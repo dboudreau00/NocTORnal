@@ -140,6 +140,12 @@ every investigative platform.
 CONCOR is built (2026-09-24): the Analysis pane's Roles card, with the fit
 stated first because CONCOR always splits in two.
 
+REGE is built (2026-10-02): the Regular roles card, for the same kinds of
+ties to the same kinds of others, which finds the replacement who serves a
+different crew and shares no contact with the first. Its limits are on
+the card: an approximation over three rounds, sensitive to how ties are
+weighted, and a role is a hypothesis, never an attribution.
+
 ### 12. ACH built into the graph
 
 Hypotheses and diagnosticity scoring in the same surface as the evidence.

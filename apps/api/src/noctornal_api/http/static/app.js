@@ -14767,6 +14767,9 @@ function wire() {
   }
   $('an-kpp-n').addEventListener('change', onKppSizeChange);
   $('an-concor-depth').addEventListener('change', onConcorDepthChange);
+  /* REGE (2026-10-02): the regular-role card's two controls fetch only it. */
+  $('an-rege-roles').addEventListener('change', onRegeChange);
+  $('an-rege-weighting').addEventListener('change', onRegeChange);
   for (const th of document.querySelectorAll('#an-table th[data-sort]')) {
     const b = th.querySelector('button');
     if (b) b.addEventListener('click', () => sortAnalysisBy(th.dataset.sort));
@@ -16796,9 +16799,10 @@ const AN_PROJECTION_CHANGED = 'The projection changed. Run the analysis '
 function analysisFailureText(err, fallback) {
   /* F1 and F2 (2026-09-24): the role analysis and a view with venues
      projected spend budgets of their own, so a throttle there says so
-     rather than blaming the timeline. */
+     rather than blaming the timeline. Regular roles (REGE, 2026-10-02)
+     have one too, and are role analysis in the same words. */
   if (err instanceof ApiError && err.status === 429
-      && /analytics\.(one_mode|concor)/.test(err.detail || '')) {
+      && /analytics\.(one_mode|concor|rege)/.test(err.detail || '')) {
     const m = /retry in (\d+)\s*s/i.exec(err.detail || '');
     const which = /analytics\.one_mode/.test(err.detail || '')
       ? 'Projecting venues to entities' : 'Role analysis';
@@ -16866,6 +16870,9 @@ function blankAnalytics(note) {
   /* The Roles card is one run's too (F1, 2026-09-24). */
   state.analyticsConcor = null;
   state.analyticsConcorAll = {};
+  /* And the regular-role card (REGE, 2026-10-02). */
+  state.analyticsRege = null;
+  state.analyticsRegeAll = {};
   /* A held-back one-mode check was for the run just cleared (F2). */
   if (state.analyticsOneModeTimer) {
     clearTimeout(state.analyticsOneModeTimer);
@@ -16889,7 +16896,7 @@ onCaseSwitch(() => {
   state.analyticsRunning = false;
   $('an-run').disabled = false;
   for (const id of ['an-body', 'an-leads', 'an-kpp', 'an-cohesion', 'an-concor',
-                    'an-balance']) {
+                    'an-rege', 'an-balance']) {
     clear($(id));
   }
   /* Sort, filter and the expanded lead lists are a way of reading ONE
@@ -16979,6 +16986,9 @@ async function runAnalysis() {
        delays or blanks the table. It reads the stored run first and
        computes only when there is none or the graph has moved. */
     loadConcor(false);
+    /* The regular-role card the same way, on its own run and meter (REGE,
+       2026-10-02), so neither role card waits on the other. */
+    loadRege(false);
     /* The open trend is fetched again, not only re-filtered (release
        review u14, 2026-09-24). renderAnalytics re-draws the series fetched
        when Trend was pressed, so the run just computed was missing from the
@@ -17100,10 +17110,14 @@ async function checkAnalysisCurrency() {
   const q = new URLSearchParams(state.analyticsQuery);
   const k = state.analyticsKpp;
   const roles = state.analyticsConcor;
+  /* The regular-role run (REGE, 2026-10-02): the fourth and last run the
+     route takes in one ask. */
+  const regular = state.analyticsRege;
   const asked = (card) => !!(card && card.run_id && !card.error);
   q.append('run_id', a.run_id);
   if (asked(k)) q.append('run_id', k.run_id);
   if (asked(roles)) q.append('run_id', roles.run_id);
+  if (asked(regular)) q.append('run_id', regular.run_id);
   let verdicts = null, note = '';
   try {
     const out = await api(cpath('/analytics/currency?' + q.toString()));
@@ -17126,6 +17140,10 @@ async function checkAnalysisCurrency() {
   if (asked(roles) && state.analyticsConcor === roles) {
     roles.current = verdict(roles.run_id);
     renderConcor();
+  }
+  if (asked(regular) && state.analyticsRege === regular) {
+    regular.current = verdict(regular.run_id);
+    renderRege();
   }
   renderAnalyticsFlags(state.analytics);
   if (current === false) {
@@ -17259,6 +17277,66 @@ async function loadConcor(storedOnly) {
      people, as the key-player set does. */
   state.analyticsConcor = safeLabelsDeep(roles);
   renderConcor();
+}
+
+/* --- the regular-role card: REGE (ROADMAP-REMAINING phase 3, 2026-10-02) --
+ *
+ * The Roles card's shape, on purpose: its own run, stored for each number
+ * of roles and weighting, read first and computed only when there is none
+ * or the graph has moved since. `state.analyticsRegeGen` numbers what may
+ * draw on the card, so a control changed while a reply is out draws only
+ * the answer for the controls on screen, and the case token drops a reply
+ * for a case the analyst has left. */
+
+/** The number of roles or the weighting changed: only this card is
+ *  fetched again. */
+function onRegeChange() {
+  state.analyticsRegeGen = (state.analyticsRegeGen || 0) + 1;
+  state.analyticsRegeAll = {};
+  if (state.analytics) loadRege(false);
+}
+
+async function loadRege(storedOnly) {
+  if (!state.caseId || !state.analytics) return;
+  const roles = Number($('an-rege-roles').value) || 4;
+  const weighting = $('an-rege-weighting').value === 'weight' ? 'weight' : 'presence';
+  const token = caseToken();
+  const gen = state.analyticsGen || 0;
+  const rgen = state.analyticsRegeGen = (state.analyticsRegeGen || 0) + 1;
+  const stale = () => caseChanged(token) || gen !== (state.analyticsGen || 0)
+    || rgen !== state.analyticsRegeGen;
+  const q = new URLSearchParams(state.analyticsQuery);
+  q.set('roles', String(roles));
+  q.set('weighting', weighting);
+  state.analyticsRege = { pending: true, reading: true, roles, weighting };
+  renderRege();
+  let found = null;
+  try {
+    try {
+      const stored = await api(cpath('/analytics/rege/latest?' + q.toString()));
+      if (stale()) return;
+      if (storedOnly || stored.current !== false) found = stored;
+    } catch (err) {
+      if (stale()) return;
+      if (!(err instanceof ApiError && (err.status === 404 || err.status === 403))) {
+        throw err;
+      }
+    }
+    if (!found && storedOnly) found = { missing: true, roles, weighting };
+    if (!found) {
+      state.analyticsRege = { pending: true, roles, weighting };
+      renderRege();
+      found = await api(cpath('/analytics/rege?' + q.toString()));
+    }
+  } catch (err) {
+    if (stale()) return;
+    found = { error: analysisFailureText(err, 'The regular-role request failed.'),
+              roles, weighting };
+  }
+  if (stale()) return;
+  /* De-fang at the boundary: every role names its members. */
+  state.analyticsRege = safeLabelsDeep(found);
+  renderRege();
 }
 
 /* --- rendering ------------------------------------------------------------ */
@@ -17562,6 +17640,7 @@ function renderAnalytics() {
   renderKeyPlayer();
   renderCohesion(a);
   renderConcor();
+  renderRege();
   renderBalance(a);
   syncAnalysisSizeOptions();
   /* The trend's filter is this run's projection, so a trend already open
@@ -18705,6 +18784,231 @@ function renderConcor() {
   box.appendChild(card);
 }
 
+/** Where REGE's roles were cut, in words (REGE, 2026-10-02): the lowest
+ *  similarity at which members were joined, and how alike the closest two
+ *  roles left apart are. 1 means alike in every tie. */
+function regeCutText(cut) {
+  const held = cut ? cut.held_at : null;
+  const next = cut ? cut.next_merge : null;
+  if (held === null || held === undefined) {
+    return next === null || next === undefined ? ''
+      : 'No two entities were alike enough to share a role; the closest two are '
+        + metricNum(next, 2) + ' alike, where 1 is alike in every tie.';
+  }
+  return 'Members were joined down to a similarity of ' + metricNum(held, 2)
+    + ', where 1 is alike in every tie'
+    + (next === null || next === undefined ? '.'
+      : '; the closest two roles left apart are ' + metricNum(next, 2) + ' alike.');
+}
+
+/** One relation's role-to-role densities as a table, CONCOR's image with a
+ *  second mark: a block is regular when every member of the row role sends
+ *  such a tie into the column role and every member of the column role
+ *  receives one, the pattern regular equivalence looks for. Both marks are
+ *  words, and the caption states both cuts, so nothing rests on colour. */
+function regeImageTable(g, rel, numbers) {
+  const d = (g.density || {})[rel.key] || [];
+  const img = (g.image || {})[rel.key] || [];
+  const reg = (g.regular || {})[rel.key] || [];
+  const alpha = (g.alpha || {})[rel.key];
+  const table = el('table', 'table an-image');
+  table.appendChild(el('caption', null, 'Density of ' + rel.label + ' from each role '
+    + '(rows) to each role (columns). Blocks marked tied are at least '
+    + metricNum(alpha, 3) + ', the density of ' + rel.label + ' among these entities; '
+    + 'blocks marked regular have such a tie from every member of the row role and to '
+    + 'every member of the column role.'));
+  const head = el('tr');
+  head.appendChild(el('th', null, 'From / to'));
+  for (const x of numbers) head.appendChild(el('th', null, 'Role ' + x));
+  const thead = el('thead');
+  thead.appendChild(head);
+  table.appendChild(thead);
+  const body = el('tbody');
+  d.forEach((row, i) => {
+    const tr = el('tr');
+    const th = el('th', null, 'Role ' + numbers[i]);
+    th.setAttribute('scope', 'row');
+    tr.appendChild(th);
+    row.forEach((v, j) => {
+      const td = el('td', absentClass(v), metricNum(v, 3));
+      if ((img[i] || [])[j] === 1) {
+        td.classList.add('on-' + rel.key);
+        td.appendChild(el('span', 'an-image-mark', ' tied'));
+      }
+      if ((reg[i] || [])[j] === 1) td.appendChild(el('span', 'an-image-mark', ' regular'));
+      tr.appendChild(td);
+    });
+    body.appendChild(tr);
+  });
+  table.appendChild(body);
+  const wrap = el('div', 'scroll-x');
+  wrap.appendChild(table);
+  return wrap;
+}
+
+/** The regular-role card (REGE, ROADMAP-REMAINING phase 3, 2026-10-02):
+ *  roles of entities with the same kinds of ties to the same kinds of
+ *  others, where the cut fell, each role's members and how alike they are,
+ *  the role-to-role image per relation, and every limit the server states.
+ *  A role is worded as a hypothesis throughout: it is a lead about how
+ *  entities sit in this view, never a finding about who they are. */
+function renderRege() {
+  const box = $('an-rege');
+  clear(box);
+  /* A role shown on the graph says so when its run goes stale. */
+  if (state.focus && state.focus.kind === 'set') renderFocusFlag();
+  const r = state.analyticsRege;
+  if (!r || r.missing) {
+    const card = el('div', 'card');
+    card.appendChild(el('p', 'muted small', 'Not computed for this view yet. Regular '
+      + 'roles are their own run, stored for each number of roles and way of counting '
+      + 'ties.'));
+    const btn = el('button', 'btn small', 'Find regular roles');
+    btn.type = 'button';
+    btn.addEventListener('click', () => { loadRege(false); });
+    card.appendChild(btn);
+    box.appendChild(card);
+    return;
+  }
+  if (r.pending) {
+    box.appendChild(el('p', 'muted small', r.reading
+      ? 'Looking for stored regular roles...' : 'Finding regular roles...'));
+    return;
+  }
+  if (r.error) {
+    box.appendChild(el('p', 'muted small', r.error));
+    return;
+  }
+  const g = r.rege || {};
+  const roles = g.roles || [];
+  const numbers = roles.map((x) => x.role);
+  const card = el('div', 'card');
+  if (r.current === false) {
+    card.appendChild(el('p', 'an-flag an-flag-warn', 'The graph has changed since '
+      + 'this regular-role run. Run the analysis again to recompute it.'));
+  }
+  if (r.truncated && r.truncation_note) {
+    card.appendChild(el('p', 'an-flag an-flag-warn', r.truncation_note));
+  }
+  if (r.computed_at) {
+    card.appendChild(el('p', 'muted small', 'From the regular-role run of '
+      + fmtTime(r.computed_at) + ' (' + ageText(r.computed_at) + ').'));
+  }
+  const placed = (r.nodes || []).length;
+  const found = Number(g.roles_found) || roles.length;
+  const asked = Number(g.roles_asked) || found;
+  card.appendChild(el('p', null, 'REGE placed ' + countOf(placed, 'entity with ties',
+    'entities with ties') + ' in ' + countOf(found, 'role', 'roles')
+    + (g.cut && g.cut.fewer_than_asked ? ', of the ' + asked + ' asked for' : '')
+    + '. ' + regeCutText(g.cut)));
+  if (found === 1 && placed > 1) {
+    card.appendChild(el('p', 'an-flag an-flag-warn', 'Every entity with a tie is in one '
+      + 'role. On ties of one kind with no direction, regular equivalence finds nearly '
+      + 'every entity alike: read the direction and valence of the ties before reading '
+      + 'this as a finding.'));
+  } else if (g.cut && g.cut.fewer_than_asked) {
+    card.appendChild(el('p', 'an-flag an-flag-note', 'Fewer roles than asked: entities '
+      + 'alike at the level of the cut are never split to make up the number.'));
+  }
+  if (g.converged === false) {
+    card.appendChild(el('p', 'an-flag an-flag-note', 'REGE stopped after '
+      + countOf(g.rounds, 'round', 'rounds') + ' while similarities were still moving: '
+      + 'more rounds look further out and can separate more entities.'));
+  }
+  if (g.weighting === 'weight') {
+    card.appendChild(el('p', 'an-flag an-flag-note', 'Ties count by weight here, so a '
+      + 'weak tie only partly matches a strong one. Counted as present or absent, the '
+      + 'roles can differ.'));
+    const weightless = Number(g.weightless_ties) || 0;
+    if (weightless) {
+      card.appendChild(el('p', 'muted small', countOf(weightless, 'tie carries',
+        'ties carry') + ' no positive weight and ' + agree(weightless, 'counts', 'count')
+        + ' as absent.'));
+    }
+  }
+  if (g.derived_ties) {
+    card.appendChild(el('p', 'an-flag an-flag-note', g.weighting === 'weight'
+      ? 'With venues projected, a derived tie counts here at its venue weighting.'
+      : 'With venues projected, a derived tie counts here as a whole tie, however many '
+        + 'entities shared the venue.'));
+  }
+  if (r.review_scope && r.review_scope.scope === 'accepted') {
+    card.appendChild(el('p', 'an-flag an-flag-note', reviewScopeText(r.review_scope)));
+  } else if (Number(g.unaccepted_ties)) {
+    const n = Number(g.unaccepted_ties);
+    card.appendChild(el('p', 'an-flag an-flag-note', countOf(n, 'tie', 'ties')
+      + ' in this view ' + agree(n, 'is', 'are') + ' not accepted by a reviewer and '
+      + agree(n, 'shapes', 'shape') + ' these roles like any other. Choose accepted ties '
+      + 'only to see roles that rest on reviewed ties alone.'));
+  }
+  const all = state.analyticsRegeAll || {};
+  for (const role of roles) {
+    const item = el('div', 'an-lead');
+    const line = el('p', 'an-lead-head');
+    line.appendChild(document.createTextNode('Role ' + role.role + ' (' + role.size
+      + '): '));
+    const members = role.members || [];
+    const shown = all[role.role] ? members : members.slice(0, 8);
+    shown.forEach((m, i) => {
+      if (i) line.appendChild(document.createTextNode(', '));
+      line.appendChild(actorButton(m));
+    });
+    if (members.length > shown.length) {
+      line.appendChild(document.createTextNode(', and '
+        + countOf(members.length - shown.length, 'more', 'more') + ' '));
+      const more = el('button', 'btn ghost small', 'Show all ' + members.length);
+      more.type = 'button';
+      more.addEventListener('click', () => {
+        state.analyticsRegeAll = { ...(state.analyticsRegeAll || {}), [role.role]: true };
+        renderRege();
+      });
+      line.appendChild(more);
+    }
+    item.appendChild(line);
+    const lit = new Set(members.map((m) => m.id));
+    const actions = el('p', 'an-graph-actions');
+    const b = graphButton('Show on graph', () => ({
+      label: 'regular role ' + role.role, lit, pairs: pairsWithin(lit), fromRege: true,
+      note: 'Role ' + role.role + ' of the last regular-role run: entities with the same '
+        + 'kinds of ties to the same kinds of others, a hypothesis about how they sit in '
+        + 'this view. They need not share a single contact.',
+    }));
+    b.setAttribute('aria-label', 'Show regular role ' + role.role + ', '
+      + countOf(role.size, 'entity', 'entities') + ', on graph');
+    actions.appendChild(b);
+    item.appendChild(actions);
+    item.appendChild(el('p', 'muted small', role.size > 1
+      ? 'Members are on average ' + metricNum(role.cohesion, 2) + ' alike; the least '
+        + 'alike two, ' + metricNum(role.least_alike, 2) + '.'
+      : 'A role of one: no other entity was alike enough to join it.'));
+    card.appendChild(item);
+  }
+  for (const rel of g.relations || []) {
+    if ((g.density || {})[rel.key]) card.appendChild(regeImageTable(g, rel, numbers));
+  }
+  const noTies = Number((g.no_ties || {}).count) || 0;
+  if (noTies) {
+    card.appendChild(el('p', 'muted small', countOf(noTies, 'entity', 'entities')
+      + ' with no tie in this view ' + agree(noTies, 'has', 'have') + ' no role.'));
+  }
+  const only = g.profile_only || {};
+  if (Number(only.count)) {
+    card.appendChild(el('p', 'muted small', countOf(Number(only.count),
+      'vertex that is not an entity', 'vertices that are not entities') + ' ('
+      + andList((only.types || []).map(typeName)) + ') '
+      + agree(Number(only.count), 'shapes', 'shape') + ' who is alike but '
+      + agree(Number(only.count), 'holds', 'hold') + ' no role.'));
+  }
+  if (g.reading) card.appendChild(el('p', 'muted small', g.reading));
+  const limits = g.limits || [];
+  if (limits.length) {
+    card.appendChild(el('h4', 'h4', 'What these roles can and cannot say'));
+    for (const t of limits) card.appendChild(el('p', 'muted small', t));
+  }
+  if (g.method) card.appendChild(el('p', 'muted small', g.method));
+  box.appendChild(card);
+}
+
 /** Every tie of the projection on screen with both ends in `ids`. */
 function pairsWithin(ids) {
   const out = new Set();
@@ -18835,8 +19139,11 @@ function analysisSizeRaw(n) {
  *  is kept with it, so the flag can say when that run has left the pane
  *  or the graph has moved past it (setFocusSource). */
 function showSetOnGraph(spec) {
+  /* A regular role (REGE, 2026-10-02) is a run of its own, as a CONCOR
+     position is. */
   const from = spec.fromKpp ? state.analyticsKpp
-    : (spec.fromConcor ? state.analyticsConcor : state.analytics);
+    : (spec.fromConcor ? state.analyticsConcor
+      : (spec.fromRege ? state.analyticsRege : state.analytics));
   /* A set grouped over projected venues (F2, 2026-09-24) is drawn on a
      graph that still shows the forums and wallets as recorded, so the flag
      says why the ties that grouped them are not the ties on screen. */
@@ -18847,6 +19154,7 @@ function showSetOnGraph(spec) {
                   hide: spec.hide || null, keep: spec.keep || null,
                   lit: spec.lit || null, pairs: spec.pairs || null,
                   fromKpp: !!spec.fromKpp, fromConcor: !!spec.fromConcor,
+                  fromRege: !!spec.fromRege,
                   runId: (from && from.run_id) || null };
   state.pathIds = null;
   state.pathAnchor = null;
@@ -18868,11 +19176,12 @@ function setFocusSource(f) {
   /* The key player and the Roles card (F1, 2026-09-24) are runs of their
      own, each with its own verdict. */
   const run = f.fromKpp ? state.analyticsKpp
-    : (f.fromConcor ? state.analyticsConcor : state.analytics);
+    : (f.fromConcor ? state.analyticsConcor
+      : (f.fromRege ? state.analyticsRege : state.analytics));
   if (!run || !f.runId || run.run_id !== f.runId) {
     return 'from an analysis run no longer on the Analysis pane';
   }
-  const current = f.fromKpp || f.fromConcor
+  const current = f.fromKpp || f.fromConcor || f.fromRege
     ? run.current
     : (state.analyticsCurrency && state.analyticsCurrency.current);
   if (current === false) return 'from an analysis run the graph has changed since';
@@ -18924,6 +19233,11 @@ function renderInspectorAnalysis(nodeId) {
   const roles = state.analyticsConcor;
   const placed = roles && !roles.error && (roles.nodes || []).find((n) => n.id === nodeId);
   if (placed) text += ' Position ' + placed.position + ' in the role analysis.';
+  /* And its regular role, when that run placed it (REGE, 2026-10-02). */
+  const regular = state.analyticsRege;
+  const cast = regular && !regular.error
+    && (regular.nodes || []).find((n) => n.id === nodeId);
+  if (cast) text += ' Role ' + cast.role + ' by regular equivalence.';
   box.appendChild(document.createTextNode(text + ' '));
   const b = el('button', 'btn ghost small', 'Open the Analysis pane');
   b.type = 'button';
@@ -24231,6 +24545,9 @@ async function loadLatestAnalysis() {
   /* And the stored role analysis after it, on its own, for the same reason
      (F1, 2026-09-24): a stored read never computes. */
   loadConcor(true);
+  /* The stored regular roles too (REGE, 2026-10-02), read and never
+     computed on opening. */
+  loadRege(true);
   /* The open trend is fetched again, as after a Run (u14, 2026-09-24):
      the stored run may be one computed since Trend was pressed, by this
      analyst under another view or by a colleague. */

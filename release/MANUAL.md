@@ -178,6 +178,15 @@ stored, cached and charted apart, and changing one clears the pane.
   two, so a weak fit means the positions are a sorting, not a finding.
   "Alike but not tied" lists pairs that may fill the same role, one may be
   the other's replacement, or one person may be behind both.
+- **Regular roles** finds entities with the same kinds of ties to the same
+  kinds of others (REGE): two launderers serving different crews can share
+  a role without sharing a single contact. Choose the most roles to find,
+  from two to eight, and whether ties count as present or absent or by
+  weight. REGE is sensitive to that choice, so a role that holds both ways
+  is the firmer lead. Entities alike at the level of the cut are never
+  split, so fewer roles than asked is an answer. Read the limits on the
+  card: REGE is an approximation over three rounds, it compares only the
+  ties the view admits, and a role is a hypothesis, never an attribution.
 
 ### Search
 

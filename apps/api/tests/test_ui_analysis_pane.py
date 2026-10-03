@@ -633,6 +633,7 @@ function anQuery() { return new URLSearchParams({ preset: 'all' }); }
 function syncAnalysisSizeOptions() {}
 function renderKeyPlayer() {}
 function loadConcor() {}
+function loadRege() {}
 const drawnKpp = [];
 function renderAnalytics() {
   const k = state.analyticsKpp;
@@ -768,6 +769,7 @@ function anQuery() { return new URLSearchParams({ preset: 'all' }); }
 function syncAnalysisSizeOptions() {}
 function renderAnalytics() {}
 function loadConcor() {}
+function loadRege() {}
 function fmtTime(v) { return String(v); }
 """ + _const("AN_PROJECTION_CHANGED") + "\n" + "\n".join(
         _fn(n) for n in ("countOf", "agree", "closeClause", "analysisFailureText",
