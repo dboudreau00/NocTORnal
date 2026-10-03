@@ -4365,7 +4365,7 @@ class SampleService:
         reviewer can read it, and the case's own analysts see the queue.
         """
         from noctornal_ontology.definition import SELECTOR_TYPES
-        from noctornal_ontology.normalisers import normalise
+        from noctornal_ontology.normalisers import normalise, redact_url_credentials
 
         from noctornal_api.proposals import KIND_NODE, ProposalStore
 
@@ -4484,7 +4484,13 @@ class SampleService:
             case_id=sample.case_id, kind=KIND_NODE, origin=origin,
             payload={"node_type": node_type, "label": norm,
                      "classification": classification,
-                     "attrs": {"selector_type": kind, "raw_value": raw,
+                     # Accept copies attrs onto the entity, so the value as
+                     # the analysis recorded it is kept without a URL's
+                     # password or token: the label (`norm`) was clean, the
+                     # raw value was not (graph-url-selector-keeps-
+                     # credentials, 2026-10-03, verify round).
+                     "attrs": {"selector_type": kind,
+                               "raw_value": redact_url_credentials(raw),
                                "sample_id": str(sample.id),
                                "analysis_id": str(analysis_id)}},
             rationale=self._proposal_rationale(sample, found, entry))

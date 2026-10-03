@@ -85,7 +85,12 @@ URL_FOOTER = (
     "Record each link again where it matters: it now gets its own selector, "
     "and a capture raises it as a new proposal. A shared row is corrected "
     "the way any wrong record is (correct the entity's label with a reason, "
-    "or retract its claim); nothing here deletes or rewrites a row.")
+    "or retract its claim); nothing here deletes or rewrites a row. A link "
+    "that carries a password, token or key is printed here without it. "
+    "Upgrade revision 0137 removes them from the rows it can rewrite, so one "
+    "still listed was refused by the database: correct the entity's label, "
+    "which no longer keeps one, and reject a pending proposal so a new "
+    "capture raises the link without it.")
 
 
 def utc(value: datetime | None) -> str:
@@ -170,24 +175,27 @@ def victim_captures(conn) -> int:
 
 def url_fragments(conn) -> int:
     from noctornal_api.legacy_records import url_identity_changes
+    from noctornal_ontology.normalisers import redact_url_credentials as clean
     rep = url_identity_changes(conn)
     print(f"URLs whose identity changed: "
           f"{plural(rep.total, 'record', 'records')}")
+    # Every stored form is printed without its password or token
+    # (graph-url-selector-keeps-credentials, 2026-10-03).
     for s in rep.selectors:
         shared = ("one observation: record it again and it gets its own row"
                   if s.observations <= 1 else
                   f"{s.observations} observations share this row")
         print(f"  {s.case_code:14} selector {s.selector_id} {s.selector_type} "
-              f"{s.raw_value!r}")
-        print(f"    stored {s.stored_norm!r}, now {s.new_norm!r}; {shared}")
+              f"{clean(s.raw_value)!r}")
+        print(f"    stored {clean(s.stored_norm)!r}, now {s.new_norm!r}; {shared}")
         for link, norm in s.behind:
-            print(f"    behind it: {link!r} -> {norm!r}")
+            print(f"    behind it: {clean(link)!r} -> {norm!r}")
     for e in rep.entities:
-        print(f"  {e.case_code:14} entity {e.node_id} labelled {e.label!r}, "
-              f"now {e.new_norm!r}")
+        print(f"  {e.case_code:14} entity {e.node_id} labelled "
+              f"{clean(e.label)!r}, now {e.new_norm!r}")
     for p in rep.proposals:
         print(f"  {p.case_code:14} pending proposal {p.proposal_id} "
-              f"{p.label!r}, accepting it writes the old form; now "
+              f"{clean(p.label)!r}, accepting it writes the old form; now "
               f"{p.new_norm!r}")
     if rep.deception_captures or rep.deception_hops:
         print(f"  {plural(rep.deception_captures, 'deception capture URL', 'deception capture URLs')} "
