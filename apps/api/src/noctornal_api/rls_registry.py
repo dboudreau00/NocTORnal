@@ -71,6 +71,12 @@ HELD = `(SELECT iam.rls_compartments())`:
   `classification <= CLR AND compartments <@ HELD`. No case term, so no
   case-scoped grant raises it: a row that belongs to no case is held to
   the reader's case-less ceiling, as every collection view holds it.
+- CUSTOM_SOURCE_CHILD (a row of an exempt `collect.source`, 0129):
+  `EXISTS (SELECT 1 FROM collect.source p WHERE p.id = <table>.source_id
+  AND p.classification <= CLR)`. The CHILD test with the source's label
+  inline, because the source is exempt (the egress proxy reads it) and so
+  carries no policy for a CHILD test to lean on; the same reading as
+  `collection._SOURCE_VISIBLE`, held to the case-less ceiling.
 
 A trigger function that reads a policied table must be SECURITY DEFINER
 with `SET search_path = pg_catalog, <its schemas>, pg_temp` (0113), or it
@@ -165,6 +171,10 @@ POLICY: dict[str, str] = {
     # every watch as system purposes (COLLECTION, INGEST).
     "collect.watch": "CUSTOM_WATCH",
     "collect.watch_hit": "CHILD",
+    # 0129 (F51, 2026-10-02): which Telegram chat a source is. A new chat's
+    # duplicate check runs as a system purpose (TELEGRAM_INTAKE), and the
+    # attended acts refuse a write that changed no chat.
+    "collect.telegram_chat": "CUSTOM_SOURCE_CHILD",
 }
 
 #: The readiness row fails below this many policied tables: a registry
@@ -255,16 +265,6 @@ DEFERRED: dict[str, str] = {
         "iam.countersign_blocked_by reads it inside a trigger and becomes "
         "SECURITY DEFINER; the out-of-band audit writers keep working as "
         "appends"),
-    "collect.telegram_chat": (
-        "CHILD of source with the source's label inline (the source is exempt), "
-        "once three readers move: TelegramChats.create's duplicate check must "
-        "see a chat under a source above the caller (it audits "
-        "TELEGRAM_CHAT_DUPLICATE_HIDDEN and the unique durable_id would "
-        "otherwise raise), so it runs as a system purpose; attach_target_chats "
-        "reads the chats of an officer's authority targets, whose sources the "
-        "officer may be below; and the acts (join, check_membership, "
-        "mark_member, rebind) update by source id after _chat_row and must "
-        "check the rowcount"),
     "ingest.record": (
         "CUSTOM (attached: case readable and labels within reach; "
         "quarantined: ingest.manage held and labels within reach, through "
