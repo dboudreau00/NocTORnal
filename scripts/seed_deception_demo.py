@@ -42,12 +42,15 @@ load_env_local()
 #: address, so no real account can be this one: the README screenshots
 #: show it as an attacker's address, and a well-formed one could belong to
 #: somebody (README screenshot set review, 2026-09-23).
+#: The receiving server's Authentication-Results sits above every Received
+#: header, as an MTA that prepends writes it: a header below one is not
+#: believed (http_ui-007, 2026-10-03).
 BEC_EML = b"""\
+Authentication-Results: mail.latticework-holdings.example; spf=fail smtp.mailfrom=vps-4471.hostmarket.example; dkim=fail header.d=latticework-holdings.example; dmarc=fail
 Received: from mx-edge.latticework-holdings.example (mx-edge.latticework-holdings.example [10.4.0.9]) by mail.latticework-holdings.example with ESMTPS id 7f2a; Fri, 17 Jul 2026 08:14:31 +0000
 Received: from relay.latticework-holdings.example (relay.latticework-holdings.example [10.4.0.3]) by mx-edge.latticework-holdings.example with ESMTP id 7f29; Fri, 17 Jul 2026 08:14:30 +0000
 Received: from vps-4471.hostmarket.example (vps-4471.hostmarket.example [203.0.113.44]) by relay.latticework-holdings.example with ESMTP id 7f28; Fri, 17 Jul 2026 08:14:28 +0000
 Received: from mail.microsoft.example ([198.51.100.20]) by vps-4471.hostmarket.example; Fri, 17 Jul 2026 08:14:00 +0000
-Authentication-Results: mail.latticework-holdings.example; spf=fail smtp.mailfrom=vps-4471.hostmarket.example; dkim=fail header.d=latticework-holdings.example; dmarc=fail
 Message-ID: <20260717081400.7f28.kitbuild@vps-4471.hostmarket.example>
 From: "Moira Vance, Group CFO" <m.vance@latticework-holdings.example>
 Reply-To: m.vance_latticework@gmail.com

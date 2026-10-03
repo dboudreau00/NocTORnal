@@ -14,7 +14,7 @@ routes run in production's shape (NOCTORNAL_TEST_ASSUME_ROLE):
   changes one;
 - appends by the owner, the system role, a bound request and an unbound
   one, interleaved and then all at once, chain to the true tail and
-  verify (0166);
+  verify (0149);
 - the countersigning rule still sees an administrator's reset of the
   signer's account, which the signer may not read (0166);
 - the break-glass queue reads each grant's invoke row for a reviewer who
@@ -255,12 +255,18 @@ def test_the_policy_is_initplans_only_and_reads_and_appends(owner):
         """SELECT cmd, coalesce(with_check, '') FROM pg_policies
             WHERE schemaname = 'audit' AND tablename = 'event'""").fetchall()}
     assert {cmd for cmd, _check in policies} == {"SELECT", "INSERT"}
-    # A row that names nobody, or the user the connection is bound to, and
-    # nothing else (evidence-ledger-actor-time-forgeable, 2026-10-03): it was
-    # `true`, which let a bound analyst write history in another user's name.
+    # Every writer appends. What a request may NAME is not the policy's to
+    # say: 0150's trigger pins it before the policy is checked, and says it
+    # once (`test_ledger_isolation_clock_pg.
+    # test_the_attribution_pin_holds_with_the_insert_policy_in_place`).
     (check,) = [c for cmd, c in policies if cmd == "INSERT"]
-    assert "actor_id IS NULL" in check and "rls_actor()" in check, check
-    assert check.strip().lower() != "true"
+    assert check.strip().lower() == "true", check
+    triggers = [r[0] for r in owner.execute(
+        """SELECT tgname FROM pg_trigger
+            WHERE tgrelid = 'audit.event'::regclass AND NOT tgisinternal
+              AND (tgtype & 2) = 2 AND (tgtype & 4) = 4 AND (tgtype & 1) = 1
+            ORDER BY tgname""").fetchall()]
+    assert triggers == ["audit_attribution", "audit_chain"], triggers
 
 
 def test_every_database_reader_of_the_log_runs_as_the_definer(owner):
@@ -284,7 +290,7 @@ def test_every_database_reader_of_the_log_runs_as_the_definer(owner):
 # ---------------------------------------------------------------------------
 
 def test_interleaved_appends_by_every_role_chain_to_the_true_tail(owner):
-    """Without 0166 the trigger read the tail as the writer: the bound
+    """Without 0149's definer trigger the append read the tail as the writer: the bound
     analyst, who may read none of these rows, and the unbound connection
     would each chain to an older row or to none, and the chain would fork
     or grow a second genesis."""
@@ -327,12 +333,13 @@ def test_interleaved_appends_by_every_role_chain_to_the_true_tail(owner):
 
 def test_concurrent_appends_by_every_role_form_one_chain(owner):
     """The same four writers at once. The chain trigger takes its lock, then
-    draws `seq`, then reads the tail (0153), so the rows form ONE linked list
+    draws `seq`, then reads the tail (0149), so the rows form ONE linked list
     off the old tail: every predecessor a real row, none claimed twice. It
-    failed 9 times in 15 against 0166 to 0168, where the draw came first and
-    two writers could take the lock in the opposite order to their seqs
-    (verify:g37, 2026-10-03), and is held to 20 passes in 20 runs
-    (`test_ledger_attribution_pg.py` holds the order itself, without a race)."""
+    failed 9 times in 15 where the draw came first and two writers could take
+    the lock in the opposite order to their seqs (verify:g37, 2026-10-03), and
+    is held to 20 passes in 20 runs (`test_ledger_chain_g49_pg.py` holds the
+    same for every role over 20 rounds, and `test_ledger_isolation_clock_pg.py`
+    holds the order itself, without a race)."""
     import threading
 
     from noctornal_api.audit_verify import verify_chain
@@ -383,7 +390,7 @@ def test_concurrent_appends_by_every_role_form_one_chain(owner):
         walker.close()
     assert not [b for b in report.breaks if b.seq > start], report.breaks
     assert not [f for f in report.forks if f.seq > start], report.forks
-    # And stronger than "no forks": seq order IS chain order since 0153, so
+    # And stronger than "no forks": seq order IS chain order since 0149, so
     # each row names the one before it by seq.
     ordered = owner.execute(
         "SELECT prev_hash, row_hash FROM audit.event WHERE seq > %s ORDER BY seq",

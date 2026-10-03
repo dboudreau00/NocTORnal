@@ -83,7 +83,8 @@ to run rather than skip must `CREATE ROLE` before the migration step and export
 Symptom: the test suite, or a migration, fails with `must be owner of table
 audit.event` (or `permission denied for schema core`, or `permission denied for
 sequence sample_access_id_seq` on the first Lab access write; the audit and
-custody sequences are drawn by their chain triggers as the owner since 0153).
+custody sequences are drawn by their chain triggers as the owner since 0149,
+and the runtime roles hold no privilege on them since 0169).
 Cause, almost always:
 `DATABASE_URL` is pointed at `noctornal_app`.
 

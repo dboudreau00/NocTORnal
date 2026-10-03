@@ -134,7 +134,14 @@ def merge_reversed(conn: psycopg.Connection, *, case_id: UUID, merge_id: UUID,
 
 def approval_requested(conn: psycopg.Connection, *, case_id: UUID,
                        request_id: UUID, operation: str, permission: str,
-                       justification: str, actor_id: UUID) -> int:
+                       justification: str, actor_id: UUID,
+                       # The labels of what the request names (a node.merge
+                       # names two entities): the body quotes the
+                       # justification, so a signer below them is not sent
+                       # it (http_ui-011, 2026-10-03).
+                       element_classification: str | None = None,
+                       element_compartments: frozenset[str] = frozenset(),
+                       ) -> int:
     """Tell everyone on the case who could actually approve it.
 
     Not the case owner, and not everyone assigned: the people who hold the
@@ -182,6 +189,8 @@ def approval_requested(conn: psycopg.Connection, *, case_id: UUID,
                   f"checked the specific parameters, not that you trust the "
                   f"person asking."),
             classification=classification, compartments=compartments,
+            element_classification=element_classification,
+            element_compartments=element_compartments,
             object_type="approval_request", object_id=request_id,
             actor_id=actor_id)
         if raised is not None:
@@ -652,8 +661,9 @@ def persona_suspended(conn: psycopg.Connection, *, persona_id: UUID,
     visibility predicate reads), AMBER when there is none, so a manager that
     predicate hides from the persona is never told about it: the
     notification service refuses a recipient below the label (suppression
-    2). When collect.source gains compartments through the compartment
-    contract, the union of those sources' compartments goes on it too. One
+    2). Since F43 (g40 verify major 5d, 2026-10-03) the union of those
+    sources' compartments is on it too, so a manager who does not hold every
+    key of a source the persona reads is not told about it either. One
     unacknowledged notification per persona at a time, the integrity
     alarm's guard: a platform refusing a credential on every poll must not
     ring a phone on every poll. Returns how many were raised.
@@ -666,12 +676,15 @@ def persona_suspended(conn: psycopg.Connection, *, persona_id: UUID,
     row = conn.execute(
         """SELECT a.handle, a.platform_uid,
                   (SELECT max(s.classification)::text FROM collect.source s
+                    WHERE s.id = a.source_id OR s.collection_account_id = a.id),
+                  (SELECT coalesce(array_agg(DISTINCT k), '{}')
+                     FROM collect.source s, unnest(s.compartments) AS k
                     WHERE s.id = a.source_id OR s.collection_account_id = a.id)
              FROM collect.collection_account a WHERE a.id = %s""",
         (persona_id,)).fetchone()
     if row is None:
         return 0
-    handle, uid, label = row
+    handle, uid, label, keys = row
     svc = NotificationService(conn)
     raised = 0
     guard: OpenNotice | None = OpenNotice(anyone=True, same_object=True)
@@ -685,7 +698,7 @@ def persona_suspended(conn: psycopg.Connection, *, persona_id: UUID,
             body=(f"Persona {handle} ({uid or 'no account id recorded'}) "
                   f"was locked: {reason}\n\nOpen Feeds, Sources, "
                   f"Personas."),
-            classification=label or "AMBER", compartments=frozenset(),
+            classification=label or "AMBER", compartments=frozenset(keys or ()),
             object_type="collection_account",
             object_id=persona_id, open_notice=guard)
         if result.outcome == COALESCED:
@@ -1050,6 +1063,31 @@ def detonation_signoff_requested(conn: psycopg.Connection, *,
               f"person who signs it off. Nothing is sent until you approve "
               f"it, and it lapses in 72 hours. Open the Lab: the request is "
               f"listed under Detonations awaiting your sign-off."),
+        detonation_id=detonation_id, actor_id=requester_id)
+
+
+def detonation_named(conn: psycopg.Connection, *, detonation_id: UUID,
+                     sample_id: UUID, named_id: UUID, requester_id: UUID,
+                     target: str, exposure_level: str) -> Notification | None:
+    """A record-only VENDOR or PUBLIC detonation names this person as its
+    authoriser (lab-3, 2026-10-03). The record is the requester's word; the
+    named person is told so they can object, which they could not before.
+    Labelled as the sign-off request is, so a person who cannot read the
+    sample is told nothing."""
+    row = _sample_labels(conn, sample_id)
+    code = row[1] if row else None
+    head = (f"{code}: you are named as a detonation's authoriser" if code
+            else "You are named as a detonation's authoriser")
+    where = "a public" if exposure_level == "PUBLIC" else "a vendor"
+    return _detonation_notice(
+        conn, recipient=named_id, sample_id=sample_id,
+        kind="DETONATION_NAMED", subject=head,
+        summary=("A colleague recorded a detonation outside the product and "
+                 "named you as the person who agreed to it."),
+        body=(f"A colleague recorded sending a sample to {target}, {where} "
+              f"sandbox, and named you as the person who agreed. The product "
+              f"did not send it and you were not asked in the product. If you "
+              f"did not agree, tell the case lead: the record stays as written."),
         detonation_id=detonation_id, actor_id=requester_id)
 
 

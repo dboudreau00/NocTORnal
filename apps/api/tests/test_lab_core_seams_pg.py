@@ -373,7 +373,9 @@ def test_analyses_name_what_produced_a_machine_row():
     assert MACHINE_PRODUCERS == {"STATIC": "NocTORnal static triage",
                                  "YARA": "YARA scan",
                                  # F14 fills the sandbox's seam.
-                                 "SANDBOX": "CAPEv2 sandbox"}
+                                 "SANDBOX": "CAPEv2 sandbox",
+                                 # Phase 8 (2026-10-02): archive expansion.
+                                 "ARCHIVE": "NocTORnal archive expansion"}
     assert PROPOSAL_ORIGINS[("analyst", None)] == "lab/analysis"
     assert PROPOSAL_ORIGINS[("machine", "STATIC")] == "lab/static-triage"
     assert PROPOSAL_ORIGINS[("machine", "SANDBOX")] == "lab/sandbox"

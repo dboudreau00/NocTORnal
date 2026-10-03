@@ -140,6 +140,15 @@
       <span class="label">Display name</span>
       <input id="setup-name" type="text" autocomplete="off" required>
     </label>
+    <!-- http_ui-010 and infra-3 (2026-10-03): shown only when the server
+         says it wants a setup token (NOCTORNAL_SETUP_TOKEN is set). -->
+    <label class="field" id="setup-token-field" hidden>
+      <span class="label">Setup token</span>
+      <input id="setup-token" type="password" autocomplete="off"
+             spellcheck="false" maxlength="512">
+      <span class="help">The value of NOCTORNAL_SETUP_TOKEN on the server.
+        This deployment will not create its first account without it.</span>
+    </label>
     <!-- firstrun-oneclick-wipe (2026-09-22): the operator learned that a
          password would be GENERATED only after it was on screen. Said
          before the button, so the app and a safe place are ready. -->
@@ -1509,6 +1518,31 @@
             </div>
             <div id="an-concor"></div>
 
+            <!-- REGE (2026-10-02): regular roles, their own run stored for
+                 each number of roles and way of counting ties, read after
+                 the table is drawn. -->
+            <h3 class="h3">Regular roles: the same kinds of ties to the same kinds of others</h3>
+            <div class="pane-head">
+              <label class="field inline">
+                <span class="label">Roles</span>
+                <select id="an-rege-roles" class="select">
+                  <option value="2">Up to 2 roles</option>
+                  <option value="3">Up to 3 roles</option>
+                  <option value="4" selected>Up to 4 roles</option>
+                  <option value="6">Up to 6 roles</option>
+                  <option value="8">Up to 8 roles</option>
+                </select>
+              </label>
+              <label class="field inline">
+                <span class="label">Ties count</span>
+                <select id="an-rege-weighting" class="select">
+                  <option value="presence" selected>As present or absent</option>
+                  <option value="weight">By weight</option>
+                </select>
+              </label>
+            </div>
+            <div id="an-rege"></div>
+
             <h3 class="h3">Signed balance</h3>
             <div id="an-balance"></div>
           </div>
@@ -2551,6 +2585,20 @@
             <div id="src-personas"></div>
             <p id="src-personas-empty" class="empty" hidden>No personas.</p>
 
+            <!-- Persona acts (A collector process, 2026-10-02): what you asked
+                 a persona to do, run by the collector, the one process that
+                 holds the persona key. -->
+            <h2 class="h-sm">Persona acts</h2>
+            <p class="help">
+              Looking a chat up, joining it, checking its membership and
+              polling a source a persona reads run in the collector. What you
+              asked for is listed here with its outcome. An act the collector
+              has not started in time (fifteen minutes, unless your operator
+              set another limit) is not run.
+            </p>
+            <div id="src-acts"></div>
+            <p id="src-acts-empty" class="empty" hidden>You have asked for no persona act.</p>
+
             <!-- Collection authorities (2026-09-24): the written authorities every forum
                  and Telegram source needs, recorded here by a collection
                  manager and confirmed by a security officer in Oversight. -->
@@ -2970,7 +3018,10 @@
               document the gate cleared, and only if it matches the preview
               above.
             </p>
-            <!-- These are `egress.Destination`, verbatim. An earlier
+            <!-- These are `routers/reports.RELEASE_DESTINATIONS`, the
+                 `egress.Destination` values a released document can go to,
+                 verbatim (in_app went 2026-10-03: the release refuses it,
+                 evidence-report-release-in-app). An earlier
                  version of this control invented plausible-looking values
                  (INTERNAL / PARTNER_AGENCY / EXTERNAL / PUBLIC) and every
                  release attempt 400'd on "unknown destination", the same
@@ -2982,7 +3033,6 @@
             <label class="field">
               <span class="label">Destination</span>
               <select id="rep-destination" class="select">
-                <option value="in_app">in_app: stays inside the platform</option>
                 <option value="export" selected>export: an analyst saves it as a file</option>
                 <option value="smtp">smtp: email</option>
                 <option value="jira">jira</option>
@@ -2990,9 +3040,10 @@
               </select>
             </label>
             <p class="help">
-              Everything except <code>in_app</code> crosses the boundary
-              into a system with its own access model, which this platform
-              does not control and cannot audit.
+              Each of these crosses the boundary into a system with its own
+              access model, which this platform does not control and cannot
+              audit. Inside the platform, the prepared report above is
+              already where it needs to be.
             </p>
             <label class="field">
               <span class="label">Destination ceiling (optional)</span>
@@ -3799,7 +3850,8 @@
 
             <h2 class="h-sm">Connection log</h2>
             <p class="help">What the egress proxy let out and refused, newest
-              first. Rows you are not cleared to see are counted, not shown.</p>
+              first. Rows you are not cleared to see are counted over the
+              whole log, not shown.</p>
             <div class="row-form egr-log-controls">
               <label class="field">
                 <span class="label">Route</span>
@@ -5166,6 +5218,13 @@
               <div id="fix-label-field" class="field">
                 <label class="label" for="fix-label">Corrected label</label>
                 <input id="fix-label" spellcheck="false" autocomplete="off">
+              </div>
+              <!-- The end date, as a correction rather than a retirement:
+                   the as-of view keeps the past (graph-valid-to-cannot-be-
+                   set-after-creation, 2026-10-03). -->
+              <div id="fix-end-field" class="field">
+                <label class="label" for="fix-valid-to">Stopped being true on (UTC date)</label>
+                <input id="fix-valid-to" type="date">
               </div>
               <div class="row">
                 <label class="field">

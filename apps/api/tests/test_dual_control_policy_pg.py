@@ -97,6 +97,15 @@ def teardown(c, prefix: str) -> None:
                          AND id NOT IN {held}""")
         c.execute(f"DELETE FROM iam.case_assignment WHERE case_id IN {csub} "
                   f"OR user_id IN {sub}")
+        # The entities a merge request names (2026-10-03: a request must name
+        # real ones), with their claims, before the case goes.
+        c.execute("ALTER TABLE core.assertion DISABLE TRIGGER USER")
+        try:
+            c.execute(f"DELETE FROM core.assertion WHERE case_id IN {csub}")
+        finally:
+            c.execute("ALTER TABLE core.assertion ENABLE TRIGGER USER")
+        c.execute(f"DELETE FROM core.edge WHERE case_id IN {csub}")
+        c.execute(f"DELETE FROM core.node WHERE case_id IN {csub}")
         c.execute(f'DELETE FROM core."case" WHERE id IN {csub}')
         # A policy pair a failed test left on its throwaway permissions.
         c.execute("ALTER TABLE iam.separated_duty DISABLE TRIGGER "
@@ -653,18 +662,12 @@ def test_the_first_run_shape_cannot_change_the_policy_alone(conn):
     from noctornal_api.iam_admin import IamAdminService
     first = user(conn, "SYS_ADMIN", "SECURITY_OFFICER", "CASE_OWNER", "ANALYST",
                  clearance="RED", name="First run")
-    # The account is created in a transaction of its own, before the one that
-    # decides. The log stamps a row with the clock at its append (0153,
-    # evidence-ledger-actor-time-forgeable, 2026-10-03), so an event written
-    # INSIDE the deciding transaction is later than its `now()`, which is the
-    # start of that transaction, and the seven-day rule (events at or before
-    # the decision) would not see it. Each is its own request in service.
-    creds = IamAdminService(conn).create_analyst(
-        email=f"{PREFIX}{uuid4().hex[:8]}@noctornal.test",
-        display_name="Second admin", clearance="AMBER",
-        roles=["SYS_ADMIN"], actor_id=first)
-    second = creds.user_id
     with pytest.raises(_RollBack), conn.transaction():
+        creds = IamAdminService(conn).create_analyst(
+            email=f"{PREFIX}{uuid4().hex[:8]}@noctornal.test",
+            display_name="Second admin", clearance="AMBER",
+            roles=["SYS_ADMIN"], actor_id=first)
+        second = creds.user_id
         # propose() refuses when nobody could countersign: an officer who is
         # not an administrator is what makes the proposal possible at all.
         user(conn, "SECURITY_OFFICER")
@@ -959,10 +962,8 @@ def test_the_database_refuses_a_blocked_countersigner_at_apply(conn):
     the ledger trigger refuses it anyway."""
     from noctornal_api.dual_control import PolicyError
     admin = user(conn, "SYS_ADMIN")
-    # Before the deciding transaction, not inside it: see
-    # test_the_first_run_shape_cannot_change_the_policy_alone.
-    officer, _ = _took_over(conn, "TOTP_REENROLLED")
     with pytest.raises(_RollBack), conn.transaction():
+        officer, _ = _took_over(conn, "TOTP_REENROLLED")
         req = _svc(conn).propose(change=_mode_change(), justification="j",
                                  requested_by=admin)
         conn.execute("""UPDATE core.approval_request

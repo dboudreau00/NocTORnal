@@ -99,7 +99,13 @@ import psycopg
 from noctornal_api.assumptions import AssumptionService
 from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.egress import Destination, can_egress
-from noctornal_api.projections import DISCLOSURE_NONE, GraphService, Projection
+from noctornal_api.projections import (
+    DISCLOSURE_NONE,
+    GraphService,
+    Projection,
+    Subgraph,
+    Withheld,
+)
 from noctornal_api.security.access import Tlp, tlp_from_name
 
 
@@ -329,6 +335,21 @@ class ReportBuilder:
         # everybody is its own defect.
         header_ok = (tlp_from_name(case_tlp) <= target
                      and case_compartments <= compartments)
+        # Every element reads at the STRICTER of its own label and its
+        # case's, and the union of their compartments, as the access gate
+        # and exhibit export compose them (`deps.effective_labels`, F19).
+        # evidence-report-case-raise-leak (2026-10-03): this builder chose
+        # by the element's own label, so after an AMBER case was raised to
+        # RED, everything created before the raise kept AMBER and went out
+        # in a TLP:AMBER release (exhibit titles, hashes, node labels) while
+        # exporting the same exhibit was refused as RED. `enforce_tlp_floor`
+        # keeps a new element at or above its case, and lowering a case is
+        # refused, so an element below its case's label predates a raise.
+        # Composed, every element of a case above the ceiling is above it
+        # too, which is exactly the header's condition: when the header is
+        # withheld, so is every element, and the mark below is taken from
+        # what is left.
+        elements_ok = header_ok
 
         # `target_tlp` is a CEILING on what may be included, not the mark the
         # document gets. The mark is derived below from what actually went
@@ -348,6 +369,19 @@ class ReportBuilder:
                                 as_of=None)
         sub = redacted.project(projection, limit=5000)
         withheld = redacted.withheld(projection)
+        if not elements_ok:
+            # Composed with the case, nothing in the projection is within
+            # the ceiling: what it returned joins what it already withheld,
+            # counted only where the case's setting counts (0030).
+            withheld = Withheld(
+                withheld.mode,
+                any_withheld=withheld.any_withheld or bool(sub.nodes or sub.edges),
+                nodes=(None if withheld.nodes is None
+                       else withheld.nodes + len(sub.nodes)),
+                edges=(None if withheld.edges is None
+                       else withheld.edges + len(sub.edges)))
+            sub = Subgraph(nodes=[], edges=[], projection=sub.projection,
+                           truncated=False)
 
         # The compartment filter mirrors the projection, which is built at
         # the requester's read-in. Without it the exhibit register was the
@@ -368,7 +402,8 @@ class ReportBuilder:
                 WHERE case_id = %s AND classification <= %s::core.tlp
                   AND compartments <@ %s
                 ORDER BY acquired_at, id""",
-            (case_id, target.name, sorted(compartments))).fetchall()
+            (case_id, target.name, sorted(compartments))).fetchall() \
+            if elements_ok else []
         # EVERY exhibit in the case, on a system connection, because the
         # difference from what was included is the withheld count the report
         # states; under row-level security the request connection counts only
@@ -438,8 +473,8 @@ class ReportBuilder:
             hypothesis_evidence_withheld=matrix.withheld,
         )
 
-        metrics = redacted.metrics(projection) if hasattr(
-            redacted, "metrics") else {}
+        metrics = redacted.metrics(projection) if (
+            elements_ok and hasattr(redacted, "metrics")) else {}
 
         actors = sorted(
             ({"id": str(n["id"]), "type": n["node_type"], "label": n["label"],

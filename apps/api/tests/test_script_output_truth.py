@@ -177,7 +177,9 @@ def test_the_production_file_describes_the_dev_file_as_it_is():
     # "pinned to the same RELEASE tag as the dev file".
     assert "same RELEASE tag as the dev file" in notes
     minio = "ghcr.io/dboudreau00/minio"
-    assert _image(prod, minio) == _image(dev, minio)
+    # The production file also pins the digest (infra-7, 2026-10-03); the tag
+    # in front of it is still the dev file's.
+    assert _image(prod, minio).split("@")[0] == _image(dev, minio)
     assert ":latest" not in _image(prod, minio)
     # And both Redis services run the policy the notes say they share.
     assert _dev_redis_policy() == "noeviction"
@@ -192,7 +194,9 @@ def test_the_production_file_describes_the_dev_file_as_it_is():
 #: a column nothing writes, so a warning naming it would describe nothing.
 _SEALED_WORDS = {
     "iam.app_user": "authenticator",
-    "collect.collection_account": "persona",
+    # collect.collection_account left SEALED_COLUMNS on 2026-10-02 (A
+    # collector process): the persona ring seals it, and every generated
+    # header names that key (test_persona_key_split.py).
     "ingest.victim_credential": "victim",
     "lab.sample": "sample",
     "collect.egress_profile": None,

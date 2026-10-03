@@ -32,7 +32,7 @@ A BEFORE UPDATE OR DELETE row trigger and a BEFORE TRUNCATE statement
 trigger refuse every change, and the chain trigger takes the advisory lock
 and THEN draws `seq` from its sequence, so seq order is chain order and
 concurrent writers cannot fork it. audit.event drew its seq before the
-lock until 0153 (2026-10-03), which forked its chain under concurrent
+lock until 0149 (2026-10-03), which forked its chain under concurrent
 writers; it now draws inside the lock the way this ledger always has.
 `verify` recomputes the chain with the trigger's own expression, which is
 duplicated here from the migration and held equal by a test.
@@ -369,8 +369,9 @@ def listing(conn: psycopg.Connection, *, clearance: str,
             event: str | None = None, since: datetime | None = None,
             limit: int = 200) -> dict:
     """The rows the caller may see, newest first, each OPEN paired with its
-    CLOSE, with how many matching rows were withheld. `clearance` is a TLP
-    name (deps.user_ceiling, no case)."""
+    CLOSE, with how many rows of the WHOLE log were withheld (never narrowed
+    by the route, event or window asked about: egress-ledger-withheld-oracle,
+    2026-10-03). `clearance` is a TLP name (deps.user_ceiling, no case)."""
     if event is not None and event not in ("OPEN", "REFUSED", "PREAUTH", "REWRAP"):
         raise ValueError("event is OPEN, REFUSED, PREAUTH or REWRAP")
     held = sorted(set(compartments))
@@ -419,7 +420,8 @@ def listing(conn: psycopg.Connection, *, clearance: str,
                              THEN (SELECT max(s3.classification) FROM collect.source s3
                                     WHERE s3.collection_account_id = c.collection_account_id)
                         END""" if bound else "NULL::core.tlp")
-    base = f"""
+    def cte(clauses: list[str]) -> str:
+        return f"""
       WITH filtered AS (
         SELECT c.*, s.id AS live_source,
                GREATEST(c.classification,
@@ -431,11 +433,21 @@ def listing(conn: psycopg.Connection, *, clearance: str,
           LEFT JOIN collect.collection_run r
                  ON c.source_id IS NULL AND r.id = c.collection_run_id
           LEFT JOIN collect.source s ON s.id = {subject}
-         WHERE {' AND '.join(where)})
+         WHERE {' AND '.join(clauses)})
     """
+    base = cte(where)
     visible = "(f.effective <= %(clearance)s::core.tlp AND f.compartments_ok)"
+    # egress-ledger-withheld-oracle (2026-10-03): the count of rows the
+    # caller's clearance hides is taken over the WHOLE log, never under the
+    # route, event or window the caller asked about. Under those filters it
+    # was an exact reading of one hidden profile's activity in one window
+    # (a profile's id is in the overview even when its details are not), so
+    # a reader below its label could map the timing and volume of RED
+    # collection by moving `since`. A route that is hidden from the caller
+    # now answers as one that does not exist: no rows, the same count.
     withheld = conn.execute(
-        base + f"SELECT count(*) FROM filtered f WHERE NOT {visible}", named).fetchone()[0]
+        cte(["c.event <> 'CLOSE'"])
+        + f"SELECT count(*) FROM filtered f WHERE NOT {visible}", named).fetchone()[0]
     named["limit"] = max(1, min(int(limit), 500))
     rows = conn.execute(
         base + f"""

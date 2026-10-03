@@ -25,7 +25,8 @@ APP_ONLY = ("postgres", "redis", "minio", "minio-init", "migrate", "api",
             "sample-origin", "cron",
             "lab-triage",  # static triage's own loop (F11, 2026-09-25)
             "lab-cron",    # screening and the sandbox dispatch (F13, F14)
-            "embed-pass")  # the similarity pass (F6)
+            "embed-pass",  # the similarity pass (F6)
+            "collector")   # the persona key's one holder (2026-10-02)
 
 
 class Unparseable(ValueError):
@@ -270,7 +271,11 @@ def test_only_the_proxy_joins_exits_and_models_and_only_it_and_caddy_join_edge(d
     assert members["exits"] == {"egress-proxy"}
     assert members["models"] == {"egress-proxy"}
     assert members["edge"] == {"caddy", "egress-proxy"}
-    assert set(doc["services"]) == set(APP_ONLY) | {"caddy", "egress-proxy"}
+    # The analysis worker joins no network at all (docs/17 F42):
+    # test_analysis_worker_compose.py holds it there.
+    assert set(doc["services"]) == set(APP_ONLY) | {"caddy", "egress-proxy",
+                                                    "analysis-worker"}
+    assert not _nets(doc["services"]["analysis-worker"])
 
 
 def test_caddy_keeps_its_trusted_address_and_publishes_only_80_and_443(doc):
@@ -279,7 +284,9 @@ def test_caddy_keeps_its_trusted_address_and_publishes_only_80_and_443(doc):
     assert set(nets) == {"noctornal", "edge"}
     assert nets["noctornal"]["ipv4_address"] == doc["x-caddy-ip"]
     assert caddy["ports"] == ["80:80", "443:443"]
-    assert _env_files(caddy) == [("secrets.env", True)]
+    # caddy.env, not secrets.env (infra-5, 2026-10-03): the TLS terminator
+    # holds its three values and none of the platform's secrets.
+    assert _env_files(caddy) == [("caddy.env", True)]
 
 
 def test_the_proxy_is_unpublished_on_its_own_address_with_its_own_env(doc):

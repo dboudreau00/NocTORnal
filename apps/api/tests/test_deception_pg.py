@@ -393,11 +393,11 @@ def test_a_bec_message_round_trips_with_its_chain_and_boundary(conn):
     owner = _user(conn)
     case_id = _case(conn, owner)
     raw = (
+        b"Authentication-Results: mail.corp.example; dkim=fail\r\n"
         b"Received: from mx.corp.example ([10.0.0.5]) by mail.corp.example"
         b" with ESMTPS; Mon, 20 Jul 2026 09:00:02 +0000\r\n"
         b"Received: from evil.example ([203.0.113.7]) by mx.corp.example"
         b" with ESMTP; Mon, 20 Jul 2026 09:00:01 +0000\r\n"
-        b"Authentication-Results: mail.corp.example; dkim=fail\r\n"
         b"Message-ID: <" + uuid4().hex.encode() + b"@evil.example>\r\n"
         b"From: \"Jane, CFO\" <jane@acme.example>\r\n"
         b"Reply-To: jane.acme@gmail.com\r\n"

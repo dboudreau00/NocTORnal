@@ -1129,9 +1129,16 @@ def test_turning_dual_control_off_is_audited(conn, client):
     deputy, deputy_email, _ = _make_user(conn, clearance="RED")
     token = _session(conn, email)
     case_id = _create_case(client, token)
+    # F39 (2026-10-02): the second person on the switch must have held
+    # case.update on the case for the seasoning window, so the deputy is
+    # assigned eight days back, as a colleague who has worked the case is.
+    # This test is about the audit trail of a turned-off switch; the rule
+    # itself is test_relax_seasoning_pg.py's.
     conn.execute(
-        """INSERT INTO iam.case_assignment (case_id, user_id, role_key, granted_by)
-           VALUES (%s, %s, 'CASE_OWNER', %s)""", (case_id, deputy, uid))
+        """INSERT INTO iam.case_assignment
+               (case_id, user_id, role_key, granted_by, granted_at)
+           VALUES (%s, %s, 'CASE_OWNER', %s, now() - interval '8 days')""",
+        (case_id, deputy, uid))
     _set_dual_control(client, token, case_id, True)
     epoch = client.get(f"/api/v1/cases/{case_id}/policy",
                        headers=_auth(token)).json()["dual_control_merge_epoch"]

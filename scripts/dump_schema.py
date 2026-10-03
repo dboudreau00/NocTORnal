@@ -73,6 +73,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 REPO = Path(__file__).resolve().parent.parent
 TARGET = REPO / "db" / "schema.sql"
@@ -93,6 +94,24 @@ _REVISION_LINE = re.compile(r"^-- Alembic revision: (\w+)$", re.M)
 def libpq_url(url: str) -> str:
     """SQLAlchemy spells the driver into the scheme; libpq does not know it."""
     return re.sub(r"^postgresql\+psycopg(?:2)?://", "postgresql://", url)
+
+
+def without_password(url: str) -> tuple[str, dict[str, str]]:
+    """`url` with its password taken out, and the environment that carries it
+    instead: `PGPASSWORD`, which libpq reads. A password in `--dbname` is an
+    argument of the pg_dump process, which any local user reads from the
+    process list for as long as it runs (infra-10, 2026-10-03). A pg_dump
+    wrapped in `docker exec` does not pass the environment on unless the
+    wrapper names the variable (`docker exec -e PGPASSWORD ...`); the stock
+    Postgres image trusts its own loopback, so the development stack's needs
+    none."""
+    parts = urlsplit(url)
+    if parts.password is None:
+        return url, {}
+    userinfo, _, hostinfo = parts.netloc.rpartition("@")
+    user = userinfo.partition(":")[0]
+    netloc = f"{user}@{hostinfo}" if user else hostinfo
+    return parts._replace(netloc=netloc).geturl(), {"PGPASSWORD": unquote(parts.password)}
 
 
 def pg_dump_command() -> list[str]:
@@ -188,10 +207,12 @@ def header(revision: str) -> str:
 
 
 def dump(url: str) -> str:
+    target, secret_env = without_password(libpq_url(url))
     cmd = pg_dump_command() + [
-        "--schema-only", "--no-owner", "--no-privileges", "--dbname", libpq_url(url),
+        "--schema-only", "--no-owner", "--no-privileges", "--dbname", target,
     ]
-    proc = subprocess.run(cmd, capture_output=True, check=False)
+    proc = subprocess.run(cmd, capture_output=True, check=False,
+                          env={**os.environ, **secret_env})
     if proc.returncode != 0:
         sys.exit(
             f"pg_dump failed ({proc.returncode}): "

@@ -74,7 +74,7 @@ def _persona_body(egress, **over):
 
 def test_a_persona_is_created_with_no_credential_on_a_platform_a_parser_reads(conn, api):
     uid, hdr = _caller(conn)
-    egress = h.egress_profile(conn, P)
+    egress = h.egress_profile(conn, P, persona_capable=True)
     nobody = api.post(f"{API}/personas", headers=hdr,
                       json=_persona_body(egress, platform="DISCORD"))
     assert nobody.status_code == 400

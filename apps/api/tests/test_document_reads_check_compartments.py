@@ -91,6 +91,19 @@ EXEMPT: dict[str, str] = {
         "content and shows nothing to a person"),
     "retention:RetentionService._held_document_count": (
         "the retention sweep's count of held documents: a number, no content"),
+    # graph-url-selector-keeps-credentials, 2026-10-03.
+    "proposals:ProposalReview._refuse_userinfo_selector": (
+        "an accept's check that a proposal's span is not inside a link's "
+        "userinfo: it reads the cited document's text only to refuse the "
+        "proposal and shows nothing to a person; a document the reader "
+        "cannot read returns no text (row security, CUSTOM_DOCUMENT) and "
+        "the check then has nothing to compare against, as its docstring "
+        "says"),
+    # g39: F30, 2026-10-02.
+    "retention:RetentionService.document_backlog": (
+        "the sweep's and the readiness row's count of documents past their "
+        "clock, and the oldest deadline among those no hold keeps: numbers "
+        "and a date, no content, and shows nothing to a person"),
     "retention:RetentionService._purge_documents": (
         "the retention sweep's purge: it locks, rechecks and empties "
         "documents, and shows nothing to a person"),

@@ -49,24 +49,34 @@ Violating any of these is a bug even if tests pass.
    drops the row. There is nothing to supersede it with, a retraction
    withdraws a claim rather than replacing one. A correction is a new
    assertion. `superseded_at`/`superseded_by` exist (0007) and the read
-   side honours them, but no code path writes them yet.
+   side honours them. One code path writes them (2026-10-02): a claim
+   accepted before it carried an observation date is dated by recording a
+   new claim that cites it (`supersedes_id`, 0131) and stamping the old
+   one once, from NULL (`supersede_assertion`). The old claim's own columns
+   are never written, so the invariant is not amended.
 
 6. **The audit log is append-only.** No code, migration or admin tool
    gains `UPDATE` or `DELETE` on `audit.event`.
 
 7. **Credentials never leave the vault.** `collection_account.secret_*`
-   is envelope-encrypted at rest (AES-256-GCM under `NOCTORNAL_TOTP_KEK`,
-   the same scheme as TOTP secrets) and decrypted only inside
-   `PersonaVault.use()`, a context manager that yields the plaintext to
-   one block, drops it and audits the use. There is no `get_secret()`,
-   nothing serialises a plaintext into a response, and every adapter error
-   is `redact()`-ed before it is stored. **The vault runs inside the API
-   process** (there is no separate collector), so this is a guarantee
-   about the SHAPE of the code, not about a network boundary: a
-   compromised API host is a compromised vault. (Reworded 2026-09-09.
-   Until then this read "never leave the collector, never in the API
-   process", which the topology has never backed. Splitting collection
-   into its own process is a deliberate not-yet (`ARCHITECTURE.md`).)
+   is envelope-encrypted at rest (AES-256-GCM, the same scheme as TOTP
+   secrets, under `NOCTORNAL_PERSONA_KEK`, a key of its own) and decrypted
+   only inside `PersonaVault.use()`, a context manager that yields the
+   plaintext to one block, drops it and audits the use. There is no
+   `get_secret()`, nothing serialises a plaintext into a response, and every
+   adapter error is `redact()`-ed before it is stored. **In production the
+   vault runs in the collector service, and no other process holds the
+   persona key**: the API queues a persona act in `collect.persona_act` and
+   the collector runs it, so a compromised API process cannot open a
+   persona credential. That is a PROCESS boundary and not a network zone:
+   the collector also holds the TOTP key ring, the system role's DSN and
+   the store credentials (`docs/17`), so a compromised collector host is a
+   compromised vault. In development one process runs both
+   (`NOCTORNAL_COLLECTOR_INLINE=1`), and the guarantee is about the SHAPE
+   of the code. (Reworded 2026-09-09 and 2026-10-03. Until 2026-09-09 it
+   described a collector the topology did not have; the collector service
+   was built on 2026-10-02, and `docs/02` says what it does and does not
+   separate.)
 
 8. **TLP gates egress.** Every outbound path (SMTP, Jira, webhook,
    export) checks classification first. `AMBER_STRICT` and `RED` never
@@ -110,13 +120,19 @@ firehose into a half-built model produces a landfill.
 
 `ARCHITECTURE.md` holds the reasoning. What is in the tree:
 
-- Postgres 16 + pgvector as the system of record; 124 Alembic revisions
-  (`0001`-`0124`), `db/schema.sql` regenerated from them
-- Python 3.12+ / FastAPI, **one process**, serving the REST API under
-  `/api/v1`, the analyst console under `/ui`, the `/api/v1/live`
-  WebSocket, and running the collectors, the analytics and the
-  notification drain itself. There is no worker process and no queue
-  (decision 30; `dispatch_due()` and `run_once` are called, not scheduled)
+- Postgres 16 + pgvector as the system of record; 157 Alembic revisions
+  (`0001`-`0157`), `db/schema.sql` regenerated from them
+- Python 3.12+ / FastAPI, serving the REST API under `/api/v1`, the
+  analyst console under `/ui` and the `/api/v1/live` WebSocket, and
+  running the analytics, the notification drain and the Poll now of a feed
+  no persona reads itself (`dispatch_due()` and `run_once` are called, not
+  scheduled). In development that is **one process**, persona acts
+  included (`NOCTORNAL_COLLECTOR_INLINE=1`). In production a second
+  process, the collector (`scripts/collector.py`), holds the persona key
+  and runs every persona act and every scheduled collection poll; the API
+  hands it an act through one Postgres table, `collect.persona_act`, which
+  is the only queue and no broker. Celery, Arq and NATS are not in the tree
+  (decision 30, qualified 2026-10-03)
 - `igraph` (C core) + `leidenalg` for SNA maths, not NetworkX, which will
   not hold up
 - A vanilla HTML/CSS/JS console: no framework, no build step, no bundler,
@@ -157,6 +173,13 @@ firehose into a half-built model produces a landfill.
   `problem+json` errors (RFC 9457).
   (Cursor pagination was never implemented: it was the 2026-07 convention
   and is superseded as of 2026-09-09.)
+  Two case-wide lists exceed 1000 on purpose (2026-10-03, review
+  http_ui-015): `GET /cases/{id}/edges` (2000) and the projected graph
+  (5000), because the console draws a whole case from them and says when
+  an answer is truncated. Every per-element list (an element's assertions,
+  selectors, tags, sets, members, the comms lists) is capped at 1000 and
+  pages with `offset` where it is a list, or says `truncated` where it is
+  an object.
 - Tests: every invariant above has a test named after it.
 - Secrets: environment or Vault. Never a default value in code.
 

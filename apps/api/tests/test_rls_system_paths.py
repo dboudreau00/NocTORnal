@@ -141,13 +141,6 @@ _MUST_BE_SYSTEM = {
     # S1, 2026-09-25: watches under policy (0124). A quarantined record
     # scores against every watch in the deployment.
     ("ingest.py", "_watches_for"): "INGEST",
-    # F51, 2026-10-03: the audit log accepts a row naming a user only from
-    # that user's own binding (0168), so the events about a user the
-    # connection is not bound to are written on a system connection: a
-    # session refused before the binding, a refusal written out of band.
-    ("http/deps.py", "audit_append_connection"): "AUDIT_APPEND",
-    ("http/errors.py", "_audit_rls_refused"): "AUDIT_APPEND",
-    ("approvals.py", "record_out_of_band"): "AUDIT_APPEND",
 }
 
 

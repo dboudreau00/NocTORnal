@@ -67,11 +67,23 @@ def client():
     return TestClient(app), app
 
 
-def egress_profile(conn, prefix: str, *, active: bool = True):
-    return conn.execute(
+def egress_profile(conn, prefix: str, *, active: bool = True,
+                   persona_capable: bool = False):
+    """A profile with no exit, which no persona can be created on since F35
+    (2026-10-02). `persona_capable=True` gives it an HTTPS exit (placeholder
+    sealed bytes: nothing here dials it), the one a persona may be created
+    on."""
+    pid = conn.execute(
         """INSERT INTO collect.egress_profile (name, kind, key_id, is_active)
            VALUES (%s, 'PROXY', 'k', %s) RETURNING id""",
         (f"{prefix}eg-{uuid4().hex[:6]}", active)).fetchone()[0]
+    if persona_capable:
+        conn.execute(
+            """UPDATE collect.egress_profile
+                  SET exit_kind = 'HTTPS', exit_sealed = %s,
+                      exit_seal_key_id = 'k', exit_fingerprint = %s
+                WHERE id = %s""", (b"sealed-for-tests", b"fingerprint-for-tests", pid))
+    return pid
 
 
 def source(conn, prefix: str, *, kind: str = "XENFORO",

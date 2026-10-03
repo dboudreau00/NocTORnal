@@ -23,6 +23,7 @@ from noctornal_api.projections import (
     ProjectionError,
 )
 
+from noctornal_api.http.body_ceiling import raise_body_ceiling
 from noctornal_api.http.limits import rate_limit
 
 router = APIRouter(prefix="/cases/{case_id}/graph", tags=["graph-view"])
@@ -73,6 +74,9 @@ def projected_graph(
     include_inferred: bool = Query(False),
     min_confidence: str = Query("LOW"),
     as_of: datetime | None = Query(None),
+    # le=5000 is a deliberate exception to the 1000 cap (CONVENTIONS.md,
+    # http_ui-015, 2026-10-03): the sociogram draws the whole projection
+    # and the answer says `truncated` when it is cut.
     limit: int = Query(2000, ge=1, le=5000),
     user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
@@ -244,6 +248,9 @@ def get_layout(
 
 @router.put("/layout", status_code=204,
             dependencies=[Depends(rate_limit("graph.view"))])
+# 20,000 positions run past the default body ceiling (http_ui-005,
+# 2026-10-03).
+@raise_body_ceiling(4 * 1024 * 1024, what="a saved layout")
 def save_layout(
     case_id: UUID, body: LayoutBody,
     user: CurrentUser = Depends(require("graph.node.update")),

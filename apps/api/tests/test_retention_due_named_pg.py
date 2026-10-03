@@ -208,16 +208,21 @@ def test_the_due_list_looks_forward_and_names_each_row(conn, client):
 
     body = _due(client, token, case_id, days=30)
     rows = {r["object_id"]: r for r in body["due"]}
-    assert set(rows) == {str(seen), str(withheld), str(record)}, body
+    # evidence-due-leaks-hold-reason (2026-10-03): the exhibit in a
+    # compartment the reader is not read into is not on the list at all, not
+    # even by id, and the counts leave it out; what the case lets be said
+    # about what is left out (its setting is PRESENCE here) is said once.
+    assert set(rows) == {str(seen), str(record)}, body
+    assert body["count"] == 2
     assert body["past_deadline"] == 0
     assert all(r["past_deadline"] is False for r in body["due"])
+    assert body["withheld"] == [
+        {"case_id": str(case_id), "mode": "PRESENCE", "incomplete": True}]
 
-    # The exhibit the reader could open is named; the one in a compartment
-    # they are not read into is on the list, and its title is not.
+    # The exhibit the reader could open is named.
     assert rows[str(seen)]["title"] == "Seized ledger scan"
     assert rows[str(seen)]["title_withheld"] is False
-    assert rows[str(withheld)]["title"] is None
-    assert rows[str(withheld)]["title_withheld"] is True
+    assert str(withheld) not in json.dumps(body)
     assert "Informant statement" not in json.dumps(body)
     # A record is named by the category whose clock set its deadline.
     assert rows[str(record)]["category"] == "STEALER_LOG"

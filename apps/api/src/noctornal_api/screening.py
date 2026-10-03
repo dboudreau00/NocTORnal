@@ -67,7 +67,9 @@ CATEGORY_WORDS = {"KNOWN_CSAM": "known child sexual abuse material",
                   "OTHER_PROHIBITED": "other prohibited material"}
 NOT_SCREENED, NO_MATCH, MATCH = "NOT_SCREENED", "NO_MATCH", "MATCH"
 OUTCOMES = (NOT_SCREENED, NO_MATCH, MATCH)
-TRIGGERS = ("SUBMISSION", "LIST_IMPORT", "RESCAN")
+#: ARCHIVE_MEMBER (0159, phase 8 2026-10-02): isolated because a member of
+#: its archive tree matched; the result's detail names which.
+TRIGGERS = ("SUBMISSION", "LIST_IMPORT", "RESCAN", "ARCHIVE_MEMBER")
 REVIEW_ACTIONS = ("ACKNOWLEDGED", "REFERRED", "FALSE_POSITIVE_SUSPECTED",
                   "DISPOSED_OUTSIDE", "NOTE")
 
@@ -94,9 +96,15 @@ SCREENING_REJECT_REASON = (
 EXACT_HASH_SENTENCE = (
     "Screening compares exact hashes against the lists this deployment "
     "imported. No match does not mean the material is lawful to hold.")
+#: Corrected 2026-10-03 (g40 verify major 3): a zip or tar archive the Lab
+#: expands has each member screened as a sample of its own; what is still
+#: not compared is a RAR or 7-Zip archive's members and any entry the
+#: expansion refused with bytes behind it.
 ARCHIVE_MEMBERS_SENTENCE = (
-    "Archive members are not screened: only a container's own hashes are "
-    "compared.")
+    "Archive members are screened only where the Lab expands the archive "
+    "(zip and tar kinds, each member a sample of its own); for any other "
+    "archive, and for an entry the expansion refuses, only the container's "
+    "own hashes are compared.")
 
 #: One open alert per recipient per hour: a bulk import of fifty matches,
 #: or a resubmission loop, raises one URGENT notice per officer, not fifty.
@@ -115,7 +123,9 @@ PASS_BUDGET_S = 240
 #: How far back GET /samples/policy looks for the last pass (policy_block).
 POLICY_PASS_WINDOW = timedelta(hours=24)
 #: The file types whose members are not expanded, so not screened.
-ARCHIVE_TYPES = frozenset({"ZIP or OOXML", "RAR", "7-Zip", "gzip"})
+ARCHIVE_TYPES = frozenset({"ZIP or OOXML", "RAR", "7-Zip", "gzip",
+                           # phase 8, 2026-10-02: the kinds the Lab now types.
+                           "bzip2", "xz", "tar"})
 
 
 class ScreeningError(Exception):
@@ -293,7 +303,9 @@ def screening_gaps(outcome: str, file_type: str | None) -> list[dict]:
         gaps.append({"step": "prohibited_content_archive_members",
                      "status": "unavailable",
                      "reason": "only the container's hashes were compared; "
-                               "archive members were not"})
+                               "archive members were not (an archive the "
+                               "Lab expands has each member compared as a "
+                               "sample of its own once it is expanded)"})
     return gaps
 
 
@@ -398,6 +410,38 @@ def sample_may_leave(conn: psycopg.Connection, sample_id: UUID
     if seq is None or seq < newest:
         return False, "screening_behind"
     return True, "screened"
+
+
+def bytes_may_move(conn: psycopg.Connection, sample_id: UUID) -> bool:
+    """False when an ACTIVE list matches this sample now, asked just in
+    time by every path that moves or reads its bytes (download, ticket,
+    retrieval, a NONE sandbox, static triage).
+
+    lab-2 (2026-10-03): those paths excluded only screening_outcome =
+    'MATCH', so a list imported while a pass was running (the import's own
+    pass skips on the lock) or past a pass's budget did not bind until a
+    later pass reached the sample, and its bytes were served meanwhile.
+    A sample already screened NO_MATCH at or above the newest active list
+    costs one read; one that is behind costs `screen_digests`' three index
+    lookups. A match is not isolated here (the pass does that, with its
+    custody and notices); the caller refuses as it refuses a sample it
+    cannot see. No active list leaves the answer as it was: True."""
+    row = conn.execute(
+        """SELECT s.screening_outcome, s.screening_list_seq,
+                  (SELECT max(seq) FROM lab.screening_list
+                    WHERE retired_at IS NULL),
+                  s.sha256, s.sha1, s.md5
+             FROM lab.sample s WHERE s.id = %s""", (sample_id,)).fetchone()
+    if row is None:
+        return True
+    outcome, seq, newest, sha256, sha1, md5 = row
+    if outcome == MATCH:
+        return False
+    if newest is None:
+        return True
+    if outcome == NO_MATCH and seq is not None and seq >= newest:
+        return True
+    return screen_digests(conn, sha256=sha256, sha1=sha1, md5=md5).outcome != MATCH
 
 
 def submission_disposition(conn: psycopg.Connection, *, case_id: UUID | None
@@ -758,7 +802,8 @@ class ScreeningService:
     def _pass(self, *, trigger, actor_id, move_bytes, budget) -> dict:
         ends = time.monotonic() + budget
         counters = {"screened": 0, "matched": 0, "failed": 0, "purged": 0,
-                    "preserved": 0, "pending": 0, "bytes_not_found": 0}
+                    "preserved": 0, "pending": 0, "bytes_not_found": 0,
+                    "trees_completed": 0, "trees_open": 0}
         active = self._c.execute(
             """SELECT coalesce(array_agg(id ORDER BY seq), '{}'), max(seq)
                  FROM lab.screening_list WHERE retired_at IS NULL""").fetchone()
@@ -819,6 +864,15 @@ class ScreeningService:
                     counters["failed"] += 1
                     log.warning("isolating matched sample %s failed; the next "
                                 "pass retries it", sample_id, exc_info=True)
+        # Archive trees whose isolation stopped half way (a sibling locked
+        # past the timeout, a crash after the matched row committed): the
+        # matched sample is no longer a candidate above, so the retry the
+        # log line promises is made here, from the database alone (g40
+        # verify blocker 1, 2026-10-03). Runs even with no active list.
+        from noctornal_api.lab_archive import complete_isolations
+        trees = complete_isolations(self._samples, ends=ends)
+        counters["trees_completed"] = trees["completed"]
+        counters["trees_open"] = trees["open"]
         left = ends - time.monotonic()
         if left > 0:
             counters["purged"] = self.purge_pending(budget_seconds=left)

@@ -1396,6 +1396,13 @@ button.hdr-user.codes-low::before { background: var(--alert); }
 .coverage-low { color: var(--alert); }
 
 .assert-actions { margin-top: 8px; }
+/* Date this claim (2026-10-02): the form sits in the inspector's narrow
+   column, where the shared row-form left its second field a sliver wide, so
+   its fields stack and fill the card. */
+.date-claim { flex-direction: column; align-items: stretch; gap: 8px;
+              margin-top: 8px; }
+.date-claim .field { display: flex; flex-direction: column; gap: 4px; }
+.date-claim input { width: 100%; box-sizing: border-box; }
 .assert-retraction {
   margin-top: 6px; font-size: 11px; line-height: 1.5;
   color: var(--danger); font-style: italic;

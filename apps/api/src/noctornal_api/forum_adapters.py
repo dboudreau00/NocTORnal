@@ -52,7 +52,11 @@ false claim). A run with any drift reports no deletion at all.
 
 Pages are parsed in a bounded child process (forum_parse's docstring
 says why), so a page built to exhaust the parser costs at most its wall
-clock and is reported as drift.
+clock and is reported as drift. In production that child runs in the
+isolated analysis worker (docs/17 F42, 2026-10-02), and a poll with no
+worker to parse its pages is refused before its first request. A worker
+that fails during a poll is the sandbox's state, not drift: the poll
+stops BLOCKED and keeps its cursor (AnalysisUnavailable).
 
 ## Pacing per forum, not per source
 
@@ -77,7 +81,7 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Jsonb
 
-from noctornal_api import egress, forum_parse
+from noctornal_api import analysis_runner, egress, forum_parse
 from noctornal_api.collection import (
     BUDGET_SPENT,
     ITEM_SKIPPED,
@@ -187,11 +191,42 @@ def reads_direct(env=None) -> bool:
 
 class ParseAbandoned(Exception):
     """The bounded child gave no answer: `reason` is lab_triage's failure
-    kind (timeout, crashed, output_too_large, bad_output) or 'refused'."""
+    kind (timeout, crashed, output_too_large, bad_output, or one of the
+    runner's SANDBOX_FAILURES) or 'refused'."""
 
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+class AnalysisUnavailable(SourceBlocked):
+    """The isolated analysis worker, not the page, failed during a poll
+    (F42 review, 2026-10-02): busy, gone, answering garbage, refusing, or
+    not configured. Until then this was reported as parser drift, which
+    marked a healthy parser as drifted. Now the poll stops at once, since
+    fetching more pages nothing can parse only reads a hostile site for
+    nothing, and the run is BLOCKED: no failure is counted, no drift is
+    reported, nothing it fetched is stored, and the run keeps the cursor it
+    started from, so the next poll fetches the same pages again. The
+    sentence says which of those happened."""
+
+
+#: What each sandbox failure was, for AnalysisUnavailable's sentence.
+_SANDBOX_WORDS = {
+    "isolation_refused": "no isolated analysis worker is configured",
+    "worker_unavailable": "the isolated analysis worker stopped answering",
+    "worker_bad_answer": ("the isolated analysis worker gave an answer that "
+                          "could not be read"),
+    "worker_refused": "the isolated analysis worker refused a page",
+    "worker_busy": "the isolated analysis worker had no free slot in time",
+}
+
+
+def sandbox_sentence(reason: str) -> str:
+    what = _SANDBOX_WORDS.get(reason, _SANDBOX_WORDS["worker_unavailable"])
+    return (f"This poll stopped because {what}. What it had fetched was not "
+            f"stored, and the parser is not at fault: the next poll reads the "
+            f"same pages again.")
 
 
 def parse_in_process(platform: str, page_kind: str, fetched, *, config: dict,
@@ -208,7 +243,9 @@ def parse_bounded(platform: str, page_kind: str, fetched, *, config: dict,
                   now: datetime, wall_s: float = PARSE_WALL_S) -> dict:
     """One page parsed in a child process that limits its own CPU and
     memory before it reads a byte, killed by lab_triage's runner at
-    `wall_s`. Raises ParseAbandoned when there is no usable answer."""
+    `wall_s`: here, or in the isolated analysis worker when the deployment
+    runs one (docs/17 F42, 2026-10-02). Raises ParseAbandoned when there
+    is no usable answer."""
     from noctornal_api import lab_triage
 
     content_type = fetched.headers.get("Content-Type") if fetched.headers else None
@@ -221,7 +258,8 @@ def parse_bounded(platform: str, page_kind: str, fetched, *, config: dict,
               "memory_bytes": forum_parse.CHILD_MEMORY_BYTES}
     result = lab_triage.run_child(header, (bytes(fetched.body or b""),),
                                   wall_s=max(1.0, wall_s),
-                                  stdout_cap=PARSE_STDOUT_CAP, argv=CHILD_ARGV)
+                                  stdout_cap=PARSE_STDOUT_CAP, argv=CHILD_ARGV,
+                                  kind="forum_parse")
     if not result.ok:
         raise ParseAbandoned(result.failure or "crashed")
     try:
@@ -456,14 +494,21 @@ class ForumAdapter(Adapter):
     def refusal(self, conn: psycopg.Connection, source: SourceRow) -> str | None:
         """Adapter refusals, before any lock, run row or request: the parser
         library, the source's own shape and settings (a source written by
-        SQL meets the same rules as one made through the route), and a read
-        that would leave from this server's own address."""
+        SQL meets the same rules as one made through the route), a read
+        that would leave from this server's own address, and no analysis
+        process to parse what it fetched (F42, 2026-10-02: a page that
+        cannot be parsed is not fetched). The worker's answer is
+        remembered for a few seconds (analysis_runner.unavailable), so a
+        source list of many forums asks it once."""
         if not forum_parse.parser_available():
             return PARSER_MISSING
         problems = (self.validate_source(source.base_url, source.parser_config)
                     + self.validate_config(source.parser_config))
         if problems:
             return " ".join(problems)
+        refusal = analysis_runner.unavailable()
+        if refusal:
+            return refusal + "."
         return direct_refusal()
 
     # -- one forum at a time -------------------------------------------------
@@ -648,8 +693,11 @@ class MyBBAdapter(ForumAdapter):
 
 
 def forum_registry() -> dict[str, Adapter]:
-    """The two entries collection.default_adapters() registers."""
-    return {"xenforo": XenForoAdapter(), "mybb": MyBBAdapter()}
+    """The four entries collection.default_adapters() registers: the two
+    public readers, and the two member readers (the authenticated forum
+    path, 2026-10-02, forum_member)."""
+    from noctornal_api.forum_member import member_registry
+    return {"xenforo": XenForoAdapter(), "mybb": MyBBAdapter(), **member_registry()}
 
 
 # ---------------------------------------------------------------------------
@@ -771,6 +819,9 @@ class _Walk:
         try:
             parsed = self.a.parse(page_kind, fetched, self.config, self.now, wall)
         except ParseAbandoned as exc:
+            if exc.reason in analysis_runner.SANDBOX_FAILURES:
+                # The sandbox, not the page (F42 review, 2026-10-02).
+                raise AnalysisUnavailable(sandbox_sentence(exc.reason)) from None
             self.drift_codes.add("abandoned" if exc.reason == "timeout" else "failed")
             if primary:
                 return None
@@ -1093,7 +1144,10 @@ def forum_details(conn: psycopg.Connection, document_id: UUID, *,
     row = conn.execute(
         """SELECT d.id, s.kind::text, d.category, d.external_id,
                   fp.signature_text, fp.quoted_post_refs, fp.reactions,
-                  fp.observed_at, fm.profile, fm.observed_at
+                  fp.observed_at, fm.profile, fm.observed_at,
+                  coalesce(fp.provenance, fm.provenance),
+                  coalesce(fp.collection_account_id, fm.collection_account_id),
+                  coalesce(fp.authority_id, fm.authority_id)
              FROM collect.document d
              JOIN collect.source s ON s.id = d.source_id
              LEFT JOIN collect.forum_post fp ON fp.document_id = d.id
@@ -1102,23 +1156,32 @@ def forum_details(conn: psycopg.Connection, document_id: UUID, *,
               AND d.classification <= %s::core.tlp
               AND s.classification <= %s::core.tlp
               AND d.compartments <@ %s::text[]
+              AND s.compartments <@ %s::text[]
               AND (fp.document_id IS NOT NULL OR fm.document_id IS NOT NULL)""",
-        (document_id, clearance, clearance, sorted(compartments))).fetchone()
+        (document_id, clearance, clearance, sorted(compartments),
+         sorted(compartments))).fetchone()
     if row is None:
         raise CollectionNotFound(
             "no such forum document, or it is above your clearance")
+    # The authenticated forum path (2026-10-02, 0162): how the page was
+    # read, and by which persona under which authority when as a member.
+    read_as = {"provenance": row[10] or "PUBLIC",
+               "persona_id": str(row[11]) if row[11] else None,
+               "authority_id": str(row[12]) if row[12] else None}
     if row[8] is not None:
         return {"document_id": str(row[0]), "kind": "member",
                 "source_kind": row[1], "external_id": row[3],
                 "profile": dict(row[8] or {}),
-                "observed_at": row[9].isoformat() if row[9] else None}
+                "observed_at": row[9].isoformat() if row[9] else None,
+                **read_as}
     return {"document_id": str(row[0]), "kind": "post", "source_kind": row[1],
             "external_id": row[3], "signature_text": row[4],
             "quoted_post_refs": list(row[5] or []),
             "reactions": dict(row[6] or {}),
             "observed_at": row[7].isoformat() if row[7] else None,
             "note": ("The signature is repeated on every post its author writes: "
-                     "it describes the author, and is not an observation per post.")}
+                     "it describes the author, and is not an observation per post."),
+            **read_as}
 
 
 # ---------------------------------------------------------------------------

@@ -407,9 +407,19 @@ def test_a_case_withdraw_is_bound_to_its_path_case(conn, client):
     lead = session(conn, lead_id)
     case_a, case_b = _case(conn, lead_id), _case(conn, lead_id)
     from noctornal_api.approvals import ApprovalService
+    from noctornal_api.graph import AssertionInput, GraphWriteService
+    # Real entities: a merge request that names ones the viewer cannot see is
+    # the missing request's 404 since the beta review (http_ui-011,
+    # 2026-10-03), withdrawal included.
+    graph = GraphWriteService(conn)
+    claim = AssertionInput(basis="DIRECT_OBSERVATION", created_by=lead_id)
+    a = graph.create_node(case_id=case_b, node_type="IDENTITY", label="dch a",
+                          created_by=lead_id, assertion=claim)
+    b = graph.create_node(case_id=case_b, node_type="IDENTITY", label="dch b",
+                          created_by=lead_id, assertion=claim)
     req = ApprovalService(conn).request(
         operation="node.merge", case_id=case_b,
-        payload={"source_node_id": str(uuid4()), "target_node_id": str(uuid4())},
+        payload={"source_node_id": str(a), "target_node_id": str(b)},
         justification="raised in b", requested_by=lead_id)
     through_a = client.post(f"{API}/cases/{case_a}/approvals/{req.id}/withdraw",
                             headers=lead)

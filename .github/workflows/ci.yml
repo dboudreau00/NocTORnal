@@ -58,6 +58,15 @@ env:
   SMTP_HOST: localhost
   SMTP_PORT: "1025"
   SMTP_ALLOW_PLAINTEXT: "1"
+  # Same reasoning again, for the production Redis ACL (2026-10-02):
+  # test_redis_limiter_acl.py proves the ACL confines the limiter, and the
+  # limiter works under it, only against a Redis started with the
+  # production compose file's own start script, which the "Start the ACL
+  # Redis" step below runs. Unset, those tests skip and the gate fails the
+  # build. The tenant is a second user that step adds, standing for another
+  # tenant of a shared Redis. Throwaways like every credential here.
+  NOCTORNAL_TEST_ACL_REDIS_URL: redis://noctornal_limiter:dev_only_change_me@localhost:6390/0
+  NOCTORNAL_TEST_ACL_REDIS_TENANT_URL: redis://acl_tenant:dev_only_change_me@localhost:6390/0
   MINIO_ENDPOINT: localhost:9000
   MINIO_ACCESS_KEY: noctornal
   MINIO_SECRET_KEY: dev_only_change_me
@@ -271,6 +280,42 @@ jobs:
           docker logs mailpit >&2
           exit 1
 
+      # The production Redis ACL (2026-10-02), for test_redis_limiter_acl.py's
+      # real-Redis leg. Not the `redis` service above: that one is the
+      # development shape, no user and no password, which the Lua agreement
+      # tests need. This is infra/production/compose.yml's own start script,
+      # rendered by apps/api/tests/acl_redis_support.py (compose's `$$`
+      # written back as `$`, plus one line adding the tenant user), run in
+      # the image that file names. Inside the container REDIS_URL names host
+      # `redis`, so the script's start check takes the branch production
+      # runs before it writes the ACL. A step rather than a service for the
+      # reason MinIO's is: a service container cannot be given a command.
+      # Both legs, like every other service here; the second deselects these
+      # tests, and starting it there too keeps one definition. After Install,
+      # because the renderer imports the test suite's compose reader.
+      - name: Start the ACL Redis
+        run: |
+          python apps/api/tests/acl_redis_support.py --tenant > /tmp/acl-redis-start.sh
+          docker run -d --name acl-redis \
+            -p 127.0.0.1:6390:6379 \
+            -e REDIS_PASSWORD=dev_only_change_me \
+            -e REDIS_URL=redis://noctornal_limiter:dev_only_change_me@redis:6379/0 \
+            -e ACL_TENANT_PASSWORD=dev_only_change_me \
+            -v /tmp/acl-redis-start.sh:/acl-redis-start.sh:ro \
+            redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499 \
+            /bin/sh /acl-redis-start.sh
+          # The compose file's own healthcheck, signed in as the limiter.
+          for i in $(seq 1 40); do
+            if docker exec -e REDISCLI_AUTH=dev_only_change_me acl-redis \
+                 redis-cli --user noctornal_limiter ping 2>/dev/null | grep -q PONG; then
+              echo "ACL Redis ready on attempt ${i}"; exit 0
+            fi
+            sleep 1
+          done
+          echo "The ACL Redis did not become ready; logs follow:" >&2
+          docker logs acl-redis >&2
+          exit 1
+
       # CREATE EXTENSION needs superuser, which the migration role must
       # never be -- so extensions are loaded out of band exactly as
       # db/init does on a real deployment, and Alembic owns everything
@@ -465,21 +510,19 @@ jobs:
               print("::error::No audit events to verify. The suite ran "
                     "without writing any, or the chain was truncated.")
               sys.exit(1)
-          # A fork written since 0153 is a break (it is in `report.breaks`
-          # and fails the step below): the chaining trigger takes its
-          # advisory lock, then draws `seq`, then reads the tail, so
-          # concurrent writers cannot fork the chain. Before 0153 they did,
-          # from ordinary traffic, and an old database carries those forks
-          # for ever (the table is append-only); they are history, listed
-          # here as a notice and never fatal.
+          # A fork is two rows claiming one predecessor. Until migration 0149
+          # (2026-10-03) concurrent writers made them from ordinary traffic,
+          # because `seq` was drawn before the chaining trigger took its
+          # lock, so those are only noticed. A fork whose claimants were all
+          # written since 0149 cannot come from honest traffic and is in
+          # `report.breaks`, so the loop below fails the build on it. This
+          # database is built by the migrations from nothing, so every fork
+          # here is the latter kind.
+          print(f"tail seq {report.tail_seq}, hash {report.tail_row_hash}")
           if report.forks:
               print(f"::warning::{len(report.forks)} audit rows share a "
-                    f"predecessor, {report.forks_since_fix} of them written "
-                    f"since 0153 (those fail this step).")
-          # What a green tick cannot see: rows removed from the end, or a
-          # rewrite that recomputes every later hash. Printed so a run's log
-          # can serve as an anchor to compare a later run against.
-          print(f"tail seq {report.tail_seq} row_hash {report.tail_row_hash}")
+                    f"predecessor (see the breaks below for any written "
+                    f"after migration 0149).")
           for b in report.breaks:
               print(f"::error::audit chain {b.kind} break at seq {b.seq} "
                     f"({b.action} at {b.occurred_at})")
@@ -531,12 +574,13 @@ jobs:
                     "truncation -- deleting the NEWEST rows leaves this "
                     "step green; compare tail_row_hash across runs.")
               sys.exit(1)
-          # As for the audit chain above: a fork written since 0153 is a
+          # As for the audit chain above: a fork written since 0149 is a
           # break and fails this step; older ones are history.
           if report.forks:
               print(f"::warning::{len(report.forks)} custody rows share a "
-                    f"predecessor, {report.forks_since_fix} of them written "
-                    f"since 0153 (those fail this step).")
+                    f"predecessor. Those from before migration 0149 are not "
+                    f"counted as tampering; any written after it is in the "
+                    f"breaks below.")
           for b in report.breaks:
               print(f"::error::custody chain {b.kind} break at id {b.id} "
                     f"({b.action} on {b.evidence_id} at {b.occurred_at})")

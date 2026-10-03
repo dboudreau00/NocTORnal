@@ -296,6 +296,22 @@ def test_a_selector_on_a_deleted_entity_is_not_matched(conn, world):
     assert _nodes(conn, case_id, wallet).total == 0
 
 
+def _fold_across_labels(conn, source, target, by):
+    """The merged state of a RED or compartmented record folded into a less
+    restricted survivor, written straight to the redirect.
+
+    `MergeService.merge` refuses it since 2026-10-03 (beta review
+    graph-merge-no-element-label-gate): the survivor keeps its own lower
+    labels and takes every tie, so the folded record's ties would be shown at
+    the survivor's label. These tests are about what SEARCH does with that
+    state wherever it came from (labels raised after a merge, a restored
+    backup, a deployment that predates the refusal), so the redirect is
+    written as the owner does."""
+    conn.execute(
+        "UPDATE core.node SET merged_into_id = %s, merged_at = now(), "
+        "merged_by = %s, updated_at = now() WHERE id = %s", (target, by, source))
+
+
 def test_a_selector_on_a_merged_record_finds_the_survivor(conn, world):
     """A merge moves edges, not selectors (merges.py), so the wallet stays
     on the merged record. Without following the redirect the wallet found
@@ -353,8 +369,7 @@ def test_a_merge_chain_never_reaches_past_the_callers_ceiling(conn, client, worl
     _selector(conn, case_id, first, "BTC_ADDR", through_wallet)
     merges.merge(case_id=case_id, source_node_id=first, target_node_id=red_middle,
                  merged_by=owner, reason="same wallet")
-    merges.merge(case_id=case_id, source_node_id=red_middle, target_node_id=last,
-                 merged_by=owner, reason="same operator")
+    _fold_across_labels(conn, red_middle, last, owner)
 
     svc = _svc(conn)
     for wallet in (up_wallet, through_wallet, up_wallet[:12], through_wallet[:12]):
@@ -409,28 +424,24 @@ def test_a_hidden_record_merged_into_a_visible_one_does_not_lend_it_its_selector
       line).
     """
     from noctornal_api.cases import CaseService
-    from noctornal_api.merges import MergeService
     owner, _, case_id = world
     conn.execute(
         "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
         "ON CONFLICT (key) DO NOTHING", (TEST_COMPARTMENT, "Selector search test"))
-    merges = MergeService(conn)
     tok = _tok()
 
     red_holder = _node(conn, case_id, owner, f"RED holder {tok}", classification="RED")
     amber_survivor = _node(conn, case_id, owner, "amber survivor")
     red_wallet = _wallet()
     _selector(conn, case_id, red_holder, "BTC_ADDR", red_wallet)
-    merges.merge(case_id=case_id, source_node_id=red_holder,
-                 target_node_id=amber_survivor, merged_by=owner, reason="same wallet")
+    _fold_across_labels(conn, red_holder, amber_survivor, owner)
 
     walled_holder = _node(conn, case_id, owner, f"walled holder {tok}",
                           compartments=[TEST_COMPARTMENT])
     open_survivor = _node(conn, case_id, owner, "open survivor")
     walled_wallet = _wallet()
     _selector(conn, case_id, walled_holder, "BTC_ADDR", walled_wallet)
-    merges.merge(case_id=case_id, source_node_id=walled_holder,
-                 target_node_id=open_survivor, merged_by=owner, reason="same wallet")
+    _fold_across_labels(conn, walled_holder, open_survivor, owner)
 
     svc = _svc(conn)
     for wallet, clearance in ((red_wallet, "AMBER"), (walled_wallet, "RED")):
@@ -1053,15 +1064,18 @@ def test_a_merged_name_never_reaches_past_the_callers_ceiling(conn, client, worl
                      merged_by=owner, reason="same operator")
 
     red_alias = _node(conn, case_id, owner, f"redalias_{tok}", classification="RED")
-    merge(red_alias, _node(conn, case_id, owner, "amber survivor one"))
+    _fold_across_labels(conn, red_alias,
+                        _node(conn, case_id, owner, "amber survivor one"), owner)
     merge(_node(conn, case_id, owner, f"upalias_{tok}"),
           _node(conn, case_id, owner, "red survivor", classification="RED"))
     red_middle = _node(conn, case_id, owner, "red middle", classification="RED")
     merge(_node(conn, case_id, owner, f"thrualias_{tok}"), red_middle)
-    merge(red_middle, _node(conn, case_id, owner, "amber survivor two"))
+    _fold_across_labels(conn, red_middle,
+                        _node(conn, case_id, owner, "amber survivor two"), owner)
     walled = _node(conn, case_id, owner, f"walledalias_{tok}",
                    compartments=[TEST_COMPARTMENT])
-    merge(walled, _node(conn, case_id, owner, "open survivor"))
+    _fold_across_labels(conn, walled,
+                        _node(conn, case_id, owner, "open survivor"), owner)
 
     for name in ("redalias", "upalias", "thrualias"):
         page = _nodes(conn, case_id, f"{name}_{tok}", clearance="AMBER")

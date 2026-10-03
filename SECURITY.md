@@ -46,7 +46,10 @@ use**. It has never been operated against real targets. That means:
   whose clock TOTP cannot live with and prints it in a URL *fragment*,
   which the console erases from the address bar, holds in page memory
   (never storage) and exchanges once for the pair through `POST
-  /auth/cookie`. `deps.session_token` still accepts `Authorization:
+  /auth/cookie`, but only after it has named the account the link
+  carries and the person has said yes (2026-10-03: a link made from
+  anybody's session would otherwise sign a signed-out colleague in as its
+  author). `deps.session_token` still accepts `Authorization:
   Bearer`, for clients that are not browsers.
 - **Known and already documented:** everything in
   [`docs/17-flagged-for-review.md`](docs/17-flagged-for-review.md). Please

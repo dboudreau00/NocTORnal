@@ -187,6 +187,7 @@ function closeClause(t) { return String(t || ''); }
 function syncAnalysisSizeOptions() {}
 function loadKeyPlayer(storedOnly) { kppLoads.push(storedOnly); }
 function loadConcor() {}
+function loadRege() {}
 """ + consts + "\n" + "".join(_fn(n) for n in (
         "analysisFailureText", "ageText", "currencyText", "storedRunStatus",
         "blankAnalytics", "invalidateAnalytics", "runAnalysis",

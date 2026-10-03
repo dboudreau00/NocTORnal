@@ -25,6 +25,12 @@ is worth more than a rule that must be remembered.
 before it is stored: a persona's password lands in an HTTP error body far
 more often than anybody expects.
 
+Since 2026-10-02 (A collector process) the vault seals and opens with
+NOCTORNAL_PERSONA_KEK alone (security/persona_envelope.py), never the TOTP
+ring, and in production the collector (scripts/collector.py) is the one
+process that holds that key: the API queues every persona act
+(persona_acts.py) and holds no key that could open a persona credential.
+
 ## The scheduler is polite by construction
 
 docs/04 asks for jitter and per-source `max_rps`, and the reason is
@@ -106,7 +112,7 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Json, Jsonb
 
-from noctornal_api import egress, pinned_http
+from noctornal_api import egress, pinned_http, watch_regex
 from noctornal_api.wording import agree, count_of
 from noctornal_api.egress_policy import (
     DECISION_REF,
@@ -114,6 +120,7 @@ from noctornal_api.egress_policy import (
     PUBLIC_POLICY,
     EgressRoute,
 )
+from noctornal_api.egress_policy import explain as egress_sentence
 
 # The collector's old names for what moved to egress_policy.py and
 # pinned_http.py (docs/20 section 5, 2026-09-24), kept as the SAME
@@ -161,7 +168,7 @@ from noctornal_api.pinned_http import (  # noqa: F401
 from noctornal_api.pinned_http import Deadline as _Deadline  # noqa: F401
 from noctornal_api.pinned_http import Hop as _Hop  # noqa: F401
 from noctornal_api.pinned_http import REDIRECT_CODES as _REDIRECT_CODES  # noqa: F401
-from noctornal_api.security import envelope
+from noctornal_api.security import persona_envelope
 
 #: docs/04's persona lifecycle. A burnt persona never returns to HEALTHY:
 #: reusing one that a forum admin has already flagged is how you burn the
@@ -306,13 +313,20 @@ PERSONA_USABLE_SQL = (
 #: A persona is VISIBLE to a caller when no source it is registered on or
 #: bound to sits above the caller's ceiling (2026-09-24). The old
 #: predicate looked at the venue only, so an AMBER holder could burn, lock
-#: or unlock a persona whose chats or boards are RED. Placeholders are
-#: named: `%(clearance)s`.
+#: or unlock a persona whose chats or boards are RED. Since F43 (g40
+#: verify, 2026-10-03) a source's COMPARTMENTS count too: a persona bound
+#: to a source the caller does not hold every key of is as hidden as one
+#: bound above their ceiling, so it is not listed with its venue's name and
+#: address, cannot be locked, burnt or used, and answers as a missing one.
+#: Placeholders are named: `%(clearance)s` and `%(held)s` (the reader's own
+#: compartments; `_held()` of none fails closed). A NULL clearance is the
+#: worker's and sees every persona.
 PERSONA_VISIBLE_SQL = (
     "(%(clearance)s::core.tlp IS NULL OR NOT EXISTS ("
     "SELECT 1 FROM collect.source vs"
     " WHERE (vs.id = a.source_id OR vs.collection_account_id = a.id)"
-    " AND vs.classification > %(clearance)s::core.tlp))")
+    " AND (vs.classification > %(clearance)s::core.tlp"
+    " OR NOT vs.compartments <@ %(held)s::text[])))")
 
 #: What a persona the caller may not see reads as, wherever a visible row
 #: would otherwise name it (2026-09-24). No id, no handle:
@@ -446,6 +460,29 @@ class Lease:
         return "Lease(value=[REDACTED])"
 
 
+def persona_exit_refusal(exit_kind: str | None, is_passive_default: bool) -> str:
+    """The sentence for an egress profile that cannot carry persona traffic
+    (F35, 2026-10-02).
+
+    The words are the egress proxy's own, from `egress_policy.explain`, so a
+    persona refused here and a persona refused at the proxy are told the
+    same thing and the two cannot drift: no exit at all is `no_exit`, this
+    host's own address is `persona_needs_exit`, and the passive default,
+    which serves feeds and web runs and never a persona, is
+    `passive_route_misused`. The order is the order the proxy asks in. The
+    last line is a profile `persona_capable` refuses for a reason this
+    function does not know (the generated column grew a term): it fails
+    closed with the nearest sentence rather than letting the persona through.
+    """
+    if exit_kind is None:
+        return egress_sentence("no_exit")
+    if exit_kind == "DIRECT":
+        return egress_sentence("persona_needs_exit")
+    if is_passive_default:
+        return egress_sentence("passive_route_misused")
+    return egress_sentence("persona_needs_exit")
+
+
 class PersonaVault:
     """Envelope-encrypted persona credentials.
 
@@ -481,7 +518,14 @@ class PersonaVault:
         competent site and a burnt persona's exit is the one a site has
         already noticed. That is why a burnt persona keeps its exit for
         good rather than freeing it (2026-09-24): there is no status that
-        hands an exit on."""
+        hands an exit on.
+
+        A profile that cannot carry persona traffic (`persona_capable` is
+        false: no exit, this host's own address, or the passive default) is
+        refused here, with the proxy's own sentence (F35, 2026-10-02).
+        Before this the persona was created, the readiness register flagged
+        it and the proxy refused every connection it made, so an operator
+        believed a persona was ready that could never leave."""
         handle = (handle or "").strip()
         if not 2 <= len(handle) <= 64:
             raise CollectionError("A handle is between 2 and 64 characters.")
@@ -489,7 +533,8 @@ class PersonaVault:
             raise CollectionError(
                 f"No persona can be an account on {platform!r}.")
         profile = self._c.execute(
-            "SELECT is_active FROM collect.egress_profile WHERE id = %s",
+            "SELECT is_active, persona_capable, exit_kind, is_passive_default "
+            "FROM collect.egress_profile WHERE id = %s",
             (egress_profile_id,)).fetchone()
         if profile is None or not profile[0]:
             raise CollectionNotFound(
@@ -503,6 +548,23 @@ class PersonaVault:
                 "This egress profile already carries a persona. Two personas "
                 "sharing an exit can be linked by any competent site, so one "
                 "persona, one egress profile.")
+        # collection-shared-exit (2026-10-03): the other half of the rule
+        # `_check_binding` holds. A persona-less source (a public forum or
+        # web read) bound to this profile reads from this exit, so a persona
+        # placed on it would be seen from the same address as that public
+        # read and the two linked. collect.source is not under row-level
+        # security (the egress proxy reads it), so a source above the
+        # caller's clearance is counted too, and the sentence names no kind
+        # of source.
+        carried = self._c.execute(
+            "SELECT 1 FROM collect.source WHERE egress_profile_id = %s LIMIT 1",
+            (egress_profile_id,)).fetchone()
+        if carried is not None:
+            raise CollectionError(
+                "This egress profile already carries a public read. A persona "
+                "and a public read must not share an exit.")
+        if not profile[1]:
+            raise CollectionError(persona_exit_refusal(profile[2], profile[3]))
         from psycopg.types.json import Jsonb
         row = self._c.execute(
             """INSERT INTO collect.collection_account
@@ -527,8 +589,12 @@ class PersonaVault:
         credential) clears in the same UPDATE, because a new credential
         enrolled after the lock is the one thing that lifts it. The clock is
         `clock_timestamp()`, never the transaction's, so the rotation time
-        is always after a lock signalled earlier in the same session."""
-        ciphertext, key_id = envelope.encrypt(secret)
+        is always after a lock signalled earlier in the same session.
+
+        Sealed under the persona ring since 2026-10-02 (A collector
+        process), never the TOTP ring: in production only the collector
+        holds it, so an enrolment runs there."""
+        ciphertext, key_id = persona_envelope.encrypt(secret)
         updated = self._c.execute(
             """UPDATE collect.collection_account
                   SET secret_ciphertext = %s, secret_key_id = %s,
@@ -556,6 +622,24 @@ class PersonaVault:
             raise CollectionNotFound("no such persona")
         self._audit(actor_id, "PERSONA_SECRET_DESTROYED", persona_id,
                     {"reason": reason.strip(), **dict(detail or {})})
+        self._drop_forum_session(persona_id, actor_id,
+                                 "the credential was destroyed")
+
+    def _drop_forum_session(self, persona_id: UUID, actor_id: UUID | None,
+                            why: str) -> None:
+        """A stopped persona holds no sealed forum session (g40 verify major
+        1, 2026-10-03). A session cookie is a credential (invariant 7's
+        shape, `forum_session`), so every way a persona STOPS clears it in
+        the same breath: a destroyed credential, a burn, a lock by a person
+        or by the platform. Database only and always possible: the board's
+        own sign-out is a network act (`forum_member.sign_out_persona`) that
+        may not be reached, and this does not wait for it. Audited when
+        something was held; silent when nothing was."""
+        from noctornal_api import forum_session
+
+        if forum_session.clear_session(self._c, persona_id):
+            self._audit(actor_id, "PERSONA_FORUM_SESSION_CLEARED", persona_id,
+                        {"why": why})
 
     # -- using -------------------------------------------------------------
 
@@ -619,11 +703,30 @@ class PersonaVault:
         if not row[0]:
             raise CollectionError("this persona has no stored credential")
         read_at_entry = bytes(row[0])
+        # The persona ring alone, and no other ring on any path (A collector
+        # process, 2026-10-02). EVERY way the credential can fail to open is
+        # a PersonaUnavailable with a sentence that names the fix, so a poll
+        # records BLOCKED and an act answers 409 rather than a 500: no key
+        # in this process, a process that may not hold it (the API in
+        # production), a credential still sealed under the TOTP ring (named,
+        # never opened with it), a key id this ring lacks, a key that
+        # changed under its id, and bytes that are no envelope
+        # (verify:g38, 2026-10-03: the last three were a generic 500).
+        try:
+            secret = persona_envelope.decrypt(read_at_entry, key_id=row[1])
+        except (persona_envelope.PersonaKeyError,
+                *persona_envelope.UNOPENABLE) as exc:
+            raise PersonaUnavailable(
+                persona_envelope.refusal_sentence(exc, row[1])) from None
+        # Audited once the credential has opened and before the block gets
+        # it, so the use is on record before any use is made, and a poll
+        # refused for want of a usable key (every five minutes per source,
+        # until the move or the key is fixed) writes no event for a use that
+        # never happened (verify:g38, 2026-10-03).
         self._audit(actor_id, "PERSONA_USED", persona_id,
                     {"purpose": purpose,
                      "run_id": str(run_id) if run_id else None,
                      "stopping": stopping})
-        secret = envelope.decrypt(read_at_entry, key_id=row[1])
         lease = Lease(secret)
         try:
             with secret_in_scope(secret, *_secret_leaves(secret)):
@@ -647,7 +750,7 @@ class PersonaVault:
 
     def _reseal(self, persona_id: UUID, new: str, read_at_entry: bytes,
                 lease: Lease, *, purpose: str, run_id: UUID | None) -> None:
-        ciphertext, key_id = envelope.encrypt(new)
+        ciphertext, key_id = persona_envelope.encrypt(new)
         changed = self._c.execute(
             """UPDATE collect.collection_account
                   SET secret_ciphertext = %s, secret_key_id = %s
@@ -709,6 +812,9 @@ class PersonaVault:
                       SET machine_lock_code = %s,
                           machine_lock_at = clock_timestamp()
                     WHERE id = %s""", (lock_code, persona_id)).rowcount == 1
+            self._drop_forum_session(persona_id, None,
+                                     f"the platform locked the persona "
+                                     f"({lock_code})")
         self._audit(None, "PERSONA_MACHINE_LOCK" if lock_code
                     else "PERSONA_MACHINE_HOLD", persona_id,
                     {"reason": reason,
@@ -723,7 +829,7 @@ class PersonaVault:
     def set_status(self, persona_id: UUID, status: str, *, actor_id: UUID,
                    reason: str | None = None,
                    cooldown: timedelta | None = None,
-                   clearance: str | None = None) -> dict:
+                   clearance: str | None = None, compartments=None) -> dict:
         """Move a persona through the lifecycle.
 
         BURNED is terminal and requires a reason: the reason is what stops
@@ -759,7 +865,8 @@ class PersonaVault:
             raise CollectionError(
                 "a burn has to say what burnt it: without a reason the next "
                 "analyst has nothing to avoid repeating")
-        params = {"id": persona_id, "clearance": clearance}
+        params = {"id": persona_id, "clearance": clearance,
+                  "held": _held(compartments)}
         current = self._c.execute(
             f"""SELECT a.status, a.machine_hold_until, a.machine_lock_code
                   FROM collect.collection_account a
@@ -786,6 +893,9 @@ class PersonaVault:
         self._audit(actor_id, f"PERSONA_{status}", persona_id,
                     {"reason": reason, "cooldown_until":
                      until.isoformat() if until else None})
+        if status in (LOCKED, BURNED):
+            self._drop_forum_session(persona_id, actor_id,
+                                     f"the persona was set {status}")
         notice = None
         if status == HEALTHY:
             now = datetime.now(timezone.utc)
@@ -801,14 +911,18 @@ class PersonaVault:
 
     # -- reading -----------------------------------------------------------
 
-    def visible(self, persona_id: UUID, *, clearance: str | None) -> bool:
-        """Whether `clearance` may see this persona (the set_status rule)."""
+    def visible(self, persona_id: UUID, *, clearance: str | None,
+                compartments=None) -> bool:
+        """Whether `clearance` and the reader's compartments may see this
+        persona (the set_status rule)."""
         return self._c.execute(
             f"""SELECT 1 FROM collect.collection_account a
                  WHERE a.id = %(id)s AND {PERSONA_VISIBLE_SQL}""",
-            {"id": persona_id, "clearance": clearance}).fetchone() is not None
+            {"id": persona_id, "clearance": clearance,
+             "held": _held(compartments)}).fetchone() is not None
 
-    def personas(self, *, clearance: str | None = None) -> list[dict]:
+    def personas(self, *, clearance: str | None = None,
+                 compartments=None) -> list[dict]:
         """Persona HEALTH, never a secret, under the set_status predicate.
 
         Every column named explicitly rather than selected with `*` so that
@@ -822,7 +936,7 @@ class PersonaVault:
         clearance only, the LIVE one first: a RED
         authority over an AMBER persona says nothing to an AMBER caller.
         """
-        params = {"clearance": clearance}
+        params = {"clearance": clearance, "held": _held(compartments)}
         rows = self._c.execute(
             f"""SELECT a.id, a.handle, s.name, s.base_url, a.status,
                        a.last_used_at, a.burn_reason, a.cooldown_until,
@@ -836,7 +950,8 @@ class PersonaVault:
                        (SELECT count(*) FROM collect.source b
                          WHERE b.collection_account_id = a.id AND b.is_active
                            AND (%(clearance)s::core.tlp IS NULL
-                                OR b.classification <= %(clearance)s::core.tlp))
+                                OR (b.classification <= %(clearance)s::core.tlp
+                                    AND b.compartments <@ %(held)s::text[])))
                   FROM collect.collection_account a
                   LEFT JOIN collect.source s ON s.id = a.source_id
                   LEFT JOIN collect.egress_profile e ON e.id = a.egress_profile_id
@@ -845,7 +960,7 @@ class PersonaVault:
             params).fetchall()
         from noctornal_api.collection_authority import CollectionAuthorityService
         states = CollectionAuthorityService(self._c).states_for_personas(
-            [r[0] for r in rows], clearance=clearance)
+            [r[0] for r in rows], clearance=clearance, compartments=compartments)
         return [
             {"id": str(r[0]), "handle": r[1], "source_name": r[2],
              "source_url": r[3], "status": r[4],
@@ -864,7 +979,8 @@ class PersonaVault:
              "authority": states.get(r[0])}
             for r in rows]
 
-    def egress_profiles(self, *, clearance: str | None) -> list[dict]:
+    def egress_profiles(self, *, clearance: str | None,
+                        compartments=None) -> list[dict]:
         """THE listing persona and source forms pick an exit from.
 
         Counts only what the caller may see, and one boolean for the rest
@@ -873,7 +989,7 @@ class PersonaVault:
         reason given when that persona is hidden: that one bit of presence
         is the deployment's accepted PRESENCE disclosure (docs/16 D2,
         docs/05). Never the sealed endpoint or its key id."""
-        params = {"clearance": clearance}
+        params = {"clearance": clearance, "held": _held(compartments)}
         rows = self._c.execute(
             f"""SELECT e.id, e.name, e.kind, e.region, e.is_active,
                        EXISTS (SELECT 1 FROM collect.collection_account h
@@ -884,7 +1000,8 @@ class PersonaVault:
                        (SELECT count(*) FROM collect.source s
                          WHERE s.egress_profile_id = e.id
                            AND (%(clearance)s::core.tlp IS NULL
-                                OR s.classification <= %(clearance)s::core.tlp)),
+                                OR (s.classification <= %(clearance)s::core.tlp
+                                    AND s.compartments <@ %(held)s::text[]))),
                        (SELECT coalesce(array_agg(DISTINCT a.platform::text), '{{}}')
                           FROM collect.collection_account a
                          WHERE a.egress_profile_id = e.id
@@ -896,18 +1013,28 @@ class PersonaVault:
                        OR EXISTS (SELECT 1 FROM collect.source s
                                    WHERE s.egress_profile_id = e.id
                                      AND %(clearance)s::core.tlp IS NOT NULL
-                                     AND s.classification > %(clearance)s::core.tlp)
+                                     AND (s.classification > %(clearance)s::core.tlp
+                                          OR NOT s.compartments <@ %(held)s::text[])),
+                       EXISTS (SELECT 1 FROM collect.source hs
+                                WHERE hs.egress_profile_id = e.id)
                   FROM collect.egress_profile e
                  ORDER BY e.is_active DESC, e.name""", params).fetchall()
         return [{"id": str(r[0]), "name": r[1], "kind": r[2], "region": r[3],
                  "is_active": r[4], "available": bool(r[4]) and not r[5],
+                 # collection-shared-exit (2026-10-03): what a PERSONA may
+                 # be placed on. `available` is unchanged because a public
+                 # read may share an exit with another public read; a
+                 # persona may share it with neither, and a source above the
+                 # caller's clearance counts without being named.
+                 "persona_available": bool(r[4]) and not r[5] and not r[10],
                  "personas": r[6], "sources": r[7],
                  "persona_platforms": sorted(r[8] or []),
                  "some_above_clearance": bool(r[9])}
                 for r in rows]
 
     def check_egress_separation(self, source_id: UUID, *,
-                                clearance: str | None = None) -> list[dict]:
+                                clearance: str | None = None,
+                                compartments=None) -> list[dict]:
         """docs/04: one persona, one egress profile.
 
         "Two personas sharing an exit IP can be correlated by any competent
@@ -937,13 +1064,15 @@ class PersonaVault:
         """
         if clearance is not None:
             visible = self._c.execute(
-                """SELECT 1 FROM collect.source
-                    WHERE id = %s AND classification <= %s::core.tlp""",
-                (source_id, clearance)).fetchone()
+                f"""SELECT 1 FROM collect.source s
+                     WHERE s.id = %(id)s AND {_SOURCE_VISIBLE_HELD}""",
+                {"id": source_id, "clearance": clearance,
+                 "held": _held(compartments)}).fetchone()
             if visible is None:
                 raise CollectionNotFound(
                     "no such source, or it is above your clearance")
-        params = {"source": source_id, "clearance": clearance}
+        params = {"source": source_id, "clearance": clearance,
+                  "held": _held(compartments)}
         rows = self._c.execute(
             f"""SELECT a.egress_profile_id,
                        array_agg(a.handle ORDER BY a.handle)
@@ -983,6 +1112,28 @@ class PersonaVault:
                 "a public read and a persona share an exit against one "
                 "source; the site can link them")
             for r in shared)
+        # collection-shared-exit (2026-10-03): the persona need not be
+        # registered on THIS source. Any live persona holding the exit a
+        # persona-less source reads through is seen from the same address.
+        elsewhere = self._c.execute(
+            f"""SELECT s.egress_profile_id,
+                       array_agg(a.handle ORDER BY a.handle)
+                           FILTER (WHERE {PERSONA_VISIBLE_SQL}),
+                       bool_or(NOT {PERSONA_VISIBLE_SQL})
+                  FROM collect.source s
+                  JOIN collect.collection_account a
+                    ON a.egress_profile_id = s.egress_profile_id
+                   AND a.source_id IS DISTINCT FROM s.id
+                 WHERE s.id = %(source)s AND s.egress_profile_id IS NOT NULL
+                   AND s.collection_account_id IS NULL
+                   AND a.status NOT IN ('BURNED', 'LOCKED')
+                 GROUP BY s.egress_profile_id""", params).fetchall()
+        findings.extend(
+            self._separation_finding(
+                r[0], r[1], r[2],
+                "a public read and a persona share an exit; the site can "
+                "link them")
+            for r in elsewhere if r[1] or r[2])
         return findings
 
     @staticmethod
@@ -1113,6 +1264,17 @@ class RunWarning:
     text: str
 
 
+#: The one watch target kind the matcher acts on (F47, 2026-10-02).
+#: `collect.watch.target_kind` is free text (0010's comment lists BOARD,
+#: THREAD, USER, CHANNEL, FEED and SEARCH, and nothing reads them: a watch
+#: matches what its SOURCE collects). A TELEGRAM_CHAT watch names its chat by
+#: the typed id in `target_ref` (0130 holds that to `c:<id>` or `g:<id>`),
+#: fires only on messages collected from that chat, says so in its reasons
+#: (`chat:<id>` first), and with no keyword, selector or pattern fires on every
+#: message there, which is what "watch this chat" means and what the column's
+#: own comment ("NULL keywords = capture everything from the target") meant.
+WATCH_TELEGRAM_CHAT = "TELEGRAM_CHAT"
+
 PARSER_DRIFT = "PARSER_DRIFT"
 ITEM_SKIPPED = "ITEM_SKIPPED"
 RAW_NOT_KEPT = "RAW_NOT_KEPT"
@@ -1233,6 +1395,9 @@ class SourceRow:
     parser_config: dict
     blocked_reason: str | None
     cursor_reset_at: datetime | None
+    #: F43 (2026-10-02, 0163): the need-to-know lock the source and every
+    #: document it collects are read under.
+    compartments: frozenset[str] = frozenset()
 
 
 class Adapter:
@@ -1439,16 +1604,33 @@ def default_adapters() -> dict[str, Adapter]:
 
 
 #: Every reader of a source that a caller may see: the ceiling on the
-#: source's own label. One fragment, so a later compartments column on
-#: collect.source is one edit.
+#: source's own label and, since F43 (2026-10-02, 0163), its compartments.
+#: `_SOURCE_VISIBLE` takes the clearance alone and FAILS CLOSED on a
+#: compartmented source (a reader that did not say which compartments it
+#: holds sees none of them); `_SOURCE_VISIBLE_HELD` takes `held` as well,
+#: the reader's own compartments, and is what every converted reader uses.
+#: A NULL clearance is the worker's and sees every source.
 _SOURCE_VISIBLE = ("(%(clearance)s::core.tlp IS NULL "
-                   "OR s.classification <= %(clearance)s::core.tlp)")
+                   "OR (s.classification <= %(clearance)s::core.tlp "
+                   "AND cardinality(s.compartments) = 0))")
+_SOURCE_VISIBLE_HELD = ("(%(clearance)s::core.tlp IS NULL "
+                        "OR (s.classification <= %(clearance)s::core.tlp "
+                        "AND s.compartments <@ %(held)s::text[]))")
 
 _SOURCE_COLUMNS = (
     "s.id, s.kind::text, s.name, s.base_url, s.parser_key, "
     "s.classification::text, s.default_reliability::text, s.max_rps, "
     "s.is_active, s.collection_account_id, s.egress_profile_id, "
-    "s.parser_config, s.blocked_reason, s.cursor_reset_at")
+    "s.parser_config, s.blocked_reason, s.cursor_reset_at, s.compartments")
+#: How many columns `_SOURCE_COLUMNS` selects: a query that selects more
+#: after it indexes the rest from here.
+_SOURCE_WIDTH = 15
+
+
+def _held(compartments) -> list[str]:
+    """The `held` parameter of `_SOURCE_VISIBLE_HELD`: a reader's own
+    compartments, or none for a reader that gave none (fail closed)."""
+    return sorted(compartments) if compartments else []
 
 
 def _row_to_source(row) -> SourceRow:
@@ -1458,17 +1640,20 @@ def _row_to_source(row) -> SourceRow:
         default_reliability=row[6], max_rps=float(row[7] or 1),
         is_active=bool(row[8]), collection_account_id=row[9],
         egress_profile_id=row[10], parser_config=dict(row[11] or {}),
-        blocked_reason=row[12], cursor_reset_at=row[13])
+        blocked_reason=row[12], cursor_reset_at=row[13],
+        compartments=frozenset(row[14] or []))
 
 
 def _source_row(conn: psycopg.Connection, source_id: UUID,
-                clearance: str | None) -> SourceRow:
+                clearance: str | None, compartments=None) -> SourceRow:
     """The source, or CollectionNotFound when it does not exist OR sits
-    above the caller's ceiling, indistinguishably."""
+    above the caller's ceiling or outside their compartments,
+    indistinguishably."""
     row = conn.execute(
         f"SELECT {_SOURCE_COLUMNS} FROM collect.source s "
-        f"WHERE s.id = %(id)s AND {_SOURCE_VISIBLE}",
-        {"id": source_id, "clearance": clearance}).fetchone()
+        f"WHERE s.id = %(id)s AND {_SOURCE_VISIBLE_HELD}",
+        {"id": source_id, "clearance": clearance,
+         "held": _held(compartments)}).fetchone()
     if row is None:
         raise CollectionNotFound(
             "no such source, or it is above your clearance")
@@ -1477,22 +1662,141 @@ def _source_row(conn: psycopg.Connection, source_id: UUID,
 
 
 
-#: Anything that could introduce an entity. A feed is attacker-adjacent by
-#: definition -- it is a document written by the people under investigation.
-_DOCTYPE = re.compile(rb"<!\s*(DOCTYPE|ENTITY)", re.I)
+#: A feed is attacker-adjacent by definition: it is a document written by
+#: the people under investigation.
+_FEED_DECLARATION_REFUSAL = (
+    "refusing a feed containing a DOCTYPE or ENTITY declaration: a "
+    "feed has no legitimate need for one, and an XXE here is a "
+    "file-read primitive on the host holding every persona "
+    "credential")
+
+#: What `parse_rss` reads of a feed's own claim about its encoding: the
+#: XML declaration of a feed whose first bytes are ASCII-compatible.
+_XML_DECLARED_ENCODING = re.compile(
+    rb"""^[ \t\r\n]*<\?xml[^>]{0,200}?\sencoding\s*=\s*["']"""
+    rb"""([A-Za-z][A-Za-z0-9._-]{0,40})["']""")
+
+#: The encodings a feed may DECLARE, by name with `-` and `_` removed and the
+#: case folded, mapped to the codec that reads it. collection-rss-codec-dos
+#: (2026-10-03): the declared name used to go straight to Python's whole
+#: codec registry, and the feed is written by the people under
+#: investigation. `punycode` decodes in quadratic time (a 1 MB body held
+#: parse_rss for two minutes, a 16 MiB one for hours, in-process with no
+#: bound), and `utf-7` and `unicode_escape` turn ASCII into markup. Before
+#: that decode was added expat read the bytes itself, which supported four
+#: encodings and the ASCII-compatible single-byte ones, so this is a subset
+#: of that, narrowed to what feeds are served in (the DOS and Mac code pages
+#: expat also read are left out; add one here on a real need). No name
+#: outside it is ever looked up. The multi-byte East Asian codecs were never
+#: read here and are not added; a feed that declares one is refused, and
+#: says so, every poll. Every codec in it is a table lookup or a fixed-width
+#: unit, linear in the body (test_review46_rss_codecs pins that).
+_FEED_CODECS: dict[str, str] = {
+    "utf8": "utf-8",
+    "utf16": "utf-16", "utf16le": "utf-16-le", "utf16be": "utf-16-be",
+    "utf32": "utf-32", "utf32le": "utf-32-le", "utf32be": "utf-32-be",
+    "ascii": "ascii", "usascii": "ascii",
+    "latin1": "latin-1", "l1": "latin-1",
+    "koi8r": "koi8-r", "koi8u": "koi8-u",
+    # ISO 8859 parts 1 to 11 and 13 to 16; there is no part 12.
+    **{f"iso8859{n}": f"iso8859-{n}" for n in (*range(1, 12), *range(13, 17))},
+    # The Windows code pages 1250 to 1258, under either name.
+    **{f"windows{n}": f"cp{n}" for n in range(1250, 1259)},
+    **{f"cp{n}": f"cp{n}" for n in range(1250, 1259)},
+}
+
+#: Whitespace between the parts of a prolog.
+_PROLOG_SPACE = re.compile(r"[ \t\r\n]*")
+
+#: A feed's prolog is a declaration and, at most, a few comments. More than
+#: this many comments and processing instructions before the root element is
+#: refused, which bounds the scan's loop whatever a hostile feed does.
+_MAX_PROLOG_ITEMS = 10_000
 
 
-#: The XML prolog ends at the first element start-tag. Anything before it
-#: is a declaration, comment or processing instruction — the only region
-#: where a DTD may legally appear (CP1).
-_ROOT_START = re.compile(rb"<[A-Za-z_]")
+def _feed_text(body: bytes) -> str:
+    """The feed as ONE text, decoded here and nowhere else.
+
+    collection-rss-doctype-bypass-utf16 (2026-10-03). The refusal below used
+    to scan the raw BYTES for an ASCII `<!DOCTYPE`, and ElementTree then
+    parsed the same bytes under whatever encoding the document declared.
+    A feed served as UTF-16 spells that keyword with a NUL between letters,
+    so the scan found nothing and the parser expanded the DTD. A defence
+    and a parser that read the document two ways are a defence with a
+    bypass: the encoding is chosen once, by XML 1.0 appendix F (a byte-order
+    mark, else the first four bytes, else the declaration, else UTF-8), the
+    scan runs over the decoded text, and that SAME text is what is parsed.
+    Anything that does not decode strictly is refused, as is an EBCDIC feed,
+    whose declaration this does not try to read. A declared name is read only
+    if it is in `_FEED_CODECS`; any other is refused before it is looked up
+    (collection-rss-codec-dos, 2026-10-03: `punycode` is quadratic)."""
+    head = body[:4]
+    if head in (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff"):
+        codec = "utf-32"
+    elif head == b"\x00\x00\x00<":
+        codec = "utf-32-be"
+    elif head == b"<\x00\x00\x00":
+        codec = "utf-32-le"
+    elif head[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        codec = "utf-16"
+    elif head == b"\x00<\x00?":
+        codec = "utf-16-be"
+    elif head == b"<\x00?\x00":
+        codec = "utf-16-le"
+    elif head[:3] == b"\xef\xbb\xbf":
+        codec = "utf-8-sig"
+    elif head == b"\x4c\x6f\xa7\x94":
+        raise CollectionError("feed did not parse: an EBCDIC feed is not read")
+    else:
+        declared = _XML_DECLARED_ENCODING.match(body[:300])
+        codec = "utf-8"
+        if declared:
+            label = declared.group(1).decode("ascii")
+            codec = _FEED_CODECS.get(label.lower().replace("-", "").replace("_", ""))
+            if codec is None:
+                # Refused BEFORE any lookup or decode (collection-rss-codec-dos,
+                # 2026-10-03). The label is at most 41 characters of letters,
+                # digits, dot, hyphen and underscore, so it is safe to name.
+                raise CollectionError(
+                    f"feed did not parse: it declares the encoding {label!r}, "
+                    f"which is not one a feed may use")
+    try:
+        text = body.decode(codec)
+    except Exception as exc:  # noqa: BLE001 - an undecodable feed is not a crash
+        raise CollectionError(f"feed did not parse: {type(exc).__name__}") from exc
+    # The parser is given this text, so what it is given has no mark the
+    # scan below has not looked past.
+    return text.lstrip("\ufeff")
 
 
-def _root_element_offset(body: bytes, cap: int = 1 << 20) -> int:
-    """Where the prolog ends, capped so a body with no root element does
-    not turn the DOCTYPE scan into a full pass over 16 MiB."""
-    match = _ROOT_START.search(body[:cap])
-    return match.start() if match else min(len(body), cap)
+def _refuse_prolog_declarations(text: str) -> None:
+    """Refuse a feed whose prolog carries a DOCTYPE or any other `<!`
+    declaration. The prolog is walked token by token: whitespace, a
+    processing instruction (`<?` to `?>`) and a comment (`<!--` to `-->`) are
+    stepped over WHOLE, and the first `<!` that is not a comment is a
+    declaration. The walk ends at the first other `<`, the root element.
+
+    Until 2026-10-03 the prolog was taken to end at the first `<` followed by
+    a name character found anywhere, comments included, so `<!-- <x -->`
+    ended it early and a DOCTYPE after the comment went unscanned, and a
+    comment of over a mebibyte did the same through the scan's cap. Neither
+    needs a second encoding; both are the same bypass."""
+    index = _PROLOG_SPACE.match(text).end()
+    for _ in range(_MAX_PROLOG_ITEMS):
+        if text.startswith("<?", index):
+            found, width = text.find("?>", index + 2), 2
+        elif text.startswith("<!--", index):
+            found, width = text.find("-->", index + 4), 3
+        elif text.startswith("<!", index):
+            raise CollectionError(_FEED_DECLARATION_REFUSAL)
+        else:
+            return
+        if found < 0:
+            return  # unterminated: the parser refuses it, nothing here is a DTD
+        index = _PROLOG_SPACE.match(text, found + width).end()
+    raise CollectionError(
+        "refusing a feed with more than 10,000 comments or processing "
+        "instructions before its first element")
 
 
 def parse_rss(body: bytes) -> list[Item]:
@@ -1510,30 +1814,15 @@ def parse_rss(body: bytes) -> list[Item]:
     """
     from xml.etree import ElementTree
 
-    # CP1 (2026-07-26): scan up to the ROOT ELEMENT, not a fixed 8 KiB.
-    #
-    # The window was `body[:8192]` while bodies up to 16 MiB are accepted,
-    # so an 8 KiB XML comment ahead of the DTD walked straight past the
-    # regex. ElementTree resolves no external entities and modern libexpat
-    # caps entity amplification, so the demonstrated harm is limited — but
-    # this is the check that is supposed to make those two facts
-    # irrelevant, and a defence with a documented bypass is not one.
-    #
-    # The prolog is everything before the first element start-tag that is
-    # not a comment, PI or declaration. Scanning to the first `<` that
-    # begins a name character bounds the work without bounding the
-    # coverage: a DTD cannot legally appear after the root element starts,
-    # so anything past that point is not a prolog DTD.
-    prolog_end = _root_element_offset(body)
-    if _DOCTYPE.search(body[:prolog_end]):
-        raise CollectionError(
-            "refusing a feed containing a DOCTYPE or ENTITY declaration: a "
-            "feed has no legitimate need for one, and an XXE here is a "
-            "file-read primitive on the host holding every persona "
-            "credential")
+    # CP1 (2026-07-26) closed an 8 KiB window; the finding of 2026-10-03
+    # closed the encoding and the comment forms of the same bypass. The
+    # prolog is the only place a DTD may legally appear, so it is what is
+    # walked, over the decoded text the parser is then given.
+    text = _feed_text(body)
+    _refuse_prolog_declarations(text)
 
     try:
-        root = ElementTree.fromstring(body)
+        root = ElementTree.fromstring(text)
     except Exception as exc:  # noqa: BLE001 - a broken feed is not a crash
         raise CollectionError(f"feed did not parse: {type(exc).__name__}") from exc
 
@@ -1870,6 +2159,38 @@ def _capped(value, limit: int):
     return None if value is None else value[:limit]
 
 
+def _watch_texts(item: Item) -> tuple[str, str]:
+    """The two texts a watch is matched against: the title and body, and a
+    forum post's signature, each lower-cased. One function so the regex
+    verdicts asked for before the transaction and the keyword matching inside
+    it read the same text."""
+    haystack = f"{item.title or ''}\n{item.body}".lower()
+    meta = item.meta if isinstance(item.meta, dict) else {}
+    forum = meta.get("forum")
+    signature = forum.get("signature") if isinstance(forum, dict) else None
+    return haystack, (signature.lower() if isinstance(signature, str) else "")
+
+
+def _feed_floor_refusal(source) -> tuple[str, str] | None:
+    """Invariant 8's floor for a source whose adapter enforces no collection
+    authority (RSS and WEB): reading a source is itself a boundary crossing
+    (decision 103), so AMBER_STRICT and RED are not polled by the collector.
+
+    egress-rss-floor (2026-10-03): only adapters with `requires_authority`
+    ever reached `ceiling_refusal`, so a feed labelled RED was fetched from
+    this deployment's own address on every poll. AMBER is the highest a
+    collection may carry; no per-kind ceiling is declared for feeds."""
+    from noctornal_api.egress import Destination, can_egress
+    decision = can_egress(source.classification, Destination.COLLECTION_TARGET,
+                          destination_ceiling="AMBER")
+    if decision.allowed:
+        return None
+    return CollectionService.CAUSE_ABOVE_CEILING, (
+        f"This source is labelled TLP:{source.classification}, which never "
+        f"leaves this platform, so it is collected by hand, not by the "
+        f"collector.")
+
+
 class CollectionService:
     """The scheduler's reporting half, one poll, and the read path.
 
@@ -1969,7 +2290,7 @@ class CollectionService:
             return self.CAUSE_BINDING, (
                 "This source is read by a persona, and none is bound to it.")
         if not requires:
-            return None
+            return _feed_floor_refusal(source)
         if not source.is_active:
             return self.CAUSE_INACTIVE, "This source is deactivated."
         refusal = ceiling_refusal(source)
@@ -2010,7 +2331,8 @@ class CollectionService:
         return (self.CAUSE_ADAPTER, own) if own else None
 
     def _schedule(self, *, now: datetime, rng: random.Random | None,
-                  clearance: str | None) -> tuple[list[dict], list[dict]]:
+                  clearance: str | None, compartments=None
+                  ) -> tuple[list[dict], list[dict]]:
         """(due, held) in `next_due_at` order. One read of the sources, the
         persona rows of the bound ones and the authority coverage, so the
         cron's pass is three queries however many sources there are."""
@@ -2021,13 +2343,14 @@ class CollectionService:
                        s.last_ok_at, s.consecutive_failures, s.health,
                        s.next_due_at
                   FROM collect.source s
-                 WHERE s.is_active AND {_SOURCE_VISIBLE}
+                 WHERE s.is_active AND {_SOURCE_VISIBLE_HELD}
                  ORDER BY s.next_due_at NULLS FIRST""",
-            {"clearance": clearance}).fetchall()
+            {"clearance": clearance, "held": _held(compartments)}).fetchall()
         candidates: list[tuple[SourceRow, tuple, datetime]] = []
         for row in rows:
             source = _row_to_source(row)
-            interval, jitter, last_ok, failures, health, when = row[14:20]
+            (interval, jitter, last_ok, failures, health,
+             when) = row[_SOURCE_WIDTH:_SOURCE_WIDTH + 6]
             if when is None:
                 # A source added before 0042, or one whose schedule was
                 # never set. Roll it ONCE and persist, rather than treating
@@ -2041,7 +2364,8 @@ class CollectionService:
                                             health), when))
         personas = self._persona_rows(
             [s.collection_account_id for s, _r, _w in candidates
-             if s.collection_account_id is not None], clearance=clearance)
+             if s.collection_account_id is not None], clearance=clearance,
+            compartments=compartments)
         authority_sources = [
             s for s, _r, _w in candidates
             if (a := self._adapters.get(s.parser_key)) is not None
@@ -2131,8 +2455,8 @@ class CollectionService:
             return {"reason": "AUTHORITY", "sentence": sentence, "until": None}
         return None
 
-    def _persona_rows(self, ids: list[UUID], *,
-                      clearance: str | None) -> dict[UUID, dict]:
+    def _persona_rows(self, ids: list[UUID], *, clearance: str | None,
+                      compartments=None) -> dict[UUID, dict]:
         if not ids:
             return {}
         rows = self._c.execute(
@@ -2143,7 +2467,8 @@ class CollectionService:
                        {PERSONA_VISIBLE_SQL}, a.egress_profile_id
                   FROM collect.collection_account a
                  WHERE a.id = ANY(%(ids)s)""",
-            {"ids": list(ids), "clearance": clearance}).fetchall()
+            {"ids": list(ids), "clearance": clearance,
+             "held": _held(compartments)}).fetchall()
         return {r[0]: {"id": r[0], "handle": r[1], "status": r[2],
                        "cooldown_until": r[3], "hold_until": r[4],
                        "lock_code": r[5], "window": r[6], "usable": r[7],
@@ -2152,7 +2477,7 @@ class CollectionService:
 
     def due_sources(self, *, now: datetime | None = None,
                     rng: random.Random | None = None,
-                    clearance: str | None = None) -> list[dict]:
+                    clearance: str | None = None, compartments=None) -> list[dict]:
         """What is ready to poll. Reports; does not act.
 
         Nothing loops here. A collector that runs itself on a timer nobody
@@ -2178,12 +2503,13 @@ class CollectionService:
         ceiling, and a source labelled above it is not reported as due: its
         name and URL are what the label protects.
         """
-        due, _held = self._schedule(now=now or datetime.now(timezone.utc),
-                                    rng=rng, clearance=clearance)
+        due, _held_rows = self._schedule(now=now or datetime.now(timezone.utc),
+                                         rng=rng, clearance=clearance,
+                                         compartments=compartments)
         return due
 
     def held_sources(self, *, clearance: str | None = None,
-                     now: datetime | None = None) -> list[dict]:
+                     now: datetime | None = None, compartments=None) -> list[dict]:
         """The due sources that wait on a person: REFUSED (a ceiling to
         declare, an exit to bind), PERSONA (a persona to rest or replace)
         or AUTHORITY (an authority to confirm), each with its sentence. An
@@ -2191,12 +2517,13 @@ class CollectionService:
         above the caller's ceiling, and a persona the caller may not
         see is 'a persona you cannot see'."""
         _due, held = self._schedule(now=now or datetime.now(timezone.utc),
-                                    rng=None, clearance=clearance)
+                                    rng=None, clearance=clearance,
+                                    compartments=compartments)
         return held
 
     def due_and_held(self, *, clearance: str | None = None,
                      now: datetime | None = None,
-                     rng: random.Random | None = None
+                     rng: random.Random | None = None, compartments=None
                      ) -> tuple[list[dict], list[dict]]:
         """Both answers from ONE reading of the schedule: the cron's pass
         (2026-09-25). Asking due_sources and then
@@ -2205,7 +2532,8 @@ class CollectionService:
         so the second no longer saw it as due and the pass under-counted
         `held`."""
         return self._schedule(now=now or datetime.now(timezone.utc),
-                              rng=rng, clearance=clearance)
+                              rng=rng, clearance=clearance,
+                              compartments=compartments)
 
     def held_count(self) -> int:
         """A count of held sources from a reading of its own. The cron
@@ -2242,7 +2570,7 @@ class CollectionService:
     def run_once(self, source_id: UUID, *, actor_id: UUID | None,
                  persona_id: UUID | None = None,
                  watch_id: UUID | None = None,
-                 clearance: str | None = None) -> RunResult:
+                 clearance: str | None = None, compartments=None) -> RunResult:
         """One poll. Every outcome that got as far as the lock is a
         `collection_run` row, including the failures -- parser health is
         only knowable if the failures are recorded as carefully as the
@@ -2298,7 +2626,7 @@ class CollectionService:
                 "a poll runs on a connection with no transaction open: its "
                 "run row is committed before the route is resolved, so the "
                 "egress proxy can read it")
-        source = _source_row(self._c, source_id, clearance)
+        source = _source_row(self._c, source_id, clearance, compartments)
         adapter = self._adapters.get(source.parser_key)
         if adapter is None:
             raise CollectionError(
@@ -2344,7 +2672,8 @@ class CollectionService:
                     need=need, platform=platform, needs_secret=True,
                     needs_browser_identity=bool(_attr(adapter, "persona_http")),
                     min_gap_s=float(_attr(adapter, "persona_min_gap_s") or 0),
-                    sleep=self._sleep, adapter=adapter)
+                    sleep=self._sleep, adapter=adapter,
+                    compartments=compartments)
                 persona_row = gate.check()
                 gate.lock()
             try:
@@ -2748,8 +3077,24 @@ class CollectionService:
         unclocked: set[str] = set()
         raw_gaps = {"unconfigured": 0, "refused": 0}
         broken: dict[tuple[UUID, str], str] = {}
+        misaimed: dict[UUID, str] = {}
+        # collection-watch-regex-redos (2026-10-03): the watches are read and
+        # every regex is matched BEFORE the transaction, in a bounded child
+        # (watch_regex), so a pattern that never finishes holds no database
+        # transaction and is stopped at its limit. A pattern that did not
+        # compile or was stopped is reported once per run below.
+        watches = self._watches(source.id)
+        verdicts = self._regex_verdicts(items, watches, adapter=adapter,
+                                        categories=categories)
+        slow: dict[tuple[UUID, str], str] = {}
+        for watch in watches:
+            for pattern in (watch[4] or []):
+                failed = verdicts.failed.get(pattern)
+                if failed is None:
+                    continue
+                (broken if failed[0] == watch_regex.COMPILE else slow)[
+                    (watch[0], pattern)] = failed[1]
         with self._c.transaction():
-            watches = self._watches(source.id)
             for item in items:
                 put_key = None
                 gap = None
@@ -2766,7 +3111,8 @@ class CollectionService:
                         document_id, inserted = self._store_document(
                             source.id, result.run_id, watch_id, clean,
                             classification=source.classification,
-                            category=category, retain_days=retain_days)
+                            category=category, retain_days=retain_days,
+                            compartments=source.compartments)
                         if inserted and keeps_raw and clean.raw_html:
                             put_key, gap = self._attach_raw(
                                 source.id, document_id, clean.raw_html)
@@ -2780,7 +3126,8 @@ class CollectionService:
                                     document_id=document_id,
                                     inserted=inserted)
                         hits = self._match_watches(
-                            source.id, result.run_id, clean, watches, broken)
+                            source.id, result.run_id, clean, watches, broken,
+                            misaimed, regex_verdicts=verdicts)
                 except _ItemInvalid as exc:
                     warnings.append(RunWarning(ITEM_SKIPPED, (
                         f"Item {_item_label(item)} was skipped: {exc}")))
@@ -2821,6 +3168,16 @@ class CollectionService:
                 f"watch {wid} has a regex that will not compile and therefore "
                 f"matches nothing: {reason} (pattern {redact(pat)[:120]!r})"))
                 for (wid, pat), reason in broken.items())
+            warnings.extend(RunWarning(WATCH_PATTERN, (
+                f"watch {wid} has a regex that was stopped and therefore "
+                f"matched nothing in this run: {reason} "
+                f"(pattern {redact(pat)[:120]!r})"))
+                for (wid, pat), reason in slow.items())
+            # A watch aimed at a chat this source does not read (F47,
+            # 2026-10-02) is as silent as a regex that will not compile, and
+            # is reported the same way, once per run.
+            warnings.extend(RunWarning(WATCH_PATTERN, f"watch {wid} {reason}.")
+                            for wid, reason in misaimed.items())
             if raw_gaps["unconfigured"]:
                 n = raw_gaps["unconfigured"]
                 warnings.append(RunWarning(RAW_NOT_KEPT, (
@@ -2946,8 +3303,13 @@ class CollectionService:
     def _store_document(self, source_id: UUID, run_id: UUID,
                         watch_id: UUID | None, item: Item, *,
                         classification: str, category: str = "FORUM_POST",
-                        retain_days: int | None = None) -> tuple[UUID, bool]:
+                        retain_days: int | None = None,
+                        compartments=frozenset()) -> tuple[UUID, bool]:
         """Deduped on content hash, versioned rather than overwritten.
+
+        `compartments` (F43, 2026-10-02) are the source's: every document a
+        source collects inherits them, so a read under a compartment is
+        read back under it by every document reader (decision 78).
 
         An edited forum post is a NEW version, not a correction: what the
         actor said and what they later said instead are both facts, and
@@ -2991,18 +3353,19 @@ class CollectionService:
                     external_url, thread_ref, parent_ref, author_handle,
                     author_uid, posted_at, title, body_text, content_sha256,
                     version, supersedes_id, classification, category,
-                    retain_until)
+                    retain_until, compartments)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                        %s, %s, %s, %s,
                        CASE WHEN %s::integer IS NULL THEN NULL
-                            ELSE now() + make_interval(days => %s::integer) END)
+                            ELSE now() + make_interval(days => %s::integer) END,
+                       %s::text[])
                RETURNING id""",
             (source_id, run_id, watch_id, item.external_id, item.url,
              item.thread_ref, item.parent_ref, item.author_handle,
              item.author_uid, item.posted_at, item.title, item.body, digest,
              (previous[1] + 1) if previous else 1,
              previous[0] if previous else None, classification, category,
-             retain_days, retain_days)).fetchone()
+             retain_days, retain_days, sorted(compartments or ()))).fetchone()
         return row[0], True
 
     def _attach_raw(self, source_id: UUID, document_id: UUID,
@@ -3073,15 +3436,23 @@ class CollectionService:
             (source_id, wanted[:5000])).rowcount
 
     def _watches(self, source_id: UUID) -> list[tuple]:
+        """The active watches of one source, on the collector's connection:
+        `collect.watch` is under row-level security (0124) and the poll, a
+        manual run and a pasted capture read it as the COLLECTION system
+        purpose, which sees every case's watches. The target kind and
+        reference ride along (F47, 2026-10-02) so the matcher can scope a
+        chat watch without a second read."""
         return self._c.execute(
             """SELECT id, case_id, keywords, selector_watch, regexes,
-                      priority, suppress_window_s
+                      priority, suppress_window_s, target_kind, target_ref
                  FROM collect.watch
                 WHERE source_id = %s AND is_active""", (source_id,)).fetchall()
 
     def _match_watches(self, source_id: UUID, run_id: UUID, item: Item,
                        watches: list[tuple],
-                       broken: dict[tuple[UUID, str], str]) -> int:
+                       broken: dict[tuple[UUID, str], str],
+                       misaimed: dict[UUID, str] | None = None,
+                       regex_verdicts: "watch_regex.Verdicts | None" = None) -> int:
         """Keyword, selector and regex matching into `watch_hit`, for ONE
         item, inside its savepoint (2026-09-24).
 
@@ -3098,8 +3469,24 @@ class CollectionService:
         re-fetched after its suppression window never raises a unique
         violation and never wedges the source. Purged documents are never
         matched. A broken pattern is reported once per run in `broken`.
+
+        F47 (2026-10-02), two things beside the item's text. A forum post's
+        signature is kept beside it, not in its text, and is matched on its
+        own: a reason reads `signature_keyword:`, `signature_selector:` or
+        `signature_regex:` so the analyst can tell a post that says a thing
+        from an author whose signature does, and a signature repeated on every
+        post of an author raises a hit on each (the thread's suppression
+        window thins them). And a watch of target kind TELEGRAM_CHAT fires
+        only on a message collected from the chat it names, with `chat:<id>`
+        leading its reasons; with no term of any kind it fires on every
+        message of that chat. A chat watch that names another chat, or
+        meets an item that is no Telegram message, matches nothing and is
+        reported once per run in `misaimed`.
         """
-        haystack = f"{item.title or ''}\n{item.body}".lower()
+        haystack, sig_haystack = _watch_texts(item)
+        meta = item.meta if isinstance(item.meta, dict) else {}
+        telegram = meta.get("telegram_message")
+        chat = telegram.get("chat_durable_id") if isinstance(telegram, dict) else None
         uid = (item.author_uid or "").strip()
         match_ids = item.meta.get("match_ids") if isinstance(item.meta, dict) else None
         typed = []
@@ -3107,18 +3494,36 @@ class CollectionService:
             typed = [(label, value.strip()) for label, value in match_ids.items()
                      if isinstance(label, str) and _MATCH_LABEL.match(label)
                      and isinstance(value, str) and value.strip()]
+        if regex_verdicts is None:
+            # Called without the run's verdicts (a direct caller): the same
+            # bounded matcher, for this one item. Never `re` in this process.
+            regex_verdicts = self._regex_for_item(watches, haystack, sig_haystack,
+                                                  broken)
         hits = 0
         document = None
         for watch in watches:
             (watch_id, _case_id, keywords, selectors, regexes, priority,
-             suppress) = watch
+             suppress, target_kind, target_ref) = watch
             matched: list[str] = []
+            chat_watch = target_kind == WATCH_TELEGRAM_CHAT
+            if chat_watch and (not isinstance(chat, str) or chat != target_ref):
+                if misaimed is not None:
+                    misaimed[watch_id] = (
+                        f"targets Telegram chat {target_ref} and this source "
+                        + ("reads another chat" if isinstance(chat, str)
+                           else "reads no Telegram chat")
+                        + ", so it matches nothing here")
+                continue
             for needle in (keywords or []):
                 if needle and needle.lower() in haystack:
                     matched.append(f"keyword:{needle}")
+                if needle and sig_haystack and needle.lower() in sig_haystack:
+                    matched.append(f"signature_keyword:{needle}")
             for needle in (selectors or []):
                 if needle and needle.lower() in haystack:
                     matched.append(f"selector:{needle}")
+                if needle and sig_haystack and needle.lower() in sig_haystack:
+                    matched.append(f"signature_selector:{needle}")
                 exact = (needle or "").strip()
                 if exact and uid and exact == uid:
                     matched.append(f"author:{uid}")
@@ -3126,18 +3531,28 @@ class CollectionService:
                     if exact and exact == value:
                         matched.append(f"{label}:{value}")
             for pattern in (regexes or []):
-                try:
-                    if pattern and re.search(pattern, haystack, re.I):
-                        matched.append(f"regex:{pattern}")
-                except re.error as exc:
-                    # A watch with a broken pattern must not stop the other
-                    # watches from matching, and must not be SILENT: a watch
-                    # is a standing tasking, and swallowed it reads exactly
-                    # like a quiet one. `redact` because an operator
-                    # watching for a leaked credential puts that credential
-                    # in the pattern, and this string is stored.
-                    broken[(watch_id, pattern)] = redact(str(exc))[:200]
+                # A watch with a broken pattern must not stop the other
+                # watches from matching, and must not be SILENT: a watch is a
+                # standing tasking, and swallowed it reads exactly like a
+                # quiet one. The pattern was matched (or reported, redacted:
+                # an operator watching for a leaked credential puts that
+                # credential in the pattern, and the report is stored) before
+                # this transaction began; a pattern that failed has no
+                # verdict and matches nothing here.
+                if not pattern or pattern in regex_verdicts.failed:
                     continue
+                if regex_verdicts.hits.get((pattern, haystack)):
+                    matched.append(f"regex:{pattern}")
+                if sig_haystack and regex_verdicts.hits.get((pattern, sig_haystack)):
+                    matched.append(f"signature_regex:{pattern}")
+            if chat_watch:
+                # The chat leads, and a watch with no term at all is a watch
+                # on the chat itself: it fires on every message there. A
+                # watch with terms fires only when one of them matched.
+                named = any(n for n in (*(keywords or ()), *(selectors or ()),
+                                        *(regexes or ())))
+                if matched or not named:
+                    matched.insert(0, f"chat:{target_ref}")
             if not matched:
                 continue
             if document is None:
@@ -3167,6 +3582,45 @@ class CollectionService:
                 hits += 1
         return hits
 
+    def _regex_verdicts(self, items: list[Item], watches: list[tuple], *, adapter,
+                        categories: tuple[str, ...]) -> "watch_regex.Verdicts":
+        """Every watch regex over every item's text, matched in bounded
+        children and BEFORE the persist transaction. The text is the cleaned
+        item's, as `_match_watches` reads it. No watch with a regex, or no
+        item, starts nothing."""
+        patterns = list(dict.fromkeys(
+            p for watch in watches for p in (watch[4] or []) if p))
+        if not patterns or not items:
+            return watch_regex.Verdicts()
+        texts: list[str] = []
+        for item in items:
+            try:
+                clean, _naive = self._validate_item(item, adapter=adapter,
+                                                    categories=categories)
+            except _ItemInvalid:
+                continue  # skipped, with its warning, by the persist loop
+            haystack, signature = _watch_texts(clean)
+            texts.append(haystack)
+            if signature:
+                texts.append(signature)
+        return watch_regex.run({pattern: texts for pattern in patterns})
+
+    @staticmethod
+    def _regex_for_item(watches: list[tuple], haystack: str, sig_haystack: str,
+                        broken: dict[tuple[UUID, str], str]
+                        ) -> "watch_regex.Verdicts":
+        texts = [haystack] + ([sig_haystack] if sig_haystack else [])
+        patterns = list(dict.fromkeys(
+            p for watch in watches for p in (watch[4] or []) if p))
+        verdicts = (watch_regex.run({pattern: texts for pattern in patterns})
+                    if patterns else watch_regex.Verdicts())
+        for watch in watches:
+            for pattern in (watch[4] or []):
+                failed = verdicts.failed.get(pattern)
+                if failed is not None:
+                    broken[(watch[0], pattern)] = failed[1]
+        return verdicts
+
     def _suppressed(self, watch_id: UUID, thread: str | None,
                     window_s: int | None) -> bool:
         if not window_s or not thread:
@@ -3195,7 +3649,7 @@ class CollectionService:
 
     # -- sources ------------------------------------------------------------
 
-    def sources(self, *, clearance: str | None) -> list[dict]:
+    def sources(self, *, clearance: str | None, compartments=None) -> list[dict]:
         """Every source the caller may see, with who reads it, through which
         exit, its authority state and the refusal it would meet. A persona
         the caller may not see is not named."""
@@ -3205,13 +3659,15 @@ class CollectionService:
             f"""SELECT {_SOURCE_COLUMNS}, s.health, e.name
                   FROM collect.source s
                   LEFT JOIN collect.egress_profile e ON e.id = s.egress_profile_id
-                 WHERE {_SOURCE_VISIBLE}
+                 WHERE {_SOURCE_VISIBLE_HELD}
                  ORDER BY s.is_active DESC, s.name""",
-            {"clearance": clearance}).fetchall()
-        sources = [(_row_to_source(r), r[14], r[15]) for r in rows]
+            {"clearance": clearance, "held": _held(compartments)}).fetchall()
+        sources = [(_row_to_source(r), r[_SOURCE_WIDTH], r[_SOURCE_WIDTH + 1])
+                   for r in rows]
         personas = self._persona_rows(
             [s.collection_account_id for s, _h, _e in sources
-             if s.collection_account_id], clearance=clearance)
+             if s.collection_account_id], clearance=clearance,
+            compartments=compartments)
         states = CollectionAuthorityService(self._c, self._adapters) \
             .states_for_sources([s.id for s, _h, _e in sources],
                                 clearance=clearance)
@@ -3224,6 +3680,7 @@ class CollectionService:
                 "id": str(source.id), "kind": source.kind, "name": source.name,
                 "base_url": source.base_url, "parser_key": source.parser_key,
                 "classification": source.classification,
+                "compartments": sorted(source.compartments),
                 "is_active": source.is_active, "health": health,
                 "persona": _persona_ref(personas.get(source.collection_account_id)),
                 "egress_profile": ({"id": str(source.egress_profile_id),
@@ -3249,12 +3706,18 @@ class CollectionService:
                       collection_account_id: UUID | None = None,
                       egress_profile_id: UUID | None = None,
                       actor_id: UUID, clearance: str,
-                      ceiling_env=None) -> dict:
+                      ceiling_env=None, compartments=(),
+                      held_compartments=None) -> dict:
         """A new source. Every refusal is a sentence
         (CollectionError, a 400), except a persona or exit the caller may
         not see (CollectionNotFound, a 404). A source is created with no
         schedule, so it is due at once; a forum or Telegram source then
-        waits on its authority before anything is read."""
+        waits on its authority before anything is read.
+
+        `compartments` (F43, 2026-10-02) file the source, and everything it
+        collects, under those keys: the creator must hold every one
+        (`held_compartments`, their own), and the keys must be registered
+        (the compartments_registered trigger refuses the rest)."""
         from noctornal_api.collection_authority import (
             AUTHORITY_KINDS,
             source_ceiling,
@@ -3322,27 +3785,34 @@ class CollectionService:
                     f"sources, so it would never be read by the collector. "
                     f"Collect it by hand into its case instead.")
         self._check_binding(adapter, collection_account_id, egress_profile_id,
-                            clearance=clearance)
+                            clearance=clearance,
+                            compartments=held_compartments)
+        keys = frozenset(str(k) for k in (compartments or ()))
+        if keys and not keys <= frozenset(held_compartments or ()):
+            raise CollectionError(
+                "You cannot file a source under a compartment you do not hold.")
         row = self._c.execute(
             """INSERT INTO collect.source
                    (kind, name, base_url, default_reliability, classification,
                     poll_interval_s, jitter_pct, max_rps, parser_key,
-                    parser_config, collection_account_id, egress_profile_id)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    parser_config, collection_account_id, egress_profile_id,
+                    compartments)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::text[])
                RETURNING id""",
             (kind, name, base_url, default_reliability, classification,
              poll_interval_s, jitter_pct, max_rps, parser_key, Jsonb(config),
-             collection_account_id, egress_profile_id)).fetchone()
+             collection_account_id, egress_profile_id, sorted(keys))).fetchone()
         self._audit(actor_id, "SOURCE_CREATED", "source", row[0],
                     {"kind": kind, "parser_key": parser_key,
-                     "classification": classification})
+                     "classification": classification,
+                     "compartments": sorted(keys)})
         return {"id": str(row[0]), "kind": kind, "name": name,
                 "parser_key": parser_key, "classification": classification,
-                "requires_authority": requires}
+                "compartments": sorted(keys), "requires_authority": requires}
 
     def _check_binding(self, adapter, persona_id: UUID | None,
                        egress_profile_id: UUID | None, *,
-                       clearance: str | None) -> None:
+                       clearance: str | None, compartments=None) -> None:
         """The binding rules create_source and bind_source share: a
         persona of the adapter's platform, visible, not burnt, with no exit
         beside it; or, for a persona-less authority
@@ -3361,7 +3831,8 @@ class CollectionService:
                 f"""SELECT a.platform::text, a.status
                       FROM collect.collection_account a
                      WHERE a.id = %(id)s AND {PERSONA_VISIBLE_SQL}""",
-                {"id": persona_id, "clearance": clearance}).fetchone()
+                {"id": persona_id, "clearance": clearance,
+                 "held": _held(compartments)}).fetchone()
             if row is None:
                 raise CollectionNotFound(
                     "no such persona, or it is above your clearance")
@@ -3397,7 +3868,7 @@ class CollectionService:
     def bind_source(self, source_id: UUID, *, persona_id: UUID | None,
                     egress_profile_id: UUID | None, reason: str,
                     reset_cursor: bool, actor_id: UUID,
-                    clearance: str | None) -> dict:
+                    clearance: str | None, compartments=None) -> dict:
         """Who reads a source and through which exit.
         Authority targets recorded for the old binding stop covering the
         source at once (require() reads the current binding), and the
@@ -3406,13 +3877,13 @@ class CollectionService:
         if not 5 <= len(reason) <= 500:
             raise CollectionError(
                 "A binding change has to say why, in 5 to 500 characters.")
-        source = _source_row(self._c, source_id, clearance)
+        source = _source_row(self._c, source_id, clearance, compartments)
         adapter = self._adapters.get(source.parser_key)
         if adapter is None:
             raise CollectionError(
                 f"No parser in this build is called {source.parser_key}.")
         self._check_binding(adapter, persona_id, egress_profile_id,
-                            clearance=clearance)
+                            clearance=clearance, compartments=compartments)
         self._c.execute(
             """UPDATE collect.source
                   SET collection_account_id = %s, egress_profile_id = %s,
@@ -3436,14 +3907,15 @@ class CollectionService:
                            if requires else None)}
 
     def set_source_active(self, source_id: UUID, *, active: bool, reason: str,
-                          actor_id: UUID, clearance: str | None) -> dict:
+                          actor_id: UUID, clearance: str | None,
+                          compartments=None) -> dict:
         """Deactivate or activate a source, with a reason, audited. There is
         no route that edits a source's address, kind or parser."""
         reason = (reason or "").strip()
         if not 5 <= len(reason) <= 500:
             raise CollectionError(
                 "A source's activation has to say why, in 5 to 500 characters.")
-        _source_row(self._c, source_id, clearance)
+        _source_row(self._c, source_id, clearance, compartments)
         self._c.execute(
             "UPDATE collect.source SET is_active = %s WHERE id = %s",
             (bool(active), source_id))
@@ -3454,7 +3926,8 @@ class CollectionService:
 
     # -- health and history -------------------------------------------------
 
-    def unhealthy_sources(self, *, clearance: str | None = None) -> list[dict]:
+    def unhealthy_sources(self, *, clearance: str | None = None,
+                          compartments=None) -> list[dict]:
         """Sources that have actually FAILED, not sources nobody has polled.
 
         `WHERE health <> 'OK'` looked right and was not: a source that has
@@ -3467,19 +3940,23 @@ class CollectionService:
         is what somebody has to act on.
 
         `clearance` as in `due_sources`: None is the worker and filters
-        nothing; a TLP name hides sources labelled above it.
+        nothing; a TLP name hides sources labelled above it, and a source
+        filed under a compartment the reader does not hold is hidden too
+        (g40 verify blocker 3, 2026-10-03: this list named a compartmented
+        source and, once it failed, its blocked reason, to a reader without
+        the key).
         """
         rows = self._c.execute(
-            """SELECT id, name, health, consecutive_failures, last_ok_at,
-                      blocked_reason
-                 FROM collect.source
-                WHERE is_active
-                  AND (consecutive_failures > 0
-                       OR (health <> 'OK' AND last_ok_at IS NOT NULL)
-                       OR blocked_reason IS NOT NULL)
-                  AND (%s::core.tlp IS NULL OR classification <= %s::core.tlp)
-                ORDER BY consecutive_failures DESC""",
-            (clearance, clearance)).fetchall()
+            f"""SELECT s.id, s.name, s.health, s.consecutive_failures,
+                       s.last_ok_at, s.blocked_reason
+                  FROM collect.source s
+                 WHERE s.is_active
+                   AND (s.consecutive_failures > 0
+                        OR (s.health <> 'OK' AND s.last_ok_at IS NOT NULL)
+                        OR s.blocked_reason IS NOT NULL)
+                   AND {_SOURCE_VISIBLE_HELD}
+                 ORDER BY s.consecutive_failures DESC""",
+            {"clearance": clearance, "held": _held(compartments)}).fetchall()
         return [{"id": str(r[0]), "name": r[1], "health": r[2],
                  "consecutive_failures": r[3],
                  "last_ok_at": r[4].isoformat() if r[4] else None,
@@ -3489,8 +3966,8 @@ class CollectionService:
                          "somebody is watching this"}
                 for r in rows]
 
-    def never_polled_sources(self, *,
-                             clearance: str | None = None) -> list[dict]:
+    def never_polled_sources(self, *, clearance: str | None = None,
+                             compartments=None) -> list[dict]:
         """Active, configured, and never successfully collected from.
 
         Not an error and not healthy either. A source somebody added and
@@ -3498,16 +3975,18 @@ class CollectionService:
         have been aspirational.
 
         `clearance` as in `due_sources`: None filters nothing, a TLP name
-        hides sources labelled above it.
+        hides sources labelled above it, and so does a compartment the
+        reader does not hold (g40 verify blocker 3, 2026-10-03).
         """
         rows = self._c.execute(
-            """SELECT id, name, kind, created_at, consecutive_failures
-                 FROM collect.source
-                WHERE is_active AND last_ok_at IS NULL
-                  AND consecutive_failures = 0
-                  AND (%s::core.tlp IS NULL OR classification <= %s::core.tlp)
-                ORDER BY created_at""",
-            (clearance, clearance)).fetchall()
+            f"""SELECT s.id, s.name, s.kind, s.created_at,
+                       s.consecutive_failures
+                  FROM collect.source s
+                 WHERE s.is_active AND s.last_ok_at IS NULL
+                   AND s.consecutive_failures = 0
+                   AND {_SOURCE_VISIBLE_HELD}
+                 ORDER BY s.created_at""",
+            {"clearance": clearance, "held": _held(compartments)}).fetchall()
         return [{"id": str(r[0]), "name": r[1], "kind": r[2],
                  "created_at": r[3].isoformat() if r[3] else None,
                  "consecutive_failures": r[4],
@@ -3546,7 +4025,7 @@ class CollectionService:
                 "request_count": r[18]}
 
     def runs(self, *, source_id: UUID | None = None, limit: int = 50,
-             clearance: str | None = None) -> list[dict]:
+             clearance: str | None = None, compartments=None) -> list[dict]:
         """Recent polls, successes and failures alike, newest first.
 
         Joined to the source and filtered by the caller's ceiling on its
@@ -3568,27 +4047,31 @@ class CollectionService:
         rows = self._c.execute(
             f"""SELECT {self._RUN_COLUMNS} {self._RUN_FROM}
                  WHERE (%(source)s::uuid IS NULL OR r.source_id = %(source)s)
-                   AND {_SOURCE_VISIBLE}
+                   AND {_SOURCE_VISIBLE_HELD}
                  ORDER BY r.started_at DESC NULLS LAST, r.id DESC
                  LIMIT %(limit)s""",
             {"source": source_id, "clearance": clearance,
-             "limit": limit}).fetchall()
+             "held": _held(compartments), "limit": limit}).fetchall()
         personas = self._persona_rows([r[11] for r in rows if r[11]],
-                                      clearance=clearance)
+                                      clearance=clearance,
+                                      compartments=compartments)
         return [self._run_dict(r, personas) for r in rows]
 
-    def run_detail(self, run_id: UUID, *, clearance: str | None) -> dict:
+    def run_detail(self, run_id: UUID, *, clearance: str | None,
+                   compartments=None) -> dict:
         """One run with its request log, read under the SOURCE's label:
         CollectionNotFound above it, indistinguishable from a missing id."""
         row = self._c.execute(
             f"""SELECT {self._RUN_COLUMNS}, r.requests, r.cursor
                   {self._RUN_FROM}
-                 WHERE r.id = %(run)s AND {_SOURCE_VISIBLE}""",
-            {"run": run_id, "clearance": clearance}).fetchone()
+                 WHERE r.id = %(run)s AND {_SOURCE_VISIBLE_HELD}""",
+            {"run": run_id, "clearance": clearance,
+             "held": _held(compartments)}).fetchone()
         if row is None:
             raise CollectionNotFound("no such run, or it is above your clearance")
         personas = self._persona_rows([row[11]] if row[11] else [],
-                                      clearance=clearance)
+                                      clearance=clearance,
+                                      compartments=compartments)
         detail = self._run_dict(row, personas)
         detail["requests"] = list(row[19] or [])
         return detail
@@ -3691,13 +4174,14 @@ class CollectionService:
                   AND d.classification <= %s::core.tlp
                   AND s.classification <= %s::core.tlp
                   AND d.compartments <@ %s::text[]
+                  AND s.compartments <@ %s::text[]
                   AND (%s::uuid IS NULL OR d.source_id = %s)
                   AND (%s::text IS NULL OR d.triage_state = %s)
                   AND (%s::timestamptz IS NULL OR d.captured_at >= %s)
                 ORDER BY coalesce(d.posted_at, d.captured_at) DESC
                 LIMIT %s""",
-            (clearance, clearance, sorted(compartments), source_id,
-             source_id, triage_state, triage_state, since, since,
+            (clearance, clearance, sorted(compartments), sorted(compartments),
+             source_id, source_id, triage_state, triage_state, since, since,
              limit)).fetchall()
         return [{"id": str(r[0]), "source_id": str(r[1]), "source_name": r[2],
                  "external_url": r[3], "title": r[4], "excerpt": r[5],
@@ -3964,9 +4448,10 @@ class CollectionService:
                   AND d.classification <= %s::core.tlp
                   AND s.classification <= %s::core.tlp
                   AND d.compartments <@ %s::text[]
+                  AND s.compartments <@ %s::text[]
             RETURNING d.id, old.triage_state, d.triage_state""",
             (state, document_id, clearance, clearance,
-             sorted(compartments))).fetchone()
+             sorted(compartments), sorted(compartments))).fetchone()
         if row is None:
             raise CollectionNotFound(
                 "no such document, or it is above your clearance")
@@ -3997,13 +4482,40 @@ def _str(value) -> str | None:
     return str(value) if value is not None else None
 
 
+#: The ids our own adapters write for an item, exactly: a Telegram message,
+#: `c:<chat>/<message>` for a channel or a supergroup and
+#: `g:<chat>/<message>@u:<persona>` for a basic group, whose message ids belong
+#: to one account (`TelegramAdapter._external_id`); and a forum post or member,
+#: `post:<n>` and `member:<n>` (`forum_parse.post_ref`, `member_ref`, ids below
+#: 2**53). ASCII digits only and nothing around them, matched with fullmatch.
+#: Held to the adapters' own writers by test_item_label_typed_ids (F36,
+#: 2026-10-02).
+_TYPED_ITEM_ID = re.compile(
+    r"[cg]:[1-9][0-9]{0,19}/[1-9][0-9]{0,19}(?:@u:[1-9][0-9]{0,19})?"
+    r"|(?:post|member):[1-9][0-9]{0,15}")
+
+
 def _item_label(item) -> str:
     """An item's id for a warning: redacted and short, because the id is
-    the site's text and the warning is stored."""
+    the site's text and the warning is stored.
+
+    The ids our own adapters write are the one shape kept as they are (F36,
+    2026-10-02). The redactor reads `c:123/45` or `post:1001` alone on a line
+    as `user:password` and masks it, so a warning said "Item 'c:[REDACTED]'
+    was skipped" and the analyst could not tell which message it meant. The
+    exemption is the whole string being that shape, which is digits and fixed
+    separators and carries nothing a site could smuggle a credential in, and
+    it is withheld when the string is a secret live right now (a persona's
+    credential that happens to have the shape is still masked by the exact
+    layer). Anything else, a longer string that merely contains one
+    included, goes through `redact` as before."""
     external = getattr(item, "external_id", None)
     if not isinstance(external, str) or not external:
         return "with no id"
-    return repr(redact(external.replace("\x00", "�"))[:120])
+    text = external.replace("\x00", "�")
+    if _TYPED_ITEM_ID.fullmatch(text) and not pinned_http.live_secret_in(text):
+        return repr(text)
+    return repr(redact(text)[:120])
 
 
 def _persona_ref(persona: dict | None) -> dict | None:
@@ -4171,7 +4683,7 @@ class PersonaGate:
                  platform: str | None, run_id: UUID | None = None,
                  stopping: bool = False, needs_secret: bool = True,
                  needs_browser_identity: bool = False, min_gap_s: float = 0.0,
-                 sleep=time.sleep, adapter=None):
+                 sleep=time.sleep, adapter=None, compartments=None):
         # Enforced, not only said (2026-09-25): no ceiling
         # is the worker's reading and sees every persona, so a PERSON
         # reaching the gate without their ceiling is a caller that forgot
@@ -4184,6 +4696,9 @@ class PersonaGate:
         self.persona_id = persona_id
         self.actor_id = actor_id
         self.clearance = clearance
+        #: The reader's own compartments (F43): a persona bound to a
+        #: source under a key they do not hold is hidden from them.
+        self.compartments = compartments
         self.purpose = purpose
         self.source_id = source_id
         self.need = need
@@ -4207,7 +4722,8 @@ class PersonaGate:
                        a.fingerprint_profile, {PERSONA_USABLE_SQL}
                   FROM collect.collection_account a
                  WHERE a.id = %(id)s AND {PERSONA_VISIBLE_SQL}""",
-            {"id": self.persona_id, "clearance": self.clearance}).fetchone()
+            {"id": self.persona_id, "clearance": self.clearance,
+             "held": _held(self.compartments)}).fetchone()
         if row is None:
             raise CollectionNotFound(
                 "no such persona, or it is above your clearance")
@@ -4437,7 +4953,8 @@ def persona_session(conn: psycopg.Connection, persona_id: UUID, *,
                     run_id: UUID | None = None, stopping: bool = False,
                     needs_secret: bool = True,
                     needs_browser_identity: bool = False,
-                    min_gap_s: float = 0.0, adapter=None, sleep=time.sleep):
+                    min_gap_s: float = 0.0, adapter=None, sleep=time.sleep,
+                    compartments=None):
     """An attended persona act (a chat lookup, a join, an enrolment, a
     logout): the six steps of PersonaGate in order, yielding a
     PersonaContext. A platform's answer raised inside the block goes
@@ -4449,7 +4966,8 @@ def persona_session(conn: psycopg.Connection, persona_id: UUID, *,
                        run_id=run_id, stopping=stopping,
                        needs_secret=needs_secret,
                        needs_browser_identity=needs_browser_identity,
-                       min_gap_s=min_gap_s, sleep=sleep, adapter=adapter)
+                       min_gap_s=min_gap_s, sleep=sleep, adapter=adapter,
+                       compartments=compartments)
     row = gate.check()
     gate.lock()
     try:

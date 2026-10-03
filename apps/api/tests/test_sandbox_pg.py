@@ -178,10 +178,15 @@ def test_a_live_route_or_machine_on_a_none_target_needs_signoff(conn, store, cap
     owner, case = _owned_case(conn)
     s, _ = _sample(conn, store, who, case_id=case)
     svc = _svc(conn, store)
+    # With a live machine listed every send names its machine (lab-1,
+    # 2026-10-03), so the route cases name the isolated one: the live ROUTE is
+    # what takes the second person here.
     with pytest.raises(SandboxError, match="sign-off"):
-        svc.request(s.id, requested_by=who, network_route="internet")
+        svc.request(s.id, requested_by=who, network_route="internet",
+                    machine="win10")
     out = svc.request(s.id, requested_by=who, network_route="internet",
-                      authorised_by=owner, note="needs its C2 to answer")
+                      machine="win10", authorised_by=owner,
+                      note="needs its C2 to answer")
     assert out["status"] == "AWAITING_SIGNOFF"
     svc.cancel(out["id"], actor_id=who)
     with pytest.raises(SandboxError, match="sign-off"):

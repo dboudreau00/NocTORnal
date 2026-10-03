@@ -93,7 +93,7 @@ def record(
     """Record an authority as the first person. Nothing is read under it
     until a security officer confirms it and each source under it."""
     _utc_only(body.valid_from, body.valid_until)
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     view = _answer(lambda: _service(conn, adapters).record(
         persona_id=body.persona_id, scope=body.scope,
         classification=body.classification, authority_ref=body.authority_ref,
@@ -103,7 +103,7 @@ def record(
         target_description=body.target_description,
         valid_from=body.valid_from, valid_until=body.valid_until,
         source_ids=body.source_ids, recorded_by=user.user_id,
-        clearance=clearance.name))
+        clearance=clearance.name, compartments=held))
     return {"authority": view, "notice": AUTHORITY_NOTICE}
 
 
@@ -120,10 +120,10 @@ def add_targets(
     adapters: dict = Depends(get_adapters),
 ) -> dict:
     """More sources under an authority, each waiting for a second person."""
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     view = _answer(lambda: _service(conn, adapters).add_targets(
         authority_id, source_ids=body.source_ids, added_by=user.user_id,
-        clearance=clearance.name))
+        clearance=clearance.name, compartments=held))
     return {"authority": view, "notice": AUTHORITY_NOTICE}
 
 
@@ -136,9 +136,10 @@ def listing(
     adapters: dict = Depends(get_adapters),
 ) -> dict:
     """The authorities the caller may see, newest first."""
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     body = _service(conn, adapters).listing(clearance=clearance.name,
-                                            persona_id=persona_id, state=state)
+                                            persona_id=persona_id, state=state,
+                                            compartments=held)
     return {**body, "count": len(body["authorities"]), "notice": AUTHORITY_NOTICE}
 
 
@@ -150,8 +151,9 @@ def review(
 ) -> dict:
     """The confirmer's queue: what waits for a second person, oldest first,
     and what is in force."""
-    clearance, _ = user_ceiling(conn, user.user_id)
-    body = _service(conn, adapters).review(clearance=clearance.name)
+    clearance, held = user_ceiling(conn, user.user_id)
+    body = _service(conn, adapters).review(clearance=clearance.name,
+                                           compartments=held)
     return {**body, "notice": AUTHORITY_NOTICE}
 
 
@@ -170,10 +172,11 @@ def confirm(
 ) -> dict:
     """Confirm an authority and the sources listed, as the second person:
     409 for the person who recorded it or added a source."""
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     view = _answer(lambda: _service(conn, adapters).confirm(
         authority_id, confirmed_by=user.user_id, note=body.note,
-        target_ids=body.target_ids, clearance=clearance.name))
+        target_ids=body.target_ids, clearance=clearance.name,
+        compartments=held))
     return {"authority": view, "notice": AUTHORITY_NOTICE}
 
 
@@ -183,10 +186,10 @@ class StopBody(BaseModel):
 
 def _stop(authority_id: UUID, body: StopBody, user: CurrentUser,
           conn: psycopg.Connection, adapters: dict, by_role: str) -> dict:
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     view = _answer(lambda: _service(conn, adapters).revoke(
         authority_id, revoked_by=user.user_id, reason=body.reason,
-        by_role=by_role, clearance=clearance.name))
+        by_role=by_role, clearance=clearance.name, compartments=held))
     return {"authority": view, "notice": AUTHORITY_NOTICE}
 
 
@@ -216,10 +219,10 @@ def refuse(
 
 def _stop_target(target_id: UUID, body: StopBody, user: CurrentUser,
                  conn: psycopg.Connection, adapters: dict, by_role: str) -> dict:
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     view = _answer(lambda: _service(conn, adapters).revoke_target(
         target_id, revoked_by=user.user_id, reason=body.reason,
-        by_role=by_role, clearance=clearance.name))
+        by_role=by_role, clearance=clearance.name, compartments=held))
     return {"authority": view, "notice": AUTHORITY_NOTICE}
 
 

@@ -4,8 +4,10 @@
 # becomes true on the wire.
 #
 # {$VAR} is Caddy's own environment placeholder, resolved when the config
-# loads. All three come from infra/production/secrets.env by way of the
-# caddy service's env_file.
+# loads. All three come from infra/production/caddy.env by way of the
+# caddy service's env_file, and that file holds those three and nothing
+# else: this is the one process the internet reaches before any sign-in,
+# and until 2026-10-03 it was handed the whole of secrets.env (infra-5).
 #
 # ## The TLS switch
 #
@@ -54,8 +56,34 @@
 # second limit in the proxy would refuse those uploads with a 413 that
 # names nothing.
 
+# ## Transport (infra-6, 2026-10-03)
+#
+# The application never sends Strict-Transport-Security (http/app.py leaves
+# it to the terminator) and this is the terminator, so it is sent HERE, on
+# both hostnames: a first visit, or one after a browser forgot, over plain
+# http could otherwise be stripped by anything on the path, which then
+# proxies the console including its login form. One year, subdomains
+# included, no `preload`: preload is a commitment that cannot be taken back
+# and is the operator's to make. apps/api/tests/test_g48_image_context.py
+# holds the header and the two settings below to this file, since it is the
+# only place they can come from.
+#
+# TLS 1.3 only, as docs/05's hardening checklist asks. A client that cannot
+# speak it cannot reach the console.
+#
+# HTTP/3 is off. 443/udp is not published (compose.yml), so advertising it
+# in Alt-Svc sent browsers to a port nothing answers on.
+{
+	servers {
+		protocols h1 h2
+	}
+}
+
 {$NOCTORNAL_HOSTNAME} {
-	tls {$NOCTORNAL_TLS_MODE:internal}
+	tls {$NOCTORNAL_TLS_MODE:internal} {
+		protocols tls1.3
+	}
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
 
 	# The API, the console at /ui and the /api/v1/live WebSocket, which
 	# Caddy upgrades without any extra configuration.
@@ -63,7 +91,10 @@
 }
 
 {$NOCTORNAL_SAMPLE_HOSTNAME} {
-	tls {$NOCTORNAL_TLS_MODE:internal}
+	tls {$NOCTORNAL_TLS_MODE:internal} {
+		protocols tls1.3
+	}
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
 
 	# A SEPARATE upstream, not a path on the one above. If this ever
 	# pointed at api:8000 the deployment would look correct and every

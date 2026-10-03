@@ -1738,9 +1738,10 @@ SELECT d.id, coalesce(d.title, '') || E'\\n' || left(d.body_text, 60000),
                   AND d.purged_at IS NULL
                   AND d.classification <= %s::core.tlp
                   AND s.classification <= %s::core.tlp
-                  AND d.compartments <@ %s::text[]""",
+                  AND d.compartments <@ %s::text[]
+                  AND s.compartments <@ %s::text[]""",
             (document["source_id"], document["external_id"], document["id"],
-             clearance, clearance, sorted(held))).fetchall()]
+             clearance, clearance, sorted(held), sorted(held))).fetchall()]
 
     def document_coverage(self, slot: int, *, clearance: str,
                           held: frozenset[str]) -> dict:
@@ -2187,6 +2188,7 @@ SELECT d.id, coalesce(nullif(d.title, ''), left(d.body_text, 80)),
    AND d.classification <= %(clearance)s::core.tlp
    AND s.classification <= %(clearance)s::core.tlp
    AND d.compartments <@ %(held)s::text[]
+   AND s.compartments <@ %(held)s::text[]
    AND d.id <> ALL(%(exclude)s::uuid[])
  ORDER BY cand.distance, d.id
  LIMIT %(limit)s"""
@@ -2198,7 +2200,8 @@ SELECT d.id, d.source_id, d.external_id,
  WHERE d.id = %(id)s AND d.purged_at IS NULL
    AND d.classification <= %(clearance)s::core.tlp
    AND s.classification <= %(clearance)s::core.tlp
-   AND d.compartments <@ %(held)s::text[]"""
+   AND d.compartments <@ %(held)s::text[]
+   AND s.compartments <@ %(held)s::text[]"""
 
 _DOCUMENT_COVERAGE = """
 SELECT x.status, x.reason, count(*)
@@ -2209,6 +2212,7 @@ SELECT x.status, x.reason, count(*)
    AND d.classification <= %(clearance)s::core.tlp
    AND s.classification <= %(clearance)s::core.tlp
    AND d.compartments <@ %(held)s::text[]
+   AND s.compartments <@ %(held)s::text[]
  GROUP BY 1, 2"""
 
 _DOCUMENT_GAPS = """
@@ -2223,6 +2227,7 @@ SELECT x.document_id, x.status, x.reason, x.attempts, x.next_attempt_at, x.embed
    AND d.classification <= %(clearance)s::core.tlp
    AND s.classification <= %(clearance)s::core.tlp
    AND d.compartments <@ %(held)s::text[]
+   AND s.compartments <@ %(held)s::text[]
    AND (%(after_at)s::timestamptz IS NULL
         OR (x.embedded_at, x.document_id) > (%(after_at)s::timestamptz, %(after_id)s::uuid))
  ORDER BY x.embedded_at, x.document_id
@@ -2278,11 +2283,13 @@ SELECT l.id, x.status, x.reason,
        coalesce(%(docs)s AND d.purged_at IS NULL
                 AND d.classification <= %(doc_clearance)s::core.tlp
                 AND ds.classification <= %(doc_clearance)s::core.tlp
-                AND d.compartments <@ %(doc_held)s::text[], false),
+                AND d.compartments <@ %(doc_held)s::text[]
+                AND ds.compartments <@ %(doc_held)s::text[], false),
        greatest(d.classification, ds.classification)::text, d.compartments,
        d.category, ds.kind::text,
        a.source_id IS NOT NULL,
-       coalesce(%(docs)s AND s2.classification <= %(doc_clearance)s::core.tlp, false),
+       coalesce(%(docs)s AND s2.classification <= %(doc_clearance)s::core.tlp
+                AND s2.compartments <@ %(doc_held)s::text[], false),
        s2.classification::text, s2.kind::text,
        a.evidence_id IS NOT NULL,
        coalesce(%(exhibits)s AND ev.purged_at IS NULL AND ev.case_id = a.case_id

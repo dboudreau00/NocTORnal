@@ -34,14 +34,88 @@ from uuid import UUID
 import psycopg
 from fastapi import APIRouter, Depends, Query
 
-from noctornal_api.audit_verify import BLIND_SPOTS, verify_chain
-from noctornal_api.custody_verify import verify_custody_chain
+from noctornal_api.audit_verify import ChainAnchor, verify_chain
+from noctornal_api.custody_verify import CustodyAnchor, verify_custody_chain
 from noctornal_api.db import SystemPurpose
 from noctornal_api.http.deps import CurrentUser, get_conn, require_global, system_conn
 from noctornal_api.http.errors import Problem
 from noctornal_api.http.limits import rate_limit
 
 router = APIRouter(prefix="/audit", tags=["audit"])
+
+#: The sentence that sits beside every green tick on the audit log (2026-10-03).
+#: Until then it was said only of a windowed run, while the qualification that
+#: matters most is true of every run: each check compares a row with its
+#: neighbours, so rows removed from the end, or rewritten and re-chained, leave
+#: nothing behind to disagree. The custody answer has said so since 2026-09-02.
+_AUDIT_CAVEAT = (
+    "What NO run can tell you is whether rows were removed from the END of the "
+    "log, or edited and re-chained with fresh hashes. Every check compares a "
+    "row with the rows around it, and the hash is plain SHA-256, so either "
+    "is within reach of a person with the database owner's credentials and "
+    "leaves `intact` true. The defence is an anchor recorded somewhere this "
+    "system cannot write: keep `tail_seq` and `tail_row_hash`, and pass them "
+    "back as `anchor_seq` and `anchor_hash` on a later run. This service does "
+    "not persist them."
+)
+
+_WINDOWED_CAVEAT = (
+    "Windowed: LINK, FORK and CONTENT are each exact for the rows "
+    "reported, because the predecessor lookup covers the whole "
+    "table. What a window cannot tell you is whether rows OUTSIDE "
+    "it verify. Run without `limit` for that. "
+)
+
+#: What a fork is, said once for both ledgers. A legacy fork is one with a
+#: claimant at or below the boundary 0149 recorded, an artefact of the old
+#: sequence order that an append only table cannot be cleaned of; a fresh one
+#: is a break, because since 0149 honest traffic cannot make one.
+_LEGACY_FORKS = (
+    "Rows that share a predecessor from before migration 0149, when the "
+    "sequence number was drawn before the chain lock and two concurrent "
+    "writers could chain off one tail. Not evidence of editing, and an "
+    "append only table cannot be cleaned of them. They are also why a "
+    "dead end row from that period could have been removed unseen."
+)
+_FRESH_FORKS = (
+    "Rows written after migration 0149 share a predecessor. Since then the "
+    "chaining trigger draws the sequence number inside its lock, so honest "
+    "traffic cannot make this: it is counted as a break, and the usual cause "
+    "is a row inserted with the trigger stood down."
+)
+
+_ANCHOR_NOTES = {
+    "HELD": (
+        "The row you recorded is still here with the same hash, so every row "
+        "up to it is unchanged. Rows written after it are not covered: record "
+        "a newer anchor."),
+    "MISSING": (
+        "No row has the {unit} or the hash you recorded. Rows were removed "
+        "from the end of the {what}, or the {what} was cut back past that "
+        "row."),
+    "REWRITTEN": (
+        "A row has the {unit} you recorded but not the hash. That row, or one "
+        "before it, was edited and the chain recomputed after it."),
+    "MOVED": (
+        "The hash you recorded is in the {what} under a different {unit}: "
+        "the rows were renumbered."),
+}
+
+
+def _anchor_note(status: str, *, unit: str, what: str) -> str:
+    return _ANCHOR_NOTES[status].format(unit=unit, what=what)
+
+
+def _hex_pair(number: int | None, digest: str | None, names: tuple[str, str]):
+    """`(number, digest)` when both were given, None when neither, a 422 when
+    one was: half an anchor names no row."""
+    if number is None and digest is None:
+        return None
+    if number is None or digest is None:
+        raise Problem(422, "Invalid field",
+                      f"{names[0]} and {names[1]} go together: an anchor is "
+                      "a position and the hash recorded there")
+    return number, digest
 
 
 @router.get("/verify", response_model=dict,
@@ -53,11 +127,10 @@ def verify(
                     "whole chain"),
     anchor_seq: int | None = Query(
         None, ge=1,
-        description="the tail_seq recorded from an earlier check; with "
-                    "anchor_hash, fails the check when that row is gone or "
-                    "has changed"),
+        description="the tail_seq of an earlier run you recorded somewhere "
+                    "this system cannot write; goes with anchor_hash"),
     anchor_hash: str | None = Query(
-        None, pattern=r"^[0-9a-f]{64}$",
+        None, pattern="^[0-9a-f]{64}$",
         description="the tail_row_hash recorded with anchor_seq"),
     user: CurrentUser = Depends(require_global("audit.read")),
     conn: psycopg.Connection = Depends(get_conn),
@@ -73,66 +146,56 @@ def verify(
 
     The response distinguishes LINK (a predecessor removed) from CONTENT
     (a row edited in place), because they point an investigator in
-    different directions. A fork claimed by a row written since 0153 is a
-    break too (FORK), because the chain trigger reads its tail inside its
-    lock, refuses a transaction that is not READ COMMITTED, and honest
-    traffic cannot fork the chain; forks between older rows are listed and
-    not counted.
+    different directions. A FORK is a break when every row that shares the
+    predecessor was written after migration 0149, which draws the sequence
+    number inside the chain lock; older forks are an artefact of the
+    previous order and are counted apart, because counting them as breaks
+    made this answer BROKEN on untampered history.
 
-    Every answer carries `caveat`, which says what `intact` cannot see: rows
-    removed from the end, and a rewrite that recomputes every later hash.
-    `tail_seq` and `tail_row_hash` are the values to record somewhere this
-    database cannot reach; pass them back as `anchor_seq` and `anchor_hash`
-    and the check fails when that row is gone or has changed.
+    EVERY answer carries a caveat, and the one that matters is that the
+    checks are relative: rows removed from the end, or edited and
+    re-chained, leave `intact` true. `tail_seq` and `tail_row_hash` are the
+    values to record out of band, and passing them back as `anchor_seq` and
+    `anchor_hash` makes a removed or rewritten anchored row a break.
     """
-    if (anchor_seq is None) != (anchor_hash is None):
-        raise Problem(422, "Invalid field",
-                      "anchor_seq and anchor_hash go together: send both "
-                      "or neither")
+    pair = _hex_pair(anchor_seq, anchor_hash, ("anchor_seq", "anchor_hash"))
     report = verify_chain(
         chain, limit=limit,
-        anchor=(anchor_seq, anchor_hash) if anchor_seq is not None else None)
+        anchor=ChainAnchor(*pair) if pair else None)
+    fresh = [b for b in report.breaks if b.kind == "FORK"]
     return {
         "intact": report.intact,
         "checked": report.checked,
         "first_seq": report.first_seq,
         "last_seq": report.last_seq,
-        # The whole log's size and newest row, window or not: the values to
-        # record out of band (see `caveat`).
-        "rows": report.rows,
-        "tail_seq": report.tail_seq,
-        "tail_row_hash": report.tail_row_hash,
-        # The anchor the caller sent and whether the log still holds it,
-        # or null when none was sent.
-        "anchor": ({"seq": report.anchor.seq,
-                    "row_hash": report.anchor.row_hash,
-                    "held": report.anchor.held}
-                   if report.anchor is not None else None),
         # Stated explicitly so "intact: true, checked: 0" can never be read
         # as a pass. An empty audit table is a legitimately intact chain
         # and also evidence of nothing.
         "windowed": limit is not None,
-        # On EVERY answer, because the blind spots are true of every run,
-        # not only a windowed one. A window adds one sentence: LINK, FORK
-        # and CONTENT are each exact for the rows reported, because the
-        # predecessor lookup covers the whole table, and what a window
-        # cannot tell you is whether rows OUTSIDE it verify.
-        "caveat": BLIND_SPOTS + (
-            " Windowed: the checks are exact for the rows reported, but a "
-            "window cannot tell you whether rows outside it verify. Run "
-            "without `limit` for that." if limit is not None else ""),
+        # The newest row of the WHOLE log, windowed or not, and how many rows
+        # there are: the values to record, and a count that can only grow.
+        "tail_seq": report.tail_seq,
+        "tail_row_hash": report.tail_row_hash,
+        "rows_in_log": report.total_rows,
+        # A caveat on EVERY run, as the custody answer has carried since
+        # 2026-09-02. The windowed sentence is added when it applies, and
+        # describes the actual blind spot of a window: rows OUTSIDE it.
+        "caveat": (_WINDOWED_CAVEAT if limit is not None else "") + _AUDIT_CAVEAT,
+        "anchor": None if report.anchor is None else {
+            "status": report.anchor.status,
+            "held": report.anchor.status == "HELD",
+            "seq": report.anchor.anchor.seq,
+            "found_seq": report.anchor.found_seq,
+            "rows_since": report.anchor.rows_since,
+            "note": _anchor_note(report.anchor.status, unit="seq", what="log"),
+        },
+        # Every fork, legacy and new. The ones above the boundary are also in
+        # `breaks` and make `intact` false; `fork_boundary_seq` is where the
+        # line sits, and None on a database that has not run 0149.
         "forks": len(report.forks),
-        # The forks that are breaks (written since 0153), and the boundary.
-        "forks_since_fix": report.forks_since_fix,
-        "fork_boundary_seq": report.fork_boundary_seq,
+        "fork_boundary_seq": report.fork_boundary,
         "fork_note": (
-            "Rows sharing a predecessor. Those claimed by a row written "
-            "since the chain began drawing its sequence inside its lock "
-            "(0153) are listed in `breaks` as FORK and make the chain "
-            "not intact: nothing honest does that. The others predate the "
-            "fix, are history, and are not counted: the log is append-only "
-            "and cannot be cleaned of them."
-        ) if report.forks else None,
+            _FRESH_FORKS if fresh else _LEGACY_FORKS) if report.forks else None,
         # How many rows claim to be the chain's first. Always reported, like
         # `checked`: 1 is the answer that says the chain is anchored, and
         # only an explicit number distinguishes that from "not looked at".
@@ -141,10 +204,10 @@ def verify(
             "More than one row claims to be the first. The chaining trigger "
             "writes a NULL predecessor only into an EMPTY table, under a "
             "lock, and no application code writes prev_hash at all, so a "
-            "second one means the trigger was bypassed. Unlike a fork, this "
-            "IS evidence of tampering, and it is the shape a truncation "
-            "leaves: delete the first rows, re-anchor the next one, and "
-            "every other check still passes."
+            "second one means the trigger was bypassed. Unlike a legacy "
+            "fork, this IS evidence of tampering, and it is the shape a "
+            "truncation leaves: delete the first rows, re-anchor the next "
+            "one, and every other check still passes."
             if report.genesis_count > 1 else
             "The chain has no first row, though it has rows. The original "
             "genesis was removed; every surviving row still links to a real "
@@ -176,6 +239,13 @@ def verify_custody(
         None,
         description="report only this exhibit's custody rows; the chain "
                     "checks still run against the whole ledger"),
+    anchor_id: int | None = Query(
+        None, ge=1,
+        description="the tail_id of an earlier run you recorded somewhere "
+                    "this system cannot write; goes with anchor_hash"),
+    anchor_hash: str | None = Query(
+        None, pattern="^[0-9a-f]{64}$",
+        description="the tail_row_hash recorded with anchor_id"),
     user: CurrentUser = Depends(require_global("audit.read")),
     conn: psycopg.Connection = Depends(get_conn),
     # A verifier that sees part of a chain reports breaks that are not
@@ -208,7 +278,11 @@ def verify_custody(
     is a feature nobody can run, and the only way to keep that honest is
     for each half to say where the other one is.
     """
-    report = verify_custody_chain(chain, evidence_id=evidence_id)
+    pair = _hex_pair(anchor_id, anchor_hash, ("anchor_id", "anchor_hash"))
+    report = verify_custody_chain(
+        chain, evidence_id=evidence_id,
+        anchor=CustodyAnchor(*pair) if pair else None)
+    fresh = [b for b in report.breaks if b.kind == "FORK"]
     return {
         "intact": report.intact,
         "checked": report.checked,
@@ -218,12 +292,23 @@ def verify_custody(
         # no custody rows -- can never be read as a pass.
         "scoped": evidence_id is not None,
         "evidence_id": str(evidence_id) if evidence_id else None,
-        # The hash of the newest row in the WHOLE ledger, scoped run or not.
-        # Returned because it is the ONLY thing that reveals the blind spot
-        # the caveat below describes: recorded out of band and compared on
-        # the next run, it changes if the tail was removed. Neither this
-        # service nor the CI step persists it -- an operator has to.
+        # The hash and id of the newest row in the WHOLE ledger, scoped run
+        # or not. Returned because they are the ONLY thing that reveals the
+        # blind spot the caveat below describes: recorded out of band and
+        # passed back as `anchor_id` and `anchor_hash`, a removed or
+        # rewritten anchored row is a break. Neither this service nor the CI
+        # step persists them: an operator has to.
         "tail_row_hash": report.tail_row_hash,
+        "tail_id": report.tail_id,
+        "rows_in_ledger": report.total_rows,
+        "anchor": None if report.anchor is None else {
+            "status": report.anchor.status,
+            "held": report.anchor.status == "HELD",
+            "id": report.anchor.anchor.id,
+            "found_id": report.anchor.found_id,
+            "rows_since": report.anchor.rows_since,
+            "note": _anchor_note(report.anchor.status, unit="id", what="ledger"),
+        },
         # A caveat on EVERY run, not only the scoped ones. Until 2026-09-02
         # an unscoped run returned `"caveat": null`, which reads as "nothing
         # qualifies this answer" -- and the qualification that matters most
@@ -251,24 +336,18 @@ def verify_custody(
               "deleting the last entries (the export, the destruction) "
               "orphans nothing, costs one DELETE and no rehashing, and "
               "leaves `intact` true. The defence is `tail_row_hash`: record "
-              "it somewhere this system cannot reach and compare it next "
-              "time. This service does not persist it."
+              "it, with `tail_id`, somewhere this system cannot reach and "
+              "pass them back as `anchor_hash` and `anchor_id` on a later "
+              "run. This service does not persist them."
         ),
         "forks": len(report.forks),
+        "fork_boundary_id": report.fork_boundary,
         # The ids, not just the count. `fork_note` tells the officer a fork
         # is worth investigating; until 2026-09-02 the response handed her
         # nothing to investigate WITH, which is how a note stops being read.
         "fork_ids": [b.id for b in report.forks],
-        "forks_since_fix": report.forks_since_fix,
-        "fork_boundary_id": report.fork_boundary_id,
         "fork_note": (
-            "Rows sharing a predecessor. Those claimed by a row written "
-            "since the ledger began drawing its id inside its chain lock "
-            "(0153) are listed in `breaks` as FORK and make the ledger not "
-            "intact. The others predate the fix, are history, and are not "
-            "counted: the ledger is append-only and cannot be cleaned of "
-            "them."
-        ) if report.forks else None,
+            _FRESH_FORKS if fresh else _LEGACY_FORKS) if report.forks else None,
         # Always whole-ledger, always reported: 1 says the chain is anchored,
         # and only an explicit number distinguishes that from "not looked at".
         "genesis_count": report.genesis_count,

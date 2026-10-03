@@ -47,8 +47,7 @@ _APPENDS = re.compile(r"(?is)\binsert\s+into\s+audit\.event\b")
 #: - SYSTEM:<purpose>: runs on a system connection for that purpose.
 _READERS: dict[tuple[str, str], str] = {
     ("audit_verify.py", "verify_chain"): "SYSTEM:AUDIT_VERIFY",
-    # Reads the fork boundary from the log (the AUDIT_CHAIN_SERIALISED row).
-    ("custody_verify.py", "verify_custody_chain"): "SYSTEM:AUDIT_VERIFY",
+    ("audit_verify.py", "_check_anchor"): "SYSTEM:AUDIT_VERIFY",
     ("http/routers/ach.py", "_history"): "CASE",
     ("http/routers/audit.py", "events"): "AUDIT_READ",
     ("http/routers/governance.py", "unreviewed"): "SYSTEM:BREAK_GLASS",
@@ -229,12 +228,13 @@ def test_the_officers_search_is_gated_on_audit_read():
 
 
 def test_a_system_reader_runs_on_its_purpose():
-    """A reader in a route names its purpose itself. The two library
-    readers are held through their callers: the chain walk is called only
-    from the verify route, on the AUDIT_VERIFY connection; the legacy
-    register only from readiness probes, whose connection is READINESS for
-    every probe but the two about the request connection itself, and from
-    scripts."""
+    """A reader in a route names its purpose itself. The library readers
+    are held through their callers: the chain walk and its anchor check are
+    called only from the verify route, on the AUDIT_VERIFY connection (and
+    from `scripts/audit_verify.py`, which connects as the system role); the
+    legacy register only from readiness probes, whose connection is READINESS
+    for every probe but the two about the request connection itself, and
+    from scripts."""
     for (rel, scope), treatment in _READERS.items():
         if not treatment.startswith("SYSTEM:") or rel in ("audit_verify.py",
                                                           "custody_verify.py",
@@ -253,8 +253,9 @@ def test_a_system_reader_runs_on_its_purpose():
     verify = ast.unparse(_function("http/routers/audit.py", "verify"))
     assert "system_conn(SystemPurpose.AUDIT_VERIFY)" in verify
     assert "verify_chain(chain," in verify
-    # The custody walk reads the fork boundary from the log, so it is held
-    # the same way: only the verify route calls it, on AUDIT_VERIFY.
+    # The custody walk reads only the custody ledger, which is under a policy
+    # of its own, so it is held the same way: only the verify route calls it,
+    # on AUDIT_VERIFY.
     custody_callers = [p.relative_to(SRC).as_posix() for p in SRC.rglob("*.py")
                        if "verify_custody_chain(" in p.read_text(encoding="utf-8")
                        and p.name != "custody_verify.py"]

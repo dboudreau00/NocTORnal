@@ -1,15 +1,20 @@
 # What is left
 
-**State (2026-09-25):** branch `main`, Alembic head `0124`,
-6095 tests counted as `def test_` functions across the two pytest roots,
+**State (2026-10-03):** branch `main`, Alembic head `0131`,
+6329 tests counted as `def test_` functions across the two pytest roots,
 version 0.7.1 single-sourced from `pyproject.toml`. Those four counters are
 generated: `scripts/refresh_counters.py` writes them and `test_doc_invariants`
 holds them to the tree with no tolerance. Per-release totals of COLLECTED
 items, which parametrisation makes larger, are in `release/CHANGELOG.md`.
-Every roadmap feature (F1 to F15), every leftover Alpha 6 named (L1 to L6)
-and the egress proxy (S2) is built; they are the changelog's Unreleased
-section, and so is row-level security (S1), which stands on 66 tables;
-fifteen are still deferred, each with its work named (docs/17 F51).
+Alpha 7 (2026-09-25) released every roadmap feature (F1 to F15), every
+leftover Alpha 6 named (L1 to L6), the egress proxy (S2) and row-level
+security (S1). Alpha 8 (2026-10-03) is the part of the beta build that had
+merged when the owner stopped it: row-level security on ten more tables, so
+it stands on 76 and five are deferred, each with its work named (docs/17
+F51); F35, F36, F37, F28 and F47 closed; owner questions 11 and 12 settled;
+and an operator-run sweep of collected documents (F30). The rest of that
+build was stopped before it merged and is listed under What remains open,
+with the 82 findings of the 2026-10-03 review, none of them fixed.
 
 This file is what is left. What was done and when is in the changelog; what is
 known-wrong is in `docs/17-flagged-for-review.md`; what is blocked on somebody
@@ -38,7 +43,10 @@ scrutiny.
 
 The percentages are the Alpha 6 scores. The work built since is named in each
 row and is scored when it is released, after its review, so a row can read
-"nothing left" beside a figure below 100.
+"nothing left" beside a figure below 100. None of it is scored yet: the work
+released in Alpha 7 and Alpha 8 waits, and the 2026-10-03 review of it kept
+82 findings that are all still open (What remains open, below). They are
+not repeated in each row.
 
 | Phase | Complete | Model+tests | API | UI | Reviewed | What is left |
 |---|---|---|---|---|---|---|
@@ -46,12 +54,12 @@ row and is scored when it is released, after its review, so a row can read
 | 1, Graph core | **100%** | ✅ | ✅ | ✅ | ✅ | Nothing. |
 | 2, Sociogram | **100%** | ✅ | ✅ | ✅ | ✅ | Nothing. |
 | 3, Analytics | **85%** | ◐ | ✅ | ◐ | ✅ | Built since Alpha 6: CONCOR roles (F1), forums and wallets projected to entities (F2), and an accepted-ties-only scope (L3). Left: REGE, which is not built; conversations are projected only by the Comms pane's co-participation view, deliberately (decision 73). |
-| 4, Collection | **90%** | ◐ | ✅ | ✅ | ✅ | Built since Alpha 6: the collection foundation with the two-person collection authority, XenForo and MyBB (F3, F4), Telegram over MTProto (F5) and document embeddings (F6). Left: the authenticated forum path, a first run against Telegram itself (docs/17 F31), a deployment-wide sweep of collected documents (docs/17 F30), and source compartments for adapter collection (docs/17 F43). `run_once` raises no proposals, which is a decision recorded at the `Adapter` docstring rather than a gap. |
-| 5, Notification | **92%** | ✅ | ✅ | ◐ | ✅ | Built since Alpha 6: Jira (F7) and the delivery ledger's screen under Administration, Integrations (F8), and the egress proxy that every delivery now leaves through (S2). Left: a versioned webhook signature (docs/17 F28). |
-| 6, Tradecraft | **96%** | ◐ | ✅ | ✅ | ✅ | Built since Alpha 6: the two-person policy screen (F9), a case's merge switch that takes two people to turn off (F9b), and the retirement of the dead dual-control columns (F9c). Left: whether that switch's second person needs a seasoning rule (an owner question, below). WebAuthn is a deliberate absence, stated in four documents; SECURITY.md says reporting it is not a finding. |
-| 7, Comms | **95%** | ✅ | ✅ | ✅ | ✅ | Built since Alpha 6: detached signatures, subkey signatures confirming the primary, a vendor key registry and two-person Web Key Directory lookups (F10). Left: gpg's double-spaced fingerprint display in a contact block (docs/17 F37). |
+| 4, Collection | **90%** | ◐ | ✅ | ✅ | ✅ | Built since Alpha 6: the collection foundation with the two-person collection authority, XenForo and MyBB (F3, F4), Telegram over MTProto (F5) and document embeddings (F6). Built since Alpha 7: an operator-run sweep of collected documents past their clock (docs/17 F30), watches on forum signatures and Telegram chats (F47), a persona refused at creation on a profile that cannot carry persona traffic (F35), a typed Telegram id kept in a run's warnings (F36), and Telegram chats under row-level security. Left: the authenticated forum path, a first run against Telegram itself (docs/17 F31), source compartments for adapter collection (docs/17 F43), and the persona vault split into a collector process, which the owner decided on 2026-10-02 (docs/00 decision 174). `run_once` raises no proposals, which is a decision recorded at the `Adapter` docstring rather than a gap. |
+| 5, Notification | **92%** | ✅ | ✅ | ◐ | ✅ | Built since Alpha 6: Jira (F7) and the delivery ledger's screen under Administration, Integrations (F8), and the egress proxy that every delivery now leaves through (S2). Built since Alpha 7: notifications under row-level security, raised through one definer function, and an opt-in v2 webhook signature with a timestamp (docs/17 F28). Left: nothing named; a receiver still on v1 stays replayable (docs/07). |
+| 6, Tradecraft | **96%** | ◐ | ✅ | ✅ | ✅ | Built since Alpha 6: the two-person policy screen (F9), a case's merge switch that takes two people to turn off (F9b), and the retirement of the dead dual-control columns (F9c). Built since Alpha 7: the switch's second person must have held `case.update` for a window the deployment sets (F39), and an undated legacy claim is dated by supersession (docs/00 decision 170). Left: nothing named. WebAuthn is a deliberate absence, stated in four documents; SECURITY.md says reporting it is not a finding. |
+| 7, Comms | **95%** | ✅ | ✅ | ✅ | ✅ | Built since Alpha 6: detached signatures, subkey signatures confirming the primary, a vendor key registry and two-person Web Key Directory lookups (F10). Built since Alpha 7: gpg's double-spaced fingerprint display parses in a contact block (docs/17 F37). Left: nothing named. |
 | 8, Samples | **80%** | ✅ | ✅ | ✅ | ✅ | Built since Alpha 6: static triage with imphash, Rich header, ssdeep and TLSH (F11), YARA rule sets (F12), exact-hash prohibited-content screening (F13) and sending to a self-hosted CAPEv2 (F14). Left: archive expansion, and running the analysis children in a container with no secrets and no network (docs/17 F42). **The one phase where 100% would still mean "do not switch on": see L1.** |
-| 9, Ingest | **90%** | ✅ | ✅ | ✅ | ✅ | Built since Alpha 6: the outbound credential vault with per-provider quota, exposure levels and a colleague's sign-off (F15), and the `duplicate_of` index (L4). Left: nothing named; no lookup adapter has met its live service (docs/17 F27). |
+| 9, Ingest | **90%** | ✅ | ✅ | ✅ | ✅ | Built since Alpha 6: the outbound credential vault with per-provider quota, exposure levels and a colleague's sign-off (F15), and the `duplicate_of` index (L4). Built since Alpha 7: the lookup ledger under row-level security. Left: the ingest record family under row-level security (docs/17 F51), and a sweep for dead letters and ingest records attached to no case (docs/17 F55); no lookup adapter has met its live service (docs/17 F27). |
 
 ### Overall: **92.8%**
 
@@ -60,7 +68,7 @@ The unweighted mean across the ten phases: 100, 100, 100, 85, 90, 92, 96, 95,
 document quotes it, and `test_doc_invariants` holds the quotations to this
 line, because quoting is what drifted: three documents once carried three
 different numbers. It is the Alpha 6 figure: the work above, released in
-Alpha 7, is not scored yet.
+Alpha 7 and Alpha 8, is not scored yet.
 
 Two things the number does not say.
 
@@ -72,10 +80,31 @@ Two things the number does not say.
 
 ---
 
+## What the roadmap after Alpha 7 became
+
+Everything below is built and released in Alpha 8, and the changelog's
+Alpha 8 section says what each does. docs/00 decisions 152 to 173 record
+why; decision 174 records the persona vault split, which the owner decided
+and which is not built.
+
+| Item | What it became | Where |
+|---|---|---|
+| **F51** Row-level security, ten more tables | Notifications raised through one definer function and read by their recipient alone; the lookup ledger at its own labels, with interactive sends, sign-offs and the provider test on the LOOKUPS purpose; Telegram chats at their source's label. 76 tables under policy, five deferred | `notifications.py`, `lookups.py`, `providers.py`, `telegram_service.py`, `rls_registry.py`, Alembic 0125 to 0129 (decisions 152 to 163) |
+| **F35** A persona's exit at creation | Refused at creation on a profile that cannot carry persona traffic, in the egress proxy's sentence | `collection.py` (decision 164) |
+| **F36** Typed ids in warnings | The ids the adapters write are kept in a run's item label; every other id is still redacted | `collection.py` (decision 165) |
+| **F37** gpg fingerprints | Whole hex groups kept on `PGP_FPR` lines; parser version cb-2 | `contact_blocks.py` (decision 166) |
+| **F28** Webhook signature v2 | An opt-in signature with a timestamp, and no v1 header beside it | `transports.py`, docs/07 (decision 167) |
+| **F47** Watches | A forum post's signature matched with reasons of its own; a Telegram chat as a watch's target | `collection.py`, Alembic 0130 (decision 168) |
+| **F39** The switch's second person | Must have held `case.update` on the case for `NOCTORNAL_RELAX_SEASONING_DAYS` days, 7 by default | `approvals.py` (decision 169) |
+| **Owner question 11** Undated claims | Dated by supersession, never by writing onto a recorded claim; invariant 5 not amended | `graph.py`, Alembic 0131 (decision 170) |
+| **F30** Document sweep | An operator-run sweep of collected documents past their clock, dry by default, under a declared authority | `scripts/retention_sweep.py`, `retention_sweep.py` (decisions 171 to 173) |
+
+---
+
 ## What the roadmap after Alpha 6 became
 
-Everything below is built, and the changelog's Unreleased section says what
-each does. docs/00 decisions 68 to 136 record why.
+Everything below is built and was released in Alpha 7, and the changelog's
+Alpha 7 section says what each does. docs/00 decisions 68 to 136 record why.
 
 | Item | What it became | Where |
 |---|---|---|
@@ -100,7 +129,7 @@ each does. docs/00 decisions 68 to 136 record why.
 | **L5** Fragment identity | `url_norm` keeps a fragment only where it names the resource, never a key or a login token | `normalisers.py` (decision 81) |
 | **L6** Retention rationale wording | The two seeded rationales no longer cite design documents | Alembic 0073 (decision 82) |
 | **S2** The egress proxy | The only way out of production: one client, one address policy, persona and integration routes, a connection ledger | `egress_proxy.py`, `egress_routes.py`, `egress_policy.py`, `pinned_http.py`, `scripts/egress_setup.py`, Alembic 0085, 0086, docs/20 (decisions 68, 72, 77, 84, 107 to 111) |
-| **S1** Row-level security | On 66 tables: requests read through policies as `noctornal_app`, whose IAM plane is read-only; work that must see every row runs as a named system purpose on `noctornal_worker`; each request's connection is bound to its session by a proof. Fifteen tables are deferred with their work named (docs/17 F51) | Alembic 0108 to 0124, `rls_registry.py`, `db.py`, `scripts/runtime_roles.py` (decisions 76, 137 to 151) |
+| **S1** Row-level security | On 66 tables at Alpha 7, 76 since Alpha 8 (above): requests read through policies as `noctornal_app`, whose IAM plane is read-only; work that must see every row runs as a named system purpose on `noctornal_worker`; each request's connection is bound to its session by a proof. Five tables are still deferred with their work named (docs/17 F51) | Alembic 0108 to 0124, `rls_registry.py`, `db.py`, `scripts/runtime_roles.py` (decisions 76, 137 to 151) |
 
 ---
 
@@ -135,35 +164,52 @@ server may receive case text (D12).
 
 | Item | Note |
 |---|---|
-| Row-level security on fifteen tables | The audit log, Telegram chats, the ingest records, the lookup ledger and the notification tables are not under a policy yet; each needs its readers converted first (docs/17 F51). The schema owner's password still reaches the runtime services (docs/17 F52). |
+| Row-level security on five tables | The audit log and the ingest record family (records, victim credentials, dead letters, PII authorisations) are not under a policy yet; each needs its readers converted first (docs/17 F51). The schema owner's password still reaches the runtime services (docs/17 F52). Both were built in part on 2026-10-02 and 2026-10-03 and stopped before they merged. |
 | CI typecheck | No annotations to check against (decision 42). |
-| A collector process | The persona vault runs inside the API process, so invariant 7 is a property of the code's shape rather than of a network boundary. Splitting it out is behind L3 and a queue nothing has needed. The egress proxy is a separate process, and the persona's exit credential is sealed for it alone. |
-| Isolating the analysis children | Static triage and forum parsing run hostile input in bounded child processes that can still read the secrets of other processes of the same user on Linux and reach the database host (docs/17 F42). A container with no secrets and no network is a deployment change not made. |
-| Redis isolation, enforced | `redis_limiter_isolated` reports keys in the limiter's Redis that the limiter did not write, and the production compose runs it `noeviction`. Whether another tenant will write there later is a deployment fact the runtime can only report, not prevent. |
-| The cron jobs and a published credential | Under `NOCTORNAL_ENV=production` the API refuses to start on a credential this repository publishes. `collection_poll.py`, `notify_drain.py` and the migration job do not run that check: they share `secrets.env` with the API, which will not start, but they would run. `lookup_drain.py` checks for published credentials itself, and `sample_screen.py` and `sandbox_dispatch.py` run the whole environment check. `verify_environment` also checks API-only settings, so the other jobs need their own subset before they can call it. |
+| A collector process | The persona vault runs inside the API process, so invariant 7 is a property of the code's shape rather than of a network boundary. On 2026-10-02 the owner decided to split it out: a collector process that alone holds the persona key, with the API queueing persona acts for it (docs/00 decision 174), reversing the rule that there is no collector process. It was built in part and stopped before it merged, so Alpha 8 is unchanged. The egress proxy is a separate process, and the persona's exit credential is sealed for it alone. |
+| Isolating the analysis children | Static triage and forum parsing run hostile input in bounded child processes that can still read the secrets of other processes of the same user on Linux and reach the database host (docs/17 F42). A container with no secrets and no network is a deployment change not made; an isolated worker was built in part and stopped before it merged. |
+| Redis isolation, enforced | `redis_limiter_isolated` reports keys in the limiter's Redis that the limiter did not write, and the production compose runs it `noeviction`. Whether another tenant will write there later is a deployment fact the runtime can only report, not prevent. Enforcing it with a Redis ACL was built in part and stopped before it merged. |
+| The cron jobs and a published credential | Under `NOCTORNAL_ENV=production` the API refuses to start on a credential this repository publishes. `collection_poll.py`, `notify_drain.py` and the migration job do not run that check: they share `secrets.env` with the API, which will not start, but they would run. `lookup_drain.py` checks for published credentials itself, and `sample_screen.py` and `sandbox_dispatch.py` run the whole environment check. `verify_environment` also checks API-only settings, so the other jobs need their own subset before they can call it. A shared refusal for every job script was built in part and stopped before it merged. |
 
 ---
 
 ## What remains open
 
-**Named and not built.**
+**Stopped before it merged.** The beta build was stopped on 2026-10-03 at
+the owner's instruction and released as Alpha 8 with what had merged. Each
+of these was in progress and none is in Alpha 8:
 
-- The authenticated forum path: reading a board that needs a signed-in
-  persona. The public-read adapters are built; a member read of a forum
-  waits on its own slot, and on L3.
+- Row-level security on the last five tables: the audit log and the ingest
+  record family (docs/17 F51).
+- The schema owner's password out of the runtime services (docs/17 F52).
+- Redis isolation enforced by an ACL rather than only reported.
+- The cron scripts' check for a published credential (above).
+- An isolated worker for the analysis children (docs/17 F42).
+- The persona vault split into a collector process, which the owner decided
+  on 2026-10-02 (docs/00 decision 174).
 - REGE (regular equivalence), beside CONCOR.
 - Archive expansion in the sample pipeline.
-- A deployment-wide sweep of collected documents past their clock, and who
-  runs it under which authority (docs/17 F30).
+- The authenticated forum path: reading a board that needs a signed-in
+  persona. The public-read adapters are built; a member read of a forum
+  also waits on L3.
 - Compartments on collection sources, so adapter-collected documents can
   carry them (docs/17 F43).
 - A run of the Telegram adapter against Telegram itself, and a test of a
-  persona's run, act and stop through the real egress listener (docs/17 F31).
-- Refusing a persona on a profile that cannot carry persona traffic at
-  creation (docs/17 F35); keeping a typed Telegram id in a run's warnings
-  (docs/17 F36); gpg's double-spaced fingerprint in a contact block (docs/17
-  F37); watches on forum signatures and Telegram chats (docs/17 F47).
-- A versioned webhook signature with a timestamp (docs/17 F28).
+  persona's run, act and stop through the real egress listener (docs/17
+  F31). The adapter has still never met Telegram.
+
+**Named and not built.**
+
+- A sweep for dead letters and ingest records attached to no case, which
+  nothing destroys when their clock runs out (docs/17 F55).
+- A route or console form that creates a watch (docs/17 F53).
+
+**The 2026-10-03 review.** An adversarial review of the beta build at commit
+718f92d kept 82 findings: 16 high, 25 medium and 41 low, none critical.
+None is fixed in Alpha 8; fixes were in progress when the build stopped.
+docs/17, "Open from the 2026-10-03 review", lists every high and medium
+finding with its area, and release/CHANGELOG.md, Alpha 8, names the classes
+of the high ones.
 
 **Legal blocks.** L1 to L5 in docs/16, above. Nothing here changes them.
 
@@ -178,29 +224,24 @@ release candidate, and 1 finished after a review of that pass). Two
 reviews of the fixes found 43 and then 50 more, all fixed. The seven gaps
 the known-open list named are closed too (release/CHANGELOG.md, Alpha 6).
 
-What was left after it is built since (L1 to L6 above), apart from one thing:
+What was left after it is built since (L1 to L6, and owner question 11 in
+Alpha 8), and one thing stays an analyst's work:
 
-- Claims accepted from Triage before Alpha 6 with no observation date, and
-  ATTRIBUTE claims readable below their material or attached across cases,
-  are listed by `scripts/legacy_records.py` and shown on the readiness
-  register; filling the dates waits on an owner decision amending invariant
-  5.
+- Claims accepted from Triage before Alpha 6 with no observation date are
+  dated by supersession (the inspector's Date this claim) and are still
+  listed by `scripts/legacy_records.py` and shown on the readiness
+  register; ATTRIBUTE claims readable below their material or attached
+  across cases are listed too, and are retracted by an analyst.
 
 ---
 
 ## Open questions for the owner
 
-- **May an observation date be filled on Triage claims accepted before
-  Alpha 6?** Nothing fills them, because writing a date onto a recorded
-  claim rewrites it, which invariant 5 forbids. Filling them needs an
-  amendment to invariant 5 saying when a claim may gain a field it never
-  had, and who may make that change (docs/00 open question 11).
-- **Does the second person on a case's merge switch need a seasoning rule?**
-  Turning the switch off takes a second holder of `case.update` on the case,
-  so an account holding SYS_ADMIN and CASE_OWNER can create that second
-  person and approve its own relax. The seven-day countersigner rule the
-  deployment-wide policy uses would close it, and would change case
-  approvals analysts already rely on (docs/00 open question 12, docs/17 F39).
+None of the numbered questions is open: both were settled on 2026-10-02
+(docs/00 decisions 169 and 170). Two judgements in docs/17 wait on the
+owner: who runs the document sweep, and under which authority (F30, with
+counsel), and whether dead letters and caseless ingest records join it
+(F55).
 
 ## Open questions for the operator
 

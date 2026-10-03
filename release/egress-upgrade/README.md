@@ -32,13 +32,19 @@ labelled with the file it belongs in. Nothing is written anywhere.
 ```sh
 cp infra/production/egress-proxy.env.example  infra/production/egress-proxy.env
 cp infra/production/egress-client.env.example infra/production/egress-client.env
-cp infra/production/postgres-init.env.example infra/production/postgres-init.env
+[ -e infra/production/postgres-init.env ] || cp infra/production/postgres-init.env.example infra/production/postgres-init.env
 chmod 600 infra/production/egress-*.env infra/production/postgres-init.env
 ```
 
 Fill them from step 1. Choose a password for the egress role and write it in
 `postgres-init.env` and inside `NOCTORNAL_EGRESS_DATABASE_URL`. None of this
 goes in `secrets.env`.
+
+The `cp` of `postgres-init.env` is guarded because that file may already be
+there: from the 2026-10-02 release it also holds the schema owner's password
+(`release/secrets-upgrade/README.md`), and a copy of the template over it
+would put a placeholder back in its place. Write the egress password into the
+file that is there.
 
 ## 3. Create the role on the existing volume
 

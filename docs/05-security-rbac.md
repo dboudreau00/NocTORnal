@@ -380,6 +380,29 @@ switch carries an epoch that moves with every change, so an approval
 cannot be kept across an off and on again. Under `ALWAYS` a case cannot
 turn it off at all.
 
+**The second person is seasoned** (F39, settled by the owner 2026-10-02).
+An account holding SYS_ADMIN and CASE_OWNER could otherwise create a second
+Lead investigator, assign it to the case and approve its own relax within
+the minute. So the second person must have held `case.update` on the case
+for at least `NOCTORNAL_RELAX_SEASONING_DAYS` days (7 unless declared, and
+0 turns the rule off; a value that is not a whole number from 0 to 365 is
+held to 7 and refused at a production boot). The age is the assignment's
+`granted_at`, compared with the database's clock in one statement, so the
+request never supplies the time that counts; a re-grant restarts it, and
+nobody can move it back. The decide route refuses with a sentence that
+names the rule and the date the colleague becomes eligible (UTC), the
+policy read and the approvals list say so beforehand, the refusal is
+audited (`DUAL_CONTROL_COUNTERSIGN_REFUSED`, reason `assignment_seasoning`),
+and the spend is judged again at the instant they approved
+(`DUAL_CONTROL_APPLY_REFUSED`), which closes a window declared after the
+decision and a grant that was repeated or withdrawn in between. Rejecting is
+never blocked, a merge's own second person is not seasoned, and the
+database does not check the rule, because it cannot read the setting. What
+the rule does not stop is an administrator who resets the credentials of a
+colleague who is already seasoned and signs in as them: the deployment-wide
+policy's seven-day countersigner rule covers that for policy changes, and
+this switch has no equivalent.
+
 **LIAISON** is for external sharing. Time-boxed by default (`expires_at`
 required), capped at a TLP level, export disabled, single case. Most
 platforms bolt external sharing on later and it becomes the leak path;
@@ -575,11 +598,13 @@ How that is held in `break_glass.py` and `stores.py` (final review,
   2026-09-09):** decrypted only inside `PersonaVault.use()`, which yields
   the plaintext to one block, drops it and audits the use; no
   `get_secret()`, no plaintext in a response, adapter errors redacted
-  before storage. The vault runs INSIDE the API process (there is no
-  separate collector), so this is a guarantee about the shape of the code,
-  not about a network boundary, and a compromised API host is a
-  compromised vault. Splitting a collector out is a deliberate not-yet
-  (`docs/02`).
+  before storage. Since 2026-10-02 the vault opens only with
+  `NOCTORNAL_PERSONA_KEK`, a key of its own that in production only the
+  collector service holds (`scripts/collector.py`); the API process holds
+  no persona key and queues every persona act (`persona_acts.py`), so a
+  compromised API host is no longer a compromised vault, while a
+  compromised collector host still is. Until then the vault ran inside the
+  API process and this was a guarantee about the shape of the code alone.
 - Key rotation runbook with re-wrap, not re-encrypt, **shipped
   2026-09-11**: the envelope selects the key by each blob's recorded
   `key_id`, retired keys stay in `NOCTORNAL_TOTP_KEK_RETIRED` until
@@ -612,40 +637,47 @@ Since Alembic 0168 (F51, 2026-10-02) the log is under row-level security.
 A request reads a row in a case it may read, a case-less row its user
 wrote, every row under a global `audit.read` (the Security Officer's
 search), or a case-less ingest row under a global `ingest.manage` (the
-operator's quarantine queue), and appends a row that names nobody or the
-user it is bound to, whatever case the row names (so a request cannot write
-history in another user's name; the events about a user the connection is
-not bound to, such as a session refused before the binding, go on a system
-connection for the AUDIT_APPEND purpose; the sample origin, which holds no
-system connection, names a ticket's holder in the four ticket events by
-presenting the ticket first). The chain trigger and the
-countersigning rule read the whole log as the definer (0166), so an append
-chains to the true tail whoever makes it, and the chain and custody
+operator's quarantine queue), and appends any row, whatever case it names:
+the log is append-only and every writer appends, including one that may read
+none of it. What a request may NAME on a row is not the policy's to say. A
+trigger pins it (0150): an actor must be the user the connection is bound to,
+or the holder of a ticket it spent; another user is refused; a claim from a
+connection bound to nobody is kept in `detail` as `unverified_actor_id` with no
+actor. So a request cannot write history in another user's name, and an event
+about a user the connection is not bound to (a session refused before the
+binding, a sign-out whose session has just ended) is written on a system
+connection, or on a side connection bound to the caller's own session, or kept
+as a claim, so the attribution check does not cost the row. The chain trigger
+(0149) and the countersigning rule (0166) read the whole log as the definer, so
+an append chains to the true tail whoever makes it, and the chain and custody
 verification walk every row as the AUDIT_VERIFY system purpose.
 
-Since Alembic 0153 (2026-10-03) the chain trigger takes its lock first, then
-draws the sequence and reads the clock, then reads the tail, so concurrent
-writers form one chain (before it they forked it in ordinary traffic), and
-the same holds for the custody ledger. The time of a row is the database
+Since Alembic 0149 (2026-10-03) the chain trigger takes its lock first, then
+draws the sequence, reads the clock and reads the tail, so concurrent writers
+form one chain (before it they forked it in ordinary traffic), and the same
+holds for the custody ledger. The time of a request's row is the database
 server's clock at the append, read inside the lock: never the caller's, and
 never the start of a transaction a request holds open (`now()` is that start,
 and a request-role transaction held open stamped its row in the past by its
-own age). Time order is therefore chain order, unless the server's own clock
-steps back; the verifier orders by `seq` and does not read time as evidence.
-The tail read is exact only where each statement takes a new snapshot, so the
-trigger refuses an append from a transaction that is not READ COMMITTED
-(REPEATABLE READ and SERIALIZABLE, which a request may choose for itself,
-would chain off a stale tail and fork the log). A fork written since 0153
-makes `GET /audit/verify` answer not intact; forks older than the
-`AUDIT_CHAIN_SERIALISED` row that revision appends are listed and not
-counted.
+own age). The owner and the system role keep the time they supply. Time
+order is therefore chain order, unless the server's own clock steps back; the
+verifier orders by `seq` and does not read time as evidence. The tail read is
+exact only where each statement takes a new snapshot, so the trigger refuses
+an append from a transaction that is not READ COMMITTED (REPEATABLE READ and
+SERIALIZABLE, which a request may choose for itself, would chain off a stale
+tail and fork the log). A fork whose rows were all written since 0149 makes
+`GET /audit/verify` answer not intact; forks with a row from before it are
+listed and not counted. Since 0169 the two ledger sequences are the triggers'
+alone: the runtime roles hold no privilege on them, because
+`SELECT last_value` read the size of a log they may read none of.
 
 `intact` is relative: it cannot see rows removed from the end of the log, or a
 rewrite that recomputes every later hash (the hash is unkeyed, and the schema
 owner can recompute it). Every answer says so. To close it, record
-`tail_seq` and `tail_row_hash` somewhere the database cannot reach (`python
-scripts/audit_anchor.py` prints them) and pass them back as `anchor_seq` and
-`anchor_hash`: the check fails when that row is gone or has changed.
+`tail_seq` and `tail_row_hash` somewhere the database cannot reach and pass
+them back as `anchor_seq` and `anchor_hash`: the check fails when that row is
+gone or has changed. `python scripts/audit_verify.py --anchor-file ...
+--record` does both for the audit log and the custody ledger from a shell.
 
 Log at minimum: authentication (success and failure), authorisation
 denials, every read of evidence, every graph mutation, every export, every

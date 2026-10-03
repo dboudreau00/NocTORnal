@@ -39,6 +39,25 @@ from _env import load_env_local  # noqa: E402
 load_env_local()
 
 
+def triage_seeded(conn, store, settings, seeded) -> tuple[int, bool]:
+    """Static triage over only the samples this run seeded (their bytes are
+    the ones held): `(runs, interrupted)`. A run the isolated analysis
+    worker failed under goes back to the queue at the same attempt, so a
+    loop that claimed until nothing was left would claim it again for ever:
+    it stops there instead (F42 review, 2026-10-02)."""
+    from noctornal_api import lab_triage
+    ran = 0
+    while seeded:
+        claimed, _skipped = lab_triage.claim(conn, settings, among=seeded)
+        if claimed is None:
+            return ran, False
+        status = lab_triage.run_claimed(conn, store, claimed, settings)
+        ran += 1
+        if status == lab_triage.INTERRUPTED:
+            return ran, True
+    return ran, False
+
+
 def _entropy_bytes(magic: bytes, size: int, alphabet: int) -> bytes:
     """`alphabet` distinct byte values gives roughly log2(alphabet) bits of
     entropy, so the triage figure lands where the comment says it will
@@ -224,16 +243,12 @@ def main() -> int:
     if args.triage:
         from noctornal_api import lab_triage
         settings = lab_triage.settings_or_default()
-        ran = 0
-        # Only the samples this run seeded: their bytes are the ones held.
-        while seeded:
-            claimed, _skipped = lab_triage.claim(conn, settings, among=seeded)
-            if claimed is None:
-                break
-            lab_triage.run_claimed(conn, store, claimed, settings)
-            ran += 1
+        ran, interrupted = triage_seeded(conn, store, settings, seeded)
         print(f"static triage ran on {ran} "
               f"{'sample' if ran == 1 else 'samples'}")
+        if interrupted:
+            print("static triage stopped: the isolated analysis worker failed "
+                  "under a sample, which is queued again (docs/17 F42)")
     print(f"seeded {made} {'sample' if made == 1 else 'samples'}"
           + (f" onto {args.case}" if args.case else " unattached"))
     print("Nothing written here is malware: every payload is a synthetic "
