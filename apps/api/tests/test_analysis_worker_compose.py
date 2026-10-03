@@ -215,13 +215,20 @@ def test_the_image_the_worker_runs_carries_none_of_the_operators_secret_files():
     rules = lines(".dockerignore")
 
     def excluded(path: str) -> bool:
+        # Docker's order: the LAST rule that matches decides, and a leading
+        # "!" puts a path back (the tracked .env.example templates, which the
+        # installers copy and which hold placeholders, not secrets)
+        state = False
         for rule in rules:
-            if rule.endswith("/"):
-                if path.startswith(rule):
-                    return True
-            elif fnmatch.fnmatchcase(path, rule):
-                return True
-        return False
+            negated = rule.startswith("!")
+            body = rule[1:] if negated else rule
+            if body.endswith("/"):
+                hit = path.startswith(body)
+            else:
+                hit = fnmatch.fnmatchcase(path, body)
+            if hit:
+                state = not negated
+        return state
 
     for path in secret_paths:
         assert excluded(path if not path.endswith("/") else path + "private.key"), path

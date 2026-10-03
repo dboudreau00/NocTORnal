@@ -239,12 +239,15 @@ _KEPT = {
     "caddy": {"NET_BIND_SERVICE"},
     "postgres": {"CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"},
     "redis": {"DAC_OVERRIDE"},
+    # the isolated analysis worker (F42) drops to its children's uid and
+    # kills their process group; nothing else
+    "analysis-worker": {"KILL", "SETGID", "SETUID"},
 }
 
 
 def test_every_service_drops_all_capabilities_and_keeps_only_what_is_listed():
     services = _services()
-    assert set(services) == set(APP_ONLY) | {"caddy", "egress-proxy"}
+    assert set(services) == set(APP_ONLY) | {"caddy", "egress-proxy", "analysis-worker"}
     for name, service in services.items():
         assert service.get("cap_drop") == ["ALL"], name
         assert set(service.get("cap_add") or []) == _KEPT.get(name, set()), name
