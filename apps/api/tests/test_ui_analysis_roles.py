@@ -74,6 +74,7 @@ function syncAnalysisSizeOptions() {}
 const order = [];
 function renderAnalytics() { order.push('drawn'); }
 function loadConcor(storedOnly) { order.push('roles:' + storedOnly); return new Promise(() => {}); }
+function loadRege() {}
 function storedRunStatus() { return 'Showing the run of x.'; }
 function loadKeyPlayer(storedOnly) { order.push('kpp:' + storedOnly); }
 function loadMetricHistory() {}

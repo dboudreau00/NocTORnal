@@ -1518,6 +1518,31 @@
             </div>
             <div id="an-concor"></div>
 
+            <!-- REGE (2026-10-02): regular roles, their own run stored for
+                 each number of roles and way of counting ties, read after
+                 the table is drawn. -->
+            <h3 class="h3">Regular roles: the same kinds of ties to the same kinds of others</h3>
+            <div class="pane-head">
+              <label class="field inline">
+                <span class="label">Roles</span>
+                <select id="an-rege-roles" class="select">
+                  <option value="2">Up to 2 roles</option>
+                  <option value="3">Up to 3 roles</option>
+                  <option value="4" selected>Up to 4 roles</option>
+                  <option value="6">Up to 6 roles</option>
+                  <option value="8">Up to 8 roles</option>
+                </select>
+              </label>
+              <label class="field inline">
+                <span class="label">Ties count</span>
+                <select id="an-rege-weighting" class="select">
+                  <option value="presence" selected>As present or absent</option>
+                  <option value="weight">By weight</option>
+                </select>
+              </label>
+            </div>
+            <div id="an-rege"></div>
+
             <h3 class="h3">Signed balance</h3>
             <div id="an-balance"></div>
           </div>

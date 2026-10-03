@@ -1,5 +1,6 @@
 """Phase 3 analytics endpoints: the SNA suite, key player, role analysis
-(CONCOR), and per-node metric history.
+(CONCOR, and regular roles by REGE since 2026-10-02), and per-node metric
+history.
 
 Everything is computed against a named projection and every response
 carries the parameters that produced it, because a metric without its
@@ -45,8 +46,19 @@ from noctornal_api.projections import (
     ProjectionTooLarge,
     validate_projection,
 )
+from noctornal_api.rege import (
+    DEFAULT_WEIGHTING,
+    REGE_DEFAULT_ROLES,
+    REGE_MAX_ROLES,
+    REGE_MIN_ROLES,
+    WEIGHTINGS,
+)
 
 router = APIRouter(prefix="/cases/{case_id}/analytics", tags=["analytics"])
+
+#: How REGE counts a tie (2026-10-02), from the module's own list: an
+#: unknown value is FastAPI's 422, as a CONCOR depth out of range is.
+_REGE_WEIGHTING = "^(" + "|".join(WEIGHTINGS) + ")$"
 
 # The per-node metrics that can be charted over time. Constrained to a
 # whitelist so the history query cannot be steered by arbitrary input.
@@ -362,6 +374,59 @@ def concor_latest(
         raise Problem(404, "Not found",
                       "no completed role analysis at this depth for this "
                       "projection at your clearance yet")
+    return found.as_response()
+
+
+@router.get("/rege", response_model=dict,
+            dependencies=[Depends(rate_limit("analytics.rege")),
+                          Depends(_one_mode_meter)])
+def rege(
+    case_id: UUID,
+    roles: int = Query(REGE_DEFAULT_ROLES, ge=REGE_MIN_ROLES, le=REGE_MAX_ROLES,
+                       description="At most this many roles; fewer when entities "
+                                   "are alike at the level of the cut"),
+    weighting: str = Query(DEFAULT_WEIGHTING, pattern=_REGE_WEIGHTING,
+                           description="presence: a tie is present or absent; "
+                                       "weight: ties count by their weights"),
+    p: Projection = Depends(analysis_projection),
+    decay_half_life_months: float | None = Query(None),
+    force: bool = Query(False),
+    user: CurrentUser = Depends(require("analytics.run")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """Regular roles by REGE (ROADMAP-REMAINING phase 3, 2026-10-02):
+    entities with the same kinds of ties to the same kinds of others, cut
+    into at most `roles` roles. CONCOR's pattern: cached on the graph hash,
+    the roles, the weighting and every tie's direction, on its own meter.
+    The decay parameter names the same projection row as CONCOR's and moves
+    no role."""
+    params = _params(decay_half_life_months, 1.0)
+    return _answer(lambda: _svc(conn, user, case_id).rege(
+        p, params, roles=roles, weighting=weighting, force=force).as_response())
+
+
+@router.get("/rege/latest", response_model=dict,
+            dependencies=[Depends(rate_limit("graph.view")),
+                          Depends(_one_mode_meter)])
+def rege_latest(
+    case_id: UUID,
+    roles: int = Query(REGE_DEFAULT_ROLES, ge=REGE_MIN_ROLES, le=REGE_MAX_ROLES),
+    weighting: str = Query(DEFAULT_WEIGHTING, pattern=_REGE_WEIGHTING),
+    p: Projection = Depends(analysis_projection),
+    decay_half_life_months: float | None = Query(None),
+    user: CurrentUser = Depends(require("analytics.run")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """The most recent completed regular-role run for this projection,
+    number of roles and weighting, with `computed_at` and a checked
+    `current`; 404 when there is none. Served exactly as computed."""
+    params = _params(decay_half_life_months, 1.0)
+    found = _answer(lambda: _svc(conn, user, case_id).latest_rege(
+        p, params, roles=roles, weighting=weighting))
+    if found is None:
+        raise Problem(404, "Not found",
+                      "no completed regular-role analysis with these roles and "
+                      "this weighting for this projection at your clearance yet")
     return found.as_response()
 
 
