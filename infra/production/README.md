@@ -273,8 +273,8 @@ docker compose -p noctornal-prod -f infra/production/compose.yml logs -f migrate
 ```
 
 `migrate` and `minio-init` are one-shot and are expected to sit in `exited
-(0)`. Everything else should be `running`, and `api` and `sample-origin`
-should reach `healthy`.
+(0)`. Everything else should be `running`, and `api`, `sample-origin` and
+`analysis-worker` should reach `healthy`.
 
 ### If the API refuses to start
 
@@ -592,6 +592,233 @@ the passive default and the smtp and webhook routes from your current
 settings and creates them when you confirm. Until adopt has run, feeds and
 deliveries are refused for want of a route, and the readiness row
 `egress_routes_cover_sources` says so.
+
+---
+
+## Analysis worker
+
+Static triage and forum parsing read bytes written by the people under
+investigation. Each read runs in a bounded child process, and a child
+started beside the application can, on Linux, read the environment of
+every process of the same user (all of `secrets.env`) and reach the
+database over the shared network (`docs/17` F42). So in this deployment
+no such child runs in `api`, `cron` or `lab-triage`. They hand each read
+to the **analysis worker**, a container with no secrets and no network,
+over a Unix socket, and it starts the same child with the same limits.
+
+It is not a task worker: there is no queue, nothing is scheduled, and each
+request is one connection and one child. What `compose.yml` gives it:
+
+* no `env_file` and no variable but its own three settings (the table
+  below) and what Docker and the base image set. The worker refuses to
+  start holding any other variable, and readiness asks it what it holds;
+* `network_mode: none`, so loopback only: no route, no DNS, no database;
+* a read-only root, a `/tmp` that only root can write, `no-new-privileges`,
+  a pids limit of 128 (a number from what its slots need up to four times
+  that) and a memory limit of 6 GiB;
+* `ipc: none` and four sysctls (`kernel.shmmax` 0, `kernel.msgmni` 0,
+  `kernel.sem` `0 0 0 0`, `fs.mqueue.queues_max` 0), so a child can create
+  no shared memory, message queue or semaphore set that outlives it (see
+  below);
+* `init: true`, so the processes the worker kills are reaped;
+* user `0:10001` with `cap_drop: [ALL]` and only `KILL`, `SETGID` and
+  `SETUID` added. It is root because it gives every child a user of its
+  own (next section) and must be able to stop that user's processes. It
+  parses nothing itself: it moves bytes, bounded, between the socket and
+  a child's pipes. It refuses to start with any other capability, without
+  `no-new-privileges`, as PID 1, with a pids limit that is absent, cannot
+  hold its slots or is more than four times what they need, or in a
+  container that lets a child leave state behind;
+* one volume, `analysis-socket`: a tmpfs owned by root, group `10001`, mode
+  `0750`. `api`, `cron` and `lab-triage` (user `10001`, the group) mount it
+  read-only and can pass through it to the socket, which is mode `0660`.
+  No child's user can even enter it.
+
+### What a compromised child can and cannot do
+
+A parser exploit runs as a child of the worker. Slot N of the worker runs
+its child as uid `10100 + N` (gid the same, no supplementary group, no
+capability), so:
+
+* it cannot unlink, bind or connect to the worker's socket, and it cannot
+  signal, trace or read the memory of the worker or of another slot's
+  child. That does not depend on the host's `kernel.yama.ptrace_scope`: the
+  uids differ and the child holds no capability, so no setting lets it in.
+  (Under `--shared-uid`, which is development only, every child shares the
+  worker's uid, a scope of `0` would let one read a concurrent request's
+  payload, and the readiness row fails);
+* a task limit of 16 processes and threads is set on its uid before its
+  program starts, so it cannot spend the container's pids and leave the
+  worker without a thread for anybody else, and a child that forks until
+  it is stopped is stopped at 16;
+* it ranks first for the kernel's out-of-memory killer, so when the
+  container's memory runs out the kernel kills a child and not the worker;
+* before the request is answered every process of that uid is killed, so
+  what it detached with `setsid` does not outlive its request, whether or
+  not the helper kept the child's stdout. The kill comes before anything
+  waits on the child's pipes: until 2026-10-03 it came after, and a helper
+  that kept a pipe open wedged the request for as long as it lived, which
+  cost the slot for good and left no signal but the readiness row. A slot
+  whose uid cannot be emptied, or whose emptying fails, is retired, and with
+  none left the worker exits so that Docker restarts it clean;
+* it can create nothing that outlives its request. SysV shared memory used to
+  survive every process of its uid, count against the container's memory
+  limit and be readable by a child of another slot, so that a few requests
+  were enough to fill the limit and have the worker killed for it; POSIX
+  shared memory (`/dev/shm`), POSIX message queues and files in `/tmp` did
+  the same, and the worker, which holds no capability that overrides
+  ownership, could remove none of it. `ipc: none` leaves the container no
+  `/dev/shm`, the sysctls leave a child unable to create a segment, a queue
+  or a semaphore set, and `/tmp` is a tmpfs of root's with mode `0755`, so no
+  child's user can write in it (nothing a child runs writes there). The
+  worker reads each of these from its own process, refuses to start unless
+  they hold, and the readiness row fails when its hello says one is open.
+
+What remains:
+
+* The uids `10100` to `10115` must own nothing else on the host, a second
+  analysis worker included. The task limit counts a uid's processes over the
+  whole host, not per container, so a second worker would spend the first
+  one's 16.
+* The container's settings are what keep a child from leaving state behind,
+  and the worker can only read that they are set, not that the runtime
+  honours them. A kernel keyring is the one other object a plain user can
+  leave; Docker's default seccomp profile refuses it, and a container
+  started with no seccomp profile is outside this claim.
+* Where there is no uid to empty, the local runner (development, and
+  `NOCTORNAL_ANALYSIS_LOCAL=1`) stops the child's process group, but a
+  helper that left the child's session keeps the child's pipes and lives on.
+  The run no longer waits for it (it is answered after five seconds at most)
+  and nothing it writes afterwards reaches the answer, but the process stays
+  until it exits or is killed.
+* A kernel or container-runtime escape from the worker's container is not
+  addressed, and a compromised child can still return false findings,
+  which the application validates by shape only.
+
+| Variable | Set on | What it does |
+|---|---|---|
+| `NOCTORNAL_ANALYSIS_SOCKET` | the worker, `api`, `cron`, `lab-triage` | the socket the worker listens on and the others connect to |
+| `NOCTORNAL_ANALYSIS_WORKER_CONCURRENCY` | the worker | requests run at once, 1 to 16 (default 2); others wait up to 30 seconds for a slot. The service's `pids_limit` must hold 40 plus 20 a slot and be at most four times that, and the worker refuses to start when it is not |
+| `NOCTORNAL_ANALYSIS_WORKER_MAX_BYTES` | the worker | the largest request it reads (default `1GiB`); it must hold a sample at the analysis maximum plus a compiled YARA build, and readiness says when it cannot |
+| `NOCTORNAL_ANALYSIS_LOCAL` | nowhere, by default | `1` runs analysis in a local child instead, beside this deployment's secrets |
+
+**When it is down, nothing falls back.** A triage pass prints `refused:`
+and exits 1, leaving the queue as it was; an analyst's "run it now" waits
+for the next pass; a forum poll is refused before its first request, with
+the reason on the run. A worker that fails in the middle of a pass is the
+sandbox's state and not the sample's or the forum's: the run goes back to
+the queue at the same attempt, a compile keeps its attempts, and a poll
+ends BLOCKED with no failure counted and no parser drift, keeping its
+cursor so the next poll reads the same pages again (the pages it fetched
+are not stored). The pass stops and exits 1 saying `interrupted=1`. A
+worker that answers but refuses every request, for example because
+`NOCTORNAL_ANALYSIS_WORKER_MAX_BYTES` is below a sample, therefore costs
+one failed run row a pass, saying the worker refused it, and the same
+request is queued again at the same attempt: nothing is lost and no
+attempt is spent, and the readiness row says why.
+
+The readiness row `sample_static_analysis` goes red and says why. A
+production deployment with no `NOCTORNAL_ANALYSIS_SOCKET` behaves the same
+way: the console starts, and analysis is refused until the socket is set. A
+setting that is set and unusable (a relative path, or both variables at
+once) is refused at start, by name. Asking the worker is remembered for
+five seconds and asked by one caller at a time, so a worker that accepts
+and never answers costs one wait of at most ten seconds, not one per forum
+source in a list.
+
+`NOCTORNAL_ANALYSIS_LOCAL=1` is the explicit way out, for a host that cannot
+run the worker: analysis runs in local children again, and the readiness
+row stays red, saying so. It is a decision about where hostile bytes are
+parsed, so write down who took it.
+
+**Memory.** Each running request holds its payload once while it arrives
+(a 256 MiB request peaked the worker at 286 MiB, measured on 2026-10-03), a
+child bounded by `NOCTORNAL_SAMPLE_ANALYSIS_MEMORY` (2 GiB of address space
+by default) and its output (8 MiB for a step, up to 256 MiB for a compile).
+Two YARA scans at their worst, a 256 MiB sample plus a build of up to
+256 MiB each, are 2 x (512 MiB + 2 GiB + 8 MiB), about 5.2 GiB, and 6 GiB
+holds that. Two 512 MiB requests at once, as hash steps, peaked the worker
+at 1.03 GiB and the container at 2.6 GiB. With a 160 MiB limit a child that
+outgrew it was killed twice, both requests were answered as crashed steps,
+and the worker kept serving. The limit stops holding where the
+application's own are raised: `NOCTORNAL_ANALYSIS_WORKER_MAX_BYTES` above
+its default, a larger sample cap or a higher concurrency. Raise the
+service's `mem_limit` with them.
+
+Confirm it after every change to Docker or to this file:
+
+```sh
+docker compose -p noctornal-prod -f infra/production/compose.yml exec analysis-worker \
+  python -m noctornal_api.analysis_worker --check        # exit 0: it answers
+docker inspect noctornal-prod-analysis-worker-1 --format \
+  '{{.HostConfig.NetworkMode}} {{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}} {{.HostConfig.CapAdd}} {{.Config.User}} {{.HostConfig.Init}}'
+# none true [ALL] [CAP_KILL CAP_SETGID CAP_SETUID] 0:10001 true
+# (an older Docker prints the three without the CAP_ prefix)
+docker inspect noctornal-prod-analysis-worker-1 --format \
+  '{{.HostConfig.IpcMode}} {{.HostConfig.Sysctls}} {{.HostConfig.PidsLimit}}'
+# none map[fs.mqueue.queues_max:0 kernel.msgmni:0 kernel.sem:0 0 0 0 kernel.shmmax:0] 128
+docker compose -p noctornal-prod -f infra/production/compose.yml exec -u 10100:10100 analysis-worker \
+  python -c "open('/tmp/x', 'w')"
+# must FAIL with "Permission denied": a child's user can write nothing there
+docker compose -p noctornal-prod -f infra/production/compose.yml exec analysis-worker \
+  python -c "import socket; socket.create_connection(('192.0.2.1', 443), 3)"
+# must FAIL with "Network is unreachable": 192.0.2.1 is a documentation
+# address nothing routes, so this sends nothing anywhere
+docker compose -p noctornal-prod -f infra/production/compose.yml exec -u 10100:10100 analysis-worker \
+  python -c "import os; os.unlink('/run/noctornal-analysis/worker.sock')"
+# must FAIL with "Permission denied": a child's user cannot touch the socket
+docker compose -p noctornal-prod -f infra/production/compose.yml exec analysis-worker env
+# only PATH, HOME, HOSTNAME, the python image's own variables and
+# NOCTORNAL_ANALYSIS_*
+```
+
+The readiness row asks the worker the same questions itself, and asks the
+running process rather than reading this file: the names in its
+environment, its network interfaces, its user and capabilities,
+`no-new-privileges`, a read-only root, how it keeps its children apart and
+the task limit it gives them, its pids limit (a number from what its slots
+need up to four times that), the state a child could leave behind, any slot
+it has retired (a worker that has lost one is running at reduced capacity),
+its parser versions (they must be the API's, so rebuild both together) and
+the largest request it takes. It runs the child's selftest through the
+worker as well, which must not reach the database host. Every one of those
+it does not report, or reports wrong, fails the row.
+
+What was shown with docker, and what was not. The network and environment
+checks above were shown on 2026-10-02, and everything else on 2026-10-03,
+with the `noctornal-api:0.5.2` image and this tree's code mounted read-only
+(a 0.7.1 image needs a package index to build). Against the worker as
+`compose.yml` starts it: a child that exhausts the pids, a child that
+forks a hundred helpers and hangs, a child that detaches processes into a
+new session, a child that tries to replace the worker's socket, and one
+slot's child reading another's memory. None of them stopped the worker,
+left a process behind, or replaced the socket. The worker refused to start
+in each of five shapes that differ from `compose.yml`, and a selftest and
+a PE step ran through it as uid `10100` with no capability, a task limit
+of 16 and the highest OOM score (the image has no `pefile`, so the step
+answered with that gap). Not shown: a build of the 0.7.1 image under the
+worker's environment allow-list (a base-image bump that adds a variable
+shows as a refused worker, by name, in its log), forum parsing inside a
+container (the image has no `selectolax`), and the host's `ptrace_scope`
+at `0`, which is a host setting this work does not change.
+
+The 2026-10-03 verification round, in containers started as `compose.yml`
+now starts them (the same image and mounted code). A child that detaches a
+helper which keeps its stdout, started with `setsid` or without, used to
+leave its request unanswered for ninety-five seconds, the helper alive and
+the slot lost, and two such requests left every later request answering
+`worker_busy` while the health check stayed green. Now both requests are
+answered in 0.3 seconds, a third request in 0.2, and no process of a child's
+user is left. A compromised child that tried to create SysV shared memory
+(200 MiB), a semaphore set, a message queue, POSIX shared memory, a POSIX
+queue and files in `/tmp` and `/dev/shm` succeeded at all of them under the
+old container settings (the segment stayed after the request, and a later
+request on another slot could use it) and at none under the current ones
+(`EINVAL`, `ENOSPC`, `ENOENT` and permission denied). The worker refused to
+start, by name, with default IPC, with the sysctls missing, with a `/tmp`
+every user could write, with no pids limit (the host's own, 38393, is above
+the ceiling) and with a limit of 100000, and started with the settings as
+they are, reporting a pids limit of 128 and nothing open.
 
 ---
 
@@ -997,8 +1224,9 @@ both names resolve to the same digest, which is how that is checked.
   nothing anywhere reads its verdict on a schedule.
 * **No secrets management.** `secrets.env` is a file on disk in plain text.
   There is no Vault, no KMS, and the TOTP key-encrypting key sits in it.
-  Every container built from the application image receives the whole file.
-  Caddy does not: it has `caddy.env`, with its three values.
+  Every container built from the application image receives the whole file
+  except the analysis worker, which receives none of it. Caddy does not:
+  it has `caddy.env`, with its three values.
 * **`docs/16` L1-L5 are unresolved.** Prohibited content in the sample
   store, stealer logs and third-party personal data at scale, persona
   operation and computer-misuse exposure, message content capture, and

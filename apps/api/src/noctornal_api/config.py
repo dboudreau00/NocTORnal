@@ -782,6 +782,17 @@ def verify_environment(env: Mapping[str, str] | None = None) -> list[str]:
             problems.append(
                 f"{problem}, so {what} would run with limits nobody here "
                 f"decided (the development defaults) or not at all.")
+    # F42, 2026-10-02. Where hostile input is parsed, through the runner's
+    # one reader. Only a value SET and unusable is refused here: an unset
+    # socket in production refuses every analysis at the point of use and
+    # readiness says so, but does not stop the console starting (the F42
+    # decision in docs/00 says why). Named, never quoted.
+    from noctornal_api.analysis_runner import setting_problem
+    runner_problem = setting_problem(env)
+    if runner_problem:
+        problems.append(
+            f"{runner_problem}, so static triage and forum parsing would refuse "
+            f"every request rather than guess where to run.")
 
     # Collection ceilings (docs/00 decision 69, 2026-09-24). A ceiling SET
     # to a label the collector may not read at (invariant 8 caps it at

@@ -836,11 +836,18 @@ services:
       - secrets.env
       - path: egress-client.env
         required: false
+    # The analysis worker's socket, read-only (docs/17 F42): forum pages
+    # polled from the console and an analyst's "run static triage now"
+    # are parsed there, never in this container.
+    volumes:
+      - ./tls:/certs:ro
+      - analysis-socket:/run/noctornal-analysis:ro
     environment:
       NOCTORNAL_ENV: production
       NOCTORNAL_TRUSTED_PROXY_IP: *caddy_ip
       NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
       NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
+      NOCTORNAL_ANALYSIS_SOCKET: /run/noctornal-analysis/worker.sock
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -851,6 +858,10 @@ services:
       # Started, not healthy: the console must come up while the proxy
       # does not, and say so on the readiness register.
       egress-proxy:
+        condition: service_started
+      # The same for the analysis worker: without it analysis is refused
+      # and readiness says why, but the console still serves.
+      analysis-worker:
         condition: service_started
     command:
       - /bin/sh
@@ -1023,10 +1034,16 @@ services:
       - secrets.env
       - path: egress-client.env
         required: false
+    # The collection poll's forum pages are parsed in the analysis worker
+    # (docs/17 F42); its socket, read-only.
+    volumes:
+      - ./tls:/certs:ro
+      - analysis-socket:/run/noctornal-analysis:ro
     environment:
       NOCTORNAL_ENV: production
       NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
       NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
+      NOCTORNAL_ANALYSIS_SOCKET: /run/noctornal-analysis/worker.sock
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -1036,6 +1053,10 @@ services:
       # only fail every source and delivery in the pass.
       egress-proxy:
         condition: service_healthy
+      # Started only: the notification drain must not wait on it, and a
+      # forum source polled while it is down is refused by name.
+      analysis-worker:
+        condition: service_started
     command:
       - /bin/sh
       - -c
@@ -1075,6 +1096,11 @@ services:
   # object store (the CA bundle, as cron) and sends nothing out. A deployment
   # that must share a loop can pass --budget SECONDS instead.
   #
+  # Every step's child runs in the analysis worker below (docs/17 F42,
+  # 2026-10-02), so this container decrypts a sample and hands its bytes
+  # over the socket; it parses none of them. Healthy, not started: a pass
+  # with no worker would only refuse and exit 1.
+  #
   # Healthcheck disabled: no HTTP server here (see the Dockerfile).
   lab-triage:
     <<: *noctornal-app
@@ -1083,11 +1109,17 @@ services:
       disable: true
     env_file:
       - secrets.env
+    volumes:
+      - ./tls:/certs:ro
+      - analysis-socket:/run/noctornal-analysis:ro
     environment:
       NOCTORNAL_ENV: production
+      NOCTORNAL_ANALYSIS_SOCKET: /run/noctornal-analysis/worker.sock
     depends_on:
       migrate:
         condition: service_completed_successfully
+      analysis-worker:
+        condition: service_healthy
     command:
       - /bin/sh
       - -c
@@ -1105,6 +1137,129 @@ services:
           nap 300
         done
         echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] stopped on request"
+
+  # ------------------------------------------------------------------------
+  # The isolated analysis worker (docs/17 F42, 2026-10-02). Static triage
+  # and forum parsing read bytes written by the people under
+  # investigation; api, cron and lab-triage hand each such read to this
+  # container over a Unix socket, and it starts the same bounded child
+  # they would otherwise have started beside their own secrets
+  # (noctornal_api.analysis_worker).
+  #
+  # Not a task worker, and decision 30 stands: no queue, nothing scheduled,
+  # one request per connection and nothing kept between them (below, and
+  # analysis_worker's docstring, say what is closed and what remains). The
+  # owner chose it on 2026-10-02 to close what a child beside
+  # the application could still reach: on Linux the environment of every
+  # process of the same user, which is all of secrets.env, and the database
+  # over the shared network.
+  #
+  # So, unlike every other application service, it does NOT merge
+  # x-noctornal-app: that block carries secrets.env, the `noctornal`
+  # network and the MinIO certificate, and this service must have none of
+  # them. It repeats the build and the image tag instead (one image, one
+  # dependency set; readiness refuses a worker whose parser versions differ
+  # from the API's).
+  #
+  #   * No env_file, and an environment of its own settings only. The
+  #     worker refuses to start holding any variable it cannot name, and
+  #     readiness asks it what it holds.
+  #   * network_mode none: loopback only, so no route, no DNS and no
+  #     database.
+  #   * A read-only root; no-new-privileges; pids and memory limits.
+  #   * Nothing a child makes outlives its request (F42 verify round,
+  #     2026-10-03). Killing a uid's processes does not remove what they
+  #     left in the kernel or on a writable filesystem, and the worker
+  #     holds no capability that would let it: SysV shared memory (charged
+  #     to this container's memory limit until the worker is killed for it),
+  #     SysV queues and semaphores, POSIX queues, /dev/shm (Docker's 64 MiB
+  #     tmpfs, writable although the root is read-only) and /tmp all lasted
+  #     until the container was removed, and a later child, of any slot,
+  #     could read them. So `ipc: none` gives the container no /dev/shm,
+  #     the four sysctls (the container's own, in its IPC namespace) leave
+  #     a child unable to create a segment, a queue or a semaphore set, and
+  #     /tmp is a tmpfs of root's, mode 0755, that no child's uid can
+  #     write; nothing a child runs writes there (its code is on the root).
+  #     The worker reads each setting from its own process, refuses to
+  #     start unless all are in place, and the readiness row fails when its
+  #     hello says one is open.
+  #   * Each child is a user of its own (F42 review, 2026-10-02). A child
+  #     running as the worker's user could replace the worker's socket, and
+  #     a process it detached outlived its request and answered later ones
+  #     in the worker's place. So the worker starts as root (user 0, group
+  #     10001) holding only KILL, SETGID and SETUID, and runs slot N's child
+  #     as uid 10100+N with no supplementary group, under a task limit,
+  #     killing every process of that uid before the request is answered.
+  #     The worker refuses to start with any other capability, without
+  #     no-new-privileges (a setuid program would hand a child a capability
+  #     back) or as PID 1 (init: true reaps what it kills). uids 10100 to
+  #     10115 must own nothing on the host. analysis_worker's docstring
+  #     says why this and not a pid namespace per request.
+  #   * pids_limit: the worker needs 40 tasks and each slot 20 (a child may
+  #     hold 16), and refuses to start when the limit cannot hold them, so
+  #     raise it with NOCTORNAL_ANALYSIS_WORKER_CONCURRENCY. It refuses as
+  #     well when the limit is absent or more than four times that need (F42
+  #     verify round, 2026-10-03): the child's task limit is the first wall
+  #     and this is the second, and a limit of 100000 is no wall. The hello
+  #     reports it and the readiness row judges it.
+  #   * The socket's volume (analysis-socket, below) is a tmpfs owned by
+  #     root, group 10001, mode 0750: only the worker writes it, a child's
+  #     uid cannot even enter it, and api, cron and lab-triage mount it
+  #     read-only.
+  #
+  # Memory: each running request holds its payload (a YARA scan at the
+  # defaults: a 256 MiB sample and a build of up to 256 MiB), a child
+  # bounded by NOCTORNAL_SAMPLE_ANALYSIS_MEMORY (2 GiB of address space by
+  # default) and its output (8 MiB for a step, up to 256 MiB for a
+  # compile). Two YARA scans at their worst are 2 x (512 MiB + 2 GiB +
+  # 8 MiB), about 5.2 GiB with the worker's own memory; 6g holds that.
+  # Measured on 2026-10-03 with docker: one 256 MiB request peaked the
+  # worker at 286 MiB (a payload is held once while it arrives, not
+  # twice), and two 512 MiB requests at once peaked it at 1.03 GiB and the
+  # whole container at 2.6 GiB. With a 160 MiB limit a child that outgrew
+  # it was killed by the kernel twice, both requests were answered
+  # `crashed`, and the worker went on serving: every child ranks first for
+  # the OOM killer, so a limit that is too small costs a crashed step,
+  # never the worker. It stops holding where the application's own limits
+  # are raised: NOCTORNAL_ANALYSIS_WORKER_MAX_BYTES above its default lets
+  # a caller send more than 512 MiB, and a larger sample cap or a higher
+  # concurrency multiplies the figures above, so raise mem_limit with them.
+  analysis-worker:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: noctornal-api:0.7.1
+    restart: unless-stopped
+    network_mode: none
+    init: true
+    ipc: none
+    sysctls:
+      kernel.shmmax: 0
+      kernel.msgmni: 0
+      kernel.sem: "0 0 0 0"
+      fs.mqueue.queues_max: 0
+    user: "0:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=1m,mode=0755,noexec,nosuid,nodev
+    cap_drop: [ALL]
+    cap_add: [KILL, SETGID, SETUID]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 6g
+    memswap_limit: 6g
+    environment:
+      NOCTORNAL_ANALYSIS_SOCKET: /run/noctornal-analysis/worker.sock
+      NOCTORNAL_ANALYSIS_WORKER_CONCURRENCY: "2"
+    volumes:
+      - analysis-socket:/run/noctornal-analysis
+    command: ["python", "-m", "noctornal_api.analysis_worker"]
+    healthcheck:
+      test: ["CMD", "python", "-m", "noctornal_api.analysis_worker", "--check"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
 
   # The Lab's workers (F13 and F14, 2026-09-24): prohibited-content screening
   # and the sandbox dispatch, in a loop of their OWN. A screening pass may
@@ -1307,3 +1462,13 @@ volumes:
   prod-miniodata:
   caddy-data:
   caddy-config:
+  # The analysis worker's socket and nothing else (docs/17 F42). A tmpfs,
+  # so nothing survives a host restart, owned by root (the worker) with the
+  # application's group: the worker alone writes it, and its children's
+  # uids cannot enter it (F42 review, 2026-10-02).
+  analysis-socket:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=1m,uid=0,gid=10001,mode=0750"

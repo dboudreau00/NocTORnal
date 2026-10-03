@@ -94,6 +94,8 @@ infra/production/caddy.env
 noctornal-*
 backup/
 backups/
+# The analysis worker's image is this image (compose.yml), so these lines are also
+# what lets its "holds no secret" rest on more than a file's mode (F42 verify 5).
 
 # MinIO's TLS keypair, including `private.key`. The compose file BIND-mounts
 # this directory into the containers that need it, so nothing is lost by
