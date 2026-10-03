@@ -201,16 +201,24 @@ def _merge_subjects(conn: psycopg.Connection, user: CurrentUser,
 
 def _approvers_reached(conn: psycopg.Connection,
                        rows: list[ApprovalRequest]) -> dict:
-    """How many APPROVAL_REQUESTED notifications each request raised."""
+    """How many APPROVAL_REQUESTED notifications each request raised.
+
+    The notices are the signers' rows, which row-level security shows to
+    their recipients alone, so the count runs as a withheld count on a
+    system connection (F51, 2026-10-02). The ids are the requests the
+    caller has already read under policy, and only a number comes back."""
+    from noctornal_api.db import SystemPurpose, system_connection
+
     ids = [r.id for r in rows]
     if not ids:
         return {}
-    return {row[0]: row[1] for row in conn.execute(
-        """SELECT object_id, count(*) FROM notify.notification
-            WHERE kind = 'APPROVAL_REQUESTED'
-              AND object_type = 'approval_request'
-              AND object_id = ANY(%s)
-            GROUP BY object_id""", (ids,))}
+    with system_connection(SystemPurpose.WITHHELD, reuse=conn) as sconn:
+        return {row[0]: row[1] for row in sconn.execute(
+            """SELECT object_id, count(*) FROM notify.notification
+                WHERE kind = 'APPROVAL_REQUESTED'
+                  AND object_type = 'approval_request'
+                  AND object_id = ANY(%s)
+                GROUP BY object_id""", (ids,))}
 
 
 def _names(conn: psycopg.Connection, rows: list[ApprovalRequest]) -> dict:

@@ -45,7 +45,9 @@ def _migration(conn, stem: str):
 
 
 #: The revisions after 0095, newest first: each must go down before 0095.
-_LATER = ("0101", "0100", "0099", "0098", "0097", "0096")
+#: 0126 first (F51, 2026-10-02): the delivery's policy names jira_link_id
+#: and notify.jira_link, which 0097's downgrade drops.
+_LATER = ("0126", "0101", "0100", "0099", "0098", "0097", "0096")
 
 CORPUS = [
     "https://hooks.example.org/T01/B02/secret",
