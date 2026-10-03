@@ -360,7 +360,7 @@ def test_the_migration_round_trips(conn):
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     m.run = lambda sql: conn.execute(sql)
-    assert (m.revision, m.down_revision) == ("0131", "0129")
+    assert (m.revision, m.down_revision) == ("0131", "0130")
 
     def has_column() -> bool:
         return bool(conn.execute(
