@@ -106,7 +106,7 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Json, Jsonb
 
-from noctornal_api import egress, pinned_http
+from noctornal_api import egress, pinned_http, watch_regex
 from noctornal_api.wording import agree, count_of
 from noctornal_api.egress_policy import (
     DECISION_REF,
@@ -535,6 +535,21 @@ class PersonaVault:
                 "This egress profile already carries a persona. Two personas "
                 "sharing an exit can be linked by any competent site, so one "
                 "persona, one egress profile.")
+        # collection-shared-exit (2026-10-03): the other half of the rule
+        # `_check_binding` holds. A persona-less source (a public forum or
+        # web read) bound to this profile reads from this exit, so a persona
+        # placed on it would be seen from the same address as that public
+        # read and the two linked. collect.source is not under row-level
+        # security (the egress proxy reads it), so a source above the
+        # caller's clearance is counted too, and the sentence names no kind
+        # of source.
+        carried = self._c.execute(
+            "SELECT 1 FROM collect.source WHERE egress_profile_id = %s LIMIT 1",
+            (egress_profile_id,)).fetchone()
+        if carried is not None:
+            raise CollectionError(
+                "This egress profile already carries a public read. A persona "
+                "and a public read must not share an exit.")
         if not profile[1]:
             raise CollectionError(persona_exit_refusal(profile[2], profile[3]))
         from psycopg.types.json import Jsonb
@@ -930,11 +945,19 @@ class PersonaVault:
                        OR EXISTS (SELECT 1 FROM collect.source s
                                    WHERE s.egress_profile_id = e.id
                                      AND %(clearance)s::core.tlp IS NOT NULL
-                                     AND s.classification > %(clearance)s::core.tlp)
+                                     AND s.classification > %(clearance)s::core.tlp),
+                       EXISTS (SELECT 1 FROM collect.source hs
+                                WHERE hs.egress_profile_id = e.id)
                   FROM collect.egress_profile e
                  ORDER BY e.is_active DESC, e.name""", params).fetchall()
         return [{"id": str(r[0]), "name": r[1], "kind": r[2], "region": r[3],
                  "is_active": r[4], "available": bool(r[4]) and not r[5],
+                 # collection-shared-exit (2026-10-03): what a PERSONA may
+                 # be placed on. `available` is unchanged because a public
+                 # read may share an exit with another public read; a
+                 # persona may share it with neither, and a source above the
+                 # caller's clearance counts without being named.
+                 "persona_available": bool(r[4]) and not r[5] and not r[10],
                  "personas": r[6], "sources": r[7],
                  "persona_platforms": sorted(r[8] or []),
                  "some_above_clearance": bool(r[9])}
@@ -1017,6 +1040,28 @@ class PersonaVault:
                 "a public read and a persona share an exit against one "
                 "source; the site can link them")
             for r in shared)
+        # collection-shared-exit (2026-10-03): the persona need not be
+        # registered on THIS source. Any live persona holding the exit a
+        # persona-less source reads through is seen from the same address.
+        elsewhere = self._c.execute(
+            f"""SELECT s.egress_profile_id,
+                       array_agg(a.handle ORDER BY a.handle)
+                           FILTER (WHERE {PERSONA_VISIBLE_SQL}),
+                       bool_or(NOT {PERSONA_VISIBLE_SQL})
+                  FROM collect.source s
+                  JOIN collect.collection_account a
+                    ON a.egress_profile_id = s.egress_profile_id
+                   AND a.source_id IS DISTINCT FROM s.id
+                 WHERE s.id = %(source)s AND s.egress_profile_id IS NOT NULL
+                   AND s.collection_account_id IS NULL
+                   AND a.status NOT IN ('BURNED', 'LOCKED')
+                 GROUP BY s.egress_profile_id""", params).fetchall()
+        findings.extend(
+            self._separation_finding(
+                r[0], r[1], r[2],
+                "a public read and a persona share an exit; the site can "
+                "link them")
+            for r in elsewhere if r[1] or r[2])
         return findings
 
     @staticmethod
@@ -1522,22 +1567,141 @@ def _source_row(conn: psycopg.Connection, source_id: UUID,
 
 
 
-#: Anything that could introduce an entity. A feed is attacker-adjacent by
-#: definition -- it is a document written by the people under investigation.
-_DOCTYPE = re.compile(rb"<!\s*(DOCTYPE|ENTITY)", re.I)
+#: A feed is attacker-adjacent by definition: it is a document written by
+#: the people under investigation.
+_FEED_DECLARATION_REFUSAL = (
+    "refusing a feed containing a DOCTYPE or ENTITY declaration: a "
+    "feed has no legitimate need for one, and an XXE here is a "
+    "file-read primitive on the host holding every persona "
+    "credential")
+
+#: What `parse_rss` reads of a feed's own claim about its encoding: the
+#: XML declaration of a feed whose first bytes are ASCII-compatible.
+_XML_DECLARED_ENCODING = re.compile(
+    rb"""^[ \t\r\n]*<\?xml[^>]{0,200}?\sencoding\s*=\s*["']"""
+    rb"""([A-Za-z][A-Za-z0-9._-]{0,40})["']""")
+
+#: The encodings a feed may DECLARE, by name with `-` and `_` removed and the
+#: case folded, mapped to the codec that reads it. collection-rss-codec-dos
+#: (2026-10-03): the declared name used to go straight to Python's whole
+#: codec registry, and the feed is written by the people under
+#: investigation. `punycode` decodes in quadratic time (a 1 MB body held
+#: parse_rss for two minutes, a 16 MiB one for hours, in-process with no
+#: bound), and `utf-7` and `unicode_escape` turn ASCII into markup. Before
+#: that decode was added expat read the bytes itself, which supported four
+#: encodings and the ASCII-compatible single-byte ones, so this is a subset
+#: of that, narrowed to what feeds are served in (the DOS and Mac code pages
+#: expat also read are left out; add one here on a real need). No name
+#: outside it is ever looked up. The multi-byte East Asian codecs were never
+#: read here and are not added; a feed that declares one is refused, and
+#: says so, every poll. Every codec in it is a table lookup or a fixed-width
+#: unit, linear in the body (test_review46_rss_codecs pins that).
+_FEED_CODECS: dict[str, str] = {
+    "utf8": "utf-8",
+    "utf16": "utf-16", "utf16le": "utf-16-le", "utf16be": "utf-16-be",
+    "utf32": "utf-32", "utf32le": "utf-32-le", "utf32be": "utf-32-be",
+    "ascii": "ascii", "usascii": "ascii",
+    "latin1": "latin-1", "l1": "latin-1",
+    "koi8r": "koi8-r", "koi8u": "koi8-u",
+    # ISO 8859 parts 1 to 11 and 13 to 16; there is no part 12.
+    **{f"iso8859{n}": f"iso8859-{n}" for n in (*range(1, 12), *range(13, 17))},
+    # The Windows code pages 1250 to 1258, under either name.
+    **{f"windows{n}": f"cp{n}" for n in range(1250, 1259)},
+    **{f"cp{n}": f"cp{n}" for n in range(1250, 1259)},
+}
+
+#: Whitespace between the parts of a prolog.
+_PROLOG_SPACE = re.compile(r"[ \t\r\n]*")
+
+#: A feed's prolog is a declaration and, at most, a few comments. More than
+#: this many comments and processing instructions before the root element is
+#: refused, which bounds the scan's loop whatever a hostile feed does.
+_MAX_PROLOG_ITEMS = 10_000
 
 
-#: The XML prolog ends at the first element start-tag. Anything before it
-#: is a declaration, comment or processing instruction — the only region
-#: where a DTD may legally appear (CP1).
-_ROOT_START = re.compile(rb"<[A-Za-z_]")
+def _feed_text(body: bytes) -> str:
+    """The feed as ONE text, decoded here and nowhere else.
+
+    collection-rss-doctype-bypass-utf16 (2026-10-03). The refusal below used
+    to scan the raw BYTES for an ASCII `<!DOCTYPE`, and ElementTree then
+    parsed the same bytes under whatever encoding the document declared.
+    A feed served as UTF-16 spells that keyword with a NUL between letters,
+    so the scan found nothing and the parser expanded the DTD. A defence
+    and a parser that read the document two ways are a defence with a
+    bypass: the encoding is chosen once, by XML 1.0 appendix F (a byte-order
+    mark, else the first four bytes, else the declaration, else UTF-8), the
+    scan runs over the decoded text, and that SAME text is what is parsed.
+    Anything that does not decode strictly is refused, as is an EBCDIC feed,
+    whose declaration this does not try to read. A declared name is read only
+    if it is in `_FEED_CODECS`; any other is refused before it is looked up
+    (collection-rss-codec-dos, 2026-10-03: `punycode` is quadratic)."""
+    head = body[:4]
+    if head in (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff"):
+        codec = "utf-32"
+    elif head == b"\x00\x00\x00<":
+        codec = "utf-32-be"
+    elif head == b"<\x00\x00\x00":
+        codec = "utf-32-le"
+    elif head[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        codec = "utf-16"
+    elif head == b"\x00<\x00?":
+        codec = "utf-16-be"
+    elif head == b"<\x00?\x00":
+        codec = "utf-16-le"
+    elif head[:3] == b"\xef\xbb\xbf":
+        codec = "utf-8-sig"
+    elif head == b"\x4c\x6f\xa7\x94":
+        raise CollectionError("feed did not parse: an EBCDIC feed is not read")
+    else:
+        declared = _XML_DECLARED_ENCODING.match(body[:300])
+        codec = "utf-8"
+        if declared:
+            label = declared.group(1).decode("ascii")
+            codec = _FEED_CODECS.get(label.lower().replace("-", "").replace("_", ""))
+            if codec is None:
+                # Refused BEFORE any lookup or decode (collection-rss-codec-dos,
+                # 2026-10-03). The label is at most 41 characters of letters,
+                # digits, dot, hyphen and underscore, so it is safe to name.
+                raise CollectionError(
+                    f"feed did not parse: it declares the encoding {label!r}, "
+                    f"which is not one a feed may use")
+    try:
+        text = body.decode(codec)
+    except Exception as exc:  # noqa: BLE001 - an undecodable feed is not a crash
+        raise CollectionError(f"feed did not parse: {type(exc).__name__}") from exc
+    # The parser is given this text, so what it is given has no mark the
+    # scan below has not looked past.
+    return text.lstrip("\ufeff")
 
 
-def _root_element_offset(body: bytes, cap: int = 1 << 20) -> int:
-    """Where the prolog ends, capped so a body with no root element does
-    not turn the DOCTYPE scan into a full pass over 16 MiB."""
-    match = _ROOT_START.search(body[:cap])
-    return match.start() if match else min(len(body), cap)
+def _refuse_prolog_declarations(text: str) -> None:
+    """Refuse a feed whose prolog carries a DOCTYPE or any other `<!`
+    declaration. The prolog is walked token by token: whitespace, a
+    processing instruction (`<?` to `?>`) and a comment (`<!--` to `-->`) are
+    stepped over WHOLE, and the first `<!` that is not a comment is a
+    declaration. The walk ends at the first other `<`, the root element.
+
+    Until 2026-10-03 the prolog was taken to end at the first `<` followed by
+    a name character found anywhere, comments included, so `<!-- <x -->`
+    ended it early and a DOCTYPE after the comment went unscanned, and a
+    comment of over a mebibyte did the same through the scan's cap. Neither
+    needs a second encoding; both are the same bypass."""
+    index = _PROLOG_SPACE.match(text).end()
+    for _ in range(_MAX_PROLOG_ITEMS):
+        if text.startswith("<?", index):
+            found, width = text.find("?>", index + 2), 2
+        elif text.startswith("<!--", index):
+            found, width = text.find("-->", index + 4), 3
+        elif text.startswith("<!", index):
+            raise CollectionError(_FEED_DECLARATION_REFUSAL)
+        else:
+            return
+        if found < 0:
+            return  # unterminated: the parser refuses it, nothing here is a DTD
+        index = _PROLOG_SPACE.match(text, found + width).end()
+    raise CollectionError(
+        "refusing a feed with more than 10,000 comments or processing "
+        "instructions before its first element")
 
 
 def parse_rss(body: bytes) -> list[Item]:
@@ -1555,30 +1719,15 @@ def parse_rss(body: bytes) -> list[Item]:
     """
     from xml.etree import ElementTree
 
-    # CP1 (2026-07-26): scan up to the ROOT ELEMENT, not a fixed 8 KiB.
-    #
-    # The window was `body[:8192]` while bodies up to 16 MiB are accepted,
-    # so an 8 KiB XML comment ahead of the DTD walked straight past the
-    # regex. ElementTree resolves no external entities and modern libexpat
-    # caps entity amplification, so the demonstrated harm is limited — but
-    # this is the check that is supposed to make those two facts
-    # irrelevant, and a defence with a documented bypass is not one.
-    #
-    # The prolog is everything before the first element start-tag that is
-    # not a comment, PI or declaration. Scanning to the first `<` that
-    # begins a name character bounds the work without bounding the
-    # coverage: a DTD cannot legally appear after the root element starts,
-    # so anything past that point is not a prolog DTD.
-    prolog_end = _root_element_offset(body)
-    if _DOCTYPE.search(body[:prolog_end]):
-        raise CollectionError(
-            "refusing a feed containing a DOCTYPE or ENTITY declaration: a "
-            "feed has no legitimate need for one, and an XXE here is a "
-            "file-read primitive on the host holding every persona "
-            "credential")
+    # CP1 (2026-07-26) closed an 8 KiB window; the finding of 2026-10-03
+    # closed the encoding and the comment forms of the same bypass. The
+    # prolog is the only place a DTD may legally appear, so it is what is
+    # walked, over the decoded text the parser is then given.
+    text = _feed_text(body)
+    _refuse_prolog_declarations(text)
 
     try:
-        root = ElementTree.fromstring(body)
+        root = ElementTree.fromstring(text)
     except Exception as exc:  # noqa: BLE001 - a broken feed is not a crash
         raise CollectionError(f"feed did not parse: {type(exc).__name__}") from exc
 
@@ -1915,6 +2064,38 @@ def _capped(value, limit: int):
     return None if value is None else value[:limit]
 
 
+def _watch_texts(item: Item) -> tuple[str, str]:
+    """The two texts a watch is matched against: the title and body, and a
+    forum post's signature, each lower-cased. One function so the regex
+    verdicts asked for before the transaction and the keyword matching inside
+    it read the same text."""
+    haystack = f"{item.title or ''}\n{item.body}".lower()
+    meta = item.meta if isinstance(item.meta, dict) else {}
+    forum = meta.get("forum")
+    signature = forum.get("signature") if isinstance(forum, dict) else None
+    return haystack, (signature.lower() if isinstance(signature, str) else "")
+
+
+def _feed_floor_refusal(source) -> tuple[str, str] | None:
+    """Invariant 8's floor for a source whose adapter enforces no collection
+    authority (RSS and WEB): reading a source is itself a boundary crossing
+    (decision 103), so AMBER_STRICT and RED are not polled by the collector.
+
+    egress-rss-floor (2026-10-03): only adapters with `requires_authority`
+    ever reached `ceiling_refusal`, so a feed labelled RED was fetched from
+    this deployment's own address on every poll. AMBER is the highest a
+    collection may carry; no per-kind ceiling is declared for feeds."""
+    from noctornal_api.egress import Destination, can_egress
+    decision = can_egress(source.classification, Destination.COLLECTION_TARGET,
+                          destination_ceiling="AMBER")
+    if decision.allowed:
+        return None
+    return CollectionService.CAUSE_ABOVE_CEILING, (
+        f"This source is labelled TLP:{source.classification}, which never "
+        f"leaves this platform, so it is collected by hand, not by the "
+        f"collector.")
+
+
 class CollectionService:
     """The scheduler's reporting half, one poll, and the read path.
 
@@ -2014,7 +2195,7 @@ class CollectionService:
             return self.CAUSE_BINDING, (
                 "This source is read by a persona, and none is bound to it.")
         if not requires:
-            return None
+            return _feed_floor_refusal(source)
         if not source.is_active:
             return self.CAUSE_INACTIVE, "This source is deactivated."
         refusal = ceiling_refusal(source)
@@ -2794,8 +2975,23 @@ class CollectionService:
         raw_gaps = {"unconfigured": 0, "refused": 0}
         broken: dict[tuple[UUID, str], str] = {}
         misaimed: dict[UUID, str] = {}
+        # collection-watch-regex-redos (2026-10-03): the watches are read and
+        # every regex is matched BEFORE the transaction, in a bounded child
+        # (watch_regex), so a pattern that never finishes holds no database
+        # transaction and is stopped at its limit. A pattern that did not
+        # compile or was stopped is reported once per run below.
+        watches = self._watches(source.id)
+        verdicts = self._regex_verdicts(items, watches, adapter=adapter,
+                                        categories=categories)
+        slow: dict[tuple[UUID, str], str] = {}
+        for watch in watches:
+            for pattern in (watch[4] or []):
+                failed = verdicts.failed.get(pattern)
+                if failed is None:
+                    continue
+                (broken if failed[0] == watch_regex.COMPILE else slow)[
+                    (watch[0], pattern)] = failed[1]
         with self._c.transaction():
-            watches = self._watches(source.id)
             for item in items:
                 put_key = None
                 gap = None
@@ -2827,7 +3023,7 @@ class CollectionService:
                                     inserted=inserted)
                         hits = self._match_watches(
                             source.id, result.run_id, clean, watches, broken,
-                            misaimed)
+                            misaimed, regex_verdicts=verdicts)
                 except _ItemInvalid as exc:
                     warnings.append(RunWarning(ITEM_SKIPPED, (
                         f"Item {_item_label(item)} was skipped: {exc}")))
@@ -2868,6 +3064,11 @@ class CollectionService:
                 f"watch {wid} has a regex that will not compile and therefore "
                 f"matches nothing: {reason} (pattern {redact(pat)[:120]!r})"))
                 for (wid, pat), reason in broken.items())
+            warnings.extend(RunWarning(WATCH_PATTERN, (
+                f"watch {wid} has a regex that was stopped and therefore "
+                f"matched nothing in this run: {reason} "
+                f"(pattern {redact(pat)[:120]!r})"))
+                for (wid, pat), reason in slow.items())
             # A watch aimed at a chat this source does not read (F47,
             # 2026-10-02) is as silent as a regex that will not compile, and
             # is reported the same way, once per run.
@@ -3140,7 +3341,8 @@ class CollectionService:
     def _match_watches(self, source_id: UUID, run_id: UUID, item: Item,
                        watches: list[tuple],
                        broken: dict[tuple[UUID, str], str],
-                       misaimed: dict[UUID, str] | None = None) -> int:
+                       misaimed: dict[UUID, str] | None = None,
+                       regex_verdicts: "watch_regex.Verdicts | None" = None) -> int:
         """Keyword, selector and regex matching into `watch_hit`, for ONE
         item, inside its savepoint (2026-09-24).
 
@@ -3171,11 +3373,8 @@ class CollectionService:
         meets an item that is no Telegram message, matches nothing and is
         reported once per run in `misaimed`.
         """
-        haystack = f"{item.title or ''}\n{item.body}".lower()
+        haystack, sig_haystack = _watch_texts(item)
         meta = item.meta if isinstance(item.meta, dict) else {}
-        forum = meta.get("forum")
-        signature = forum.get("signature") if isinstance(forum, dict) else None
-        sig_haystack = signature.lower() if isinstance(signature, str) else ""
         telegram = meta.get("telegram_message")
         chat = telegram.get("chat_durable_id") if isinstance(telegram, dict) else None
         uid = (item.author_uid or "").strip()
@@ -3185,6 +3384,11 @@ class CollectionService:
             typed = [(label, value.strip()) for label, value in match_ids.items()
                      if isinstance(label, str) and _MATCH_LABEL.match(label)
                      and isinstance(value, str) and value.strip()]
+        if regex_verdicts is None:
+            # Called without the run's verdicts (a direct caller): the same
+            # bounded matcher, for this one item. Never `re` in this process.
+            regex_verdicts = self._regex_for_item(watches, haystack, sig_haystack,
+                                                  broken)
         hits = 0
         document = None
         for watch in watches:
@@ -3217,21 +3421,20 @@ class CollectionService:
                     if exact and exact == value:
                         matched.append(f"{label}:{value}")
             for pattern in (regexes or []):
-                try:
-                    if pattern and re.search(pattern, haystack, re.I):
-                        matched.append(f"regex:{pattern}")
-                    if (pattern and sig_haystack
-                            and re.search(pattern, sig_haystack, re.I)):
-                        matched.append(f"signature_regex:{pattern}")
-                except re.error as exc:
-                    # A watch with a broken pattern must not stop the other
-                    # watches from matching, and must not be SILENT: a watch
-                    # is a standing tasking, and swallowed it reads exactly
-                    # like a quiet one. `redact` because an operator
-                    # watching for a leaked credential puts that credential
-                    # in the pattern, and this string is stored.
-                    broken[(watch_id, pattern)] = redact(str(exc))[:200]
+                # A watch with a broken pattern must not stop the other
+                # watches from matching, and must not be SILENT: a watch is a
+                # standing tasking, and swallowed it reads exactly like a
+                # quiet one. The pattern was matched (or reported, redacted:
+                # an operator watching for a leaked credential puts that
+                # credential in the pattern, and the report is stored) before
+                # this transaction began; a pattern that failed has no
+                # verdict and matches nothing here.
+                if not pattern or pattern in regex_verdicts.failed:
                     continue
+                if regex_verdicts.hits.get((pattern, haystack)):
+                    matched.append(f"regex:{pattern}")
+                if sig_haystack and regex_verdicts.hits.get((pattern, sig_haystack)):
+                    matched.append(f"signature_regex:{pattern}")
             if chat_watch:
                 # The chat leads, and a watch with no term at all is a watch
                 # on the chat itself: it fires on every message there. A
@@ -3268,6 +3471,45 @@ class CollectionService:
             if inserted is not None:
                 hits += 1
         return hits
+
+    def _regex_verdicts(self, items: list[Item], watches: list[tuple], *, adapter,
+                        categories: tuple[str, ...]) -> "watch_regex.Verdicts":
+        """Every watch regex over every item's text, matched in bounded
+        children and BEFORE the persist transaction. The text is the cleaned
+        item's, as `_match_watches` reads it. No watch with a regex, or no
+        item, starts nothing."""
+        patterns = list(dict.fromkeys(
+            p for watch in watches for p in (watch[4] or []) if p))
+        if not patterns or not items:
+            return watch_regex.Verdicts()
+        texts: list[str] = []
+        for item in items:
+            try:
+                clean, _naive = self._validate_item(item, adapter=adapter,
+                                                    categories=categories)
+            except _ItemInvalid:
+                continue  # skipped, with its warning, by the persist loop
+            haystack, signature = _watch_texts(clean)
+            texts.append(haystack)
+            if signature:
+                texts.append(signature)
+        return watch_regex.run({pattern: texts for pattern in patterns})
+
+    @staticmethod
+    def _regex_for_item(watches: list[tuple], haystack: str, sig_haystack: str,
+                        broken: dict[tuple[UUID, str], str]
+                        ) -> "watch_regex.Verdicts":
+        texts = [haystack] + ([sig_haystack] if sig_haystack else [])
+        patterns = list(dict.fromkeys(
+            p for watch in watches for p in (watch[4] or []) if p))
+        verdicts = (watch_regex.run({pattern: texts for pattern in patterns})
+                    if patterns else watch_regex.Verdicts())
+        for watch in watches:
+            for pattern in (watch[4] or []):
+                failed = verdicts.failed.get(pattern)
+                if failed is not None:
+                    broken[(watch[0], pattern)] = failed[1]
+        return verdicts
 
     def _suppressed(self, watch_id: UUID, thread: str | None,
                     window_s: int | None) -> bool:

@@ -32,6 +32,12 @@ from noctornal_api.deception import (
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
 
+#: The Received line our own MTA writes when it takes a message (http_ui-007,
+#: 2026-10-03): an Authentication-Results header is believed only when it
+#: sits above every Received header, the topmost of which is a trusted MTA's.
+_STAMPED_BY_US = (b"Received: from sender.example ([203.0.113.9]) by mx.corp.example;"
+                  b" Mon, 20 Jul 2026 09:00:00 +0000\r\n")
+
 
 # --- invariant 10: samples never render, never execute -------------------
 
@@ -202,9 +208,9 @@ def test_an_unverified_attestation_claim_promotes_nothing():
 # --- BEC header forensics ------------------------------------------------
 
 BEC = b"""\
+Authentication-Results: mail.corp.example; spf=fail smtp.mailfrom=evil-vps.example; dkim=fail header.d=acme-holdings.example; dmarc=fail
 Received: from mx-edge.corp.example (mx-edge.corp.example [10.0.0.5]) by mail.corp.example with ESMTPS id abc; Mon, 20 Jul 2026 09:00:03 +0000
 Received: from evil-vps.example (evil-vps.example [203.0.113.7]) by mx-edge.corp.example with ESMTP id ghi; Mon, 20 Jul 2026 09:00:01 +0000
-Authentication-Results: mail.corp.example; spf=fail smtp.mailfrom=evil-vps.example; dkim=fail header.d=acme-holdings.example; dmarc=fail
 Message-ID: <kit-20260720-0001@evil-vps.example>
 From: "Jane Okafor, CFO" <jane.okafor@acme-holdings.example>
 Reply-To: jane.okafor.acme@gmail.com
@@ -409,11 +415,12 @@ def test_an_inconclusive_auth_result_is_not_a_failure():
     that was not PASS red, which turns a DNS timeout at delivery time into
     an adverse attribution against the sender.
     """
-    msg = (b"From: a@b.example\r\n"
-           b"Subject: x\r\n"
-           b"Authentication-Results: mx.corp.example; dkim=temperror "
-           b"header.d=acme.example; spf=none\r\n\r\nbody\r\n")
-    parsed = parse_eml(msg)
+    msg = (b"Authentication-Results: mx.corp.example; dkim=temperror "
+           b"header.d=acme.example; spf=none\r\n"
+           + _STAMPED_BY_US
+           + b"From: a@b.example\r\n"
+           b"Subject: x\r\n\r\nbody\r\n")
+    parsed = parse_eml(msg, trusted=("corp.example",))
     assert parsed.dkim_result == "TEMPERROR"
     assert parsed.spf_result == "NONE"
     # A non-PASS never carries a domain — that claim is the attacker's.
@@ -455,11 +462,11 @@ def test_an_appended_authentication_results_header_does_not_win():
     domain agree on the forged value.
     """
     evil = (
-        b"Received: from evil.example ([203.0.113.9]) by mx.corp.example;"
-        b" Mon, 20 Jul 2026 09:00:00 +0000\r\n"
         b"Authentication-Results: mx.corp.example; spf=fail"
         b" smtp.mailfrom=evil.example; dkim=fail header.d=evil.example;"
         b" dmarc=fail\r\n"
+        b"Received: from evil.example ([203.0.113.9]) by mx.corp.example;"
+        b" Mon, 20 Jul 2026 09:00:00 +0000\r\n"
         b"Authentication-Results: mx.corp.example; spf=pass"
         b" smtp.mailfrom=microsoft.com; dkim=pass header.d=microsoft.com;"
         b" dmarc=pass\r\n"
@@ -486,8 +493,9 @@ def test_a_pass_then_fail_signature_pair_is_ordinary_mail_not_a_500():
     raw = (b"Authentication-Results: mx.corp.example;"
            b" dkim=pass header.d=acme.example;"
            b" dkim=fail header.d=list.example\r\n"
-           b"From: a@acme.example\r\nSubject: x\r\n\r\nbody\r\n")
-    parsed = parse_eml(raw)
+           + _STAMPED_BY_US
+           + b"From: a@acme.example\r\nSubject: x\r\n\r\nbody\r\n")
+    parsed = parse_eml(raw, trusted=("corp.example",))
     assert parsed.dkim_result == "PASS"
     assert parsed.dkim_domain == "acme.example"
     # The invariant the DB constraint expresses, asserted here too.
@@ -497,8 +505,9 @@ def test_a_pass_then_fail_signature_pair_is_ordinary_mail_not_a_500():
 def test_a_failing_method_never_carries_a_domain_even_alone():
     raw = (b"Authentication-Results: mx.corp.example;"
            b" dkim=fail header.d=spoofed.example\r\n"
-           b"From: a@b.example\r\nSubject: x\r\n\r\nbody\r\n")
-    parsed = parse_eml(raw)
+           + _STAMPED_BY_US
+           + b"From: a@b.example\r\nSubject: x\r\n\r\nbody\r\n")
+    parsed = parse_eml(raw, trusted=("corp.example",))
     assert parsed.dkim_result == "FAIL"
     assert parsed.dkim_domain is None
 

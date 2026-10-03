@@ -789,9 +789,15 @@ class ProviderRegistry:
         # the update then runs as the LOOKUPS purpose, on one connection
         # (F51, 2026-10-02).
         withdraw = moved or redetermine
+        # egress-lookup-signoff-exposure (2026-10-03): a raise (the only
+        # direction this method takes; a lowering is a second administrator's
+        # and cancels its waiting sign-offs in decide_exposure_change) also
+        # reaches every case's waiting lookups, so it too runs as LOOKUPS.
+        raised = "exposure_level" in sets
         try:
-            with (system_connection(SystemPurpose.LOOKUPS, reuse=self._c) if withdraw
-                  else nullcontext(self._c)) as conn, conn.transaction():
+            with (system_connection(SystemPurpose.LOOKUPS, reuse=self._c)
+                  if (withdraw or raised) else nullcontext(self._c)) as conn, \
+                    conn.transaction():
                 registry = self._on(conn)
                 if moved or "exposure_level" in sets:
                     # An open change was asked about the destination and the
@@ -811,9 +817,15 @@ class ProviderRegistry:
                     conn.execute("UPDATE collect.source SET name = %s WHERE id = %s",
                                  (sets["display_name"], p.source_id))
                 if "exposure_level" in sets:
+                    # A sign-off the requester and a colleague gave for the
+                    # level as it stood is not a sign-off for the higher one.
+                    # `withdraw` below already cancels these with the rest.
+                    cancelled = (0 if withdraw else self._cancel_awaiting_signoff(
+                        conn, provider_id, "the provider's exposure changed"))
                     _audit(conn, "PROVIDER_EXPOSURE_CHANGED", actor_id=actor_id,
                            object_id=provider_id,
-                           detail={"old": p.exposure_level, "new": sets["exposure_level"]})
+                           detail={"old": p.exposure_level, "new": sets["exposure_level"],
+                                   "signoffs_cancelled": cancelled})
                 if withdraw:
                     after = registry.require(provider_id)
                     self._withdraw_queued(conn, provider_id,
@@ -906,6 +918,19 @@ class ProviderRegistry:
         return len(conn.execute(
             """UPDATE ingest.lookup SET state = 'CANCELLED', refusal = %s
                 WHERE provider_id = %s AND state IN ('QUEUED', 'AWAITING_SIGNOFF')
+               RETURNING id""", (why, provider_id)).fetchall())
+
+    @staticmethod
+    def _cancel_awaiting_signoff(conn: psycopg.Connection, provider_id: UUID,
+                                 why: str) -> int:
+        """The waiting sign-offs of a provider, every case's, cancelled;
+        `conn` is a LOOKUPS connection (F51, 2026-10-02). Queued rows are
+        left to the drain, which refuses a changed exposure by name."""
+        if conn.execute("SELECT to_regclass('ingest.lookup')").fetchone()[0] is None:
+            return 0
+        return len(conn.execute(
+            """UPDATE ingest.lookup SET state = 'CANCELLED', refusal = %s
+                WHERE provider_id = %s AND state = 'AWAITING_SIGNOFF'
                RETURNING id""", (why, provider_id)).fetchall())
 
     def disable(self, provider_id: UUID, *, reason: str, actor_id: UUID) -> Provider:
