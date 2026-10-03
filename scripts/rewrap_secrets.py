@@ -25,6 +25,24 @@ left alone rather than overwritten. One audit event records the pass.
 
 Exit 0 when every row is under the active key (or would be), 1 when rows
 remain that nothing opens, 2 when the environment itself is not usable.
+
+## Persona credentials, `--persona` (A collector process, 2026-10-02)
+
+A persona credential seals under its own ring, NOCTORNAL_PERSONA_KEK, which
+in production only the collector holds; the TOTP pass above no longer
+touches `collect.collection_account`. `--persona` reports every persona
+credential by key id, and with `--apply` moves each one sealed before the
+split (under a TOTP ring id) onto the persona ring and re-seals each one
+under a retired persona key under the active one. It needs BOTH rings, so
+it runs in the collector:
+
+    docker compose -f infra/production/compose.yml run --rm collector \\
+        python scripts/rewrap_secrets.py --persona --apply
+
+The upgrade note: until it has run, the vault refuses every persona
+credential sealed before the split by name, polls of those personas are
+BLOCKED with that sentence, and the readiness row `collector_split` counts
+them.
 """
 from __future__ import annotations
 
@@ -65,7 +83,13 @@ def main() -> int:
                         help="a file holding the base64 key that sealed rows "
                              "recorded under an id the ring now maps to a "
                              "different key (the pre-ring world)")
+    parser.add_argument("--persona", action="store_true",
+                        help="persona credentials: move them onto the persona "
+                             "key ring (needs both rings: run it in the "
+                             "collector)")
     args = parser.parse_args()
+    if args.persona:
+        return _persona(args)
 
     try:
         ids = envelope.key_ids()
@@ -78,6 +102,18 @@ def main() -> int:
           + (f", retired {', '.join(ids[1:])}" if ids[1:] else ", no retired keys"))
 
     conn = connect_system(SystemPurpose.SCRIPT)
+    from noctornal_api.security.persona_sealed import sealed_before_split
+    stranded = sealed_before_split(conn)
+    if stranded:
+        # A collector process (2026-10-02): this pass no longer moves
+        # persona credentials, and a TOTP key dropped from the ring takes
+        # the ones still sealed under it with it.
+        from noctornal_api.wording import count_of
+        print(f"{count_of(stranded, 'persona credential is', 'persona credentials are')} "
+              f"still sealed under this ring, "
+              f"from before the persona key existed: keep every key that sealed "
+              f"them in the ring until --persona --apply has moved them",
+              file=sys.stderr)
     groups = inventory(conn)
     if not groups:
         print("no sealed rows in any table; nothing to do")
@@ -113,6 +149,85 @@ def main() -> int:
               f"readiness register will keep naming them", file=sys.stderr)
         return 1
     print(f"\nevery sealed row is under {active}; the retired entries can be dropped")
+    return 0
+
+
+def _persona(args) -> int:
+    """`--persona`: the persona ring's report, and with --apply the move."""
+    from psycopg.types.json import Json
+
+    from noctornal_api.db import SystemPurpose, connect_system
+    from noctornal_api.security import envelope, persona_envelope
+    from noctornal_api.security.persona_sealed import (
+        inventory,
+        move_and_rewrap,
+        sealed_before_split,
+    )
+    from noctornal_api.wording import count_of
+
+    if args.legacy_key_file:
+        print("--legacy-key-file is for the TOTP ring's pre-ring rows; it does "
+              "not apply to --persona", file=sys.stderr)
+        return 2
+    try:
+        ids = persona_envelope.key_ids()
+    except persona_envelope.PersonaKeyError as exc:
+        print(f"the persona key ring is not usable here: {exc}", file=sys.stderr)
+        return 2
+    active = ids[0]
+    print(f"persona ring: active {active}"
+          + (f", retired {', '.join(ids[1:])}" if ids[1:] else ", no retired keys"))
+    conn = connect_system(SystemPurpose.SCRIPT)
+    # BEFORE the inventory opens anything (verify:g38, 2026-10-03): a row
+    # still sealed under the TOTP ring is opened with that ring, so a
+    # process without the TOTP key must be refused by name here, with exit
+    # 2, and not crash in the inventory with a traceback and exit 1.
+    stranded = sealed_before_split(conn)
+    if stranded:
+        try:
+            envelope.key_ids()
+        except (RuntimeError, ValueError) as exc:
+            print(f"{count_of(stranded, 'persona credential is', 'persona credentials are')} "
+                  f"still sealed under the TOTP key ring, and opening "
+                  f"{'it' if stranded == 1 else 'them'} needs that ring, which "
+                  f"is not usable here ({exc}): run this where both keys are "
+                  f"held, the collector", file=sys.stderr)
+            return 2
+    groups = inventory(conn)
+    if not groups:
+        print("no persona credential is sealed; nothing to do")
+        return 0
+    for g in groups:
+        print("  " + g.describe())
+    unopenable = sum(g.unopenable for g in groups)
+    pending = sum(g.rows for g in groups if g.key_id != active)
+    if not args.apply:
+        print(f"\n{count_of(pending, 'persona credential would be', 'persona credentials would be')} "
+              f"sealed under {active}; run with --apply to do it")
+        if unopenable:
+            print(f"{unopenable} of the checked rows open under nothing held here: "
+                  f"a credential sealed before the split needs the TOTP key that "
+                  f"sealed it in NOCTORNAL_TOTP_KEK or _RETIRED, and one under a "
+                  f"retired persona key needs it in NOCTORNAL_PERSONA_KEK_RETIRED; "
+                  f"or re-enrol that persona", file=sys.stderr)
+        return 1 if unopenable else 0
+    report = move_and_rewrap(conn)
+    print(f"  {report.table:32} moved {report.recovered}, re-sealed "
+          f"{report.rewrapped}, skipped {report.skipped}, unopenable "
+          f"{report.unopenable}")
+    conn.execute(
+        """INSERT INTO audit.event
+               (actor_id, actor_kind, action, object_type, object_id, case_id, detail)
+           VALUES (NULL, 'SYSTEM', 'PERSONA_KEK_REWRAP', 'kek', NULL, NULL, %s)""",
+        (Json({"active_key_id": active, "moved": report.recovered,
+               "rewrapped": report.rewrapped, "skipped": report.skipped,
+               "unopenable": report.unopenable}),))
+    if report.unopenable:
+        print(f"\n{report.unopenable} persona credentials open under nothing held "
+              f"here and were left as found; the readiness row collector_split "
+              f"keeps counting the ones sealed before the split", file=sys.stderr)
+        return 1
+    print(f"\nevery persona credential is under {active}")
     return 0
 
 

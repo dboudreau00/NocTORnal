@@ -354,8 +354,9 @@ if ([string]::IsNullOrWhiteSpace($env:NOCTORNAL_TOTP_KEK)) {
             '# NocTORnal local key store. Created by scripts/launch.ps1.',
             '#',
             '# NOCTORNAL_TOTP_KEK seals every secret the database stores encrypted,',
-            '# except the egress exits, which are sealed to the egress proxy''s own key:',
-            '# enrolled authenticators, collection persona credentials, stored victim',
+            '# except the egress exits, which are sealed to the egress proxy''s own key,',
+            '# and collection persona credentials, which NOCTORNAL_PERSONA_KEK seals:',
+            '# enrolled authenticators, stored victim',
             '# credentials, each sample''s data key, and the credentials of the outbound',
             '# integrations an administrator configures (Jira and lookup provider',
             '# credentials). LOSING THIS FILE LOSES ALL OF',
@@ -383,8 +384,9 @@ if ([string]::IsNullOrWhiteSpace($env:NOCTORNAL_TOTP_KEK)) {
     Write-Host "      $EnvLocal" -ForegroundColor Yellow
     Write-Host '' -ForegroundColor Yellow
     Write-Host '    That file is now your key store. The key seals every secret the' -ForegroundColor Yellow
-    Write-Host '    database stores encrypted: authenticators, persona and victim' -ForegroundColor Yellow
-    Write-Host '    credentials, Jira and lookup provider credentials, and the keys of' -ForegroundColor Yellow
+    Write-Host '    database stores encrypted but persona credentials, which have a' -ForegroundColor Yellow
+    Write-Host '    key of their own: authenticators, victim credentials, Jira and' -ForegroundColor Yellow
+    Write-Host '    lookup provider credentials, and the keys of' -ForegroundColor Yellow
     Write-Host '    stored samples. If you lose it, every user has to re-enrol their' -ForegroundColor Yellow
     Write-Host '    authenticator app, and none of the rest can be decrypted again.' -ForegroundColor Yellow
     Write-Host '    There is no recovery and no default key.' -ForegroundColor Yellow
@@ -394,6 +396,22 @@ if ([string]::IsNullOrWhiteSpace($env:NOCTORNAL_TOTP_KEK)) {
 }
 elseif (-not $kekFromEnvironment) {
     Write-Good 'TOTP key ready'
+}
+
+# A collector process (2026-10-02): persona credentials seal under a key of
+# their own. On this machine the API holds it and runs persona acts inline
+# (NOCTORNAL_COLLECTOR_INLINE below); in production only the collector
+# service does. Appended, never replacing anything in the file.
+if ([string]::IsNullOrWhiteSpace($env:NOCTORNAL_PERSONA_KEK)) {
+    $pbytes = New-Object byte[] 32
+    $prng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $prng.GetBytes($pbytes) } finally { $prng.Dispose() }
+    $pgenerated = [Convert]::ToBase64String($pbytes)
+    Add-Content -LiteralPath $EnvLocal -Value @(
+        '# NOCTORNAL_PERSONA_KEK seals every collection persona credential. Lost, every persona is enrolled again.',
+        "NOCTORNAL_PERSONA_KEK=$pgenerated")
+    $env:NOCTORNAL_PERSONA_KEK = $pgenerated
+    Write-Good 'persona key generated and saved to .env.local'
 }
 
 # ---------------------------------------------------------------------------
@@ -433,6 +451,10 @@ $defaults = [ordered]@{
     # 2026-09-24: raw markup of collected forum pages, again without
     # object lock, because it is deleted with its document.
     COLLECT_RAW_BUCKET = 'noctornal-collect-raw'
+    # A collector process (2026-10-02): there is no collector process on
+    # this machine, so persona acts run inside the API, as they always did
+    # here. Refused in production.
+    NOCTORNAL_COLLECTOR_INLINE = '1'
 }
 
 foreach ($name in $defaults.Keys) {

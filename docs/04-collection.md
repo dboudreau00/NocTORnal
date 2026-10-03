@@ -174,7 +174,10 @@ management problem with an operational-security problem wrapped around it.
   key. Ciphertext in `collection_account.secret_ciphertext`, master key
   never in the database.
 - Decryption happens only inside `PersonaVault.use()`, only at use time.
-  That is in the API process: there is no separate collector process.
+  Since 2026-10-02 that is the collector process (`scripts/collector.py`),
+  the one service holding `NOCTORNAL_PERSONA_KEK`: the API holds no persona
+  key and queues every persona act in `collect.persona_act`. Development
+  runs the same code inline in the API (`NOCTORNAL_COLLECTOR_INLINE`).
 - The API never returns plaintext. `collection_account.reveal` exists as a
   permission but requires step-up *and* dual control, and fires a
   high-priority audit alert.

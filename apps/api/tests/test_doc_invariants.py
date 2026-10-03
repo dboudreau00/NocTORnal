@@ -688,11 +688,15 @@ def test_nothing_describes_a_behaviour_that_was_never_built():
 
 
 def test_invariant_7_is_never_stated_as_a_separate_process():
-    """There is no collector process and no worker process. `PersonaVault`
-    runs inside the API process, so invariant 7 bounds the shape of the code
-    and not the blast radius of a compromised host -- which is what
-    CONVENTIONS, ARCHITECTURE and docs/05 say, and what the README's
-    invariant table did not say until 2026-09-10."""
+    """Invariant 7 is never worded as a network zone. Since 2026-10-02 the
+    persona key is the collector service's alone in production, which is a
+    process boundary: the collector still holds the TOTP key ring, the
+    system role's DSN and the store credentials, so a document must not say
+    credentials 'never leave the collector' as though it were the isolated
+    zone the 2026-07 sketch drew (CONVENTIONS, ARCHITECTURE, docs/02 and
+    docs/05 say what it does and does not separate, and the README's
+    invariant table did not say it until 2026-09-10). Reworded 2026-10-03:
+    the earlier docstring still said there is no collector process."""
     offenders: list[str] = []
     for path in _prose_and_source():
         rel = path.relative_to(ROOT).as_posix()
@@ -702,6 +706,7 @@ def test_invariant_7_is_never_stated_as_a_separate_process():
                     and not _QUOTING_THE_OLD_WORDING.search(line)):
                 offenders.append(f"{rel}:{lineno}: {line.strip()[:100]}")
     assert not offenders, (
-        "invariant 7 is stated as though the credentials lived in a separate "
-        "process; name the VAULT, and say it runs inside the API process:\n  "
+        "invariant 7 is stated as though the credentials lived in an isolated "
+        "zone; name the VAULT, and say what the collector process does and "
+        "does not separate (docs/02):\n  "
         + "\n  ".join(offenders))

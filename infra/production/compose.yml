@@ -923,18 +923,74 @@ services:
           python scripts/notify_drain.py; rc=$$?
           echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] notify_drain exit=$$rc"
           sleep 150
-          echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] collection_poll start"
-          python scripts/collection_poll.py; rc=$$?
-          echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] collection_poll exit=$$rc"
-          # Queued outbound lookups (F15.4, 2026-09-24),
-          # straight after the poll with no sleep of its own, so every job
-          # keeps its five-minute cadence. The cadence is a resolution, not
-          # a rate: pacing comes from the provider windows.
+          # The collection poll moved to the collector service below on
+          # 2026-10-02 (A collector process): it needs the persona key,
+          # which this loop does not hold.
+          # Queued outbound lookups (F15.4, 2026-09-24), with no sleep of
+          # its own, so every job keeps its five-minute cadence. The
+          # cadence is a resolution, not a rate: pacing comes from the
+          # provider windows.
           echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] lookup_drain start"
           python scripts/lookup_drain.py; rc=$$?
           echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] lookup_drain exit=$$rc"
           sleep 150
         done
+
+  # ------------------------------------------------------------------------
+  # The collector (A collector process, 2026-10-02): the ONE service that
+  # holds the persona key. It runs every persona act the API queues in
+  # collect.persona_act (a Telegram chat looked up, joined, checked, marked
+  # or rebound; a Poll now of a source a persona reads) and the scheduled
+  # collection polls (scripts/collection_poll.py, as a child every five
+  # minutes, the resolution the cron loop used). The API and the cron loop
+  # hold no persona key, so neither can open a persona credential.
+  #
+  # collector.env carries NOCTORNAL_PERSONA_KEK and nothing else, and only
+  # this service reads it. Optional to compose so an upgrade starts and the
+  # collector then refuses by name until the file exists. NOCTORNAL_COLLECTOR
+  # is set HERE, where the env files cannot unset it, and every other
+  # process refuses to start with it. It takes cron's egress settings and
+  # waits for the proxy, as cron does: a persona reaches its site only
+  # through its own exit.
+  #
+  # Healthcheck disabled: no HTTP server here (see the Dockerfile).
+  collector:
+    <<: *noctornal-app
+    healthcheck:
+      disable: true
+    # SIGTERM finishes the act in hand and claims no other (scripts/
+    # collector.py). The longest act is a Telegram poll's whole session,
+    # 120 seconds, and the poll child, which ends on SIGTERM at once, is given
+    # up to 30 more before it is killed; docker's default
+    # of 10 would kill the process mid-act and leave it RUNNING, to be
+    # failed as "outcome unknown" fifteen minutes later (verify:g38,
+    # 2026-10-03). test_persona_act_queue_pg holds the number.
+    stop_grace_period: 180s
+    env_file:
+      - secrets.env
+      - path: egress-client.env
+        required: false
+      - path: collector.env
+        required: false
+    environment:
+      NOCTORNAL_ENV: production
+      NOCTORNAL_COLLECTOR: "1"
+      NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
+      NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      egress-proxy:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -c
+      - |
+        cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt || exit 1
+        export SSL_CERT_FILE=/tmp/ca-bundle.crt
+        exec python scripts/collector.py
 
   # F11 and F12 (2026-09-24). Static triage and YARA compiles in a loop
   # of their own: a pass finishes the run it started, and one run can take

@@ -16,6 +16,14 @@ import pytest
 os.environ.setdefault(
     "NOCTORNAL_TOTP_KEK", "A" * 43 + "="  # 32 zero-ish bytes, valid base64
 )
+# A collector process (2026-10-02): the persona ring's own deterministic
+# key, never the TOTP one (32 bytes of 0x01, which config refuses in
+# production as a published value), and the inline mode development runs
+# in, so the suites that drive persona acts over HTTP run them in the
+# request as before. test_persona_act_queue_pg.py turns it off to prove the
+# queue and the collector.
+os.environ.setdefault("NOCTORNAL_PERSONA_KEK", "AQEB" * 10 + "AQE=")
+os.environ.setdefault("NOCTORNAL_COLLECTOR_INLINE", "1")
 
 # Every exhibit a test ingests is written under a COMPLIANCE object lock,
 # and a COMPLIANCE retention cannot be shortened, lifted or overridden by

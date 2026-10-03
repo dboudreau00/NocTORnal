@@ -25,7 +25,8 @@ APP_ONLY = ("postgres", "redis", "minio", "minio-init", "migrate", "api",
             "sample-origin", "cron",
             "lab-triage",  # static triage's own loop (F11, 2026-09-25)
             "lab-cron",    # screening and the sandbox dispatch (F13, F14)
-            "embed-pass")  # the similarity pass (F6)
+            "embed-pass",  # the similarity pass (F6)
+            "collector")   # the persona key's one holder (2026-10-02)
 
 
 class Unparseable(ValueError):

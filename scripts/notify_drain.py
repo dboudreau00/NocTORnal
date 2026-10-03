@@ -67,6 +67,9 @@ def connect():
 
 
 def main() -> int:
+    # A collector process (2026-10-02): the cron loop holds no persona key.
+    from noctornal_api.config import enforce_persona_key_boundary
+    enforce_persona_key_boundary(collector=False)
     conn = connect()
     try:
         # S2, the egress proxy (2026-09-24). A production cron with

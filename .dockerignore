@@ -14,28 +14,76 @@
 # a server AND put the dev database DSN one `scripts/_env.py` call away --
 # and `load_env_local()` only declines to override variables that are
 # already set, so a variable compose forgot would silently come from here.
-.env
-.env.*
-.env.local
+#
+# Docker reads a pattern as anchored at the context root, unlike .gitignore:
+# `.env` matched the root's .env and nothing else, so apps/api/.env and
+# infra/production/.env.production were COPYed into the image (verify:g38,
+# 2026-10-03). `**/` matches at any depth, the root included.
+**/.env
+**/.env.*
+**/*.env
+**/*.env.*
+
+# Private keys and keystores, wherever one is left. Nothing in the image
+# reads a key file: the TLS keypair is bind-mounted by compose.
+**/*.key
+**/*.pem
+**/*.p12
+**/*.pfx
+**/*.jks
+
+# The copy an editor or a careful operator leaves beside a secret file: a
+# backup, an editor swap file, a half-written temp file. Each holds
+# everything the original held and none of them is named anywhere else.
+**/*~
+**/*.swp
+**/*.swo
+**/*.bak
+**/*.old
+**/*.orig
+**/*.save
+**/*.tmp
 
 # Renders of real panes against real case data. A screenshot of an
 # AMBER_STRICT case carries that case's classification and does not look
-# like it does (the same reasoning as .gitignore).
-screenshots/
-shots/
+# like it does (the same reasoning as .gitignore). By name and by kind, at
+# any depth: `--out` can point anywhere, and a bare `screenshots/` only
+# matched the one at the root. The tracked docs/images renders are a README
+# asset the image never serves.
+**/screenshots/
+**/shots/
+**/*.png
+
+# Machine-local tool settings. The agent's permission grants
+# (.claude/settings.local.json) are the text of a command somebody approved
+# once, and an editor's launch configuration carries the environment it runs
+# with; either can hold a token or a DSN. .gitignore keeps them out of a
+# commit and this keeps them out of an image.
+**/.claude/
+**/.vscode/
+**/.idea/
 
 # --- Secrets that live under infra/production ------------------------------
 
-# The operator's real secrets file sits beside the compose file. It is
-# gitignored, which means nothing stops it being COPYed into an image.
-infra/production/secrets.env
-
-# MinIO's TLS keypair, including `private.key`. The compose file BIND-mounts
-# this directory into the containers that need it, so nothing is lost by
-# excluding it -- and without this line the private key of the production
-# object store would be baked into every layer of the image and travel with
-# it to wherever the image goes.
-infra/production/tls/
+# The operator keeps real secrets beside the compose file: secrets.env,
+# collector.env (the persona key, which the API must not hold even on disk),
+# egress-proxy.env (the seal key and the proxy's DSN), egress-client.env,
+# postgres-init.env (the BYPASSRLS worker role's password), migrate.env, and
+# tls/private.key (the object store's TLS key, which would otherwise travel
+# in every layer to wherever the image goes). All are gitignored, which means
+# nothing stops them being COPYed into the one image every service runs.
+#
+# A list of NAMES lost that race twice (2026-10-03, verify:g38 and review
+# infra-1): the first named secrets.env and tls/ and missed the egress and
+# init env files, the next named five env files and missed collector.env.old,
+# secrets.env.bak, .env.production, private.key and signing.pem. So the whole
+# directory stays out, which is an allow-list of nothing and covers the next
+# file whatever it is called.
+# Nothing in the image reads it: compose, the Caddyfile, the templates and
+# the README are used on the host, and compose BIND-mounts what a container
+# needs. test_dockerignore_secrets.py holds the rule against every name
+# .gitignore keeps out, at every depth.
+infra/production/
 
 # --- Size and staleness ----------------------------------------------------
 

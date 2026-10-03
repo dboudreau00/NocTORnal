@@ -269,6 +269,8 @@ The ones worth knowing:
 | Variable | Effect if unset |
 |---|---|
 | `NOCTORNAL_TOTP_KEK` | The API will not start. Generated for you at install. |
+| `NOCTORNAL_PERSONA_KEK` | A collection persona's credential can be neither sealed nor opened, so a persona cannot be enrolled or used and every act or poll that needs one is refused by name. A key of its own, never the TOTP key. Generated for you at install. In production only the collector service holds it (`infra/production/collector.env`). |
+| `NOCTORNAL_COLLECTOR_INLINE` | Persona acts are queued for the collector process and wait for it. A development install sets it to `1`, so the API runs them itself; it is refused in production. Written for you at install. |
 | `NOCTORNAL_INGEST_PEPPER` | Ingest keys cannot be issued. Generated for you. |
 | `NOCTORNAL_PROHIBITED_CONTENT_POLICY`<br>`NOCTORNAL_DESIGNATED_PERSON` | **Sample ingest returns 451.** This is L1, and the refusal is the point. Set both only once counsel has written the policy. |
 | `NOCTORNAL_SAMPLE_ORIGIN` | Sample downloads are refused. Invariant 10 requires malware bytes to come from a **separate origin**; an origin split that is only written down does not survive the first hurried deploy. |

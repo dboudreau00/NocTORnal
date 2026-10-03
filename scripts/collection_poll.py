@@ -1,9 +1,14 @@
 """Poll every source whose OWN schedule says it is due. This is the cron entry.
 
-There is no collector process in this build and there deliberately is not
-one -- decisions 30 and 46, and `collection.py`'s own "what is NOT built"
+Since 2026-10-02 (A collector process) it runs inside the collector:
+`scripts/collector.py` starts one pass of it on its schedule, in the one
+process that holds the persona key, and in production it refuses to run
+anywhere else. Until then there was no collector process, deliberately --
+decisions 30 and 46, and `collection.py`'s own "what is NOT built"
 note: a collector that runs itself on a timer nobody watches is how a
-persona gets burnt at 3am. `due_sources()` reports and `run_once()` acts,
+persona gets burnt at 3am. That reasoning still holds of the cadence
+below: the collector LOOKS on a schedule, and each source's own jittered
+`next_due_at` decides when it is polled. `due_sources()` reports and `run_once()` acts,
 and until now the only thing that called either outside a test was the
 Feeds pane, which needs an analyst with `collection.run` sitting at a
 keyboard. So a source with a five-minute interval was polled when somebody
@@ -318,6 +323,12 @@ def main() -> int:
     # outbound uses and no egress proxy stops here, as the API does.
     from noctornal_api.egress_routes import enforce_production_egress
     enforce_production_egress()
+    # A collector process (2026-10-02): in production a pass runs in the
+    # collector, the one process that holds the persona key and carries
+    # NOCTORNAL_COLLECTOR; anywhere else a persona's poll could not open
+    # its credential, and the cron loop must not hold it.
+    from noctornal_api.config import enforce_persona_key_boundary
+    enforce_persona_key_boundary(collector=True)
     # Read before anything else, so the pass's clock includes the
     # readiness probes and the listing, which are part of how long the
     # compose loop waits for this process.

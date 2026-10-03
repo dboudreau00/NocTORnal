@@ -3166,6 +3166,17 @@ def _telegram_collection(conn: psycopg.Connection) -> Check:
     return Check("telegram_collection", ok, evidence, "" if ok else action)
 
 
+def _collector_split(conn: psycopg.Connection) -> Check:
+    """A collector process (2026-10-02): the API holds no persona key, a
+    collector drains the persona act queue, and every persona credential
+    is under the persona ring. Not blocking: the acts and polls a missing
+    collector stops are refused by name where they are asked for."""
+    from noctornal_api import persona_acts
+
+    ok, evidence, action = persona_acts.readiness_verdict(conn)
+    return Check("collector_split", ok, evidence, "" if ok else action)
+
+
 # ---------------------------------------------------------------------------
 # Prohibited-content screening (F13, 2026-09-24). Not blocking: holding
 # hash lists may itself be unlawful, so no list loaded must pass.
@@ -3586,6 +3597,9 @@ _CHECKS: tuple[tuple[str, Callable[[psycopg.Connection], Check], str], ...] = (
     # Telegram collection (F5.3, 2026-09-24). Not blocking.
     ("telegram_collection", _telegram_collection,
      "the collection tables could not be read; run alembic upgrade head"),
+    # A collector process (2026-10-02). Not blocking.
+    ("collector_split", _collector_split,
+     "the persona act queue could not be read; run alembic upgrade head"),
 )
 
 #: The names, in the order the report lists them. Public so the router
@@ -3716,6 +3730,8 @@ UI_TARGETS: dict[str, str] = {
     "forum_collection": "feeds/sources",
     # Telegram collection (F5.3, 2026-09-24).
     "telegram_collection": "feeds/sources",
+    # A collector process (2026-10-02).
+    "collector_split": "feeds/sources",
 }
 
 

@@ -320,6 +320,25 @@ def published_credentials(env: Mapping[str, str] | None = None) -> list[Publishe
                 "and of no key a random generator produces, so every TOTP "
                 "secret, persona credential and sample data key it seals opens "
                 "for anyone who has read the source.")
+    # The persona key (A collector process, 2026-10-02), the same shape
+    # test: the suites publish 32 bytes of 0x01 for it. Decoded here with
+    # the envelope's lenient reader rather than the persona ring's, which
+    # refuses outside the collector in production and would hide it.
+    persona = env.get("NOCTORNAL_PERSONA_KEK", "")
+    if "NOCTORNAL_PERSONA_KEK" not in found and persona.strip():
+        from noctornal_api.security.envelope import _decode_key
+
+        try:
+            key = _decode_key(persona, name="NOCTORNAL_PERSONA_KEK")
+        except (RuntimeError, ValueError):
+            key = b""
+        if key and len(set(key)) == 1:
+            found["NOCTORNAL_PERSONA_KEK"] = PublishedCredential(
+                "NOCTORNAL_PERSONA_KEK", "kek",
+                "NOCTORNAL_PERSONA_KEK decodes to one byte repeated 32 times, "
+                "the shape of the key the test suites publish and of no key a "
+                "random generator produces, so every persona credential it "
+                "seals opens for anyone who has read the source.")
     return [found[name] for name in sorted(found)]
 
 
@@ -468,8 +487,13 @@ def declared_cap(name: str, default: int = DEFAULT_UPLOAD_CAP) -> int:
     return parse_size(raw) if raw else default
 
 
-def verify_environment(env: Mapping[str, str] | None = None) -> list[str]:
+def verify_environment(env: Mapping[str, str] | None = None, *,
+                       collector: bool = False) -> list[str]:
     """Every reason this environment must not run a production deployment.
+
+    `collector` is True only from scripts/collector.py: the one process
+    that must hold the persona key, where every other must not (A collector
+    process, 2026-10-02; `persona_key_problems`).
 
     Pure: it reads `env` (the process environment by default), opens
     nothing, and returns the refusals rather than raising, so the rules
@@ -836,7 +860,81 @@ def verify_environment(env: Mapping[str, str] | None = None) -> list[str]:
     # DSN, which bypasses row security. Named, never quoted.
     problems.extend(_row_security_problems(env))
 
+    # A collector process (2026-10-02): who holds the persona key.
+    problems.extend(persona_key_problems(env, collector=collector))
+
     return problems
+
+
+def persona_key_problems(env: Mapping[str, str] | None = None, *,
+                         collector: bool) -> list[str]:
+    """The production refusals the persona key's split needs (A collector
+    process, 2026-10-02). Pure, like `verify_environment`, and `[]` outside
+    production.
+
+    The collector is the one process that holds NOCTORNAL_PERSONA_KEK, and
+    carries NOCTORNAL_COLLECTOR=1 from the compose file so the vault opens
+    with it there. Every other production process (the API, the sample
+    origin, the cron loop, the Lab workers) is refused when it holds the key
+    or the collector's mark, and the inline mode, which runs persona acts
+    inside the API, is refused everywhere. Named, never quoted."""
+    from noctornal_api.persona_acts import INLINE_ENV, inline_requested
+    from noctornal_api.security import persona_envelope as pe
+
+    if env is None:
+        env = os.environ
+    if env.get(ENV_VAR, "").strip().lower() != PRODUCTION:
+        return []
+    problems: list[str] = []
+    if inline_requested(env):
+        problems.append(
+            f"{INLINE_ENV} is set, and it runs persona acts inside the API "
+            f"process, which in production holds no persona key; it exists for "
+            f"development only.")
+    if not collector:
+        held = pe.held(env)
+        if held:
+            problems.append(
+                f"{' and '.join(held)} {'is' if len(held) == 1 else 'are'} set on "
+                f"a process that is not the collector: in production the persona "
+                f"key is held by the collector service alone "
+                f"(infra/production/collector.env), so no other process can open "
+                f"a persona credential.")
+        if pe.is_collector(env):
+            problems.append(
+                f"{pe.COLLECTOR_ENV} is set on a process that is not the "
+                f"collector; it marks the collector service alone "
+                f"(infra/production/compose.yml).")
+        return problems
+    if not pe.is_collector(env):
+        problems.append(
+            f"{pe.COLLECTOR_ENV} is not set on the collector, so its vault would "
+            f"refuse to open any persona credential; the compose file sets it on "
+            f"the collector service.")
+        return problems
+    with _borrowing(env, "NOCTORNAL_ENV", pe.COLLECTOR_ENV, pe.KEK_ENV,
+                    pe.KEK_ID_ENV, pe.RETIRED_ENV):
+        try:
+            pe.ring()
+        except pe.PersonaKeyError as exc:
+            problems.append(
+                f"the persona key ring is not usable ({exc}), so the collector "
+                f"could open no persona credential and every persona act and "
+                f"poll would be refused.")
+    return problems
+
+
+def enforce_persona_key_boundary(env: Mapping[str, str] | None = None, *,
+                                 collector: bool) -> None:
+    """`persona_key_problems` as a refusal, for the cron entries that do not
+    run the whole of `enforce_environment` (A collector process,
+    2026-10-02). Nothing at all outside production."""
+    problems = persona_key_problems(env, collector=collector)
+    if problems:
+        listed = "\n".join(f"  - {problem}" for problem in problems)
+        raise RuntimeError(
+            f"{ENV_VAR}={PRODUCTION}, and this process may not run with its "
+            f"persona key settings:\n{listed}")
 
 
 def _dsn_user(dsn: str) -> str | None:
@@ -935,7 +1033,8 @@ def _egress_key_problems(env: Mapping[str, str]) -> list[str]:
     return problems
 
 
-def enforce_environment(env: Mapping[str, str] | None = None) -> None:
+def enforce_environment(env: Mapping[str, str] | None = None, *,
+                        collector: bool = False) -> None:
     """Refuse to continue when `verify_environment` found anything.
 
     Does nothing at all unless `NOCTORNAL_ENV=production`, because
@@ -950,7 +1049,7 @@ def enforce_environment(env: Mapping[str, str] | None = None) -> None:
     so a first-deployment misconfiguration turns into an evening of
     self-inflicted outages. The list is what makes it one fix.
     """
-    problems = verify_environment(env)
+    problems = verify_environment(env, collector=collector)
     if not problems:
         return
     listed = "\n".join(f"  - {problem}" for problem in problems)

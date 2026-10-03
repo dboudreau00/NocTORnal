@@ -19,17 +19,24 @@
 
 ## Topology
 
-One process. `noctornal_api.http.app:app` (FastAPI under uvicorn) serves
-the REST API under `/api/v1`, the analyst console under `/ui` and the
-`/api/v1/live` WebSocket, and runs the collectors, the analytics and the
-notification drain in-process. It talks to four services.
+One API process. `noctornal_api.http.app:app` (FastAPI under uvicorn)
+serves the REST API under `/api/v1`, the analyst console under `/ui` and
+the `/api/v1/live` WebSocket, and runs the analytics, the notification
+drain and the polls of feeds no persona reads in-process. It talks to four
+services. Since 2026-10-02 a second process, the collector
+(`scripts/collector.py`), holds the persona key and runs everything that
+needs a persona credential: the persona acts the API queues in
+`collect.persona_act` and the scheduled collection polls. Postgres is the
+queue (`FOR UPDATE SKIP LOCKED`, `pg_notify`); there is no broker.
+Development and Windows run persona acts inline in the API process
+(`NOCTORNAL_COLLECTOR_INLINE=1`, refused in production).
 
 ```
 ┌─ API PROCESS  (noctornal_api, one uvicorn) ─────────────────────────────┐
 │  /ui          static console: HTML/CSS/JS, no build step, strict CSP    │
 │  /api/v1      routers ──► five-part access gate ──► services            │
 │  /api/v1/live WebSocket fed by Postgres LISTEN/NOTIFY (one listener)    │
-│  collection   adapters + PersonaVault, run by call (no scheduler loop)  │
+│  collection   feed adapters by call; persona acts go to the collector   │
 │  analytics    igraph, synchronous on request (decision 30)              │
 │  notify       dispatch_due(), called, not a worker (decision 46)        │
 └────────┬────────────────┬─────────────────┬──────────────────┬──────────┘
@@ -40,34 +47,48 @@ notification drain in-process. It talks to four services.
    58 revisions        in Lua), cache   samples buckets
 ```
 
-**There is no separate collection zone.** The 2026-07 sketch put the
-collectors in their own network segment, holding persona credentials and
-no database credentials, so that a burnt persona could not become a route
-into the case file. That separation is not in the tree: `PersonaVault`
-lives in `apps/api/src/noctornal_api/collection.py`, inside the process
-that holds `DATABASE_URL` and `NOCTORNAL_TOTP_KEK`. What IS true, and what
-invariant 7 says since 2026-09-09:
+**The collector is a second process, not a separate collection zone.** The
+2026-07 sketch put the collectors in their own network segment, holding
+persona credentials and no database credentials, so that a burnt persona
+could not become a route into the case file. The tree has the first half
+of that, built on 2026-10-02 (A collector process): the persona key,
+`NOCTORNAL_PERSONA_KEK`, is held by the collector service alone, and
+every other process that runs the application's code, and the egress proxy,
+refuses to start holding it. It does not
+have the second half. The collector reads `secrets.env` like every
+application service, so it also holds the TOTP key ring, the system
+role's DSN and the store credentials; the split is one way (docs/17).
+What is true, and what invariant 7 says:
 
-- persona credentials are envelope-encrypted at rest (AES-256-GCM, the
-  same scheme as TOTP secrets, `security/envelope.py`) and decrypted only
-  inside `PersonaVault.use()`, a context manager that yields the plaintext
-  to one block, drops it and audits the use; there is no `get_secret()`;
+- persona credentials are envelope-encrypted at rest (AES-256-GCM,
+  `security/persona_envelope.py`, under the persona key and never the TOTP
+  ring) and decrypted only inside `PersonaVault.use()`, a context manager
+  that yields the plaintext to one block, drops it and audits the use;
+  there is no `get_secret()`;
+- the vault opens only in the collector process in production
+  (`scripts/collector.py`, compose service `collector`, marked
+  `NOCTORNAL_COLLECTOR=1`). The API queues every persona act in
+  `collect.persona_act` (the kind, the source, the request's own
+  parameters, who asked and from which session, never a secret) and the
+  collector runs it after asking again, as the person who asked: their
+  session, their permissions and second factor, the blocking readiness
+  checks and their ceiling. Whether a collector is running is on the
+  readiness register (`collector_split`, from the collector's own
+  heartbeat, so a stopped collector is red even with an empty queue);
 - adapter errors are `redact()`-ed before they are stored, because a
   persona password lands in an HTTP error body more often than anyone
   expects;
-- **a compromised API host is a compromised vault.** The shape of the code
-  stops a credential reaching a response, a log or a traceback. It does
-  not stop an attacker who is on the host, and nothing here claims it
-  does.
+- **a compromised API host is no longer a compromised vault**: it holds
+  no persona key and can queue an act, which the collector re-checks, but
+  cannot read or replay a session. **A compromised collector host still
+  is one**, and nothing here claims otherwise.
 
-Splitting a collector out (its own process, a queue between it and the
-API, no database credentials) is a deliberate not-yet. The seam is real
-(`Adapter` returns `Item`s, never graph elements, and
-`CollectionService.run_once` is its only caller), but `RssAdapter` is the
-only adapter, and the Telegram and forum adapters that would justify the
-split are behind docs/16 L3 (authority to operate a persona at all) before
-they are behind any topology question. When the split happens, decision 9
-becomes true; until then `docs/00` records it as superseded.
+The seam is `Adapter` returning `Item`s, never graph elements, with
+`CollectionService.run_once` its only caller. Everything that needs a
+persona credential crosses it in the collector; a feed no persona reads
+(an RSS source) is still polled by the API's own Poll now. Until
+2026-10-02 `docs/00` recorded the split as superseded (decision 9) and
+the vault ran in the API process.
 
 ## Stack, with reasoning
 
@@ -226,9 +247,9 @@ decision lives. The names in the first column are the ones
 
 | Sketch (2026-07) | What is in the tree | Where recorded |
 |---|---|---|
-| Three trust zones; collectors with persona credentials and no database access | One process; `PersonaVault` inside the API; invariant 7 reworded | decision 9, superseded note, 2026-09-09 |
-| A NATS / Redis Streams queue between zones | No queue; `due_sources` / `run_once` are called | NATS removed from compose 2026-07-26 (R13) |
-| Arq or Celery workers for collection and analytics | No worker; analytics synchronous, notifications by `dispatch_due()` | decision 30 (Arq/NATS marked removed there), decision 46 |
+| Three trust zones; collectors with persona credentials and no database access | An API process and one collector process; the persona key is the collector's alone, but the collector also holds database credentials; invariant 7 reworded twice | decision 9 (superseded 2026-09-09, then built on 2026-10-02); docs/17 |
+| A NATS / Redis Streams queue between zones | No broker; persona acts queue in one Postgres table (`collect.persona_act`), everything else is called (`due_sources` / `run_once`) | NATS removed from compose 2026-07-26 (R13); the table, 2026-10-02 |
+| Arq or Celery workers for collection and analytics | No Arq or Celery; analytics synchronous, notifications by `dispatch_due()`; one collector service for everything that needs a persona credential | decision 30 (Arq/NATS marked removed there), decision 46; the collector, 2026-10-02 |
 | OpenFGA or SpiceDB for authorisation | The five-part gate in `security/access.py` over `iam.*` | decision 8 superseded; OpenFGA removed from compose 2026-07-26 (R13) |
 | Next.js 15 / TypeScript / Tailwind front end | Vanilla HTML/CSS/JS, no build step, superseded before a line was written | decision 37, docs/14 U1 |
 | sigma.js + graphology (WebGL) sociogram | Canvas 2D + Barnes-Hut worker; sigma.js is not in the tree and never was | decision 37, docs/09 Phase 2 |

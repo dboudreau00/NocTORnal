@@ -1,8 +1,8 @@
 # Production deployment: one host, docker compose
 
 This directory is the whole deployment: a reverse proxy, Postgres, Redis,
-MinIO, the API, a second process serving the sample origin, and a cron
-loop. There is no Kubernetes here and no cloud service; the target is one
+MinIO, the API, a second process serving the sample origin, a cron
+loop, and the collector, the one process that holds the persona key. There is no Kubernetes here and no cloud service; the target is one
 Linux box you control.
 
 Read [What you are NOT getting](#what-you-are-not-getting) before you rely
@@ -68,11 +68,14 @@ python3 -c "import base64, os; print(base64.b64encode(os.urandom(32)).decode())"
 
 Losing that key costs far more than the second factors. It seals every
 column `apps/api/src/noctornal_api/security/sealed.py` lists: each
-account's TOTP secret, each persona's collection credential, each stored
-victim credential and the data key of every sample, preserved samples
-included. A database restored without the key that sealed it opens none
-of them: no enrolled account can complete a sign-in (it answers 503), and
-no persona credential, victim credential or sample can be read again.
+account's TOTP secret, each stored victim credential, the data key of every
+sample (preserved samples included) and each configured integration's
+credential. A collection persona's credential is sealed by a key of its
+own, `NOCTORNAL_PERSONA_KEK`, in `collector.env` (see
+[The collector](#the-collector-the-one-service-that-holds-the-persona-key)).
+A database restored without the key that sealed it opens none of them: no
+enrolled account can complete a sign-in (it answers 503), and no victim
+credential or sample can be read again.
 Nothing recovers them short of the key, so back it up with every backup of
 the database, somewhere that is not this host. Rotating it loses nothing:
 the envelope keeps a ring (`NOCTORNAL_TOTP_KEK_RETIRED`, see the
@@ -89,6 +92,12 @@ sudo chmod 600      infra/production/secrets.env
 
 > `docker compose config` prints this file's contents, resolved into each
 > service's environment. Do not paste that output into a ticket.
+
+Write one more file before the first `up`: `collector.env`, which holds the
+persona key and is read by the collector service alone (see
+[The collector](#the-collector-the-one-service-that-holds-the-persona-key)).
+Without it the collector refuses to start and **nothing is polled**, feeds
+no persona reads included.
 
 ---
 
@@ -251,7 +260,7 @@ means break-glass refuses every request because nobody can review one.
 GET /api/v1/admin/readiness
 ```
 
-Forty-three checks, each with the evidence behind it and, when it fails, the
+Forty-four checks, each with the evidence behind it and, when it fails, the
 action that fixes it. It needs `user.manage`, which is a step-up
 permission, so re-enter your second factor first.
 
@@ -275,7 +284,7 @@ working.
 
 ### What stays red, and what a red check refuses
 
-Four of the forty-three are **blocking** (`readiness.BLOCKING_CHECKS`):
+Four of the forty-four are **blocking** (`readiness.BLOCKING_CHECKS`):
 `prohibited_content_policy`, `sample_origin_configured`,
 `retention_rules_confirmed` and `security_officer_present`. "Blocking" is
 not a synonym for important, everything in the register is important. It
@@ -398,7 +407,7 @@ service and Caddy receive. They are in three files beside it:
 | File | Read by | Holds |
 |---|---|---|
 | `egress-proxy.env` | the egress proxy alone | its database URL, the client key, the seal key, the fingerprint key |
-| `egress-client.env` | api and cron | the client key, the fingerprint key, the seal key's public half |
+| `egress-client.env` | api, cron and the collector | the client key, the fingerprint key, the seal key's public half |
 | `postgres-init.env` | postgres alone | `NOCTORNAL_EGRESS_DB_PASSWORD`, for `db/init/20-egress-role.sh` |
 
 ```sh
@@ -406,8 +415,20 @@ python scripts/egress_setup.py keygen     # prints every key, once
 cp infra/production/egress-proxy.env.example infra/production/egress-proxy.env
 cp infra/production/egress-client.env.example infra/production/egress-client.env
 cp infra/production/postgres-init.env.example infra/production/postgres-init.env
+sudo chown root:root infra/production/egress-proxy.env infra/production/egress-client.env infra/production/postgres-init.env
+sudo chmod 600      infra/production/egress-proxy.env infra/production/egress-client.env infra/production/postgres-init.env
 python scripts/egress_setup.py preflight  # checks all three before you start
 ```
+
+Nothing in this directory is ever copied into the image: the Dockerfile
+copies the whole checkout into the one image every service runs, so
+`.dockerignore` leaves out all of `infra/production/`, whatever a file in it
+is called, so a `collector.env.old` or a `secrets.env.bak` (each holds what
+the file held) is covered as well as the files named above. The same file
+keeps an `.env`, a key, a backup and an editor copy out wherever they land
+in the tree, at every depth. `test_dockerignore_secrets.py` fails when a
+path `.gitignore` keeps out of a commit reaches the image, so a file you
+add here is covered without anyone editing either list.
 
 The client key and the fingerprint key must be the same in both env files;
 preflight says so when they are not. **Losing the seal key loses every
@@ -466,6 +487,95 @@ the passive default and the smtp and webhook routes from your current
 settings and creates them when you confirm. Until adopt has run, feeds and
 deliveries are refused for want of a route, and the readiness row
 `egress_routes_cover_sources` says so.
+
+---
+
+## The collector: the one service that holds the persona key
+
+Since 2026-10-02 the API cannot open a collection persona's credential. A
+persona credential (a Telegram session, a forum login) is sealed under its
+own key, `NOCTORNAL_PERSONA_KEK`, and the only service that holds it is
+`collector`: it runs every persona act the console asks for (a Telegram
+chat looked up, joined, checked, marked as a member chat or rebound, and a
+Poll now of a source a persona reads) and the scheduled collection polls.
+The API queues an act in the database and answers with its outcome, or
+with "queued" while the collector has not finished it; the console follows
+it under Feeds, Persona acts. The cron loop no longer polls.
+
+```sh
+python3 -c "import base64, os; print(base64.b64encode(os.urandom(32)).decode())"
+cp infra/production/collector.env.example infra/production/collector.env
+sudo chown root:root infra/production/collector.env
+sudo chmod 600      infra/production/collector.env
+```
+
+Put the key in `collector.env` and nowhere else, never in `secrets.env`. The
+services that run the application's code (the API and the sample origin, the
+cron loop, the Lab workers, the embedding pass) and the egress proxy refuse
+to start if they find it. The database, the object store, Redis, the
+migration job and Caddy run none of that code and check nothing: they read
+`secrets.env`, so a key put there would simply be carried. The collector
+refuses to start without it, by name, **whether or not the deployment has a
+persona**. The collector also
+runs every scheduled poll (the cron loop no longer polls), so a deployment
+without `collector.env` polls **nothing at all**, the feeds no persona reads
+(RSS, a plain site) included. That is red on the readiness register (below),
+not silent. Enrolling a Telegram persona needs the key too, so it runs in the
+collector:
+
+```sh
+docker compose -f infra/production/compose.yml run --rm collector \
+    python scripts/telegram_persona.py enrol --persona <persona id>
+```
+
+### Upgrading any existing deployment
+
+1. Create `collector.env` as above **before** `docker compose up -d`, even
+   if no persona has ever been enrolled. Without it the collector exits at
+   once, names the missing key, and compose restarts it in a loop, and in
+   the meantime nothing is polled.
+2. If the deployment has personas: their credentials, enrolled before
+   2026-10-02, are sealed under the TOTP key. Until they are moved the
+   collector refuses them by name, their polls are BLOCKED with that
+   sentence, and the readiness row `collector_split` counts them. Move them
+   once, in the collector, which holds both keys:
+
+```sh
+docker compose -f infra/production/compose.yml run --rm collector \
+    python scripts/rewrap_secrets.py --persona            # report
+docker compose -f infra/production/compose.yml run --rm collector \
+    python scripts/rewrap_secrets.py --persona --apply    # move
+```
+
+3. Rebuild the image (`up -d --build`) and remove the old one. An image
+   built before 2026-10-03 carries whichever env files sat beside
+   `compose.yml` when it was built (`secrets.env` aside, the egress files,
+   `postgres-init.env`, and `collector.env` once it existed), in every layer.
+   If such an image ever left this host, treat what those files hold as
+   exposed and rotate it.
+
+### What the register says about the collector
+
+The collector writes a heartbeat to the database when it starts and every
+30 seconds while it runs, with what its key ring made of the persona
+credentials it sampled (counts and key ids, never a key). The readiness row
+`collector_split` reads it, so it is red, with the action, when:
+
+* no collector has ever started against this database (an upgrade without
+  `collector.env`: an empty queue and nothing polled);
+* no collector has been seen for ten minutes (a stopped or crash-looping
+  service, which is also every scheduled poll stopped);
+* the collector's persona key does not open the credentials it sampled when
+  it started (a wrong or restored-from-the-wrong-backup `collector.env`; a
+  persona whose key changed under its id fails each act by name until the key
+  is restored, named in `NOCTORNAL_PERSONA_KEK_RETIRED` under its own id, or
+  the persona is enrolled again);
+* a persona act has waited more than two minutes in the queue;
+* persona credentials are still sealed under the TOTP key;
+* the API holds the persona key.
+
+`docker compose stop collector` is safe at any time: it finishes the act in
+hand and claims no other, within the 180 second `stop_grace_period`.
 
 ---
 
@@ -554,7 +664,13 @@ names, which is the version a retrieval reads. Nothing in this release
 restores one.
 
 Copy `secrets.env` every time you copy the database, and keep it as
-carefully as the dump: together they open every sealed column.
+carefully as the dump: together they open every sealed column except a
+collection persona's credential. That one opens only with the persona key
+in `collector.env`, which the dump and `secrets.env` do not carry: back it
+up with them, somewhere that is not this host (a restore without it loses
+every persona, which must then be enrolled again; nothing else is
+affected), and keep it apart from them if you want the split to mean
+anything for a stolen backup.
 
 **Stopping.**
 

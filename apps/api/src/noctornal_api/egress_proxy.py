@@ -121,7 +121,9 @@ REALM = 'Basic realm="noctornal-egress"'
 #: internet and needs none of them, so it refuses to start holding one.
 FORBIDDEN_ENV = ("NOCTORNAL_TOTP_KEK", "NOCTORNAL_TOTP_KEK_RETIRED", "DATABASE_URL",
                  "NOCTORNAL_MIGRATION_DATABASE_URL", "NOCTORNAL_INGEST_PEPPER",
-                 "MINIO_SECRET_KEY", "SAMPLE_SECRET_KEY")
+                 "MINIO_SECRET_KEY", "SAMPLE_SECRET_KEY",
+                 # The persona key (A collector process, 2026-10-02).
+                 "NOCTORNAL_PERSONA_KEK", "NOCTORNAL_PERSONA_KEK_RETIRED")
 
 #: Refusals before the credentials held: counted per peer, never chained
 #: row by row (egress_ledger, PREAUTH).

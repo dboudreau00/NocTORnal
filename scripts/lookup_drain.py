@@ -10,9 +10,9 @@ keeping a reserve for interactive work.
 
     python scripts/lookup_drain.py [--limit N] [--max-seconds S] [--dry-run]
 
-It runs in the cron loop directly after collection_poll.py, with no sleep of
-its own, so every job in the loop keeps its five-minute cadence
-(infra/production/compose.yml). The cadence is a resolution, not a rate:
+It runs in the cron loop with no sleep of its own, so every job in the loop
+keeps its five-minute cadence (infra/production/compose.yml). The
+collection poll it followed moved to the collector service on 2026-10-02. The cadence is a resolution, not a rate:
 pacing comes from the provider windows.
 
 Prints, first, the host switch as read (NOCTORNAL_OUTBOUND_LOOKUPS=...), so
@@ -24,7 +24,8 @@ switch says: it sends nothing.
 Exit codes: 0 when nothing failed; 1 when a lookup FAILED in this pass or a
 provider had no route out (information, like notify_drain.py: every other
 row was still attempted); 2 when, under NOCTORNAL_ENV=production, a
-credential in the environment carries a published value.
+credential in the environment carries a published value, or the process
+holds the persona key only the collector may hold (2026-10-02).
 """
 from __future__ import annotations
 
@@ -62,6 +63,13 @@ def main(argv: list[str] | None = None, *, conn=None, service=None) -> int:
             names = ", ".join(sorted({p.variable for p in published}))
             print(f"refusing to run: {names} carry a published value")
             return 2
+    # A collector process (2026-10-02): the cron loop holds no persona key.
+    from noctornal_api.config import enforce_persona_key_boundary
+    try:
+        enforce_persona_key_boundary(collector=False)
+    except RuntimeError as exc:
+        print(f"refusing to run: {exc}")
+        return 2
     own = conn is None
     conn = conn or connect_system(SystemPurpose.LOOKUPS)
     try:

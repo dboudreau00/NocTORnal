@@ -51,7 +51,9 @@ is not a failure.
 1 when any item FAILED, or when a configured MEANING role was refused
 (readiness, configuration, unrouted, route refused, no authority, an
 endpoint error, a changed model); 0 otherwise. A retired index
-(refused=retired) is an administrator's choice, not a failure.
+(refused=retired) is an administrator's choice, not a failure. 2 when,
+under NOCTORNAL_ENV=production, this process holds the persona key only
+the collector may hold.
 """
 from __future__ import annotations
 
@@ -105,6 +107,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.limit < 0 or args.max_seconds < 0:
         parser.error("--limit and --max-seconds are 0 or more")
+
+    # A collector process (2026-10-02, verify:g38 2026-10-03): this Lab
+    # worker holds no persona key, and in production refuses to run holding
+    # it, as the cron entries do. Nothing at all outside production.
+    from noctornal_api.config import enforce_persona_key_boundary
+    try:
+        enforce_persona_key_boundary(collector=False)
+    except RuntimeError as exc:
+        print(f"refusing to run: {exc}")
+        return 2
 
     roles = ([embedders.ROLE_WORDING, embedders.ROLE_MEANING] if args.role == "all"
              else [args.role.upper()])

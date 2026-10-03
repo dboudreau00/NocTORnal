@@ -2551,6 +2551,20 @@
             <div id="src-personas"></div>
             <p id="src-personas-empty" class="empty" hidden>No personas.</p>
 
+            <!-- Persona acts (A collector process, 2026-10-02): what you asked
+                 a persona to do, run by the collector, the one process that
+                 holds the persona key. -->
+            <h2 class="h-sm">Persona acts</h2>
+            <p class="help">
+              Looking a chat up, joining it, checking its membership and
+              polling a source a persona reads run in the collector. What you
+              asked for is listed here with its outcome. An act the collector
+              has not started in time (fifteen minutes, unless your operator
+              set another limit) is not run.
+            </p>
+            <div id="src-acts"></div>
+            <p id="src-acts-empty" class="empty" hidden>You have asked for no persona act.</p>
+
             <!-- Collection authorities (2026-09-24): the written authorities every forum
                  and Telegram source needs, recorded here by a collection
                  manager and confirmed by a security officer in Oversight. -->

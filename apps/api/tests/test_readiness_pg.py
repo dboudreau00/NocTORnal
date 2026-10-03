@@ -109,6 +109,8 @@ EXPECTED_CHECKS = (
     "forum_collection",
     # Telegram collection (F5.3).
     "telegram_collection",
+    # A collector process (2026-10-02): the persona key's split.
+    "collector_split",
 )
 
 

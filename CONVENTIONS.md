@@ -55,18 +55,24 @@ Violating any of these is a bug even if tests pass.
    gains `UPDATE` or `DELETE` on `audit.event`.
 
 7. **Credentials never leave the vault.** `collection_account.secret_*`
-   is envelope-encrypted at rest (AES-256-GCM under `NOCTORNAL_TOTP_KEK`,
-   the same scheme as TOTP secrets) and decrypted only inside
-   `PersonaVault.use()`, a context manager that yields the plaintext to
-   one block, drops it and audits the use. There is no `get_secret()`,
-   nothing serialises a plaintext into a response, and every adapter error
-   is `redact()`-ed before it is stored. **The vault runs inside the API
-   process** (there is no separate collector), so this is a guarantee
-   about the SHAPE of the code, not about a network boundary: a
-   compromised API host is a compromised vault. (Reworded 2026-09-09.
-   Until then this read "never leave the collector, never in the API
-   process", which the topology has never backed. Splitting collection
-   into its own process is a deliberate not-yet (`ARCHITECTURE.md`).)
+   is envelope-encrypted at rest (AES-256-GCM, the same scheme as TOTP
+   secrets, under `NOCTORNAL_PERSONA_KEK`, a key of its own) and decrypted
+   only inside `PersonaVault.use()`, a context manager that yields the
+   plaintext to one block, drops it and audits the use. There is no
+   `get_secret()`, nothing serialises a plaintext into a response, and every
+   adapter error is `redact()`-ed before it is stored. **In production the
+   vault runs in the collector service, and no other process holds the
+   persona key**: the API queues a persona act in `collect.persona_act` and
+   the collector runs it, so a compromised API process cannot open a
+   persona credential. That is a PROCESS boundary and not a network zone:
+   the collector also holds the TOTP key ring, the system role's DSN and
+   the store credentials (`docs/17`), so a compromised collector host is a
+   compromised vault. In development one process runs both
+   (`NOCTORNAL_COLLECTOR_INLINE=1`), and the guarantee is about the SHAPE
+   of the code. (Reworded 2026-09-09 and 2026-10-03. Until 2026-09-09 it
+   described a collector the topology did not have; the collector service
+   was built on 2026-10-02, and `docs/02` says what it does and does not
+   separate.)
 
 8. **TLP gates egress.** Every outbound path (SMTP, Jira, webhook,
    export) checks classification first. `AMBER_STRICT` and `RED` never
@@ -112,11 +118,17 @@ firehose into a half-built model produces a landfill.
 
 - Postgres 16 + pgvector as the system of record; 124 Alembic revisions
   (`0001`-`0124`), `db/schema.sql` regenerated from them
-- Python 3.12+ / FastAPI, **one process**, serving the REST API under
-  `/api/v1`, the analyst console under `/ui`, the `/api/v1/live`
-  WebSocket, and running the collectors, the analytics and the
-  notification drain itself. There is no worker process and no queue
-  (decision 30; `dispatch_due()` and `run_once` are called, not scheduled)
+- Python 3.12+ / FastAPI, serving the REST API under `/api/v1`, the
+  analyst console under `/ui` and the `/api/v1/live` WebSocket, and
+  running the analytics, the notification drain and the Poll now of a feed
+  no persona reads itself (`dispatch_due()` and `run_once` are called, not
+  scheduled). In development that is **one process**, persona acts
+  included (`NOCTORNAL_COLLECTOR_INLINE=1`). In production a second
+  process, the collector (`scripts/collector.py`), holds the persona key
+  and runs every persona act and every scheduled collection poll; the API
+  hands it an act through one Postgres table, `collect.persona_act`, which
+  is the only queue and no broker. Celery, Arq and NATS are not in the tree
+  (decision 30, qualified 2026-10-03)
 - `igraph` (C core) + `leidenalg` for SNA maths, not NetworkX, which will
   not hold up
 - A vanilla HTML/CSS/JS console: no framework, no build step, no bundler,
