@@ -125,7 +125,7 @@ def test_every_policied_table_can_be_read_and_the_ledger_child_cannot_change(con
     for table, template in reg.POLICY.items():
         got = commands.get(table, set())
         assert got & {"ALL", "SELECT"}, (table, got)
-        if template == "LEDGER_CHILD":
+        if template in ("LEDGER_CHILD", "CUSTOM_CUSTODY"):
             assert got == {"SELECT", "INSERT"}, (table, got)
 
 

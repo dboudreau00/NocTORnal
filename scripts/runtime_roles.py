@@ -38,7 +38,8 @@ replays exactly the migrations' own SQL, so the two cannot disagree.
    created after that revision ran would get back the columns it took away
    (F51, 2026-10-02). And 0156's GRANTS_SQL when at or past 0156: the same
    blanket grant hands DELETE on the persona act queue back, and no role may
-   have it (A collector process, 2026-10-02).
+   have it (A collector process, 2026-10-02). And the revoke of the two ledger
+   sequences from both roles (0169), which the same blanket grant hands back.
 
 It never drops or alters any other role, and it touches only the database
 DATABASE_URL names.
@@ -143,6 +144,13 @@ def grant(conn) -> None:
     # act queue, which 0108's blanket grant hands back to a new role.
     if _at_or_past(conn, "0156"):
         conn.execute(_migration("0156").GRANTS_SQL)
+    # The ledger sequences are drawn by the chain triggers as the owner, so
+    # neither runtime role holds them (2026-10-03). 0108's blanket grant hands
+    # every sequence back, so the revoke is replayed. Found by name, as the
+    # claims guard is above.
+    sequences = _migration_named("ledger_sequences_trigger_drawn")
+    if _at_or_past(conn, sequences.revision):
+        conn.execute(sequences.REVOKE_SQL)
 
 
 def ensure(conn) -> int:

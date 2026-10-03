@@ -112,6 +112,22 @@ HELD = `(SELECT iam.rls_compartments())`:
   (attempts zero, no claimant, no claim time, no result; 2026-10-03). No
   UPDATE or DELETE policy: the collector and the inline runner claim and
   finish an act as the PERSONA_ACTS system purpose.
+- CUSTOM_AUDIT (the audit log, 0168): a SELECT policy, `case_id = ANY
+  (CASES)`, or a case-less row the reader wrote, or `audit.read` held
+  globally, or a case-less `ingest` row under a global `ingest.manage`;
+  and an INSERT policy `WITH CHECK (true)`: every writer appends, whatever
+  case the row names, because the log is append-only and a writer that may
+  read none of it still has to write to it. What a request may NAME is not
+  the policy's to say: 0150's BEFORE INSERT trigger `audit_attribution` pins
+  it (an actor must be the user the connection is bound to, or the holder
+  of a ticket it spent; a claim from a connection bound to nobody is kept
+  in `detail` with `actor_id` NULL; the time is the database's), and it
+  fires before the policy's check. No UPDATE or DELETE privilege or policy
+  (invariant 6).
+- CUSTOM_CUSTODY (the custody ledger, 0114 and 0151): the LEDGER_CHILD
+  SELECT policy and an INSERT policy that adds `actor_id = (SELECT
+  iam.rls_actor())` to the child test, so a custody row names the user who
+  wrote it. The column is NOT NULL, so there is no unattributed row to allow.
 
 A table the request role writes only by UPDATE carries its template as a
 SELECT and an UPDATE policy and nothing else, so no INSERT of the request
@@ -146,7 +162,7 @@ POLICY: dict[str, str] = {
     "core.evidence": "ELEMENT",
     "core.assertion": "CUSTOM_ASSERTION",
     "core.evidence_link": "CHILD",
-    "core.evidence_custody": "LEDGER_CHILD",
+    "core.evidence_custody": "CUSTOM_CUSTODY",
     # 0116: the analysis built on them.
     "core.hypothesis": "CASE",
     "core.assumption": "CASE",
@@ -266,6 +282,10 @@ POLICY: dict[str, str] = {
     # API enqueues on the request connection; claims and outcomes are
     # written as PERSONA_ACTS.
     "collect.persona_act": "CUSTOM_ACT",
+    # 0168 (F51, 2026-10-02): the audit log. The countersign rule reads it as
+    # the definer (0166), the Lab's last screening pass is a fact (0167), and
+    # every other reader is classified by function in test_rls_audit_paths.py.
+    "audit.event": "CUSTOM_AUDIT",
 }
 
 #: The readiness row fails below this many policied tables: a registry
@@ -349,25 +369,11 @@ EXEMPT: dict[str, str] = {
     "collect.egress_connection": _EGRESS,
 }
 
-#: Will carry a policy; not yet. Each reason names what is owed first.
-DEFERRED: dict[str, str] = {
-    "audit.event": (
-        "CUSTOM, not system-only (S1, 2026-09-25): a case member reads the "
-        "case's timeline, review history and ingest triage state from it on "
-        "the request connection, so a system-only read would move every one "
-        "of those readers off row security rather than under it. The policy: "
-        "SELECT where the case is readable, or the row is the actor's own "
-        "case-less row, or audit.read is held globally (the officer's "
-        "search), or it is an ingest row and ingest.manage is held; INSERT "
-        "always (append-only, every writer appends). Owed first: about 100 "
-        "readers in 53 modules; audit_verify and custody_verify move to "
-        "AUDIT_VERIFY (the chain walk must see every row); "
-        "IngestService.attach_record copies the latest triage state onto a "
-        "case-scoped row (quarantine rows carry no case); "
-        "iam.countersign_blocked_by reads it inside a trigger and becomes "
-        "SECURITY DEFINER; the out-of-band audit writers keep working as "
-        "appends"),
-}
+#: Will carry a policy; not yet. Each reason names what is owed first. Empty
+#: since 0168 put the audit log under its policy, the last table that was
+#: waiting on its readers (F51, 2026-10-03): a new entry is a table that is
+#: not enforced, and a reason that says what is owed before it can be.
+DEFERRED: dict[str, str] = {}
 
 #: Trigger functions that read a policied table and stay SECURITY INVOKER,
 #: with the reason. Each fires only on a write the request role cannot make.
@@ -386,6 +392,9 @@ INVOKER_TRIGGER_FUNCTIONS: dict[str, str] = {
     "iam.check_dual_control_change": (
         "fires on iam.dual_control_policy_change writes, which only a system "
         "connection makes (0109), so it reads every approval as it is"),
+    # F51, 2026-10-02: names the audit log only in the sentence it raises.
+    "audit.block_mutation": (
+        "refuses every change to the audit log; reads nothing"),
 }
 
 

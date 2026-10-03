@@ -169,11 +169,14 @@ def _forge_clean_fork(conn, action="FORKED_TWIN") -> None:
     """
     from noctornal_api.audit_verify import _HASH_EXPR
 
+    # `seq` is given: the chain trigger draws it, and with the trigger stood
+    # down nothing else does (0169 took the column default away).
     conn.execute("ALTER TABLE audit.event DISABLE TRIGGER USER")
     conn.execute(
         """INSERT INTO audit.event
-               (actor_kind, action, outcome, detail, prev_hash, row_hash)
-           SELECT 'USER', %s, 'SUCCESS', '{}'::jsonb, e.prev_hash, decode('00','hex')
+               (seq, actor_kind, action, outcome, detail, prev_hash, row_hash)
+           SELECT nextval('audit.event_seq_seq'), 'USER', %s, 'SUCCESS',
+                  '{}'::jsonb, e.prev_hash, decode('00','hex')
              FROM audit.event e
             WHERE e.seq = (SELECT max(seq) FROM audit.event)""",
         (action,))
@@ -252,8 +255,9 @@ def _forge_second_genesis(conn, action="SECOND_GENESIS") -> None:
     conn.execute("ALTER TABLE audit.event DISABLE TRIGGER USER")
     conn.execute(
         f"""INSERT INTO audit.event
-                (actor_kind, action, outcome, detail, prev_hash, row_hash)
-            SELECT 'USER', %s, 'SUCCESS', '{{}}'::jsonb, NULL, {_HASH_EXPR}
+                (seq, actor_kind, action, outcome, detail, prev_hash, row_hash)
+            SELECT nextval('audit.event_seq_seq'), 'USER', %s, 'SUCCESS',
+                   '{{}}'::jsonb, NULL, {_HASH_EXPR}
               FROM (SELECT NULL::bytea AS prev_hash, now() AS occurred_at,
                            NULL::uuid AS actor_id, 'USER' AS actor_kind,
                            %s AS action, NULL::text AS object_type,

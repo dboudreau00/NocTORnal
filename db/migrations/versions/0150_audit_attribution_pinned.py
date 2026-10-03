@@ -20,6 +20,10 @@ the conversion of about a hundred readers in 53 modules, which is its own
 piece of work. A BEFORE INSERT trigger answers the same question for the
 write, today, without touching one reader.
 
+0168 has since put the table under row-level security. Its INSERT policy admits
+every append, and what a request may NAME stays this trigger's to decide: it
+fires before the policy is checked, and one mechanism says it.
+
 A caller that row security exempts (the owner, the system role, a
 superuser) is left exactly as it was. The system role is how the product
 writes on behalf of a person it has authenticated by other means, and the
@@ -28,7 +32,12 @@ anchor (`/audit/verify` tail_row_hash), not this.
 
 Any other caller, the request role, gets three things:
 
-1. `occurred_at` is `now()`, whatever it supplied.
+1. `occurred_at` is the database's, whatever it supplied: this trigger marks
+   the row (`infinity`, which no stored row carries) and `audit.chain_hash()`
+   (0149) replaces the mark with the clock inside the chain lock. Not `now()`,
+   which is the start of a transaction a request can hold open. The mark, not
+   a second exemption test in the chain trigger: that is a catalog read, and
+   none belongs inside the serialised section.
 2. A row that names no actor stays as it is.
 3. A row that names an actor is checked against `iam.rls_actor()`, the user
    the connection is bound to. Equal: kept. A connection bound to someone
@@ -86,7 +95,7 @@ BEGIN
   IF iam.rls_caller_exempt() THEN
     RETURN NEW;
   END IF;
-  NEW.occurred_at := pg_catalog.now();
+  NEW.occurred_at := 'infinity'::pg_catalog.timestamptz;
   IF NEW.actor_id IS NULL THEN
     RETURN NEW;
   END IF;
@@ -122,7 +131,7 @@ CREATE TRIGGER audit_attribution BEFORE INSERT ON audit.event
   FOR EACH ROW EXECUTE FUNCTION audit.pin_attribution();
 
 COMMENT ON FUNCTION audit.pin_attribution() IS
-  'The request role may not date an audit row. A claimed actor must be the user its connection is bound to, or the holder of a ticket it spent: another user is refused, and a claim from a connection bound to nobody is kept in detail as unverified_actor_id with actor_id NULL (0150). Fires before audit_chain.';
+  'The request role may not attribute an audit row to another user. A claimed actor must be the user its connection is bound to, or the holder of a ticket it spent: another user is refused, and a claim from a connection bound to nobody is kept in detail as unverified_actor_id with actor_id NULL (0150). Fires before audit_chain.';
 """
 
 DOWNGRADE_SQL = """

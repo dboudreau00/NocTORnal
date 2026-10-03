@@ -1908,16 +1908,24 @@ class IngestService:
         if len(reason) < 5:
             raise IngestError("say why this record belongs to that case, in "
                               "at least five characters")
-        row = self._c.execute(
-            """UPDATE ingest.record SET case_id = %s
-                WHERE id = %s AND case_id IS NULL AND purged_at IS NULL
-                RETURNING id""", (case_id, record_id)).fetchone()
-        if row is None:
-            raise IngestError(
-                "this record is not in quarantine: it is already attached to "
-                "a case, or it no longer exists")
-        self._audit(case_id, actor_id, "INGEST_RECORD_ATTACHED",
-                    {"reason": reason}, object_id=record_id)
+        # One transaction for the attach, its audit row and the carried
+        # triage state (F51, 2026-10-03): a connection that fails between
+        # them (a statement timeout, a dropped link) used to leave a record
+        # attached with none of its state, which a retry could not repair
+        # because the record is no longer in quarantine.
+        with self._c.transaction():
+            row = self._c.execute(
+                """UPDATE ingest.record SET case_id = %s
+                    WHERE id = %s AND case_id IS NULL AND purged_at IS NULL
+                    RETURNING id""", (case_id, record_id)).fetchone()
+            if row is None:
+                raise IngestError(
+                    "this record is not in quarantine: it is already attached "
+                    "to a case, or it no longer exists")
+            self._audit(case_id, actor_id, "INGEST_RECORD_ATTACHED",
+                        {"reason": reason}, object_id=record_id)
+            self._carry_from_quarantine(record_id, case_id=case_id,
+                                        actor_id=actor_id)
         self.score_records([record_id], actor_id=actor_id)
         return {"record_id": str(record_id), "case_id": str(case_id)}
 
@@ -2001,6 +2009,48 @@ class IngestService:
                 "retain_until_kept": until == retain_until}
 
     # -- internals ---------------------------------------------------------
+
+    def _carry_from_quarantine(self, record_id: UUID, *, case_id: UUID,
+                               actor_id: UUID) -> None:
+        """Restate on the new case what its team reads about the record.
+
+        F51, 2026-10-02. A quarantined record's triage decisions and
+        category corrections carry no case, because the record had none,
+        and under row security on the log (0168) only the operator reads
+        those rows. The case's team reads the case's rows. So the latest
+        triage state, unless it is NEW (the state of no row at all), and
+        the first correction, which holds the classifier's own output the
+        queue shows as `category_was`, are copied onto rows of the case,
+        each naming the row it carries. Written by the attacher, who holds
+        the operator verb and so reads every case-less ingest row. Called
+        inside `attach_record`'s transaction, so a record is never left
+        attached with none, or half, of its state; the savepoint here keeps
+        the two carried rows together when it is called on its own.
+
+        Records attached before 0168 had no such copy; the migration
+        writes theirs (`0168.BACKFILL_SQL`, SYSTEM actor)."""
+        rows = self._c.execute(
+            """SELECT action, seq, occurred_at, actor_id, detail
+                 FROM audit.event
+                WHERE object_id = %s AND case_id IS NULL
+                  AND action IN ('INGEST_RECORD_TRIAGED',
+                                 'INGEST_CATEGORY_CORRECTED')
+                ORDER BY seq""", (record_id,)).fetchall()
+        latest = next((r for r in reversed(rows)
+                       if r[0] == "INGEST_RECORD_TRIAGED"), None)
+        first = next((r for r in rows
+                      if r[0] == "INGEST_CATEGORY_CORRECTED"), None)
+        if latest is not None and (latest[4] or {}).get("state") in (None, "NEW"):
+            latest = None
+        carried = sorted((r for r in (first, latest) if r is not None),
+                         key=lambda r: r[1])
+        with self._c.transaction():
+            for action, seq, at, by, detail in carried:
+                self._audit(case_id, actor_id, action, {
+                    **(detail or {}),
+                    "carried": {"seq": seq, "at": at.isoformat(),
+                                "by": str(by) if by else None}},
+                    object_id=record_id)
 
     def _audit(self, case_id: UUID | None, actor_id: UUID, action: str,
                detail: dict, *, object_id: UUID | None = None) -> None:

@@ -282,10 +282,12 @@ def _custody_fixture(conn):
 def test_a_chain_is_only_extended_from_a_snapshot_that_can_see_the_tail(tamperable):
     """A REPEATABLE READ transaction would read the tail as of its own
     snapshot, miss a row committed since, and fork the chain. Refused, as
-    nothing in the product opens one."""
+    nothing in the product opens one, with `invalid_transaction_state` (the
+    full matrix of levels, roles and ledgers is
+    `test_ledger_isolation_clock_pg.py`)."""
     tamperable.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
     tamperable.execute("SELECT 1")
-    with pytest.raises(psycopg.errors.RaiseException, match="READ COMMITTED"):
+    with pytest.raises(psycopg.errors.InvalidTransactionState, match="READ COMMITTED"):
         tamperable.execute(
             "INSERT INTO audit.event (actor_kind, action, detail) "
             "VALUES ('SYSTEM', 'G49_CHAIN_RR', '{}'::jsonb)")

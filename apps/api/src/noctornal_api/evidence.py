@@ -763,8 +763,10 @@ class EvidenceService:
         # acquired_at, when the caller gives none, is stamped by the
         # DATABASE inside the INSERT below: COALESCE(..., now()) in the same
         # transaction as the ACQUIRED custody row, whose occurred_at the
-        # custody trigger pins to now() (migration 0024). Both are then the
-        # one transaction timestamp. Until 2026-09-23 it was self._now(),
+        # custody trigger pins to the clock at its append (migration 0149,
+        # 2026-10-03; it was now(), 0024). So acquired_at is the start of
+        # the transaction and the ACQUIRED row a few milliseconds later,
+        # never earlier. Until 2026-09-23 it was self._now(),
         # the API host's clock, read before the object store put: a
         # database clock behind the host showed an exhibit "acquired" a
         # minute AFTER its own ACQUIRED, VIEWED and HASH_VERIFIED rows

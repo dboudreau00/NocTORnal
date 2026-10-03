@@ -510,19 +510,19 @@ jobs:
               print("::error::No audit events to verify. The suite ran "
                     "without writing any, or the chain was truncated.")
               sys.exit(1)
-          # A fork is two rows claiming one predecessor. Until migration 0200
+          # A fork is two rows claiming one predecessor. Until migration 0149
           # (2026-10-03) concurrent writers made them from ordinary traffic,
           # because `seq` was drawn before the chaining trigger took its
           # lock, so those are only noticed. A fork whose claimants were all
-          # written since 0200 cannot come from honest traffic and is in
+          # written since 0149 cannot come from honest traffic and is in
           # `report.breaks`, so the loop below fails the build on it. This
           # database is built by the migrations from nothing, so every fork
           # here is the latter kind.
           print(f"tail seq {report.tail_seq}, hash {report.tail_row_hash}")
           if report.forks:
-              print(f"::warning::{len(report.forks)} audit row(s) share a "
+              print(f"::warning::{len(report.forks)} audit rows share a "
                     f"predecessor (see the breaks below for any written "
-                    f"after migration 0200).")
+                    f"after migration 0149).")
           for b in report.breaks:
               print(f"::error::audit chain {b.kind} break at seq {b.seq} "
                     f"({b.action} at {b.occurred_at})")
@@ -574,9 +574,11 @@ jobs:
                     "truncation -- deleting the NEWEST rows leaves this "
                     "step green; compare tail_row_hash across runs.")
               sys.exit(1)
+          # As for the audit chain above: a fork written since 0149 is a
+          # break and fails this step; older ones are history.
           if report.forks:
-              print(f"::warning::{len(report.forks)} custody row(s) share a "
-                    f"predecessor. Those from before migration 0200 are not "
+              print(f"::warning::{len(report.forks)} custody rows share a "
+                    f"predecessor. Those from before migration 0149 are not "
                     f"counted as tampering; any written after it is in the "
                     f"breaks below.")
           for b in report.breaks:

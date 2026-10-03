@@ -1447,6 +1447,10 @@ def unreviewed(
     limit: int = Query(100, ge=1, le=500),
     user: CurrentUser = Depends(require_global("break_glass.review")),
     conn: psycopg.Connection = Depends(get_conn),
+    # Each grant's invoke row, for the clearance it raised from: an audit
+    # row the reviewer reads whether or not they also hold audit.read,
+    # which row security on the log asks for (F51, 2026-10-02).
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.BREAK_GLASS)),
 ) -> dict:
     """The security officer's queue. This is the control.
 
@@ -1482,7 +1486,7 @@ def unreviewed(
     # and "did it raise anything" is part of what the officer judges. Null
     # for a grant invoked before the level was recorded: the card then says
     # only which level was named, not that it raised it.
-    bases = {r[0]: r[1] for r in conn.execute(
+    bases = {r[0]: r[1] for r in sconn.execute(
         """SELECT object_id, detail->>'base_clearance' FROM audit.event
             WHERE action = 'BREAK_GLASS_INVOKED'
               AND object_type = 'break_glass' AND object_id = ANY(%s)""",

@@ -27,10 +27,12 @@ Each function now takes the lock first, THEN assigns the number
 exactly as `collect.egress_connection_chain` has done since 0086. Number
 order is chain order: a number is drawn only by the writer that holds the
 lock, so the next number is always above every number already written, and
-"the highest number" is the true tail. The column default stays (a row
-written with the trigger stood down, which the verifier tests do, still gets
-a number); the trigger overrides it, so a caller can no longer choose a
-number either, and each append burns one extra value, which is harmless.
+"the highest number" is the true tail. The column default stays in this
+revision (a row written with the trigger stood down, which the verifier tests
+do, still gets a number); the trigger overrides it, so a caller can no longer
+choose a number either, and each append burns one extra value, which is
+harmless. 0169 takes the default away, with the runtime roles' privilege on the
+two sequences.
 
 The hash expressions are copied character for character, so every row
 already written verifies as before and the verifiers' duplicated
@@ -39,11 +41,67 @@ already written verifies as before and the verifiers' duplicated
 Both are SECURITY DEFINER with `search_path = pg_catalog, pg_temp`
 (`custody_chain_hash` already was since 0113 and keeps its path). The tail
 read must see the real tail whoever writes: a role that row-level security
-filters would read a filtered tail and fork the chain. `audit.event` is not
-policied today; this makes it safe to policy later (rls_registry DEFERRED).
-A chain is only extended from a snapshot that can see the last committed
-row, so the functions refuse a transaction that is not READ COMMITTED; no
-code in the product opens one.
+filters would read a filtered tail and fork the chain. 0168 puts `audit.event`
+under row-level security and relies on this: an append by a request that may
+read none of the log still chains to the true tail.
+
+## The isolation guard
+
+The tail is read after the lock is taken, in a statement of its own, so it
+sees every row committed before the lock was granted. That holds only under
+READ COMMITTED, where each statement takes a new snapshot. Under REPEATABLE
+READ or SERIALIZABLE the snapshot predates the wait for the lock, the tail it
+reads is stale, and the append chains off an old row: a fork, which the
+verifier counts as a break. The request role is the untrusted party and
+chooses its own level (`BEGIN ISOLATION LEVEL ...`, or `SET
+default_transaction_isolation` for the session; measured on 2026-10-03: a bound
+analyst that began REPEATABLE READ forked the chain). So each function refuses
+the append unless the transaction is READ COMMITTED, BEFORE it takes the lock,
+so a refusal never queues behind it. READ UNCOMMITTED passes: PostgreSQL runs it
+as READ COMMITTED, a new snapshot per statement. The refusal is
+`invalid_transaction_state` (25000) and not `serialization_failure` (40001),
+which a driver retries under the same level for ever. A transaction cannot
+change its level after its first statement, so the caller cannot move the
+check, and no code in the product sets a level. Whoever owns the table can
+stand the trigger down altogether, which is tampering, and the verifier says
+so.
+
+## The time
+
+`now()` is the START of the caller's transaction. Pinning `occurred_at` to it
+(custody since 0024) took the choice from the caller and handed it a different
+one: a request-role transaction held open stamped its row with the time it
+began, in the past by its own age (8.1 s measured on 2026-10-03, and unbounded,
+because nothing in the repository or the infrastructure sets
+`idle_in_transaction_session_timeout`). The lock is taken only at the INSERT,
+so an idle open transaction blocks nobody and is easy to hold, and a row could
+carry a time earlier than the rows before it in the chain with nothing
+noticing, since the verifier orders by number. Both functions now read
+`clock_timestamp()` AFTER the lock is granted: the time of the append itself,
+so no caller can stamp a row earlier than the append that wrote it, and time
+order is chain order, because the one writer that holds the lock is the one
+reading the clock.
+
+The custody function does it for every writer, as it always pinned the time.
+The audit function does it for the callers 0150 pins (the request role): that
+trigger runs BEFORE this one and, for such a caller, sets `occurred_at` to
+`infinity`, a mark that no stored row carries, which this function replaces
+with the clock once it holds the lock. The mark, and not a second look at who
+the caller is, because asking costs a catalog read and none belongs inside the
+serialised section. The owner and the system role keep the time they supply,
+as before: they are trusted writers, and the owner can drop the trigger
+anyway. The time is not clamped with GREATEST: a row written before this
+revision may carry any time its writer chose, a future one included, and a
+clamp would copy it into every later row. The one way time runs backwards is
+the server's own clock stepping back; the verifier orders by number and does
+not read time as evidence.
+
+What a reader sees differently: a request-role audit row, and any custody row,
+appended earlier in a transaction is now LATER than that transaction's `now()`
+(it used to equal it). The one reader of the log that compares its times with a
+`now()` is the seven-day rule, `iam.countersign_blocked_by` (0075: events at or
+before `as_of`, which a decision takes from `now()`). In service each such event
+is a request of its own, committed before the decision.
 
 ## The boundary
 
@@ -88,11 +146,18 @@ CREATE OR REPLACE FUNCTION audit.chain_hash() RETURNS trigger
 AS $fn$
 DECLARE prev bytea;
 BEGIN
-  IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
-    RAISE EXCEPTION 'audit.event is chained under READ COMMITTED only: a snapshot taken before the last append cannot see the tail';
+  IF pg_catalog.current_setting('transaction_isolation')
+       NOT IN ('read committed', 'read uncommitted') THEN
+    RAISE EXCEPTION 'audit.event is chained under READ COMMITTED only, and this transaction is %: a snapshot taken before the last append cannot see the tail',
+      pg_catalog.current_setting('transaction_isolation')
+      USING ERRCODE = 'invalid_transaction_state',
+            HINT = 'Run the append in a READ COMMITTED transaction.';
   END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended('audit.event.chain', 0));
   NEW.seq := nextval('audit.event_seq_seq');
+  IF NEW.occurred_at = 'infinity'::pg_catalog.timestamptz THEN
+    NEW.occurred_at := pg_catalog.clock_timestamp();
+  END IF;
   SELECT row_hash INTO prev FROM audit.event ORDER BY seq DESC LIMIT 1;
   NEW.prev_hash := prev;
   NEW.row_hash := public.digest(
@@ -121,12 +186,16 @@ CREATE OR REPLACE FUNCTION core.custody_chain_hash() RETURNS trigger
 AS $fn$
 DECLARE prev bytea;
 BEGIN
-  NEW.occurred_at := now();
-  IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
-    RAISE EXCEPTION 'core.evidence_custody is chained under READ COMMITTED only: a snapshot taken before the last append cannot see the tail';
+  IF pg_catalog.current_setting('transaction_isolation')
+       NOT IN ('read committed', 'read uncommitted') THEN
+    RAISE EXCEPTION 'core.evidence_custody is chained under READ COMMITTED only, and this transaction is %: a snapshot taken before the last append cannot see the tail',
+      pg_catalog.current_setting('transaction_isolation')
+      USING ERRCODE = 'invalid_transaction_state',
+            HINT = 'Run the append in a READ COMMITTED transaction.';
   END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended('core.evidence_custody.chain', 0));
   NEW.id := nextval('core.evidence_custody_id_seq');
+  NEW.occurred_at := pg_catalog.clock_timestamp();
   SELECT row_hash INTO prev FROM core.evidence_custody ORDER BY id DESC LIMIT 1;
   NEW.prev_hash := prev;
   NEW.row_hash := public.digest(

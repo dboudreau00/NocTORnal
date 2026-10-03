@@ -633,6 +633,52 @@ How that is held in `break_glass.py` and `stores.py` (final review,
 previous row's hash, so deletion or modification of history is detectable.
 `REVOKE UPDATE, DELETE` from every role including the application user.
 
+Since Alembic 0168 (F51, 2026-10-02) the log is under row-level security.
+A request reads a row in a case it may read, a case-less row its user
+wrote, every row under a global `audit.read` (the Security Officer's
+search), or a case-less ingest row under a global `ingest.manage` (the
+operator's quarantine queue), and appends any row, whatever case it names:
+the log is append-only and every writer appends, including one that may read
+none of it. What a request may NAME on a row is not the policy's to say. A
+trigger pins it (0150): an actor must be the user the connection is bound to,
+or the holder of a ticket it spent; another user is refused; a claim from a
+connection bound to nobody is kept in `detail` as `unverified_actor_id` with no
+actor. So a request cannot write history in another user's name, and an event
+about a user the connection is not bound to (a session refused before the
+binding, a sign-out whose session has just ended) is written on a system
+connection, or on a side connection bound to the caller's own session, or kept
+as a claim, so the attribution check does not cost the row. The chain trigger
+(0149) and the countersigning rule (0166) read the whole log as the definer, so
+an append chains to the true tail whoever makes it, and the chain and custody
+verification walk every row as the AUDIT_VERIFY system purpose.
+
+Since Alembic 0149 (2026-10-03) the chain trigger takes its lock first, then
+draws the sequence, reads the clock and reads the tail, so concurrent writers
+form one chain (before it they forked it in ordinary traffic), and the same
+holds for the custody ledger. The time of a request's row is the database
+server's clock at the append, read inside the lock: never the caller's, and
+never the start of a transaction a request holds open (`now()` is that start,
+and a request-role transaction held open stamped its row in the past by its
+own age). The owner and the system role keep the time they supply. Time
+order is therefore chain order, unless the server's own clock steps back; the
+verifier orders by `seq` and does not read time as evidence. The tail read is
+exact only where each statement takes a new snapshot, so the trigger refuses
+an append from a transaction that is not READ COMMITTED (REPEATABLE READ and
+SERIALIZABLE, which a request may choose for itself, would chain off a stale
+tail and fork the log). A fork whose rows were all written since 0149 makes
+`GET /audit/verify` answer not intact; forks with a row from before it are
+listed and not counted. Since 0169 the two ledger sequences are the triggers'
+alone: the runtime roles hold no privilege on them, because
+`SELECT last_value` read the size of a log they may read none of.
+
+`intact` is relative: it cannot see rows removed from the end of the log, or a
+rewrite that recomputes every later hash (the hash is unkeyed, and the schema
+owner can recompute it). Every answer says so. To close it, record
+`tail_seq` and `tail_row_hash` somewhere the database cannot reach and pass
+them back as `anchor_seq` and `anchor_hash`: the check fails when that row is
+gone or has changed. `python scripts/audit_verify.py --anchor-file ...
+--record` does both for the audit log and the custody ledger from a shell.
+
 Log at minimum: authentication (success and failure), authorisation
 denials, every read of evidence, every graph mutation, every export, every
 break-glass, every persona use, every integration dispatch.

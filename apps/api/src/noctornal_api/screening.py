@@ -534,10 +534,10 @@ def state(conn: psycopg.Connection, *, with_last_pass: bool = True
             WHERE purge_requested AND entries_purged_at IS NULL""").fetchone()[0]
     last = None
     if with_last_pass:
+        # Through the fact function (0167), as the policy block reads it,
+        # so the fact has one reader (F51, 2026-10-02).
         last = conn.execute(
-            """SELECT max(occurred_at) FROM audit.event
-                WHERE action = 'SCREENING_RESCAN'
-                  AND occurred_at > now() - interval '30 days'""").fetchone()[0]
+            "SELECT audit.last_screening_pass(interval '30 days')").fetchone()[0]
     algorithms = tuple(sorted({a for x in active for a in x["algorithms"]}))
     reference, problem = hash_set_authority()
     return ScreeningState(active, algorithms, max_seq, last, behind, pending,
@@ -1148,11 +1148,11 @@ def policy_block(conn: psycopg.Connection) -> dict:
                          "WHERE retired_at IS NULL").fetchone()[0]
     last = None
     if count:
-        last = conn.execute(
-            """SELECT max(occurred_at) FROM audit.event
-                WHERE action = 'SCREENING_RESCAN'
-                  AND occurred_at > now() - %s""",
-            (POLICY_PASS_WINDOW,)).fetchone()[0]
+        # A fact read as the definer (0167): the pass rows carry no case and
+        # are the worker's or the officer's, so an analyst's request reads
+        # none of them under row security on the log (F51, 2026-10-02).
+        last = conn.execute("SELECT audit.last_screening_pass(%s)",
+                            (POLICY_PASS_WINDOW,)).fetchone()[0]
     reference, _problem = hash_set_authority()
     return {"active_lists": count, "algorithms": sorted(lists[1] or []),
             "exact_hash_only": True,

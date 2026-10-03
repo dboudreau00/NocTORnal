@@ -424,10 +424,13 @@ def _forge_second_genesis(conn, evidence_id, uid) -> int:
     from noctornal_api.custody_verify import _HASH_EXPR
 
     conn.execute("ALTER TABLE core.evidence_custody DISABLE TRIGGER USER")
+    # `id` is drawn here: the chain trigger draws it, and with the trigger
+    # stood down nothing else does (0169 took the column default away).
     forged = conn.execute(
         """INSERT INTO core.evidence_custody
-               (evidence_id, action, actor_id, detail, prev_hash, row_hash)
-           VALUES (%s, 'ACQUIRED', %s, '{}'::jsonb, NULL, decode('00','hex'))
+               (id, evidence_id, action, actor_id, detail, prev_hash, row_hash)
+           VALUES (nextval('core.evidence_custody_id_seq'), %s, 'ACQUIRED', %s,
+                   '{}'::jsonb, NULL, decode('00','hex'))
            RETURNING id""",
         (evidence_id, uid)).fetchone()[0]
     conn.execute(
