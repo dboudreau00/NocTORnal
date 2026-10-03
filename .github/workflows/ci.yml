@@ -465,17 +465,19 @@ jobs:
               print("::error::No audit events to verify. The suite ran "
                     "without writing any, or the chain was truncated.")
               sys.exit(1)
-          # Forks are NOTICED, never fatal. Two rows can claim one
-          # predecessor because `seq` is drawn before the chaining trigger
-          # takes its advisory lock, so concurrent writers produce them
-          # from ordinary traffic -- the development database has 67 in
-          # 60,181 rows. Failing the build on those would make a red tick
-          # mean "somebody wrote to two cases at once", and the first
-          # person to chase one would stop believing the green ones.
+          # A fork is two rows claiming one predecessor. Until migration 0200
+          # (2026-10-03) concurrent writers made them from ordinary traffic,
+          # because `seq` was drawn before the chaining trigger took its
+          # lock, so those are only noticed. A fork whose claimants were all
+          # written since 0200 cannot come from honest traffic and is in
+          # `report.breaks`, so the loop below fails the build on it. This
+          # database is built by the migrations from nothing, so every fork
+          # here is the latter kind.
+          print(f"tail seq {report.tail_seq}, hash {report.tail_row_hash}")
           if report.forks:
               print(f"::warning::{len(report.forks)} audit row(s) share a "
-                    f"predecessor. Concurrent writers, not tampering -- the "
-                    f"chain simply cannot be fully linearised.")
+                    f"predecessor (see the breaks below for any written "
+                    f"after migration 0200).")
           for b in report.breaks:
               print(f"::error::audit chain {b.kind} break at seq {b.seq} "
                     f"({b.action} at {b.occurred_at})")
@@ -529,8 +531,9 @@ jobs:
               sys.exit(1)
           if report.forks:
               print(f"::warning::{len(report.forks)} custody row(s) share a "
-                    f"predecessor. Not counted as tampering, but on a ledger "
-                    f"written by 0024 this should not occur -- investigate.")
+                    f"predecessor. Those from before migration 0200 are not "
+                    f"counted as tampering; any written after it is in the "
+                    f"breaks below.")
           for b in report.breaks:
               print(f"::error::custody chain {b.kind} break at id {b.id} "
                     f"({b.action} on {b.evidence_id} at {b.occurred_at})")

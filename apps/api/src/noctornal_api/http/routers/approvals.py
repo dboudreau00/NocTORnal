@@ -767,7 +767,7 @@ def set_policy(
         # signed. Before the transaction, so a refusal recorded out of band
         # is not rolled back with it (approvals.py, the out-of-band rule).
         try:
-            svc.refuse_unseasoned_spend(approval)
+            svc.refuse_unseasoned_spend(approval, actor_id=user.user_id)
         except ApprovalError as exc:
             raise Problem(409, "Conflict", safe_detail(exc)) from exc
 
