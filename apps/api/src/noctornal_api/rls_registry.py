@@ -105,6 +105,12 @@ HELD = `(SELECT iam.rls_compartments())`:
   route's gate: the case half (the permission read off the grantor's one
   role on that case) is not asked at the database (docs/17, g31
   verification 2, 2026-10-03).
+- CUSTOM_ACT (a persona act, 0156, 2026-10-02): the requester's own
+  (`requested_by = (SELECT iam.rls_actor())`) and its label within CLR, a
+  SELECT policy and an INSERT policy that admits only a fresh PENDING row
+  (attempts zero, no claimant, no claim time, no result; 2026-10-03). No
+  UPDATE or DELETE policy: the collector and the inline runner claim and
+  finish an act as the PERSONA_ACTS system purpose.
 
 A table the request role writes only by UPDATE carries its template as a
 SELECT and an UPDATE policy and nothing else, so no INSERT of the request
@@ -254,6 +260,10 @@ POLICY: dict[str, str] = {
     "ingest.victim_credential": "CHILD",
     "ingest.dead_letter": "CUSTOM_DEAD_LETTER",
     "ingest.pii_authorisation": "CUSTOM_PII_AUTHORISATION",
+    # 0156 (A collector process, 2026-10-02): the persona act queue. The
+    # API enqueues on the request connection; claims and outcomes are
+    # written as PERSONA_ACTS.
+    "collect.persona_act": "CUSTOM_ACT",
 }
 
 #: The readiness row fails below this many policied tables: a registry
@@ -320,6 +330,11 @@ EXEMPT: dict[str, str] = {
     "lab.screening_list": _CONFIG + " (the officer's label-free view, F13)",
     "lab.screening_hash": _CONFIG + " (read only by the screening worker)",
     "lab.yara_compile_job": _CONFIG + " (a queue the triage worker drains)",
+    # 0157 (verify:g38, 2026-10-03): when each collector was last seen and
+    # whether its persona key ring opened what it sampled; key ids and
+    # counts, never key material, a person or a source.
+    "collect.collector_heartbeat": _CONFIG + " (the collector's heartbeat, "
+                                             "read by the readiness register)",
     "collect.source": _EGRESS,
     "collect.collection_account": _EGRESS,
     "collect.collection_authority": _EGRESS,

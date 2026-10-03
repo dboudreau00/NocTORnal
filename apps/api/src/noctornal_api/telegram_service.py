@@ -592,6 +592,38 @@ def _refuse_offline_problems(*, classification: str | None) -> None:
         raise TelegramActError(409, telegram.NO_PROXY_SENTENCE)
 
 
+def check_create_request(ref, access_mode: str,
+                         classification: str | None) -> telegram.ChatRef:
+    """What `TelegramChats.create` refuses before it reaches the persona,
+    needing no key and no network: a reference that is not a public chat
+    (a private invite link above all: a bearer join credential the product
+    refuses to take), an access mode, a basic group asked for as public,
+    and the offline sentences. One function, so the route that queues the
+    act (it refuses at the door, before anything is stored) and the
+    collector that runs it cannot disagree (verify:g38, 2026-10-03: a
+    pasted invite link was queued first, and kept for ever in a table whose
+    rows are never deleted)."""
+    try:
+        parsed = telegram.parse_chat_reference(ref)
+    except ReferenceRefused as exc:
+        raise TelegramActError(400, str(exc)) from None
+    if access_mode not in ("PUBLIC_READ", "MEMBER"):
+        raise TelegramActError(400, "The access mode is PUBLIC_READ or MEMBER.")
+    if (parsed.durable_id or "").startswith("g:") and access_mode == "PUBLIC_READ":
+        raise TelegramActError(400, "Basic groups are never public. Add it "
+                                    "as a member chat.")
+    _refuse_offline_problems(classification=classification)
+    return parsed
+
+
+def normal_reference(parsed: telegram.ChatRef) -> str:
+    """The reference a validated chat is queued under: its public name or
+    its typed id, as `parse_chat_reference` reads it back to the same chat.
+    Never the text the person typed, so what is stored is what was
+    understood and nothing else."""
+    return f"@{parsed.username}" if parsed.by_username else str(parsed.durable_id)
+
+
 async def _reach(transport, chat: dict, persona_id: UUID) -> ChatInfo:
     """The chat as the persona sees it: by its own access hash, by the name
     it was resolved by (a recycled name refused), or from its conversation
@@ -636,16 +668,7 @@ class TelegramChats:
                max_rps: float, actor_id: UUID, clearance: str) -> dict:
         """Look the chat up as the persona, then create the source and its
         chat row in one transaction."""
-        try:
-            parsed = telegram.parse_chat_reference(ref)
-        except ReferenceRefused as exc:
-            raise TelegramActError(400, str(exc)) from None
-        if access_mode not in ("PUBLIC_READ", "MEMBER"):
-            raise TelegramActError(400, "The access mode is PUBLIC_READ or MEMBER.")
-        if (parsed.durable_id or "").startswith("g:") and access_mode == "PUBLIC_READ":
-            raise TelegramActError(400, "Basic groups are never public. Add it "
-                                        "as a member chat.")
-        _refuse_offline_problems(classification=classification)
+        parsed = check_create_request(ref, access_mode, classification)
         need = "PUBLIC_READ" if parsed.by_username else "MEMBER_READ"
 
         async def work(transport, ctx):

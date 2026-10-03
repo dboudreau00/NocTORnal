@@ -130,5 +130,7 @@ def test_without_a_stop_the_cron_loop_runs_every_job_in_order(tmp_path):
     finally:
         _finish(proc)
     ends = [j.split()[1] for j in _jobs(log) if j.startswith("job-end")]
-    assert ends[:4] == ["scripts/notify_drain.py", "scripts/collection_poll.py",
-                        "scripts/lookup_drain.py", "scripts/notify_drain.py"], ends
+    # The collection poll left this loop for the collector service
+    # (A collector process, 2026-10-02): two jobs, round and round.
+    assert ends[:4] == ["scripts/notify_drain.py", "scripts/lookup_drain.py",
+                        "scripts/notify_drain.py", "scripts/lookup_drain.py"], ends

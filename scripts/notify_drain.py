@@ -38,9 +38,10 @@ failed ones are in the ledger with their reason (GET
 be tried again next run.
 
 Exits 2, before any connection, when under NOCTORNAL_ENV=production a
-credential carries a value this repository publishes or the schema owner's
+credential carries a value this repository publishes, the schema owner's
 password or DSN is in the environment (docs/17 F52 and infra-12, 2026-10-02
-and 2026-10-03): the refusal is one line per variable on stderr, `notify_drain:
+and 2026-10-03), or the persona key only the collector may hold is (A
+collector process, 2026-10-02): the refusal is one line per variable on stderr, `notify_drain:
 refusing to run: <NAME> ...`, naming it and never its value. It is the one
 helper every job calls first (`config.refuse_unsafe_job_environment`) and the
 one code every job gives it (`config.JOB_REFUSAL_EXIT`), 2 and not 1 because 1
@@ -79,7 +80,8 @@ def connect():
 def main() -> int:
     # First, before anything is connected to (docs/17 F52 and infra-12,
     # 2026-10-02 and 2026-10-03): under NOCTORNAL_ENV=production a published
-    # credential or the schema owner's refuses the pass, the same two
+    # credential, the schema owner's or a persona key (the cron loop holds
+    # none: A collector process, 2026-10-02) refuses the pass, the same
     # refusals every job makes through the one helper (config.py). Exit 2,
     # not 1: 1 already means a delivery failed in a pass that ran.
     refusals = refuse_unsafe_job_environment("notify_drain")

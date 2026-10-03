@@ -12,12 +12,17 @@ password and DSN with no check at all. Held here:
   it asks for the owner's credential and for a published one, and the
   migration job, which holds the owner's DSN by design, is asked for the
   published half alone;
-* notify_drain, collection_poll, lookup_drain and embed_pass call it once,
-  first, before they connect to anything, and all four exit
+* notify_drain, collection_poll, lookup_drain, embed_pass and the collector
+  (scripts/collector.py, A collector process, 2026-10-02) call it once,
+  first, before they connect to anything, and all five exit
   `config.JOB_REFUSAL_EXIT` (2: 1 means a pass ran and failed). Merged from
   two builds that disagreed on the code (docs/17 F52 gave collection_poll and
   embed_pass 1; infra-12 gave all four 2) and on the helper that made the
   published half (`config.refuse_published`, now gone);
+* a job that is not the collector also refuses the persona key and the
+  collector's mark, through the same helper (the collector and the poll it
+  starts as a child pass `holds_persona_key=True`: the key is theirs by
+  design, and each makes the collector's own half itself);
 * the Lab's three workers, which call `enforce_environment`, refuse the
   owner's credential through it.
 
@@ -40,8 +45,19 @@ OWNER_DSN = f"postgresql+psycopg://noctornal:{OWNER_PASSWORD}@postgres:5432/noct
 
 #: (script, the exit code its docstring gives a refusal): one code for all.
 CRON_JOBS = [(name, config.JOB_REFUSAL_EXIT)
-             for name in ("notify_drain", "collection_poll", "lookup_drain", "embed_pass")]
+             for name in ("notify_drain", "collection_poll", "lookup_drain", "embed_pass",
+                          "collector")]
 LAB_WORKERS = ["lab_triage", "sample_screen", "sandbox_dispatch"]
+#: The jobs that hold the persona key by design (A collector process,
+#: 2026-10-02): the collector, and the poll it starts as its child. The
+#: poll is not a line of any compose loop, so it is not in the compose scan.
+KEY_HOLDERS = ("collector", "collection_poll")
+COLLECTOR_CHILDREN = ("collection_poll",)
+
+
+def _expected(job: str) -> list[str]:
+    """What the helper says to `job` in this process's environment."""
+    return config.refuse_unsafe_job_environment(job, holds_persona_key=job in KEY_HOLDERS)
 
 
 def _script(name: str):
@@ -184,7 +200,7 @@ def test_there_is_one_job_helper_and_it_is_called_once_in_each_job():
     assert not hasattr(config, "PUBLISHED_REFUSAL_EXIT")
     for path in ("scripts/notify_drain.py", "scripts/collection_poll.py",
                  "scripts/lookup_drain.py", "scripts/embed_pass.py",
-                 "db/migrations/env.py"):
+                 "scripts/collector.py", "db/migrations/env.py"):
         text = (ROOT / path).read_text(encoding="utf-8")
         assert text.count("refuse_unsafe_job_environment(") == 1, path
         assert "refuse_published" not in text and "published_credentials" not in text, path
@@ -210,8 +226,7 @@ def test_each_cron_job_refuses_the_owner_credential_before_connecting(
     _no_connection(monkeypatch, module)
     assert module.main() == code
     out = capsys.readouterr()
-    assert out.err.splitlines() == [
-        line for line in config.refuse_unsafe_job_environment(job)]
+    assert out.err.splitlines() == _expected(job)
     assert out.err.startswith(f"{job}: refusing to run: {name} is set on a runtime process")
     assert OWNER_PASSWORD not in out.out + out.err
 
@@ -232,7 +247,51 @@ def test_the_cron_jobs_are_every_script_the_cron_loops_run():
     import re
     compose = (ROOT / "infra" / "production" / "compose.yml").read_text(encoding="utf-8")
     run = set(re.findall(r"python scripts/(\w+)\.py", compose))
-    assert run == {job for job, _ in CRON_JOBS} | set(LAB_WORKERS), run
+    # The collection poll runs as the collector's child, not in a loop.
+    assert run == ({job for job, _ in CRON_JOBS} - set(COLLECTOR_CHILDREN)) | set(LAB_WORKERS), run
+    collector = (ROOT / "scripts" / "collector.py").read_text(encoding="utf-8")
+    assert all(f"{child}.py" in collector for child in COLLECTOR_CHILDREN)
+
+
+# ---------------------------------------------------------------------------
+# The persona key (A collector process, 2026-10-02)
+# ---------------------------------------------------------------------------
+
+PERSONA_KEY = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="
+
+
+def test_a_job_that_is_not_the_collector_refuses_the_persona_key_by_name_never_by_value():
+    env = {**_production(), "NOCTORNAL_PERSONA_KEK": PERSONA_KEY}
+    for job in ("notify_drain", "lookup_drain", "embed_pass", "migrate"):
+        (line,) = config.refuse_unsafe_job_environment(job, env, holds_owner_credential=job == "migrate")
+        assert line.startswith(f"{job}: refusing to run: NOCTORNAL_PERSONA_KEK ")
+        assert "not the collector" in line and PERSONA_KEY not in line
+    marked = {**_production(), "NOCTORNAL_COLLECTOR": "1"}
+    (line,) = config.refuse_unsafe_job_environment("notify_drain", marked)
+    assert "NOCTORNAL_COLLECTOR is set on a process that is not the collector" in line
+    inline = {**_production(), "NOCTORNAL_COLLECTOR_INLINE": "1"}
+    (line,) = config.refuse_unsafe_job_environment("lookup_drain", inline)
+    assert "development only" in line
+
+
+def test_the_collector_and_its_poll_are_not_asked_for_the_key_they_are_there_to_hold():
+    env = {**_production(), "NOCTORNAL_PERSONA_KEK": PERSONA_KEY, "NOCTORNAL_COLLECTOR": "1"}
+    for job in KEY_HOLDERS:
+        assert config.refuse_unsafe_job_environment(job, env, holds_persona_key=True) == []
+    # ... but the rest of the helper still applies to them: the collector never
+    # receives the schema owner's credential, nor a published one.
+    owner = {**env, config.OWNER_PASSWORD_ENV: OWNER_PASSWORD}
+    (line,) = config.refuse_unsafe_job_environment("collector", owner, holds_persona_key=True)
+    assert line.startswith(f"collector: refusing to run: {config.OWNER_PASSWORD_ENV} is set")
+    published = {**env, "SMTP_PASSWORD": "replace-me-smtp-password"}
+    (line,) = config.refuse_unsafe_job_environment("collector", published, holds_persona_key=True)
+    assert line.startswith("collector: refusing to run: SMTP_PASSWORD still carries")
+
+
+def test_the_persona_key_is_nobodys_business_outside_production():
+    env = {"NOCTORNAL_ENV": "development", "NOCTORNAL_PERSONA_KEK": PERSONA_KEY,
+           "NOCTORNAL_COLLECTOR_INLINE": "1"}
+    assert config.refuse_unsafe_job_environment("notify_drain", env) == []
 
 
 # ---------------------------------------------------------------------------

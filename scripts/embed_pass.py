@@ -55,8 +55,10 @@ endpoint error, a changed model); 0 otherwise. A retired index
 
 2 when, under NOCTORNAL_ENV=production, the environment is one this job
 will not run on (docs/17 F52 and infra-12, 2026-10-02 and 2026-10-03): a
-credential that carries a value this repository publishes, or the schema
-owner's password or DSN, which no runtime process may hold. The pass prints
+credential that carries a value this repository publishes, the schema
+owner's password or DSN, which no runtime process may hold, or the persona
+key (or the collector's mark), which only the collector may hold (A collector
+process, 2026-10-02). The pass prints
 one line per variable on stderr, `embed_pass: refusing to run: <NAME> ...`,
 naming the variable and never its value, and touches nothing: it refuses
 before it reads its arguments or connects. It is the one helper every job
@@ -111,8 +113,10 @@ def main(argv: list[str] | None = None) -> int:
     # the API, so with the template's placeholders, or with the schema
     # owner's credential still in secrets.env, it ran beside an API that
     # refused. Under NOCTORNAL_ENV=production a published credential or the
-    # owner's refuses the pass, through the one helper every job calls
-    # (config.py). See "Exit code" above for 2.
+    # owner's refuses the pass, and so does a persona key (A collector
+    # process, 2026-10-02, verify:g38: this Lab worker holds none and the
+    # vault guard alone stood between it and one), all through the one helper
+    # every job calls (config.py). See "Exit code" above for 2.
     refusals = refuse_unsafe_job_environment("embed_pass")
     if refusals:
         print("\n".join(refusals), file=sys.stderr)

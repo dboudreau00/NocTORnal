@@ -73,7 +73,8 @@ def test_only_the_migrate_job_reads_migrate_env(services):
 def test_every_other_application_service_keeps_secrets_env(services):
     """The move is out of secrets.env, not a second copy of it: the API
     and the loops still read secrets.env and nothing owner-shaped."""
-    for name in ("api", "sample-origin", "cron", "lab-triage", "lab-cron", "embed-pass"):
+    for name in ("api", "sample-origin", "cron", "lab-triage", "lab-cron", "embed-pass",
+                 "collector"):
         files = dict(_env_files(services[name]))
         assert "secrets.env" in files and "migrate.env" not in files, name
         assert "postgres-init.env" not in files, name
@@ -88,8 +89,13 @@ def test_every_runtime_service_holds_the_owner_variables_blank(services):
     both as empty strings, which every reader counts as unset."""
     readers_of_the_owner = {"postgres", "migrate"}
     assert readers_of_the_owner < set(services)
+    # The isolated analysis worker (F42) reads no env file at all and holds no
+    # variable but its own three, so there is nothing to blank, and it refuses
+    # to start holding any other (test_analysis_worker_compose.py).
+    no_env_file = {"analysis-worker"}
+    assert not any(_env_files(services[name]) for name in no_env_file)
     for name, svc in services.items():
-        if name in readers_of_the_owner:
+        if name in readers_of_the_owner or name in no_env_file:
             continue
         env = svc.get("environment") or {}
         assert env.get(config.OWNER_PASSWORD_ENV) == "", name
@@ -103,13 +109,14 @@ def test_every_runtime_service_holds_the_owner_variables_blank(services):
 def test_the_owner_variables_are_blanked_where_a_secrets_file_reaches():
     """The services above are every service compose runs: a new one that
     reads secrets.env without the anchor fails the test above, and the
-    anchor is one declaration, not eleven copies."""
+    anchor is one declaration, not twelve copies (the collector, A collector
+    process, 2026-10-02, is the twelfth)."""
     text = (PROD / "compose.yml").read_text(encoding="utf-8")
     anchor = text[text.index("x-no-owner-credential: &no-owner-credential\n"):]
     anchor = anchor[:anchor.index("\n\n")]
     assert anchor.splitlines()[1:] == ['  POSTGRES_PASSWORD: ""',
                                        '  NOCTORNAL_MIGRATION_DATABASE_URL: ""']
-    assert text.count("<<: *no-owner-credential") == 11
+    assert text.count("<<: *no-owner-credential") == 12
 
 
 def test_the_templates_put_each_owner_variable_where_it_lives():

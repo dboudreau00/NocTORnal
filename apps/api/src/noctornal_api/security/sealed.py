@@ -35,7 +35,9 @@ from noctornal_api.security import envelope
 #: has a uuid primary key called `id`, which the re-wrap pages on.
 SEALED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("iam.app_user", "totp_secret_ciphertext", "totp_key_id"),
-    ("collect.collection_account", "secret_ciphertext", "secret_key_id"),
+    # collect.collection_account left this list on 2026-10-02 (A collector
+    # process): a persona credential seals under the persona ring, which
+    # the API does not hold. security/persona_sealed.py is its inventory.
     ("ingest.victim_credential", "value_ciphertext", "value_key_id"),
     ("lab.sample", "data_key_ciphertext", "data_key_id"),
     ("collect.egress_profile", "endpoint_ciphertext", "key_id"),

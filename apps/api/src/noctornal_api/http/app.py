@@ -64,6 +64,8 @@ from noctornal_api.http.routers import (
     search,
     setup,
 )
+# The persona act queue (A collector process, 2026-10-02).
+from noctornal_api.http.routers import collection_acts
 # Similarity reads and Administration, Embeddings (F6.3, 2026-09-24).
 from noctornal_api.http.routers import embeddings as embeddings_router
 from noctornal_api.http.routers import similarity
@@ -371,6 +373,9 @@ def create_app() -> FastAPI:
                    collection_authority.router,
                    # Telegram chats and personas (F5.2, F5.3).
                    collection_telegram.router,
+                   # The caller's persona acts (A collector process,
+                   # 2026-10-02).
+                   collection_acts.router,
                    # Tags and node sets: schema and service since
                    # 0009, no router until 2026-07-26.
                    curation.router,

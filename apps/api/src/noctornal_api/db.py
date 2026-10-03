@@ -153,6 +153,10 @@ class SystemPurpose(StrEnum):
     # added under a source the adder may not see, and say nothing about it
     # (F51, 2026-10-02).
     TELEGRAM_INTAKE = "telegram_intake"
+    # The persona act queue (A collector process, 2026-10-02): the
+    # collector's claims, its sweeps and every outcome, and the inline
+    # runner's; the request role may only enqueue and read its own acts.
+    PERSONA_ACTS = "persona_acts"
     # Comms minimisation (docs/16 L4) and the incidental-party flag it
     # relies on: an obligation done in full, never to the minimiser's
     # labels (S1, 2026-09-25).

@@ -378,6 +378,18 @@ def run_once(
     # this one distinguishable to a caller who is not reading this file.
     refuse_unready(conn)
     clearance, _ = user_ceiling(conn, user.user_id)
+    # A collector process (2026-10-02): a source a persona reads is polled
+    # by the collector, the one process holding the persona key, so this
+    # route queues it as a persona act and answers with its outcome (or
+    # 202 while it is queued). A feed no persona reads polls here, as
+    # before. A source above the caller is the same 404 either way.
+    persona_read = _persona_read_label(conn, source_id, clearance.name, adapters)
+    if persona_read is not None:
+        from noctornal_api.http.routers.collection_acts import act_answer
+        return act_answer(
+            conn, user, kind="SOURCE_POLL", source_id=source_id,
+            classification=persona_read, adapters=adapters, factory=None,
+            params={"persona_id": body.persona_id, "watch_id": body.watch_id})
     try:
         # The poll on a system connection (S1, 2026-09-25), as the cron's
         # is: a new item dedupes against every stored version of it and
@@ -389,34 +401,63 @@ def run_once(
             result = CollectionService(sconn, adapters).run_once(
                 source_id, actor_id=user.user_id, persona_id=body.persona_id,
                 watch_id=body.watch_id, clearance=clearance.name)
-    except (SourceRefused, PersonaResting, AuthorityError) as exc:
-        # ABOVE `except CollectionError`, as CollectionBusy is: each is "you
-        # are allowed, this cannot run", and nothing was done. A refused
-        # source is configuration, a resting persona is outside its hours,
-        # and the confirmer is refused as the runner before any run row;
-        # 400 "Invalid request" would tell the caller to
-        # fix a request with nothing wrong in it.
-        raise Problem(409, "Conflict", safe_detail(exc)) from exc
-    except PersonaUnavailable as exc:
-        # 409 rather than 403: the caller is allowed, the persona is not
-        # usable -- suspended, burnt, or cooling down.
-        raise Problem(409, "Conflict", safe_detail(exc)) from exc
-    except CollectionBusy as exc:
-        # ABOVE `except CollectionError` and it must stay there: CollectionBusy
-        # is a subclass, so until 2026-09-10 it was caught below and answered
-        # 400 "Invalid request" -- for a request that was entirely valid and
-        # did nothing at all. The case that produces it is the ordinary one
-        # the lock exists for and `run_once`'s docstring names: an analyst
-        # double-clicking Run, or this pane overlapping the cron in
-        # scripts/collection_poll.py. 409 says the true thing, which is that
-        # the poll is already happening; 400 told them to fix a request that
-        # had nothing wrong with it, and left retrying -- the correct
-        # response -- looking like the wrong one.
-        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    except CollectionError as exc:
+        raise run_problem(exc) from exc
+    return run_body(result)
+
+
+def _persona_read_label(conn: psycopg.Connection, source_id: UUID,
+                        clearance: str, adapters: dict) -> str | None:
+    """The source's label when a persona reads it (its adapter names a
+    persona platform), else None. A source above the caller, or none at
+    all, is the run route's 404 as ever."""
+    from noctornal_api.collection import _source_row
+
+    try:
+        source = _source_row(conn, source_id, clearance)
     except CollectionNotFound as exc:
         raise Problem(404, "Not found", safe_detail(exc)) from exc
-    except CollectionError as exc:
-        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+    adapter = adapters.get(source.parser_key)
+    if adapter is None or _attr(adapter, "persona_platform") is None:
+        return None
+    return source.classification
+
+
+def run_problem(exc: CollectionError) -> Problem:
+    """The run route's answer for a refused or failed poll: one mapping for
+    the poll run here and the one the collector runs (2026-10-02). The
+    order is the old `except` chain's: a subclass before its parent."""
+    if isinstance(exc, (SourceRefused, PersonaResting, AuthorityError)):
+        # Before the CollectionError fallback, as CollectionBusy is: each is
+        # "you are allowed, this cannot run", and nothing was done. A
+        # refused source is configuration, a resting persona is outside its
+        # hours, and the confirmer is refused as the runner before any run
+        # row; 400 "Invalid request" would tell the caller to fix a request
+        # with nothing wrong in it.
+        return Problem(409, "Conflict", safe_detail(exc))
+    if isinstance(exc, PersonaUnavailable):
+        # 409 rather than 403: the caller is allowed, the persona is not
+        # usable: suspended, burnt, or cooling down.
+        return Problem(409, "Conflict", safe_detail(exc))
+    if isinstance(exc, CollectionBusy):
+        # Before the CollectionError fallback and it must stay there:
+        # CollectionBusy is a subclass, so until 2026-09-10 it was caught
+        # below and answered 400 "Invalid request", for a request that was
+        # entirely valid and did nothing at all. The case that produces it
+        # is the ordinary one the lock exists for and `run_once`'s docstring
+        # names: an analyst double-clicking Run, or this pane overlapping
+        # the scheduled poll in scripts/collection_poll.py. 409 says the
+        # true thing, which is that the poll is already happening; 400 told
+        # them to fix a request that had nothing wrong with it, and left
+        # retrying (the correct response) looking like the wrong one.
+        return Problem(409, "Conflict", safe_detail(exc))
+    if isinstance(exc, CollectionNotFound):
+        return Problem(404, "Not found", safe_detail(exc))
+    return Problem(400, "Invalid request", safe_detail(exc))
+
+
+def run_body(result) -> dict:
+    """What a finished poll answers, here and from the collector."""
     return {
         "run_id": str(result.run_id),
         "items_seen": result.items_seen,

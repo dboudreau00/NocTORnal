@@ -7,8 +7,10 @@ application container: no env_file and no setting but its own, no
 network, a read-only root, no-new-privileges, pids and memory limits, and
 (since the F42 review of 2026-10-02) root holding only kill, setgid and
 setuid, with an init, so each child runs as a user of its own. Its
-socket's volume is a tmpfs only it writes; api, cron and lab-triage mount
-it read-only and name the same socket; nothing else mounts it.
+socket's volume is a tmpfs only it writes; api, collector and lab-triage
+mount it read-only and name the same socket; nothing else mounts it (the
+cron loop did until the collection poll moved to the collector, A collector
+process, 2026-10-02).
 
 Pure: the compose file is read with test_egress_topology's reader, which
 fails closed on any construct it does not understand. That the container
@@ -27,7 +29,7 @@ from noctornal_api import analysis_runner as ar
 from noctornal_api import analysis_worker as aw
 
 WORKER = "analysis-worker"
-USERS = ("api", "cron", "lab-triage")
+USERS = ("api", "collector", "lab-triage")
 MOUNT = "/run/noctornal-analysis"
 
 
@@ -176,7 +178,7 @@ def test_each_user_mounts_the_socket_read_only_and_names_the_same_one(doc, worke
         assert WORKER in svc["depends_on"], name
     assert doc["services"]["lab-triage"]["depends_on"][WORKER]["condition"] == \
         "service_healthy"
-    for name in ("api", "cron"):
+    for name in ("api", "collector"):
         assert doc["services"][name]["depends_on"][WORKER]["condition"] == \
             "service_started"
 
@@ -215,20 +217,19 @@ def test_the_image_the_worker_runs_carries_none_of_the_operators_secret_files():
     rules = lines(".dockerignore")
 
     def excluded(path: str) -> bool:
-        # Docker's order: the LAST rule that matches decides, and a leading
-        # "!" puts a path back (the tracked .env.example templates, which the
-        # installers copy and which hold placeholders, not secrets)
-        state = False
+        """Docker's reading: the last rule that matches decides, and a `!`
+        rule puts a path back (the tracked `.example` templates)."""
+        verdict = False
         for rule in rules:
-            negated = rule.startswith("!")
-            body = rule[1:] if negated else rule
-            if body.endswith("/"):
-                hit = path.startswith(body)
+            negate = rule.startswith("!")
+            pattern = rule[1:] if negate else rule
+            if pattern.endswith("/"):
+                hit = path.startswith(pattern)
             else:
-                hit = fnmatch.fnmatchcase(path, body)
+                hit = fnmatch.fnmatchcase(path, pattern)
             if hit:
-                state = not negated
-        return state
+                verdict = not negate
+        return verdict
 
     for path in secret_paths:
         assert excluded(path if not path.endswith("/") else path + "private.key"), path

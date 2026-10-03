@@ -161,7 +161,7 @@ def keygen() -> str:
         f"NOCTORNAL_EGRESS_SEAL_KEY={keys[egress_seal.SEAL_KEY_ENV]}",
         f"NOCTORNAL_EGRESS_CLIENT_KEY={keys['NOCTORNAL_EGRESS_CLIENT_KEY']}",
         f"NOCTORNAL_EGRESS_FINGERPRINT_KEY={keys[egress_seal.FINGERPRINT_KEY_ENV]}",
-        "# infra/production/egress-client.env (api and cron):",
+        "# infra/production/egress-client.env (api, cron and the collector):",
         f"NOCTORNAL_EGRESS_CLIENT_KEY={keys['NOCTORNAL_EGRESS_CLIENT_KEY']}",
         f"NOCTORNAL_EGRESS_FINGERPRINT_KEY={keys[egress_seal.FINGERPRINT_KEY_ENV]}",
         f"NOCTORNAL_EGRESS_SEAL_PUBLIC={keys[egress_seal.SEAL_PUBLIC_ENV]}",

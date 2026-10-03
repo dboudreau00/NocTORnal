@@ -239,8 +239,9 @@ _KEPT = {
     "caddy": {"NET_BIND_SERVICE"},
     "postgres": {"CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"},
     "redis": {"DAC_OVERRIDE"},
-    # the isolated analysis worker (F42) drops to its children's uid and
-    # kills their process group; nothing else
+    # The isolated analysis worker (docs/17 F42): root, so that it can give
+    # each child a user of its own and stop that user's processes. Held, with
+    # the rest of what makes it a sandbox, by test_analysis_worker_compose.
     "analysis-worker": {"KILL", "SETGID", "SETUID"},
 }
 

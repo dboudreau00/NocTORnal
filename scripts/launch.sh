@@ -288,8 +288,9 @@ if [ -z "${NOCTORNAL_TOTP_KEK:-}" ]; then
 # NocTORnal local key store. Created by scripts/launch.sh.
 #
 # NOCTORNAL_TOTP_KEK seals every secret the database stores encrypted,
-# except the egress exits, which are sealed to the egress proxy's own key:
-# enrolled authenticators, collection persona credentials, stored victim
+# except the egress exits, which are sealed to the egress proxy's own key,
+# and collection persona credentials, which NOCTORNAL_PERSONA_KEK seals:
+# enrolled authenticators, stored victim
 # credentials, each sample's data key, and the credentials of the outbound
 # integrations an administrator configures (Jira and lookup provider
 # credentials). LOSING THIS FILE LOSES ALL OF
@@ -317,8 +318,9 @@ EOF
   printf '      %s\n' "$ENV_LOCAL"
   printf '\n'
   printf '    That file is now your key store. The key seals every secret the\n'
-  printf '    database stores encrypted: authenticators, persona and victim\n'
-  printf '    credentials, Jira and lookup provider credentials, and the keys of\n'
+  printf '    database stores encrypted but persona credentials, which have a\n'
+  printf '    key of their own: authenticators, victim credentials, Jira and\n'
+  printf '    lookup provider credentials, and the keys of\n'
   printf '    stored samples. If you lose it, every user has to re-enrol their\n'
   printf '    authenticator app, and none of the rest can be decrypted again.\n'
   printf '    There is no recovery and no default key.\n'
@@ -327,6 +329,20 @@ EOF
   printf '\n'
 elif [ "$kek_from_environment" -eq 0 ]; then
   good 'TOTP key ready'
+fi
+
+# A collector process (2026-10-02): persona credentials seal under a key of
+# their own. On this machine the API holds it and runs persona acts inline
+# (NOCTORNAL_COLLECTOR_INLINE below); in production only the collector
+# service does. Appended, never replacing anything in the file.
+if [ -z "${NOCTORNAL_PERSONA_KEK:-}" ]; then
+  generated="$("$PYTHON" -c 'import base64, os; print(base64.b64encode(os.urandom(32)).decode())')"
+  printf '%s\n%s\n' \
+    '# NOCTORNAL_PERSONA_KEK seals every collection persona credential. Lost, every persona is enrolled again.' \
+    "NOCTORNAL_PERSONA_KEK=$generated" >> "$ENV_LOCAL"
+  chmod 600 "$ENV_LOCAL" 2>/dev/null || true
+  export NOCTORNAL_PERSONA_KEK="$generated"
+  good 'persona key generated and saved to .env.local'
 fi
 
 # ---------------------------------------------------------------------------
@@ -374,6 +390,10 @@ set_default EVIDENCE_BUCKET  'noctornal-evidence'
 # Raw markup of collected forum pages (2026-09-24), without object
 # lock, because it is deleted with its document.
 set_default COLLECT_RAW_BUCKET 'noctornal-collect-raw'
+# A collector process (2026-10-02): there is no collector process on this
+# machine, so persona acts run inside the API, as they always did here.
+# Refused in production.
+set_default NOCTORNAL_COLLECTOR_INLINE '1'
 
 # ---------------------------------------------------------------------------
 # Step e: migrations

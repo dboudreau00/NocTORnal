@@ -598,11 +598,13 @@ How that is held in `break_glass.py` and `stores.py` (final review,
   2026-09-09):** decrypted only inside `PersonaVault.use()`, which yields
   the plaintext to one block, drops it and audits the use; no
   `get_secret()`, no plaintext in a response, adapter errors redacted
-  before storage. The vault runs INSIDE the API process (there is no
-  separate collector), so this is a guarantee about the shape of the code,
-  not about a network boundary, and a compromised API host is a
-  compromised vault. Splitting a collector out is a deliberate not-yet
-  (`docs/02`).
+  before storage. Since 2026-10-02 the vault opens only with
+  `NOCTORNAL_PERSONA_KEK`, a key of its own that in production only the
+  collector service holds (`scripts/collector.py`); the API process holds
+  no persona key and queues every persona act (`persona_acts.py`), so a
+  compromised API host is no longer a compromised vault, while a
+  compromised collector host still is. Until then the vault ran inside the
+  API process and this was a guarantee about the shape of the code alone.
 - Key rotation runbook with re-wrap, not re-encrypt, **shipped
   2026-09-11**: the envelope selects the key by each blob's recorded
   `key_id`, retired keys stay in `NOCTORNAL_TOTP_KEK_RETIRED` until

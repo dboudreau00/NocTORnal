@@ -1093,22 +1093,26 @@ services:
           --proxy-headers --forwarded-allow-ips "$$NOCTORNAL_TRUSTED_PROXY_IP"
 
   # ------------------------------------------------------------------------
-  # The two things that have to happen on a timer, in a shell loop.
+  # The things that have to happen on a timer, in a shell loop: the
+  # notification drain and the queued outbound lookups. The scheduled
+  # collection poll ran here until 2026-10-02 and now runs in the collector
+  # service below, the one holder of the persona key (decision 174).
   #
-  # There is no worker process and no queue in this build (decision 30):
+  # There is no general worker process and no queue in this build (decision
+  # 30; the collector is the one exception, for persona credentials):
   # `transports.dispatch_due()` and the collection runner are functions you
   # CALL. Until something called them on a schedule, a notification queued
   # at 17:05 went out when an administrator next pressed the button --
   # priority 1 "overrides quiet hours" only if something sends it.
   #
-  # Both are safe to run beside the API, and safe if this loop ever overlaps
-  # itself, because both are guarded by Postgres advisory locks -- at
+  # All of them are safe to run beside the API, and safe if this loop ever
+  # overlaps itself, because each is guarded by Postgres advisory locks, at
   # different granularities, which is worth knowing when reading the log.
   # `dispatch_due` takes ONE lock across the whole drain, so a second copy
   # does nothing and no notification is sent twice. The collection runner
-  # locks PER SOURCE, so a source another runner holds -- a second cron, or
-  # an analyst who pressed Run -- is reported `skipped`, which is not a
-  # failure and does not move the exit code.
+  # (in the collector) locks PER SOURCE, so a source another runner holds (a
+  # second collector, or an analyst who pressed Run) is reported
+  # `skipped`, which is not a failure and does not move the exit code.
   #
   # ## the cadence, described accurately
   #
@@ -1118,7 +1122,8 @@ services:
   # passes took, and it drifts.
   #
   # That drift does not matter, and it especially does not matter for the
-  # collection poll, which is NOT a timer for the sources it polls. Each
+  # collection poll (which the collector runs on the same five-minute
+  # resolution), which is NOT a timer for the sources it polls. Each
   # source carries its own `next_due_at`, rolled once with per-source jitter
   # when a run finishes and stored (Alembic 0042). The jitter is there for
   # operational security, not politeness -- docs/04: a collector that polls
@@ -1168,30 +1173,23 @@ services:
       - secrets.env
       - path: egress-client.env
         required: false
-    # The collection poll's forum pages are parsed in the analysis worker
-    # (docs/17 F42); its socket, read-only.
-    volumes:
-      - ./tls:/certs:ro
-      - analysis-socket:/run/noctornal-analysis:ro
+    # No analysis worker socket: the collection poll, whose forum pages are
+    # parsed in the worker (docs/17 F42), runs in the collector now, and
+    # neither drain below parses hostile bytes.
     environment:
       <<: *no-owner-credential
       NOCTORNAL_ENV: production
       NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
       NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
-      NOCTORNAL_ANALYSIS_SOCKET: /run/noctornal-analysis/worker.sock
     depends_on:
       migrate:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
-      # Healthy: a poll or a drain through a proxy that cannot answer would
-      # only fail every source and delivery in the pass.
+      # Healthy: a drain through a proxy that cannot answer would only fail
+      # every delivery and lookup in the pass.
       egress-proxy:
         condition: service_healthy
-      # Started only: the notification drain must not wait on it, and a
-      # forum source polled while it is down is refused by name.
-      analysis-worker:
-        condition: service_started
     command:
       - /bin/sh
       - -c
@@ -1208,14 +1206,13 @@ services:
           [ -z "$$stop" ] || break
           nap 150
           [ -z "$$stop" ] || break
-          echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] collection_poll start"
-          python scripts/collection_poll.py; rc=$$?
-          echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] collection_poll exit=$$rc"
-          [ -z "$$stop" ] || break
-          # Queued outbound lookups (F15.4, 2026-09-24),
-          # straight after the poll with no sleep of its own, so every job
-          # keeps its five-minute cadence. The cadence is a resolution, not
-          # a rate: pacing comes from the provider windows.
+          # The collection poll moved to the collector service below on
+          # 2026-10-02 (A collector process): it needs the persona key,
+          # which this loop does not hold.
+          # Queued outbound lookups (F15.4, 2026-09-24), straight after the
+          # notification drain's nap with no sleep of their own, so every
+          # job keeps its five-minute cadence. The cadence is a resolution,
+          # not a rate: pacing comes from the provider windows.
           echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] lookup_drain start"
           python scripts/lookup_drain.py; rc=$$?
           echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] lookup_drain exit=$$rc"
@@ -1223,6 +1220,77 @@ services:
           nap 150
         done
         echo "[$$(date -u +%Y-%m-%dT%H:%M:%SZ)] stopped on request"
+
+  # ------------------------------------------------------------------------
+  # The collector (A collector process, 2026-10-02): the ONE service that
+  # holds the persona key. It runs every persona act the API queues in
+  # collect.persona_act (a Telegram chat looked up, joined, checked, marked
+  # or rebound; a Poll now of a source a persona reads) and the scheduled
+  # collection polls (scripts/collection_poll.py, as a child every five
+  # minutes, the resolution the cron loop used). The API and the cron loop
+  # hold no persona key, so neither can open a persona credential. The poll
+  # parses forum pages, so the collector mounts the analysis worker's socket
+  # read-only as the cron loop did when it ran the poll; it holds no schema
+  # owner credential (*no-owner-credential, and scripts/collector.py refuses
+  # one through the same helper every job calls).
+  #
+  # collector.env carries NOCTORNAL_PERSONA_KEK and nothing else, and only
+  # this service reads it. Optional to compose so an upgrade starts and the
+  # collector then refuses by name until the file exists. NOCTORNAL_COLLECTOR
+  # is set HERE, where the env files cannot unset it, and every other
+  # process refuses to start with it. It takes cron's egress settings and
+  # waits for the proxy, as cron does: a persona reaches its site only
+  # through its own exit.
+  #
+  # Healthcheck disabled: no HTTP server here (see the Dockerfile).
+  collector:
+    <<: *noctornal-app
+    healthcheck:
+      disable: true
+    # SIGTERM finishes the act in hand and claims no other (scripts/
+    # collector.py). The longest act is a Telegram poll's whole session,
+    # 120 seconds, and the poll child, which ends on SIGTERM at once, is given
+    # up to 30 more before it is killed; docker's default
+    # of 10 would kill the process mid-act and leave it RUNNING, to be
+    # failed as "outcome unknown" fifteen minutes later (verify:g38,
+    # 2026-10-03). test_persona_act_queue_pg holds the number.
+    stop_grace_period: 180s
+    env_file:
+      - secrets.env
+      - path: egress-client.env
+        required: false
+      - path: collector.env
+        required: false
+    # The collection poll's forum pages are parsed in the analysis worker
+    # (docs/17 F42); its socket, read-only.
+    volumes:
+      - ./tls:/certs:ro
+      - analysis-socket:/run/noctornal-analysis:ro
+    environment:
+      <<: *no-owner-credential
+      NOCTORNAL_ENV: production
+      NOCTORNAL_COLLECTOR: "1"
+      NOCTORNAL_EGRESS_PROXY_URL: "http://172.31.243.11:3128"
+      NOCTORNAL_EGRESS_INTERNAL_CIDRS: "172.31.243.0/24,172.31.244.0/24"
+      NOCTORNAL_ANALYSIS_SOCKET: /run/noctornal-analysis/worker.sock
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      egress-proxy:
+        condition: service_healthy
+      # Started only: a persona act must not wait on it, and a forum source
+      # polled while it is down is refused by name.
+      analysis-worker:
+        condition: service_started
+    command:
+      - /bin/sh
+      - -c
+      - |
+        cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt || exit 1
+        export SSL_CERT_FILE=/tmp/ca-bundle.crt
+        exec python scripts/collector.py
 
   # F11 and F12 (2026-09-24). Static triage and YARA compiles in a loop
   # of their own: a pass finishes the run it started, and one run can take
@@ -1277,7 +1345,7 @@ services:
   # ------------------------------------------------------------------------
   # The isolated analysis worker (docs/17 F42, 2026-10-02). Static triage
   # and forum parsing read bytes written by the people under
-  # investigation; api, cron and lab-triage hand each such read to this
+  # investigation; api, collector and lab-triage hand each such read to this
   # container over a Unix socket, and it starts the same bounded child
   # they would otherwise have started beside their own secrets
   # (noctornal_api.analysis_worker).
@@ -1340,7 +1408,7 @@ services:
   #     reports it and the readiness row judges it.
   #   * The socket's volume (analysis-socket, below) is a tmpfs owned by
   #     root, group 10001, mode 0750: only the worker writes it, a child's
-  #     uid cannot even enter it, and api, cron and lab-triage mount it
+  #     uid cannot even enter it, and api, collector and lab-triage mount it
   #     read-only.
   #
   # Memory: each running request holds its payload (a YARA scan at the

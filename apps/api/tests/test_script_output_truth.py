@@ -194,7 +194,9 @@ def test_the_production_file_describes_the_dev_file_as_it_is():
 #: a column nothing writes, so a warning naming it would describe nothing.
 _SEALED_WORDS = {
     "iam.app_user": "authenticator",
-    "collect.collection_account": "persona",
+    # collect.collection_account left SEALED_COLUMNS on 2026-10-02 (A
+    # collector process): the persona ring seals it, and every generated
+    # header names that key (test_persona_key_split.py).
     "ingest.victim_credential": "victim",
     "lab.sample": "sample",
     "collect.egress_profile": None,

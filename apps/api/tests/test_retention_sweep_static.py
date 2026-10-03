@@ -132,10 +132,12 @@ def test_nothing_the_deployment_ships_runs_the_sweep(path):
 
 def test_the_scan_looks_at_the_loop_that_runs_the_other_jobs():
     """A guard that reads the wrong file passes for ever. The production
-    compose's cron service runs the three drains, so the file is the one."""
+    compose's cron service runs the two drains, and the collector service
+    (A collector process, 2026-10-02) runs the collection poll that used to
+    be the loop's second job, so the file is the one."""
     live = _live_lines(ROOT / "infra" / "production" / "compose.yml")
-    for job in ("scripts/notify_drain.py", "scripts/collection_poll.py",
-                "scripts/lookup_drain.py"):
+    for job in ("scripts/notify_drain.py", "scripts/lookup_drain.py",
+                "scripts/collector.py"):
         assert job in live, job
 
 

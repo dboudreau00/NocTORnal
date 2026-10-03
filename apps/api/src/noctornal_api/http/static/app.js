@@ -21046,6 +21046,77 @@ async function section(path, listId, emptyId, pick, build, missing, retry) {
   }
 }
 
+/* --- persona acts (A collector process, 2026-10-02) -------------------
+   A persona act runs in the collector, the one process that holds the
+   persona key. Its route answers 202 with the act while the collector has
+   not finished it; `actCall` then follows it on /collection/acts/{id} the
+   way any slow answer is waited for, and answers what the route would
+   have: the body, or the route's own refusal as an ApiError. Past
+   ACT_PATIENCE_MS it answers `{queued: true, notice}`, and the act stays
+   listed under Persona acts with its outcome. */
+const ACT_PATIENCE_MS = 90000;
+const ACT_QUEUED_TEXT = 'The collector has not run this yet. It is listed under '
+  + 'Persona acts, with its outcome once it has run.';
+
+async function actCall(path, options) {
+  const body = await api(path, options);
+  if (!body || !body.queued || !body.act) return body;
+  const until = Date.now() + ACT_PATIENCE_MS;
+  while (Date.now() < until) {
+    await new Promise((done) => { setTimeout(done, 2000); });
+    const seen = await api('/collection/acts/' + encodeURIComponent(body.act.id));
+    if (seen.problem) {
+      throw new ApiError(seen.problem.status, seen.problem.title, seen.problem.detail);
+    }
+    if (seen.body) return seen.body;
+  }
+  return { queued: true, act: body.act, notice: ACT_QUEUED_TEXT };
+}
+
+/** One of the caller's persona acts: what, when, and how it ended. */
+function personaActRow(a) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', a.what));
+  const cls = a.status === 'DONE' ? 'ok'
+    : (a.status === 'PENDING' || a.status === 'RUNNING' ? 'warn' : 'bad');
+  head.appendChild(el('span', 'chip ' + cls, a.status));
+  card.appendChild(head);
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('asked', fmtTime(a.requested_at)));
+  if (a.started_at) facts.appendChild(fact('started', fmtTime(a.started_at)));
+  if (a.finished_at) facts.appendChild(fact('finished', fmtTime(a.finished_at)));
+  card.appendChild(facts);
+  if (a.outcome) card.appendChild(el('p', 'why', a.outcome));
+  if (a.status === 'PENDING') {
+    const actions = el('div', 'row-actions');
+    const stop = el('button', 'btn small ghost', 'Cancel');
+    stop.type = 'button';
+    stop.addEventListener('click', async () => {
+      stop.disabled = true;
+      try {
+        await api('/collection/acts/' + encodeURIComponent(a.id) + '/cancel',
+          { method: 'POST', json: {} });
+        loadPersonaActs();
+      } catch (err) {
+        card.appendChild(el('p', 'form-error', err instanceof ApiError
+          ? (err.detail || err.title) : String(err)));
+      } finally {
+        stop.disabled = false;
+      }
+    });
+    actions.appendChild(stop);
+    card.appendChild(actions);
+  }
+  return card;
+}
+
+function loadPersonaActs() {
+  return section('/collection/acts?limit=25', 'src-acts', 'src-acts-empty',
+    (b) => b.acts, personaActRow,
+    'Persona acts belong to the collector role.', loadSources);
+}
+
 /** Whether Poll now would be refused for this analyst, and why, from the
  *  due list's `run` block (ux12-feeds:poll-now-one-click-and-blocked,
  *  2026-09-23). Read before the rows are built, so each button is drawn
@@ -21114,6 +21185,7 @@ async function loadSources() {
   // F5.3 (2026-09-24). After the personas, whose Telegram rows the
   // Add a chat form offers.
   loadTelegramChats();
+  loadPersonaActs();  // A collector process (2026-10-02)
   $('src-counts').textContent = (due && unhealthy)
     ? ((due.due || []).length + ' due · '
        + (unhealthy.sources || []).length + ' unhealthy')
@@ -21263,10 +21335,13 @@ function dueRow(s) {
         + 'Whoever runs ' + host + ' can see the request.')) return;
     run.disabled = true;
     try {
-      const body = await api('/collection/sources/' + s.id + '/run',
+      const body = await actCall('/collection/sources/' + s.id + '/run',
         { method: 'POST', json: {} });
-      card.appendChild(el('p', body.error ? 'form-error' : 'form-ok',
-        body.error || (body.items_new + ' new of ' + body.items_seen + ' seen')));
+      // A source a persona reads is polled by the collector (2026-10-02);
+      // one it has not finished yet says so rather than a count.
+      const said = body.queued ? body.notice
+        : (body.error || (body.items_new + ' new of ' + body.items_seen + ' seen'));
+      card.appendChild(el('p', body.error ? 'form-error' : 'form-ok', said));
       /* A poll can succeed and still not have done everything it was asked
          to. A watch whose regex will not compile matches nothing, for
          ever, and reads exactly like a watch that has not fired — so the
@@ -22345,7 +22420,7 @@ async function addTelegramChat(e) {
   $('stg-btn').disabled = true;
   try {
     const out = await withStepUp('Adding a Telegram chat needs a recent sign-in.',
-      () => api('/collection/telegram/chats', { method: 'POST', json }));
+      () => actCall('/collection/telegram/chats', { method: 'POST', json }));
     if (!out) return;
     $('stg-ref').value = '';
     $('stg-name').value = '';
@@ -22450,7 +22525,7 @@ function telegramChatActions(card, c) {
     button('Check membership', 'ghost', async (e) => {
       e.target.disabled = true;
       try {
-        const out = await api('/collection/telegram/chats/' + c.source_id
+        const out = await actCall('/collection/telegram/chats/' + c.source_id
           + '/membership', { method: 'POST', json: {} });
         reload(out.notice || 'Checked.');
       } catch (err) {
@@ -22471,7 +22546,7 @@ function telegramChatActions(card, c) {
       check: ([why]) => (why.trim().length < 5 ? 'Say why, in at least 5 characters.' : null),
       submitFn: async ([why]) => {
         const out = await withStepUp('Marking a member chat needs a recent sign-in.',
-          () => api('/collection/telegram/chats/' + c.source_id + '/member',
+          () => actCall('/collection/telegram/chats/' + c.source_id + '/member',
             { method: 'POST', json: { reason: why.trim() } }));
         if (!out) throw Object.assign(new Error('cancelled'), { handled: true });
         reload(out.notice || 'Marked.');
@@ -22491,7 +22566,7 @@ function telegramChatActions(card, c) {
           ? 'Say why, in at least 5 characters.' : null),
         submitFn: async ([persona, why]) => {
           const out = await withStepUp('Changing who reads a chat needs a recent '
-            + 'sign-in.', () => api('/collection/telegram/chats/' + c.source_id
+            + 'sign-in.', () => actCall('/collection/telegram/chats/' + c.source_id
             + '/persona', { method: 'POST', json: { persona_id: persona,
             reason: why.trim() } }));
           if (!out) throw Object.assign(new Error('cancelled'), { handled: true });
@@ -22575,7 +22650,7 @@ function openTelegramJoin(card, c, reload) {
     go.disabled = true;
     try {
       const out = await withStepUp('Joining a chat needs a recent sign-in.',
-        () => api('/collection/telegram/chats/' + c.source_id + '/join',
+        () => actCall('/collection/telegram/chats/' + c.source_id + '/join',
           { method: 'POST', json: { acknowledge_overt: true, note: note.value.trim() } }));
       if (out) reload(out.notice || 'Joined.');
     } catch (err) {

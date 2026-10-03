@@ -25,6 +25,12 @@ is worth more than a rule that must be remembered.
 before it is stored: a persona's password lands in an HTTP error body far
 more often than anybody expects.
 
+Since 2026-10-02 (A collector process) the vault seals and opens with
+NOCTORNAL_PERSONA_KEK alone (security/persona_envelope.py), never the TOTP
+ring, and in production the collector (scripts/collector.py) is the one
+process that holds that key: the API queues every persona act
+(persona_acts.py) and holds no key that could open a persona credential.
+
 ## The scheduler is polite by construction
 
 docs/04 asks for jitter and per-source `max_rps`, and the reason is
@@ -162,7 +168,7 @@ from noctornal_api.pinned_http import (  # noqa: F401
 from noctornal_api.pinned_http import Deadline as _Deadline  # noqa: F401
 from noctornal_api.pinned_http import Hop as _Hop  # noqa: F401
 from noctornal_api.pinned_http import REDIRECT_CODES as _REDIRECT_CODES  # noqa: F401
-from noctornal_api.security import envelope
+from noctornal_api.security import persona_envelope
 
 #: docs/04's persona lifecycle. A burnt persona never returns to HEALTHY:
 #: reusing one that a forum admin has already flagged is how you burn the
@@ -576,8 +582,12 @@ class PersonaVault:
         credential) clears in the same UPDATE, because a new credential
         enrolled after the lock is the one thing that lifts it. The clock is
         `clock_timestamp()`, never the transaction's, so the rotation time
-        is always after a lock signalled earlier in the same session."""
-        ciphertext, key_id = envelope.encrypt(secret)
+        is always after a lock signalled earlier in the same session.
+
+        Sealed under the persona ring since 2026-10-02 (A collector
+        process), never the TOTP ring: in production only the collector
+        holds it, so an enrolment runs there."""
+        ciphertext, key_id = persona_envelope.encrypt(secret)
         updated = self._c.execute(
             """UPDATE collect.collection_account
                   SET secret_ciphertext = %s, secret_key_id = %s,
@@ -668,11 +678,30 @@ class PersonaVault:
         if not row[0]:
             raise CollectionError("this persona has no stored credential")
         read_at_entry = bytes(row[0])
+        # The persona ring alone, and no other ring on any path (A collector
+        # process, 2026-10-02). EVERY way the credential can fail to open is
+        # a PersonaUnavailable with a sentence that names the fix, so a poll
+        # records BLOCKED and an act answers 409 rather than a 500: no key
+        # in this process, a process that may not hold it (the API in
+        # production), a credential still sealed under the TOTP ring (named,
+        # never opened with it), a key id this ring lacks, a key that
+        # changed under its id, and bytes that are no envelope
+        # (verify:g38, 2026-10-03: the last three were a generic 500).
+        try:
+            secret = persona_envelope.decrypt(read_at_entry, key_id=row[1])
+        except (persona_envelope.PersonaKeyError,
+                *persona_envelope.UNOPENABLE) as exc:
+            raise PersonaUnavailable(
+                persona_envelope.refusal_sentence(exc, row[1])) from None
+        # Audited once the credential has opened and before the block gets
+        # it, so the use is on record before any use is made, and a poll
+        # refused for want of a usable key (every five minutes per source,
+        # until the move or the key is fixed) writes no event for a use that
+        # never happened (verify:g38, 2026-10-03).
         self._audit(actor_id, "PERSONA_USED", persona_id,
                     {"purpose": purpose,
                      "run_id": str(run_id) if run_id else None,
                      "stopping": stopping})
-        secret = envelope.decrypt(read_at_entry, key_id=row[1])
         lease = Lease(secret)
         try:
             with secret_in_scope(secret, *_secret_leaves(secret)):
@@ -696,7 +725,7 @@ class PersonaVault:
 
     def _reseal(self, persona_id: UUID, new: str, read_at_entry: bytes,
                 lease: Lease, *, purpose: str, run_id: UUID | None) -> None:
-        ciphertext, key_id = envelope.encrypt(new)
+        ciphertext, key_id = persona_envelope.encrypt(new)
         changed = self._c.execute(
             """UPDATE collect.collection_account
                   SET secret_ciphertext = %s, secret_key_id = %s

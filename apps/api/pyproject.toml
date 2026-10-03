@@ -19,7 +19,7 @@ dependencies = [
     # 2026-09 roadmap build: the egress proxy seals its exits with the hpke
     # module, first shipped in 47.0.0 (2026-09-24).
     "cryptography>=47.0",
-    "psycopg[binary]>=3.1",
+    "psycopg[binary]>=3.2",  # notifies(timeout=, stop_after=): the collector, 2026-10-03
     "minio>=7.2",          # WORM object storage for evidence (object lock)
     "blake3>=0.4",         # second independent integrity anchor for evidence
     "fastapi>=0.110",      # REST API

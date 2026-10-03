@@ -87,6 +87,9 @@ infra/production/secrets.env
 infra/production/egress-proxy.env
 infra/production/egress-client.env
 infra/production/postgres-init.env
+# A collector process (2026-10-02): the persona key, read by the collector
+# service alone; collector.env.example is its tracked template.
+infra/production/collector.env
 # docs/17 F52 (2026-10-02): the schema owner's DSN, read by the migration
 # job alone, and the backups scripts/production_secrets.py takes of every
 # secrets file before it changes one (each holds what the file held).
@@ -103,6 +106,20 @@ infra/production/.*.tmp-*
 # Not secret, but kept out of commits with the rest of the directory's env
 # files; the template is the tracked caddy.env.example.
 infra/production/caddy.env
+
+# A stray copy of any of them (2026-10-03, verify:g38): a backup, an editor
+# copy, a key left beside the compose file. Each holds what the file held
+# and none of the lines above names it, so `git add -A` would commit it. The
+# tracked templates are the .example files.
+infra/production/*.env.*
+!infra/production/*.env.example
+infra/production/*~
+infra/production/*.swp
+infra/production/*.bak
+infra/production/*.old
+infra/production/*.orig
+infra/production/*.key
+infra/production/*.pem
 
 # Database dumps and backups at the repository root (infra-2, 2026-10-03).
 # The documented backup used to write ./noctornal-<timestamp>.sql here, an

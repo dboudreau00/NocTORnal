@@ -18,17 +18,17 @@
 .env.*
 .env.local
 
-# At any depth, and with an editor's copy of one (2026-10-03, g48
-# verification). The three lines above are root-anchored, as every line in
-# this file is, while .gitignore's `.env` and `.env.*` match at any depth, so
-# apps/api/.env.local and infra/production/.env.production were gitignored
-# yet reached every image; and `secrets.env.bak`, `secrets.env~` and
-# `secrets-prod.env.save`, which an editor or an operator leaves beside the
-# real file, were in neither list. `*.env`, `*.env.*` and `*.env~` take all
-# of them; the tracked `<name>.env.example` templates are put back (the `?*`
-# keeps a bare `.env.example` out, as `.env.*` always did). .gitignore
-# carries the same set, and apps/api/tests/test_g48_image_context.py holds
-# the two lists to each other in both directions.
+# Docker reads a pattern as anchored at the context root, unlike .gitignore:
+# `.env` above matched the root's .env and nothing else, so apps/api/.env
+# and infra/production/.env.production were COPYed into the image (verify:g38
+# and the g48 verification, 2026-10-03). `**/` matches at any depth, the root
+# included. `secrets.env.bak`, `secrets.env~` and `secrets-prod.env.save`,
+# which an editor or an operator leaves beside the real file, were in
+# neither list: `*.env`, `*.env.*` and `*.env~` take all of them, and the
+# tracked `<name>.env.example` templates are put back (the `?*` keeps a bare
+# `.env.example` out, as `.env.*` always did). .gitignore carries the same
+# set, and apps/api/tests/test_g48_image_context.py holds the two lists to
+# each other in both directions.
 **/.env
 **/.env.*
 **/*.env
@@ -36,66 +36,86 @@
 **/*.env~
 !**/?*.env.example
 
+# Private keys and keystores, wherever one is left. Nothing in the image
+# reads a key file: the TLS keypair is bind-mounted by compose.
+**/*.key
+**/*.pem
+**/*.p12
+**/*.pfx
+**/*.jks
+
+# The copy an editor or a careful operator leaves beside a secret file: a
+# backup, an editor swap file, a half-written temp file. Each holds
+# everything the original held and none of them is named anywhere else. No
+# tracked file ends in one of these, and .gitignore carries the same list.
+**/*~
+**/*.swp
+**/*.swo
+**/*.bak
+**/*.old
+**/*.orig
+**/*.save
+**/*.tmp
+
 # Renders of real panes against real case data. A screenshot of an
 # AMBER_STRICT case carries that case's classification and does not look
-# like it does (the same reasoning as .gitignore).
-screenshots/
-shots/
+# like it does (the same reasoning as .gitignore). By name and by kind, at
+# any depth: `--out` can point anywhere, and a bare `screenshots/` only
+# matched the one at the root. The tracked docs/images renders are a README
+# asset the image never serves.
+**/screenshots/
+**/shots/
+**/*.png
+
+# Machine-local tool settings. The agent's permission grants
+# (.claude/settings.local.json) are the text of a command somebody approved
+# once, and an editor's launch configuration carries the environment it runs
+# with; either can hold a token or a DSN. .gitignore keeps them out of a
+# commit and this keeps them out of an image.
+**/.claude/
+**/.vscode/
+**/.idea/
 
 # --- Secrets that live under infra/production ------------------------------
 
-# The operator's real secrets file sits beside the compose file. It is
-# gitignored, which means nothing stops it being COPYed into an image.
-infra/production/secrets.env
+# The operator keeps real secrets beside the compose file: secrets.env,
+# collector.env (the persona key, which the API must not hold even on disk),
+# egress-proxy.env (the seal key and the proxy's DSN), egress-client.env,
+# postgres-init.env (the BYPASSRLS worker role's password), migrate.env (the
+# schema owner's DSN), caddy.env, the backups
+# scripts/production_secrets.py takes of each (`NAME.backup-UTCSTAMP`) and
+# its half-written temporary file (`.NAME.tmp-PID`), and tls/private.key (the
+# object store's TLS key, which would otherwise travel in every layer to
+# wherever the image goes). All are gitignored, which means nothing stops
+# them being COPYed into the one image every service runs, the analysis
+# worker's and the collector's included (the collector is the one service
+# that holds the persona key, and the API container must not carry it on
+# disk either).
+#
+# A list of NAMES lost that race twice (2026-10-03): the first named
+# secrets.env and tls/ and missed the egress and init env files, the next
+# named five env files and missed collector.env.old, secrets.env.bak,
+# .env.production, private.key and signing.pem. A list of SHAPES cannot name
+# a file nobody foresaw either. So the directory is excluded as a whole and
+# only what is tracked and holds no secret is let back in, at the end of
+# this section: the `.example` templates, which hold placeholders only, and
+# the compose file. A name nobody listed, a backup, an editor copy, a stray
+# key, is out until somebody decides otherwise.
+# Nothing in the image reads this directory: compose, the Caddyfile and the
+# README are used on the host, and compose BIND-mounts what a container needs
+# (tls/ included, so nothing is lost by leaving it out). The tests that hold
+# this are test_dockerignore_secrets.py (every name .gitignore keeps out, at
+# every depth) and test_g48_image_context.py.
+infra/production/*
 
-# S2 (2026-09-24) moved the egress keys and the worker and egress database
-# passwords out of secrets.env into three files beside it, and this list
-# never learned them: every image carried the BYPASSRLS role's password and
-# the egress proxy's private seal key (infra-1, 2026-10-03). docs/17 F52
-# (2026-10-02) found the same of the schema owner's password
-# (postgres-init.env) and DSN (migrate.env): each was baked into the image
-# every runtime container runs, so a process meant to hold the request role
-# could read the owner's DSN off its own disk. The pattern below takes every
-# `*.env` in the directory, so the next secret file added there is excluded
-# without anyone remembering to list it; the `.example` templates end in
-# `.example` and are not matched (the `**/*.env.*` rule above would take
-# them, and the `!` line there puts them back on purpose: they hold
-# placeholders only, and a test holds them in the context). The names are
-# listed as well because a pattern is easier to get wrong than a name, and
-# apps/api/tests/test_g48_image_context.py holds every gitignored secret
-# path under infra/production to this file.
-infra/production/*.env
-infra/production/egress-proxy.env
-infra/production/egress-client.env
-infra/production/postgres-init.env
-infra/production/migrate.env
-infra/production/caddy.env
+# MinIO's TLS keypair, including `private.key`, named as well. Without this
+# the private key of the production object store would be baked into every
+# layer of the image and travel with it to wherever the image goes.
+infra/production/tls/
 
-# The backups scripts/production_secrets.py takes of every secrets file
-# before it changes one (`NAME.backup-UTCSTAMP`, each holding what the file
-# held) and its temporary file (`.NAME.tmp-PID`, a whole new secrets file for
-# the instant before it is renamed over the old one, left behind only by a
-# kill or a power cut). `**/*.env.*` above takes both by their shape already;
-# they are listed here by the shape .gitignore lists them in, so the two
-# files stay each other's mirror.
-infra/production/*.env.backup-*
-infra/production/.*.tmp-*
-
-# Private keys and certificates, wherever they are in the tree. tls/ (below)
-# is the one the deployment uses; these catch a copy somebody made.
-**/*.key
-**/*.pem
-
-# An editor's or an operator's copy of any file (`~`, `.swp`, `.bak`, `.orig`,
-# `.old`, `.save`): a copy of a file protected above keeps its contents under
-# a name no rule knows (2026-10-03, g48 verification). No tracked file ends in
-# one of these, and .gitignore carries the same list.
-**/*~
-**/*.bak
-**/*.orig
-**/*.old
-**/*.save
-**/*.swp
+# What is let back in: tracked, and no secret in any of it.
+!infra/production/*.env.example
+!infra/production/compose.yml
 
 # Database dumps and backups (infra-2, 2026-10-03). The documented backup
 # once wrote ./noctornal-<timestamp>.sql into the repository root, which is
@@ -113,13 +133,6 @@ backup/
 backups/
 # The analysis worker's image is this image (compose.yml), so these lines are also
 # what lets its "holds no secret" rest on more than a file's mode (F42 verify 5).
-
-# MinIO's TLS keypair, including `private.key`. The compose file BIND-mounts
-# this directory into the containers that need it, so nothing is lost by
-# excluding it -- and without this line the private key of the production
-# object store would be baked into every layer of the image and travel with
-# it to wherever the image goes.
-infra/production/tls/
 
 # --- Size and staleness ----------------------------------------------------
 

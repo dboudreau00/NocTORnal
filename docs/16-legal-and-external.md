@@ -201,7 +201,8 @@ the subjects of the investigation.
 
 **Built:** Phase 4 (`collection.py`, persona vault). Credentials are
 envelope-encrypted and decrypted only inside `PersonaVault.use()`, which
-runs in the API process. There is no separate collector (invariant 7).
+in production runs in the collector process, the one service holding the
+persona key (invariant 7; until 2026-10-02 it ran in the API process).
 
 **Assumes nothing about authority.** The software will happily drive an
 account into a forum. Whether *you* may is not a software question.

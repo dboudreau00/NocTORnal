@@ -1,9 +1,14 @@
 """Poll every source whose OWN schedule says it is due. This is the cron entry.
 
-There is no collector process in this build and there deliberately is not
-one -- decisions 30 and 46, and `collection.py`'s own "what is NOT built"
+Since 2026-10-02 (A collector process) it runs inside the collector:
+`scripts/collector.py` starts one pass of it on its schedule, in the one
+process that holds the persona key, and in production it refuses to run
+anywhere else. Until then there was no collector process, deliberately --
+decisions 30 and 46, and `collection.py`'s own "what is NOT built"
 note: a collector that runs itself on a timer nobody watches is how a
-persona gets burnt at 3am. `due_sources()` reports and `run_once()` acts,
+persona gets burnt at 3am. That reasoning still holds of the cadence
+below: the collector LOOKS on a schedule, and each source's own jittered
+`next_due_at` decides when it is polled. `due_sources()` reports and `run_once()` acts,
 and until now the only thing that called either outside a test was the
 Feeds pane, which needs an analyst with `collection.run` sitting at a
 keyboard. So a source with a five-minute interval was polled when somebody
@@ -307,10 +312,12 @@ def main() -> int:
     # First, before anything is read or connected to (docs/17 F52 and infra-12,
     # 2026-10-02 and 2026-10-03): under NOCTORNAL_ENV=production a published
     # credential or the schema owner's refuses the pass, the same two refusals
-    # every cron job makes through the one helper (config.py). Before the
+    # every cron job makes through the one helper (config.py); the persona
+    # half is not asked of this job, which runs as the collector's child and
+    # makes the collector's own half below. Before the
     # arguments are read, and a dry run refuses too, for the reason the
     # readiness gate below gives. See "The exit code" above for 2.
-    refusals = refuse_unsafe_job_environment("collection_poll")
+    refusals = refuse_unsafe_job_environment("collection_poll", holds_persona_key=True)
     if refusals:
         print("\n".join(refusals), file=sys.stderr)
         return JOB_REFUSAL_EXIT
@@ -339,6 +346,12 @@ def main() -> int:
     # outbound uses and no egress proxy stops here, as the API does.
     from noctornal_api.egress_routes import enforce_production_egress
     enforce_production_egress()
+    # A collector process (2026-10-02): in production a pass runs in the
+    # collector, the one process that holds the persona key and carries
+    # NOCTORNAL_COLLECTOR; anywhere else a persona's poll could not open
+    # its credential, and the cron loop must not hold it.
+    from noctornal_api.config import enforce_persona_key_boundary
+    enforce_persona_key_boundary(collector=True)
     # Read before anything else, so the pass's clock includes the
     # readiness probes and the listing, which are part of how long the
     # compose loop waits for this process.
