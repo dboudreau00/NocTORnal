@@ -144,6 +144,10 @@ class SystemPurpose(StrEnum):
     # A sample submission's duplicate check, which must refuse a duplicate
     # the submitter may not see, and say nothing about it (S1, 2026-09-25).
     SAMPLE_INTAKE = "sample_intake"
+    # A Telegram chat's duplicate check, which must refuse a chat already
+    # added under a source the adder may not see, and say nothing about it
+    # (F51, 2026-10-02).
+    TELEGRAM_INTAKE = "telegram_intake"
     # Comms minimisation (docs/16 L4) and the incidental-party flag it
     # relies on: an obligation done in full, never to the minimiser's
     # labels (S1, 2026-09-25).
