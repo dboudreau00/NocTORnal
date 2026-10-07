@@ -481,6 +481,86 @@ def test_minio_init_sources_the_alias_file_it_mounts():
     assert "mc admin user svcacct add" in script, "the residual is stated in the compose comment"
 
 
+#: A stand-in for `mc` that behaves as the real client does at the two calls
+#: that matter: `svcacct info` finds no account (so the script creates it), and
+#: `svcacct add` prints the new account's keys on STDOUT, as the real one does
+#: ("Access Key: ..." and "Secret Key: ..."), with a warning on stderr. With
+#: STUB_ADD_FAILS it refuses on stderr and exits 1 instead.
+_MC_STUB = r"""
+mc_setup() { :; }
+mc() {
+  case "$1 $2 $3 $4" in
+    "admin user svcacct info") return 1 ;;
+    "admin user svcacct add")
+      if [ -n "${STUB_ADD_FAILS:-}" ]; then echo "mc: <ERROR> stub refused the account." >&2; return 1; fi
+      shift 4
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --access-key) echo "Access Key: $2"; shift ;;
+          --secret-key) echo "Secret Key: $2"; shift ;;
+        esac
+        shift
+      done
+      echo "mc: stub stderr line" >&2
+      return 0 ;;
+  esac
+  return 0
+}
+"""
+
+
+def _run_minio_init(tmp_path: Path, **extra: str):
+    shell = _posix_shell()
+    if shell is None:
+        pytest.skip("no POSIX shell")
+    script = _script("minio-init", "entrypoint")
+    assert script.count(". /mc-alias.sh") == 1
+    # The alias file is mounted at /mc-alias.sh in the container and is not on
+    # this host; the stub defines `mc_setup` where it would have been sourced.
+    body = script.replace(". /mc-alias.sh", ":", 1)
+    path = tmp_path / "minio-init.sh"
+    path.write_text(_MC_STUB + body + "\n", encoding="utf-8", newline="\n")
+    env = {**os.environ, "MINIO_ROOT_USER": "g57-root", "EVIDENCE_BUCKET": "ev", "INGEST_BUCKET": "in",
+           "SAMPLE_BUCKET": "smp", "PRESERVE_BUCKET": "pres",
+           "SAMPLE_ACCESS_KEY": "g57-sample-ak", "SAMPLE_SECRET_KEY": "G57-SAMPLE-SECRET-q9Zx",
+           "PRESERVE_ACCESS_KEY": "g57-pres-ak", "PRESERVE_SECRET_KEY": "G57-PRESERVE-SECRET-w3Lm", **extra}
+    return subprocess.run([shell, path.as_posix()], capture_output=True, text=True, env=env, timeout=60)
+
+
+def test_minio_init_does_not_print_the_new_accounts_secret_key_into_its_log(tmp_path):
+    """`mc admin user svcacct add` echoes the account's secret key on stdout, so
+    the first run left it in `docker logs minio-init` for as long as the
+    container existed (Beta 1 verification, 2026-10-07). Both accounts, the
+    sample one and the preserve one, are created with stdout discarded; stderr
+    stays, so a warning still reaches the log."""
+    done = _run_minio_init(tmp_path)
+    assert done.returncode == 0, done.stderr
+    seen = done.stdout + done.stderr
+    for secret in ("G57-SAMPLE-SECRET-q9Zx", "G57-PRESERVE-SECRET-w3Lm"):
+        assert secret not in seen, "a secret key reached the container log"
+    assert "Secret Key:" not in seen
+    assert done.stderr.count("mc: stub stderr line") == 2, "stderr is kept for both accounts"
+    assert "buckets ready" in done.stdout
+
+
+def test_minio_init_still_fails_and_says_why_when_an_account_cannot_be_created(tmp_path):
+    done = _run_minio_init(tmp_path, STUB_ADD_FAILS="1")
+    assert done.returncode != 0, "set -e must still see a failed svcacct add"
+    assert "<ERROR> stub refused the account." in done.stderr
+    assert "buckets ready" not in done.stdout
+
+
+def test_every_svcacct_add_discards_its_stdout_and_keeps_stderr():
+    logical = re.sub(r"\\\n\s*", " ", _script("minio-init", "entrypoint")).splitlines()
+    # The `info` guard before `||` has its own `>/dev/null 2>&1`; the add is what follows it.
+    adds = [line.split("mc admin user svcacct add", 1)[1].strip()
+            for line in logical if "mc admin user svcacct add" in line]
+    assert len(adds) == 2, "the sample account and the preserve account"
+    for line in adds:
+        assert line.endswith(">/dev/null"), line
+        assert "2>" not in line and "&>" not in line, line
+
+
 # ---------------------------------------------------------------------------
 # infra-11, statically (the loops are run and signalled in test_g48_cron_sigterm.py)
 # ---------------------------------------------------------------------------

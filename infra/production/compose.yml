@@ -757,6 +757,10 @@ services:
   # `mc admin user svcacct add`, which has no other way in; that command runs
   # once, the first time each account is created (the `svcacct info` guard
   # skips it after), and the keys reach one bucket each. A stated residual.
+  # `svcacct add` prints the new account's access key and SECRET key on its
+  # stdout, which `docker logs` would keep for good (Beta 1 verification,
+  # 2026-10-07), so both calls send stdout to /dev/null. stderr is kept, and
+  # `set -e` still sees a failed add.
   minio-init:
     image: ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
     depends_on: [minio]
@@ -804,7 +808,7 @@ services:
                --access-key "$$SAMPLE_ACCESS_KEY" \
                --secret-key "$$SAMPLE_SECRET_KEY" \
                --policy /tmp/sample-policy.json \
-               local "$$MINIO_ROOT_USER"
+               local "$$MINIO_ROOT_USER" >/dev/null
         PRESERVE="$${PRESERVE_BUCKET:-noctornal-preserved}"
         mc mb --ignore-existing --with-lock "local/$$PRESERVE"
         if [ -n "$${PRESERVE_ACCESS_KEY:-}" ]; then
@@ -814,7 +818,7 @@ services:
                  --access-key "$$PRESERVE_ACCESS_KEY" \
                  --secret-key "$$PRESERVE_SECRET_KEY" \
                  --policy /tmp/preserve-policy.json \
-                 local "$$MINIO_ROOT_USER"
+                 local "$$MINIO_ROOT_USER" >/dev/null
         fi
         echo 'buckets ready'
 

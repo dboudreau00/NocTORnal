@@ -745,7 +745,10 @@ fi
 # the loop still exported any identifier in it, and the file's value wins over
 # the environment here: `PYTHONPATH=./evil` (with a sitecustomize.py),
 # `PATH=./evilbin`, `LD_PRELOAD=./evil.so` or `BASH_ENV=./evil.sh` ran code as
-# the installing user in the next python or shell the installer starts. Not an
+# the installing user in the next python or shell the installer starts. So did
+# the tools it starts (Beta 1 verification, 2026-10-07): `DOCKER_CONFIG` held a
+# fake `cli-plugins/docker-compose` that `docker compose` ran as root, hence
+# `DOCKER_`, `COMPOSE_`, `GIT_`, `PIP_`, `NODE_` and `PSModulePath` as well. Not an
 # allow-list on purpose: a new setting would silently stop loading. The same
 # list is in scripts/_env.py, scripts/launch.sh, scripts/launch.ps1 and
 # scripts/open-ui.ps1, and a test holds them to each other.
@@ -770,7 +773,7 @@ load_env_local_as_data() {
     fi
     upper="$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')"
     case "$upper" in
-      PATH|PATHEXT|HOME|COMSPEC|IFS|ENV|CDPATH|GLOBIGNORE|SHELLOPTS|BASHOPTS|PROMPT_COMMAND|PS1|PS2|PS3|PS4|BASH_*|LD_*|DYLD_*|PYTHON*)
+      PATH|PATHEXT|HOME|COMSPEC|IFS|ENV|CDPATH|GLOBIGNORE|SHELLOPTS|BASHOPTS|PROMPT_COMMAND|PS1|PS2|PS3|PS4|PSMODULEPATH|BASH_*|LD_*|DYLD_*|PYTHON*|DOCKER_*|COMPOSE_*|GIT_*|PIP_*|NODE_*)
         printf '%s\n' ".env.local: ignored $name, a name that changes how programs start (set it in your shell if you mean it)" >&2
         continue ;;
     esac

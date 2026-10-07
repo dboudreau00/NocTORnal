@@ -72,8 +72,8 @@ if (Test-Path -LiteralPath $EnvLocal) {
         # scripts/launch.sh and scripts/launch.ps1; a test holds all five
         # together. -contains and -like are case-insensitive, as Windows
         # names are.
-        $refusedExact    = @('PATH', 'PATHEXT', 'HOME', 'COMSPEC', 'IFS', 'ENV', 'CDPATH', 'GLOBIGNORE', 'SHELLOPTS', 'BASHOPTS', 'PROMPT_COMMAND', 'PS1', 'PS2', 'PS3', 'PS4')
-        $refusedPrefixes = @('BASH_', 'LD_', 'DYLD_', 'PYTHON')
+        $refusedExact    = @('PATH', 'PATHEXT', 'HOME', 'COMSPEC', 'IFS', 'ENV', 'CDPATH', 'GLOBIGNORE', 'SHELLOPTS', 'BASHOPTS', 'PROMPT_COMMAND', 'PS1', 'PS2', 'PS3', 'PS4', 'PSMODULEPATH')
+        $refusedPrefixes = @('BASH_', 'LD_', 'DYLD_', 'PYTHON', 'DOCKER_', 'COMPOSE_', 'GIT_', 'PIP_', 'NODE_')
         $refused = ($refusedExact -contains $name)
         foreach ($prefix in $refusedPrefixes) { if ($name -like "$prefix*") { $refused = $true } }
         if ($refused) {

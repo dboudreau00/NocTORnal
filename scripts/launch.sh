@@ -229,16 +229,24 @@ if [ -f "$ENV_LOCAL" ]; then
     value="${line#*=}"
     name="$(printf '%s' "$name" | tr -d '[:space:]')"
     [ -n "$name" ] || continue
+    # Only an identifier is a name. `${!name+x}` below evaluates an array
+    # subscript, so `x[$(cmd)]=1` in a handed-over file ran `cmd` as this user
+    # (Beta 1 verification, 2026-10-07: the sibling of infra-9 that install.sh
+    # closed with the same check). Skipped silently, as install.sh does: a name
+    # that is not an identifier is not worth echoing back.
+    case "$name" in [!A-Za-z_]*|*[!A-Za-z0-9_]*) continue ;; esac
     # A name that changes how programs start is left out (g48 verification,
     # 2026-10-03): this loop is data, not shell, but it still exported any
     # identifier, so `PYTHONPATH=./evil`, `PATH=./evilbin`, `LD_PRELOAD=` or
     # `BASH_ENV=` in a handed-over file ran code as this user in the next
-    # python this script starts. Not an allow-list on purpose: a new setting
+    # python this script starts. The tools it starts are on the list too
+    # (Beta 1 verification, 2026-10-07): `DOCKER_CONFIG` ran a fake compose
+    # plugin as root. Not an allow-list on purpose: a new setting
     # would silently stop loading. The same list is in release/install.sh,
     # scripts/_env.py, scripts/launch.ps1 and scripts/open-ui.ps1; a test holds
     # them together.
     case "$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')" in
-      PATH|PATHEXT|HOME|COMSPEC|IFS|ENV|CDPATH|GLOBIGNORE|SHELLOPTS|BASHOPTS|PROMPT_COMMAND|PS1|PS2|PS3|PS4|BASH_*|LD_*|DYLD_*|PYTHON*)
+      PATH|PATHEXT|HOME|COMSPEC|IFS|ENV|CDPATH|GLOBIGNORE|SHELLOPTS|BASHOPTS|PROMPT_COMMAND|PS1|PS2|PS3|PS4|PSMODULEPATH|BASH_*|LD_*|DYLD_*|PYTHON*|DOCKER_*|COMPOSE_*|GIT_*|PIP_*|NODE_*)
         detail "$name ignored: it changes how programs start (set it in your shell if you mean it)"
         continue ;;
     esac

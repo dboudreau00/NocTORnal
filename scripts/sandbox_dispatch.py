@@ -14,7 +14,8 @@ as machine SANDBOX analyses. Nothing is ever resent.
 
 The worker holds the sample store's credentials, the key ring and the
 sandbox token, and for one sample at a time its plaintext, ciphertext and
-archive in memory, so config.enforce_environment runs before anything else.
+archive in memory, so the API's whole production check runs before anything
+else (`config.refuse_unsafe_job_environment`, asked for `whole_environment`).
 
 Run it in a loop of its own, never the notification loop: the production
 compose file runs it in the lab-cron service beside
@@ -30,7 +31,10 @@ Cron, every five minutes, from the install directory:
 Prints the counters on one line. Exits 0 when no sandbox is configured (the
 deployment's state, not a failure), and 1 when a setting is unusable, when
 the preflight refused (nothing was sent), or when a send failed, was not
-sent or lost its answer.
+sent or lost its answer. Under NOCTORNAL_ENV=production an environment this
+worker will not run on exits 2 (the code every job gives that refusal,
+`config.JOB_REFUSAL_EXIT`), one line per problem on stderr led by
+`sandbox_dispatch: refusing to run:`, naming variables and never a value.
 """
 from __future__ import annotations
 
@@ -48,8 +52,11 @@ load_env_local()
 
 
 def main(argv: list[str] | None = None) -> int:
-    from noctornal_api.config import enforce_environment
-    enforce_environment()
+    from noctornal_api.config import JOB_REFUSAL_EXIT, refuse_unsafe_job_environment
+    refusals = refuse_unsafe_job_environment("sandbox_dispatch", whole_environment=True)
+    if refusals:
+        print("\n".join(refusals), file=sys.stderr)
+        return JOB_REFUSAL_EXIT
     from noctornal_api import sandbox
     from noctornal_api.db import SystemPurpose, connect_system
     from noctornal_api.samples import SampleService, SampleStorage

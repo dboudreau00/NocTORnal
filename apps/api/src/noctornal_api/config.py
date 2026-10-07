@@ -989,7 +989,8 @@ JOB_REFUSAL_EXIT = 2
 
 def refuse_unsafe_job_environment(job: str, env: Mapping[str, str] | None = None,
                                   *, holds_owner_credential: bool = False,
-                                  holds_persona_key: bool = False
+                                  holds_persona_key: bool = False,
+                                  whole_environment: bool = False
                                   ) -> list[str]:
     """Why the job `job` must not run here: one line per problem, each led by
     the job's name, naming variables and never a value. `[]` outside
@@ -1002,10 +1003,14 @@ def refuse_unsafe_job_environment(job: str, env: Mapping[str, str] | None = None
     (scripts/collector.py) and the migration job (through
     `migration_job_problems` in scripts/migrate_job.py, and again at the top
     of db/migrations/env.py, so a bare `alembic` is held to it too). The
-    Lab's workers (lab_triage, sample_screen, sandbox_dispatch) call
-    `enforce_environment`, which makes both of these refusals among the rest
-    and is not called a second time beside this one. A caller prints the
-    lines on stderr and exits `JOB_REFUSAL_EXIT`.
+    Lab's workers (lab_triage, sample_screen, sandbox_dispatch) hold the sample
+    store's credentials, the key ring and the sandbox token, so they ask for
+    the API's whole list (`whole_environment=True`: `verify_environment`, which
+    makes both of these refusals among the rest and replaces the narrower
+    questions below). They called `enforce_environment` once, which raised a
+    RuntimeError: a refusal was exit 1 with a traceback where every other job
+    gave 2 (Beta 1 verification, 2026-10-07). A caller prints the lines on
+    stderr and exits `JOB_REFUSAL_EXIT`.
 
     Two refusals, the two the API makes that every job needs as well (docs/17
     F52 and infra-12, ROADMAP-REMAINING's "The cron jobs and a published
@@ -1038,6 +1043,8 @@ def refuse_unsafe_job_environment(job: str, env: Mapping[str, str] | None = None
         env = os.environ
     if env.get(ENV_VAR, "").strip().lower() != PRODUCTION:
         return []
+    if whole_environment:
+        return [f"{job}: refusing to run: {problem}" for problem in verify_environment(env)]
     published = published_credentials(env)
     problems = [p.refusal for p in published]
     if not holds_owner_credential:
