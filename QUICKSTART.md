@@ -1,5 +1,8 @@
 # Quickstart: run NocTORnal locally
 
+New here? [`release/START-HERE.md`](release/START-HERE.md) is the one page
+to follow first, and its installer does what this page does, step by step.
+
 Everything below is a **local development instance**. It is not hardened for
 real case material: see "Before anything real" at the bottom.
 
@@ -277,10 +280,11 @@ not hidden:
   `NOCTORNAL_SESSION_STRICT_BINDING=1` refuses a session presented from
   anywhere else. Behind a proxy, set `NOCTORNAL_TRUSTED_PROXY_HOPS` or the
   bound address (and the one in the login audit) is the proxy's.
-- **Still missing:** WebAuthn, and row-level security under a non-owner
-  database role. Rate limiting (Redis GCRA) and the destination-aware TLP
-  egress gate both shipped. See `docs/17-flagged-for-review.md` for the
-  current list.
+- **Still missing:** WebAuthn. Row-level security under a non-owner
+  database role, rate limiting (Redis GCRA) and the destination-aware TLP
+  egress gate all shipped; this development instance connects as the schema
+  owner, which row security does not bind, so it shows none of that
+  protection. See `docs/17-flagged-for-review.md` for the current list.
 - **It is unaudited.** `docs/08-governance.md` sets the bar for evidence
   that has to survive a challenge; treat this as a working model of it, not
   as it.

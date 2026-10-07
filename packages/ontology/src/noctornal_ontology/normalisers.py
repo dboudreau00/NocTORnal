@@ -507,11 +507,366 @@ def _fragment_rule(host: str):
     return None
 
 
+#: Query parameter names that carry a credential rather than name a
+#: resource, compared lowercased with everything but letters and digits
+#: removed (`api_key`, `API-Key` and `apiKey` are one name). A name in the
+#: set, or ending in one of the suffixes, is a secret
+#: (graph-url-selector-keeps-credentials, 2026-10-03).
+_SECRET_QUERY_KEYS = frozenset({
+    "key", "apikey", "pass", "passwd", "password", "pwd", "pw", "secret",
+    "token", "auth", "authorization", "sig", "signature", "jwt", "otp",
+    "sid", "sessid", "phpsessid", "session", "sessionid", "sessionkey",
+    "credential", "credentials", "authkey", "passphrase", "passcode",
+    "bearer",
+    # An OAuth authorisation code is a one-time credential
+    # (graph-url-selector-keeps-credentials, 2026-10-03, verify round).
+    "code", "authcode", "oauthcode",
+})
+_SECRET_QUERY_SUFFIXES = ("token", "secret", "password", "passwd", "apikey",
+                          "accesskey", "secretkey", "privatekey", "signature",
+                          "sessionid", "credential")
+_NOT_ALNUM = re.compile(r"[^a-z0-9]")
+#: A URL with a scheme, as it sits in running text. A quote or a closing
+#: bracket does not end it: `'` and `)` are legal in a password, and a
+#: pattern that stopped at one would leave the rest of the password outside
+#: the URL it belongs to (the sentence's own punctuation is given back by
+#: `_URL_TAIL`). The scheme is bounded and possessive so the scan is linear:
+#: an unbounded one is quadratic on a long run of scheme characters with no
+#: `://` after it (40,000 characters of `a-` took seconds), and a capture
+#: may be a million characters long (2026-10-03, verify round).
+URL_IN_TEXT = re.compile(r"\b[a-z][a-z0-9+.-]{0,63}+://[^\s<>\"]+", re.I)
+#: What stands in for a removed password, token or key in text a person
+#: reads (a Triage rationale, a raw value).
+REDACTED = "REDACTED"
+
+
+def _secret_query_key(name: str) -> bool:
+    key = _NOT_ALNUM.sub("", unquote(name.replace("+", " ")).lower())
+    return key in _SECRET_QUERY_KEYS or key.endswith(_SECRET_QUERY_SUFFIXES)
+
+
+def _split_authority(s: str) -> tuple[str, str, str] | None:
+    """(scheme and '://', authority, rest) of a URL string, or None when it
+    has no '://'. The authority ends at the first '/', '?' or '#', as
+    urlsplit reads it."""
+    scheme, sep, rest = s.partition("://")
+    if not sep or not scheme:
+        return None
+    end = len(rest)
+    for ch in "/?#":
+        i = rest.find(ch)
+        if i != -1:
+            end = min(end, i)
+    return scheme + sep, rest[:end], rest[end:]
+
+
+def _userinfo_end(authority: str, rest: str) -> int | None:
+    """Where the userinfo of a URL ends, as an offset into authority+rest
+    (the index of its '@'), or None when it has none.
+
+    The ordinary case is an '@' inside the authority. The other is a
+    password holding '/', '?' or '#', which ends the authority early for
+    urlsplit: `https://alice:pa/ss@bank.example/` reads as host `alice`
+    with port `pa`, and the rest of the password lands in the path. A
+    port that is not a number, followed by an '@' later in the URL, is
+    read as that password, so it never survives into a norm_value."""
+    if "@" in authority:
+        return authority.rindex("@")
+    # Exactly one ':' only: an IPv6 literal (bracketed, or as url_norm
+    # writes it back) is a host, not a password.
+    if authority.startswith("[") or authority.count(":") != 1:
+        return None
+    port = authority.rsplit(":", 1)[1]
+    # An empty port (`host:/path@x`) is a valid port, not a password.
+    if port == "" or port.isdigit() or "@" not in rest:
+        return None
+    return len(authority) + rest.index("@")
+
+
+def strip_url_userinfo(v: str) -> str:
+    """The URL without its userinfo (`user:password@`). A credential is
+    never an identifier, and in a norm_value it is a secret in a selector
+    label on the graph (graph-url-selector-keeps-credentials,
+    2026-10-03)."""
+    parts = _split_authority(v)
+    if parts is None:
+        return v
+    head, authority, rest = parts
+    at = _userinfo_end(authority, rest)
+    if at is None:
+        return v
+    return head + (authority + rest)[at + 1:]
+
+
+_PAIR_SEP = re.compile(r"([&;])")
+#: A path parameter (`/app;jsessionid=ABC/page`): `;name=value` up to the
+#: next `;` or `/`.
+_PATH_PARAM = re.compile(r";([^;/=]*)=[^;/]*")
+#: A `login:password` pair written onto the end of a link, the stealer-log
+#: and combo-list layout `url:login:password`: the first path segment that
+#: holds a ':' with an '@' after it, so the login is an e-mail address. Group
+#: 1 is everything up to the ':'. A login that is not an address is
+#: `_LOGIN_PAIR`'s.
+_LOGIN_TAIL = re.compile(r"(/[^/?#:@]*):[^/?#]*@")
+#: The same layout with a login that is not an address (verification round
+#: three, A7, 2026-10-07: `/login:carol:pw` was kept whole): the final path
+#: segment `name:login:password`, ':' or '|' between the three, matched from
+#: its start. Possessive, so the scan is linear on a path of any length.
+_LOGIN_PAIR = re.compile(r"[^:|@]*+[:|][^:|@]++[:|]")
+
+
+def _first_of(s: str, chars: str) -> int:
+    """The offset of the first of `chars` in `s`, or its length."""
+    return min((i for i in (s.find(c) for c in chars) if i != -1),
+               default=len(s))
+
+
+def _login_cut(path: str) -> int | None:
+    """Where a `login:password` pair written onto the end of a URL path
+    starts (the offset of the separator after the last name that is the
+    link's own), or None when the path has none.
+
+    Two shapes (`_LOGIN_TAIL`, `_LOGIN_PAIR`): a login that is an e-mail
+    address, anywhere in the first segment that holds one, and a login that
+    is not, in the final segment. The second cannot be told from a path that
+    happens to hold two colons (a time, an IPv6 address, a URN), so such a
+    path loses everything from its first colon: at worst a distinction
+    missed, never a secret kept (docs/17). A password after the second
+    separator may hold any character, a separator included."""
+    tail = _LOGIN_TAIL.search(path)
+    if tail is not None:
+        return tail.end(1)
+    slash = path.rfind("/")
+    if slash == -1:
+        return None
+    start = slash + 1
+    pair = _LOGIN_PAIR.match(path, start)
+    if pair is None or pair.end() >= len(path):
+        return None
+    return start + _first_of(path[start:], ":|")
+
+
+def _piece_name_is_secret(piece: str) -> bool:
+    """Whether one `name=value` piece of a query or a fragment names a
+    credential: as written, or with a percent-encoded `=` (`token%3dabc`)
+    that hid the name."""
+    if _secret_query_key(piece.partition("=")[0]):
+        return True
+    plain = unquote(piece)
+    return plain != piece and "=" in plain and _secret_query_key(
+        plain.partition("=")[0])
+
+
+def _nested_credential(text: str) -> bool:
+    """Whether a value carries a link with a credential of its own
+    (`next=https://carol:pw@evil.example/`), written plainly or percent-
+    encoded."""
+    if redact_url_credentials(text, 1) != text:
+        return True
+    plain = unquote(text)
+    return plain != text and redact_url_credentials(plain, 1) != plain
+
+
+def _piece_is_secret(piece: str) -> bool:
+    name, eq, value = piece.partition("=")
+    return _piece_name_is_secret(piece) or _nested_credential(
+        value if eq else piece)
+
+
+def _drop_secret_query(query: str) -> str:
+    """The query without its credential-bearing parameters; every other
+    parameter is kept byte-exact and in order. Parameters end at `&` or `;`
+    (the older separator); a dropped one takes the separator before it."""
+    if not query:
+        return query
+    parts = _PAIR_SEP.split(query)
+    out = []
+    for i in range(0, len(parts), 2):
+        if not _piece_is_secret(parts[i]):
+            out.append((parts[i - 1] if i else "", parts[i]))
+    return "".join((sep if n else "") + piece
+                   for n, (sep, piece) in enumerate(out))
+
+
+def _drop_secret_path_params(path: str) -> str:
+    """The path without its credential-bearing parameters
+    (`/app;jsessionid=ABC` becomes `/app`)."""
+    if ";" not in path:
+        return path
+    return _PATH_PARAM.sub(
+        lambda m: "" if _secret_query_key(m.group(1)) else m.group(0), path)
+
+
+def _clean_path_part(s: str) -> str:
+    """`s`, a URL, without a credential in its path: the userinfo of a link
+    written inside it (`/redir/https://carol:pw@evil.example/`), and a
+    `:login:password` pair written after it, which takes the rest of the
+    string with it (it was the end of the line it came from)."""
+    parts = _split_authority(s)
+    if parts is None:
+        return s
+    head, authority, rest = parts
+    cut = _first_of(rest, "?#")
+    path, after = rest[:cut], rest[cut:]
+    path = URL_IN_TEXT.sub(lambda m: strip_url_userinfo(m.group(0)), path)
+    cut = _login_cut(path)
+    if cut is not None:
+        return head + authority + path[:cut]
+    return head + authority + path + after
+
+
+def _scrub_text(s: str) -> str:
+    """A URL as text, without any credential, and with every other byte as
+    written: what `url_norm` returns for a value it cannot parse, and the
+    form 0137 rewrites a stored one to."""
+    s = _clean_path_part(strip_url_userinfo(s))
+    f = s.find("#")
+    body, fragment = (s, "") if f == -1 else (s[:f], s[f:])
+    q = body.find("?")
+    path, query = (body, "") if q == -1 else (body[:q], body[q + 1:])
+    kept = _drop_secret_query(query)
+    bare = _drop_secret_path_params(path)
+    if kept == query and bare == path:
+        return s      # nothing to take out: exactly as written
+    return bare + ("?" + kept if kept else "") + fragment
+
+
+def _redact_piece(piece: str, depth: int) -> str:
+    name, eq, value = piece.partition("=")
+    if eq and value and _secret_query_key(name):
+        return name + "=" + REDACTED
+    if not eq:
+        # a percent-encoded `=` hid the name: `token%3dabc`
+        plain = unquote(piece)
+        if plain != piece and "=" in plain and _secret_query_key(
+                plain.partition("=")[0]):
+            return REDACTED
+    body = value if eq else piece
+    inner = redact_url_credentials(body, depth + 1)
+    if inner != body:
+        return (name + "=" if eq else "") + inner
+    plain = unquote(body)
+    if plain != body and redact_url_credentials(plain, depth + 1) != plain:
+        return (name + "=" if eq else "") + REDACTED
+    return piece
+
+
+def _redact_pairs(pairs: str, depth: int) -> str:
+    """`a=b&c=d` with the value of every credential-bearing name replaced
+    by REDACTED, a link inside a value redacted the same way, and a piece
+    without a value, and every other pair, as written."""
+    parts = _PAIR_SEP.split(pairs)
+    for i in range(0, len(parts), 2):
+        parts[i] = _redact_piece(parts[i], depth)
+    return "".join(parts)
+
+
+def _redact_path(path: str, depth: int) -> str:
+    """A path with the credentials in it replaced: path parameters, the
+    userinfo of a link inside it, and a `:login:password` pair after it."""
+    path = _PATH_PARAM.sub(
+        lambda m: (m.group(0).partition("=")[0] + "=" + REDACTED
+                   if _secret_query_key(m.group(1)) else m.group(0)), path)
+    path = redact_url_credentials(path, depth + 1)
+    cut = _login_cut(path)
+    if cut is not None:
+        path = path[:cut] + ":" + REDACTED
+    return path
+
+
+#: What a URL in running text does not own at its end: the sentence's own
+#: punctuation, kept after the redaction instead of swallowed by it.
+_URL_TAIL = ".,;:!?)]}>'\""
+#: How many links inside links `redact_url_credentials` reads.
+_MAX_NESTING = 6
+
+
+def redact_url_credentials(text: str, _depth: int = 0) -> str:
+    """`text` with every URL's userinfo and every credential-bearing query
+    or fragment value replaced by REDACTED. For text a person reads that
+    quotes a URL: a Triage rationale's context, an index row's raw value.
+    Everything else is left exactly as written, so offsets into the
+    surrounding text stay meaningful to a reader.
+
+    A link inside a link (a value that is itself a URL) is read the same
+    way, to `_MAX_NESTING` levels. Deeper than that is not read at all and
+    is shown as REDACTED: a crafted run of nested links would otherwise
+    cost a frame per level and end in a RecursionError in a capture."""
+    if _depth > _MAX_NESTING:
+        return REDACTED if URL_IN_TEXT.search(text) else text
+
+    def one(m: re.Match) -> str:
+        found = m.group(0)
+        url = found.rstrip(_URL_TAIL)
+        tail = found[len(url):]
+        parts = _split_authority(url)
+        if parts is None:
+            return found
+        head, authority, rest = parts
+        at = _userinfo_end(authority, rest)
+        if at is not None:
+            # `head` holds the '://', so the split always succeeds.
+            _, host, rest = _split_authority(head + (authority + rest)[at + 1:])
+            authority = REDACTED + "@" + host
+        f = rest.find("#")
+        fragment = "" if f == -1 else "#" + _redact_pairs(rest[f + 1:], _depth)
+        body = rest if f == -1 else rest[:f]
+        q = body.find("?")
+        path = body if q == -1 else body[:q]
+        query = "" if q == -1 else "?" + _redact_pairs(body[q + 1:], _depth)
+        return (head + authority + _redact_path(path, _depth) + query
+                + fragment + tail)
+    return URL_IN_TEXT.sub(one, text)
+
+
+def credential_spans(text: str) -> list[tuple[int, int]]:
+    """Where, in running text, a URL of ANY scheme holds a credential, as
+    (start, end) offsets: its userinfo with the '@' that closes it
+    (`mysql://root:Secret123@db.example/app` gives `root:Secret123@`), and a
+    `:login:password` pair written after its path. The selector extractor
+    reads nothing out of these spans: a password is not an identifier, and
+    only http and https links are URL selectors, so the userinfo of an
+    `ftp://`, `smtp://` or `mysql://` link was read as an e-mail address
+    (graph-url-selector-keeps-credentials, 2026-10-03, verify round)."""
+    spans: list[tuple[int, int]] = []
+    for m in URL_IN_TEXT.finditer(text):
+        url = m.group(0).rstrip(_URL_TAIL)
+        parts = _split_authority(url)
+        if parts is None:
+            continue
+        head, authority, rest = parts
+        origin = m.start() + len(head)
+        at = _userinfo_end(authority, rest)
+        remainder = authority + rest
+        if at is not None:
+            spans.append((origin, origin + at + 1))
+            remainder = remainder[at + 1:]
+            origin += at + 1
+        host_end = _first_of(remainder, "/?#")
+        path = remainder[host_end:]
+        path = path[:_first_of(path, "?#")]
+        cut = _login_cut(path)
+        if cut is not None:
+            spans.append((origin + host_end + cut, m.start() + len(url)))
+    return spans
+
+
 def url_norm(v: str) -> str:
     """Lowercase scheme+host, strip the default port; path and query stay
-    byte-exact (they are case- and encoding-sensitive). The fragment is
-    dropped unless the host is one whose fragment names the resource
-    (L5, 2026-09-24):
+    byte-exact (they are case- and encoding-sensitive), except that a
+    credential never stays: the userinfo (`user:password@`) is dropped,
+    and so is every query parameter whose name says it carries a password,
+    token, key, signature or session (`_SECRET_QUERY_KEYS`;
+    graph-url-selector-keeps-credentials, 2026-10-03). The same goes for a
+    path parameter of that kind (`;jsessionid=...`), a parameter set off by
+    `;` or with a percent-encoded `=`, a parameter whose value holds a link
+    with a credential of its own, the userinfo of a link written inside the
+    path, and a `:login:password` pair written after the path (the
+    `url:login:password` layout of a stealer log), which ends the link
+    there. Like a dropped
+    fragment, that at worst misses a distinction, and never puts a secret
+    into a selector label. The fragment is dropped unless the host is one
+    whose fragment names the resource (L5, 2026-09-24):
 
     - MEGA (mega.nz, mega.co.nz, mega.io and their subdomains): the link
       in its current path form, WITHOUT the decryption key. A legacy
@@ -532,17 +887,19 @@ def url_norm(v: str) -> str:
     broke it for every link above, and the registry mends exactly those.
     norm(norm(x)) == norm(x) holds for every rule, including on hostile
     input (tested)."""
-    s = v.strip()
+    s = _clean_path_part(strip_url_userinfo(v.strip()))
+    # A value that does not parse is returned as written, but never with a
+    # credential in it (2026-10-03, verify round).
     try:
         parts = urlsplit(s)
     except ValueError:
-        return s
+        return _scrub_text(s)
     if not parts.scheme or not parts.netloc:
-        return s
+        return _scrub_text(s)
     scheme = parts.scheme.lower()
     host = (parts.hostname or "").lower()
     if not parts.hostname:
-        return s
+        return _scrub_text(s)
     path, frag = parts.path, ""
     rule = _fragment_rule(host)
     if rule is not None:
@@ -556,10 +913,13 @@ def url_norm(v: str) -> str:
         port = None
     if port is not None and str(port) != _DEFAULT_PORTS.get(scheme):
         netloc = f"{host}:{port}"
-    if parts.username:
-        cred = parts.username + (f":{parts.password}" if parts.password else "")
-        netloc = f"{cred}@{netloc}"
-    return urlunsplit((scheme, netloc, path, parts.query, frag))
+    # No userinfo: `strip_url_userinfo` took it, and netloc is rebuilt from
+    # the host and port alone (graph-url-selector-keeps-credentials).
+    # Cleaned once more as written back: a fragment rule can make a path
+    # (`twitter.com/#!/:@` becomes `/:@`), and the form must be a fixed point.
+    return _clean_path_part(urlunsplit(
+        (scheme, netloc, _drop_secret_path_params(path),
+         _drop_secret_query(parts.query), frag)))
 
 
 def tox_pubkey(v: str) -> str:

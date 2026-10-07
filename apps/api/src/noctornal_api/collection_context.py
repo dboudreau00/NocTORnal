@@ -78,6 +78,12 @@ from noctornal_api.wording import agree, count_of
 
 #: A same-origin redirect chain is followed at most this far.
 MAX_SAME_ORIGIN_HOPS = 3
+#: The methods an adapter may use through the seam: a read, and the member
+#: adapter's sign-in and sign-out forms. PUT, PATCH, DELETE and the rest are
+#: refused here, so no adapter can act on a site by a method the invariant
+#: "nothing posts, replies, reacts, messages or buys" never meant (2026-10-03; which adapter
+#: may POST is still its own).
+ALLOWED_METHODS = ("GET", "POST")
 #: Nothing is started with less of the poll's wall clock left than this,
 #: or a tenth of the whole allowance when that is smaller: a request that
 #: will certainly be cut by the deadline only adds noise to the custody
@@ -258,6 +264,15 @@ def _origin(url: str) -> tuple[str, str, int] | None:
         return None
 
 
+def origin_text(url: str) -> str | None:
+    """`_origin` as one string, `scheme://host:port`: the key a persona's
+    sealed forum session is filed under (`forum_session.origin_key`), so the
+    cookies a run carries and the origin it may request are one reading
+    (2026-10-03)."""
+    origin = _origin(url)
+    return None if origin is None else f"{origin[0]}://{origin[1]}:{origin[2]}"
+
+
 class RunContext:
     """What one poll of an authority adapter holds.
 
@@ -384,9 +399,17 @@ class RunContext:
     # -- one request ---------------------------------------------------------
 
     def fetch(self, url: str, *, accept_status=frozenset(),
-              max_bytes: int | None = None):
-        """One GET on the source's own origin (the rules in the module
-        docstring). Returns the pinned client's Fetched."""
+              max_bytes: int | None = None, method: str = "GET",
+              headers: dict | None = None, body: bytes | None = None):
+        """One request on the source's own origin (the rules in the module
+        docstring). Returns the pinned client's Fetched.
+
+        `method`, `headers` and `body` (the authenticated forum path,
+        2026-10-02) are the member adapter's sign-in POST and its session
+        cookie; a same-origin redirect is followed as a bare GET with no
+        body, as a browser follows one, so a form is never posted twice."""
+        if method not in ALLOWED_METHODS:
+            raise ValueError(f"a collection request is a GET or a POST, not {method!r}")
         accept = frozenset(accept_status)
         target = urllib.parse.urljoin(self._base, url) if self._base else url
         hops = 0
@@ -398,13 +421,17 @@ class RunContext:
                     "refused a request to another site: collection stays on "
                     "the source's own origin")
             self.pace()
-            fetched = self._http_get(target, accept, max_bytes)
+            fetched = self._http_get(target, accept, max_bytes, method=method,
+                                     headers=headers, body=body)
             if (fetched.status in REDIRECT_CODES and fetched.location
                     and fetched.status not in accept
                     and hops < MAX_SAME_ORIGIN_HOPS
                     and _origin(fetched.location) == self._origin):
                 hops += 1
                 target = fetched.location
+                method, body = "GET", None
+                headers = {k: v for k, v in (headers or {}).items()
+                           if k.lower() != "content-type"} or None
                 continue
             return fetched
 
@@ -419,20 +446,28 @@ class RunContext:
         if self.bytes_used >= self.byte_budget:
             raise self._spent("it read the bytes its budget allows")
 
-    def _http_get(self, url: str, accept: frozenset[int], max_bytes: int | None):
+    def _http_get(self, url: str, accept: frozenset[int], max_bytes: int | None,
+                  *, method: str = "GET", headers: dict | None = None,
+                  body: bytes | None = None):
         """THE one outbound call of a collection adapter (docs/20 section 9)."""
         page_cap = min(int(max_bytes or self.max_page_bytes), self.max_page_bytes)
         left = self.byte_budget - self.bytes_used
         cap = max(0, min(page_cap, left))
         fetcher = self._fetcher or collection.fetch_response
         self.pages_used += 1
+        extra = {}
+        if method != "GET" or headers or body is not None:
+            # Only the member adapter passes these (2026-10-02); a plain
+            # read calls the client exactly as it always did.
+            extra = {"method": method, "headers": headers, "body": body}
         try:
             fetched = fetcher(
                 url, route=self.route, max_redirects=0,
                 accept_status=accept | REDIRECT_CODES,
                 user_agent=self.user_agent, deadline=self.deadline,
                 max_bytes=cap,
-                timeout=max(0.5, min(REQUEST_TIMEOUT_S, self.remaining())))
+                timeout=max(0.5, min(REQUEST_TIMEOUT_S, self.remaining())),
+                **extra)
         except (RouteUnavailable, DestinationRefused) as exc:
             if exc.request_sent:
                 self._log_url(url, None, None)

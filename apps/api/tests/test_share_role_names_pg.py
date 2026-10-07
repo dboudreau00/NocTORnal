@@ -1,6 +1,6 @@
 """The Share roster names roles the way the owner decided, over HTTP.
 
-Final review U21, 2026-09-23. Migration 0062 made CASE_OWNER read as
+2026-09-23. Migration 0062 made CASE_OWNER read as
 "Lead investigator", but the name reached only the admin pane, through
 `/admin/roles`, which needs user.manage. The Share panel is opened by every
 case worker and printed the raw key in each roster chip, in the outcome of

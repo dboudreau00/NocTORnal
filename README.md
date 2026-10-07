@@ -11,7 +11,7 @@ where every line of it traces back to an exhibit.
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![Postgres 16](https://img.shields.io/badge/postgres-16%20%2B%20pgvector-336791.svg)](https://www.postgresql.org/)
 [![CI](https://github.com/dboudreau00/NocTORnal/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/dboudreau00/NocTORnal/actions/workflows/ci.yml)
-[![Status](https://img.shields.io/badge/status-alpha%20%C2%B7%20unaudited-orange.svg)](#status)
+[![Status](https://img.shields.io/badge/status-beta%20%C2%B7%20unaudited-orange.svg)](#status)
 
 ![The sociogram](docs/images/01-graph.png)
 
@@ -50,6 +50,15 @@ sit above its case, which is why a few read GREEN or AMBER.</sub>
 
 ### Five blocking items, none of them a software problem
 
+**Legal review is required before any active case load**, and holding this
+material is dangerous in its own right: possession can be an offence, stealer
+and breach data makes you the custodian of thousands of uninvolved people,
+and a store of open investigations is a target. Until counsel has worked
+through [docs/18](docs/18-legal-review-pack.md), use only synthetic data or
+published reporting with no personal data. Read
+[Read this before you hold anything](docs/16-legal-and-external.md#read-this-before-you-hold-anything)
+first. Nothing in this repository is legal advice.
+
 | | What is built | What is assumed, and is not true until somebody makes it true |
 |---|---|---|
 | **L1** | A sample store that ingests attacker-supplied binaries | That a prohibited-content policy exists, written with counsel, covering preservation-vs-destruction. Given enough attacker-chosen files, one will eventually contain material whose *possession alone* is an offence. That is the normal failure mode of the problem domain, not a hypothetical. A `REJECTED` sample is **preserved by default**: its encrypted bytes move into the object-locked `noctornal-preserved` bucket under a legal hold, its data key is kept, and getting it back out takes two people, a Security Officer who authorises one named Lead investigator for that one sample, and that investigator. Destroying rejected samples instead is an opt-in the deployment declares (`NOCTORNAL_REJECTED_SAMPLE_DISPOSITION=destroy`), and a legal hold still refuses it. Which of the two a deployment must do is for counsel. |
@@ -58,11 +67,6 @@ sit above its case, which is why a few read GREEN or AMBER.</sub>
 | **L4** | Message-level capture, including group channels and call recordings | That interception law, one-party vs two-party consent, and retention of uninvolved third parties' content are settled. `provenance_class` records *which kind* of capture it was; it cannot confer authority for any of them. |
 | **L5** | Web capture of phishing infrastructure | That fetching attacker infrastructure is authorised, and (separately) that **entering any input into a phishing page, including canary credentials, is covered.** That may constitute unauthorised access. The schema refuses to record a submission without a written authority reference. |
 
-Plus **twelve operator determinations** and **nineteen factual claims that
-came from documentation or reasoning rather than an authoritative source**,
-including platform identifier mappings, which change, and where a stale
-mapping produces *confident false attribution* rather than a visible
-error. See [`docs/16-legal-and-external.md`](docs/16-legal-and-external.md).
 
 ---
 
@@ -176,10 +180,11 @@ sociogram is for.
 ### What it is *not*
 
 - **Not an OSINT collection suite.** It ingests; it is not a scraper farm.
-  Collection adapters exist for RSS, public XenForo and MyBB forums, Telegram
-  and the ingest API, and every forum and Telegram read needs a written
-  authority recorded by one person and confirmed by another, and leaves
-  through an exit that is not your own address. Whether you may collect at
+  Collection adapters exist for RSS, XenForo and MyBB forums (public, or as a
+  signed-in persona), Telegram and the ingest API, and every forum and
+  Telegram read needs a written authority recorded by one person and
+  confirmed by another, and leaves through an exit that is not your own
+  address. Whether you may collect at
   all is the legal items above.
 - **Not an attribution oracle.** There is no "is this the same person?"
   button. There is a model that makes your reasoning explicit and
@@ -194,6 +199,11 @@ sociogram is for.
 ---
 
 ## Install
+
+**New here? Follow [`release/START-HERE.md`](release/START-HERE.md):** one
+page with what you need, the three install steps, the first sign-in and the
+five commonest problems. The installer is a short wizard that explains each
+step as it goes.
 
 Two supported paths. Both are one command, and both are safe to re-run.
 
@@ -220,8 +230,8 @@ carries Mark-of-the-Web, and an unzipped `.sh` has no execute bit.
 3. creates `.venv` and installs the two workspace packages
 4. generates a fresh TOTP key and ingest pepper into `.env.local` (mode 600) and **never overwrites an existing one**
 5. starts Postgres, Redis, MinIO and Mailpit, then waits for the database to actually accept connections
-6. applies all 124 Alembic migrations (Alembic head 0124)
-7. offers to create your first account, printing the password **once** with a QR code to scan (on Windows it prints the `create-user` command to run instead)
+6. applies all 173 Alembic migrations (Alembic head 0173)
+7. offers to create your first account, printing the password **once** with a QR code to scan (on both systems, before the API starts), then offers a fictional demo case
 8. starts the API and prints the console URL, <http://127.0.0.1:8000/ui/>
 
 Detail and troubleshooting: **[`release/INSTALL.md`](release/INSTALL.md)**.
@@ -236,7 +246,7 @@ checks Python and Docker; it does not check memory or disk.
 | **Python** | 3.12 | With `venv` and `ensurepip`. On Debian and Ubuntu those are a separate package: `sudo apt update && sudo apt install python3.12-venv`. 3.13 is what it is developed on. |
 | **Docker** | with Compose v2 | Docker Engine and its Compose plugin on Linux; Docker Desktop on Windows and macOS. Runs four containers: Postgres, Redis, MinIO, Mailpit. |
 | **Memory** | 8 GB tested | The four containers used about 300 MB at idle after the showcase seed. Postgres is configured with `shared_buffers=512MB`, so it grows past that under load. |
-| **Disk** | 2 GB free | 1.4 GB was added by the install and the showcase seed: 1.1 GB of images, a 189 MB `.venv`, and the data. Installing Docker Engine on a bare Ubuntu took about 0.75 GB before that. |
+| **Disk** | 2 GB free | 1.5 GB was added by the Beta 1 install alone (measured 2026-10-07): 1.1 GB of images, a 273 MB `.venv`, and the data. Installing Docker Engine and the venv package on a bare Ubuntu took about 0.8 GB before that. |
 | **OS** | Windows 10/11, macOS 12+, Linux | PowerShell 5.1 is supported and specifically tested for. |
 | **GnuPG** | optional | Only for verifying PGP signatures on contact blocks. |
 
@@ -260,8 +270,7 @@ which needs no exports: `bootstrap.py` reads `.env.local`. On Windows the
 interpreter is `.venv\Scripts\python`.
 
 **Only if you have no account yet**, because you skipped the installer's
-account prompt or installed on Windows, where the installer prints this
-command rather than running it:
+account prompt:
 
 ```bash
 .venv/bin/python scripts/bootstrap.py create-user \
@@ -304,7 +313,7 @@ suite writes permanent rows into append-only tables, and some tests migrate
 the database they are given.
 
 ```bash
-set -a; . ./.env.local; set +a    # REDIS_URL, MinIO and Mailpit
+eval "$(.venv/bin/python scripts/_env.py export)"    # REDIS_URL, MinIO and Mailpit, read as data
 docker compose -f infra/docker-compose.yml exec -T postgres createdb -U noctornal noctornal_scratch
 docker compose -f infra/docker-compose.yml exec -T postgres psql -U noctornal -d noctornal_scratch -q -f /docker-entrypoint-initdb.d/00-extensions.sql
 export DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:5432/noctornal_scratch
@@ -312,7 +321,7 @@ export DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:
 .venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-With the containers up, expect **no failures** across **6095 tests** (`def test_`
+With the containers up, expect **no failures** across **7967 tests** (`def test_`
 functions across both pytest roots, maintained by
 `scripts/refresh_counters.py`; each parametrises to one or more collected
 items, and the collected total for a given release is in
@@ -633,7 +642,7 @@ test named after it.
 | 4 | **Inferred edges stay distinct**, dashed, and out of metrics | projection opt-in; `is_social_tie` on the edge type |
 | 5 | **History is superseded, never overwritten** | no destructive `UPDATE` on `assertion`; a retraction is a one-time stamp on the row, never a rewrite |
 | 6 | **The audit log is append-only** | row *and* statement triggers; `TRUNCATE` refused |
-| 7 | **Credentials never leave the vault** | `PersonaVault.use()` yields the plaintext to one block and drops it; there is no `get_secret()`. The vault runs INSIDE the API process (there is no separate collector), so this bounds the shape of the code, not the blast radius of a compromised host. `ProviderVault` holds lookup provider keys the same way, each bound to its origin and route, and exposure approvals are bound to origin and network. Every outbound path is operator-configured, labelled, audited and capped by a ceiling, and in production the egress proxy is the only way out |
+| 7 | **Credentials never leave the vault** | `PersonaVault.use()` yields the plaintext to one block and drops it; there is no `get_secret()`. In production the persona vault runs in the collector service, which alone holds `NOCTORNAL_PERSONA_KEK`, so a compromised API process cannot open a persona credential. That is a process boundary and not a network zone: the collector also holds the TOTP key ring and the system role's connection string, and in development one process runs both, where this bounds the shape of the code and not the blast radius of a compromised host. `ProviderVault` holds lookup provider keys the same way, each bound to its origin and route, and exposure approvals are bound to origin and network. Every outbound path is operator-configured, labelled, audited and capped by a ceiling, and in production the egress proxy is the only way out |
 | 8 | **TLP gates egress** | one `can_egress`, called by every outbound path (export, SMTP, webhook, Jira, outbound lookups, key lookups, the model server, the sandbox, collection targets); a destination with no gate record is refused |
 | 9 | **Durable identifiers, not displayed ones** | per-type normalisers; `durable_selector_type` |
 | 10 | **Samples never render, never execute** | separate origin, encryption at rest, `is_hostile_markup` |
@@ -654,7 +663,7 @@ test named after it.
 | **Object store** | MinIO, S3 object lock | Every exhibit is written under a per-object COMPLIANCE retention, which not even a root credential can shorten. The shipped compose file sets the BUCKET DEFAULT to `GOVERNANCE 365d`; the default is the floor for anything written by another path, and the guarantee above is the per-object lock `EvidenceStorage.put()` applies. GOVERNANCE alone is bypassable and is not a WORM guarantee. |
 | **Cache / limits** | Redis | GCRA rate limiting in one atomic Lua script. |
 | **Egress** | one pinned client and an egress proxy | Every outbound connection takes its route from one function and goes through one client that connects only to the address it checked. In production the proxy (HTTP CONNECT and SOCKS5 on one internal listener) is the only way out, and records every connection in a ledger the application cannot write ([`docs/20`](docs/20-outbound-connections.md)). |
-| **Migrations** | Alembic | 124 revisions (Alembic head 0124), one concern each. Reversible on an EMPTY database, which is what the round-trip test proves; a downgrade past `0017` on a populated one is refused on purpose, because dropping the seeded ontology would take the assertions with it. |
+| **Migrations** | Alembic | 173 revisions (Alembic head 0173), one concern each. Reversible on an EMPTY database, which is what the round-trip test proves; a downgrade past `0017` on a populated one is refused on purpose, because dropping the seeded ontology would take the assertions with it. |
 | **Live updates** | Postgres `LISTEN`/`NOTIFY` | Over Redis pub/sub because `pg_notify` inside a trigger is **part of the writing transaction**, no dual write, no lost event. |
 
 ### Frontend
@@ -674,7 +683,7 @@ enforces it.
 
 ### Testing
 
-**6095 tests** (`def test_` functions across two pytest roots, maintained by
+**7967 tests** (`def test_` functions across two pytest roots, maintained by
 `scripts/refresh_counters.py`). Every invariant has a test named
 after it. About half are database-backed and gated on `DATABASE_URL`; the
 rest need no services at all.
@@ -701,7 +710,7 @@ noctornal/
 │   └── generated/             TypeScript + SQL seed (do not edit)
 ├── db/
 │   ├── schema.sql             generated mirror (scripts/dump_schema.py; CI diffs it)
-│   └── migrations/versions/   124 Alembic revisions
+│   └── migrations/versions/   173 Alembic revisions
 ├── docs/                      00-20, the reasoning
 ├── release/                   installers, INSTALL, MANUAL, CHANGELOG
 ├── scripts/                   launch, bootstrap, demo seeds, screenshots
@@ -715,15 +724,33 @@ noctornal/
 | Read | For |
 |---|---|
 | **[`release/INSTALL.md`](release/INSTALL.md)** | installing, in detail, with troubleshooting |
+| **[`release/START-HERE.md`](release/START-HERE.md)** | the one page to follow first: what you need, three install steps, the first sign-in |
 | **[`release/MANUAL.md`](release/MANUAL.md)** | operating it, every pane, every refusal, and what it means |
 | [`docs/18-legal-review-pack.md`](docs/18-legal-review-pack.md) | **the sign-off document**, with a row to answer each question in |
+| [`docs/16-legal-and-external.md`](docs/16-legal-and-external.md) | **the register**: every place the build stops because the next step is a legal question, and why holding this material is dangerous |
 | [`docs/00-decisions.md`](docs/00-decisions.md) | why the architecture is the way it is |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | the map of what was built |
+| [`docs/02-architecture.md`](docs/02-architecture.md) | the architecture brief: what was specified, and why |
 | [`docs/01-domain-model.md`](docs/01-domain-model.md) | nodes, edges, selectors, assertions |
 | [`docs/03-graph-analytics.md`](docs/03-graph-analytics.md) | the SNA methodology, and its limits |
+| [`docs/04-collection.md`](docs/04-collection.md) | collection adapters and the aggregation bucket |
 | [`docs/05-security-rbac.md`](docs/05-security-rbac.md) | the access model |
+| [`docs/06-interface.md`](docs/06-interface.md) | the interface design brief |
+| [`docs/07-integrations.md`](docs/07-integrations.md) | integrations and notifications, and the classification check every outbound path makes |
+| [`docs/08-governance.md`](docs/08-governance.md) | governance and tradecraft features |
+| [`docs/09-roadmap.md`](docs/09-roadmap.md) | the ten build phases |
+| [`docs/10-comms-channels.md`](docs/10-comms-channels.md) | communication channels: which identifier is durable on each platform |
+| [`docs/11-malware-handling.md`](docs/11-malware-handling.md) | malware sample handling, not to be switched on until L1 is settled |
+| [`docs/12-ingest-api.md`](docs/12-ingest-api.md) | ingest API keys and feed categorisation |
+| [`docs/13-differentiators.md`](docs/13-differentiators.md) | what this does that the commercial market handles badly |
+| [`docs/14-enhancement-map.md`](docs/14-enhancement-map.md) | the enhancement map the code cites for provenance |
 | [`docs/19-social-engineering-evidence.md`](docs/19-social-engineering-evidence.md) | phishing, BEC and vishing evidence |
 | [`docs/20-outbound-connections.md`](docs/20-outbound-connections.md) | how anything leaves: the address policy, the one client, routes and the egress proxy |
 | [`docs/17-flagged-for-review.md`](docs/17-flagged-for-review.md) | known gaps, honestly listed |
+| [`QUICKSTART.md`](QUICKSTART.md) | a local development instance, not hardened for real material |
+| [`SECURITY.md`](SECURITY.md) | reporting a vulnerability, and what is not one |
+| [`ROADMAP-REMAINING.md`](ROADMAP-REMAINING.md) | what is left |
+| [`release/CLEAN-VM-INSTALL.md`](release/CLEAN-VM-INSTALL.md) | a recorded clean-VM install, step by step |
 | [`NOTICE.md`](NOTICE.md) | the licence, and why it had to be this one |
 | [`CONVENTIONS.md`](CONVENTIONS.md) | the working agreement, if you are contributing |
 
@@ -731,24 +758,28 @@ noctornal/
 
 ## Status
 
-**Alpha. Unaudited. Not certified for evidential use.**
+**Beta. Unaudited. Not certified for evidential use. Not lawful to operate against real material until the five blocking items above are settled.** It is fit for other people to try on synthetic or published, non-personal data.
 
 Working end to end: cases; the graph and assertion layer; evidence with
 WORM and custody; the five-part access gate; SNA analytics, with roles and
 forum and wallet projection; proposals and triage; entity merge and the
 two-person policy; comms, contact blocks, PGP verification and vendor keys;
-collection from feeds, forums and Telegram under a two-person authority,
-and ingest; similarity search; retention, legal hold and break-glass; ACH;
+collection from feeds, forums and Telegram under a two-person authority
+(the Telegram adapter has never met Telegram, docs/17 F31), and ingest; similarity search; retention, legal hold and break-glass; ACH;
 reporting with a TLP egress gate; the malware lab, with static triage,
-YARA, prohibited-content screening and a self-hosted sandbox; Jira, the
-delivery ledger and outbound lookups; the egress proxy; the deception
-subsystem; live change push; and the analyst console over all of it.
+YARA, archive expansion, prohibited-content screening and a self-hosted
+sandbox; Jira, the delivery ledger and outbound lookups; the egress proxy;
+the collector service that alone holds the persona key, and the isolated
+worker that parses hostile bytes; row-level security on every case table;
+the deception subsystem; live change push; a one-command installer and a
+first-sign-in walkthrough; and the analyst console over all of it.
 
 Deliberately absent, with reasons in [`docs/17`](docs/17-flagged-for-review.md):
-WebAuthn (password + TOTP today), session IP/UA binding by default,
-row-level security on fifteen of its tables (docs/17 F51), perceptual matching of prohibited content, archive
-expansion, an authenticated forum reader, and **any form of live
-interception**.
+WebAuthn (password + TOTP today), session IP/UA binding by default in
+development (a production start refuses to run without it), perceptual
+matching of prohibited content, expansion of RAR and 7-Zip archives, and
+**any form of live interception**. What the 2026-10-03 review and the fixes
+after it left open is in the same document, under Known residuals at Beta 1.
 
 ### Findings that carry forward
 
@@ -784,10 +815,12 @@ Decoding is now arithmetic and namespaced by id space (`u:`/`c:`/`g:`);
 migration `0051` re-keys stored selectors. It cannot undo a merge already
 made, and says so.
 
-**The software has been adversarially reviewed eight times. Every pass
-found a real defect (four times a critical one) each time under a fully
-passing test suite. Three of those were green tests asserting the bug.
-Assume the ninth pass would find something too.**
+**The software has been adversarially reviewed nine times, and every pass
+found real defects, four times a critical one. The first eight found them
+under a fully passing test suite, and three of those were green tests
+asserting the bug. The ninth, on 2026-10-03, kept 82 findings (16 high), and
+the independent re-verification of its fixes and nine release reviews found
+more. Assume the next pass would find something too.**
 
 ---
 

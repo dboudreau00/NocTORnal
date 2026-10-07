@@ -383,6 +383,14 @@ class Subgraph:
     #: cache key when present, because venue names and sizes never reach
     #: `nodes`.
     one_mode: dict | None = None
+    #: The union of the compartments of every node and edge in this
+    #: projection, which the caller is read into (the projection filters on
+    #: it). 2026-10-07: a report built from this
+    #: carried the header's and the exhibits' compartments but not these, so
+    #: a compartmented entity went out through the egress gate unmarked. It
+    #: is not a key on any row, and a Subgraph built from another one's
+    #: rows (`ego`) carries the whole's, which is the safe direction.
+    compartments: frozenset[str] = field(default_factory=frozenset)
 
     def node_ids(self) -> set[UUID]:
         return {n["id"] for n in self.nodes}
@@ -459,7 +467,13 @@ class GraphService:
                       -- evidenced, and that should be visible on the canvas
                       -- rather than only in the inspector one element at a
                       -- time. The rule is `evidenced_sql`'s (2026-09-22).
-                      """ + evidenced_sql("node_id", "n") + """ AS has_evidence
+                      """ + evidenced_sql("node_id", "n") + """ AS has_evidence,
+                      -- Not a key on the row (`/graph` serialises the rows
+                      -- as they are): `Subgraph.compartments` is their
+                      -- union, for a consumer that sends the projection
+                      -- somewhere. The WHERE below has already confined
+                      -- them to the caller's read-in.
+                      compartments
                  FROM core.node n
                 WHERE case_id = %s AND deleted_at IS NULL AND merged_into_id IS NULL
                   AND classification <= %s::core.tlp AND compartments <@ %s
@@ -491,6 +505,7 @@ class GraphService:
         ).fetchall()
         truncated = len(nodes) > limit
         nodes = nodes[:limit]
+        comps = {c for r in nodes for c in (r[10] or [])}
         node_out = [
             {"id": r[0], "node_type": r[1], "label": r[2], "classification": r[3],
              "attrs": r[4] or {}, "valid_from": r[5], "valid_to": r[6],
@@ -513,7 +528,8 @@ class GraphService:
                           e.weight, e.confidence, e.is_inferred, e.review,
                           e.classification, e.valid_from, e.valid_to,
                           et.is_social_tie,
-                          """ + evidenced_sql("edge_id", "e") + """ AS has_evidence
+                          """ + evidenced_sql("edge_id", "e") + """ AS has_evidence,
+                          e.compartments
                      FROM core.edge e
                      JOIN core.edge_type et ON et.key = e.edge_type
                     WHERE e.case_id = %s AND e.deleted_at IS NULL
@@ -523,7 +539,7 @@ class GraphService:
                       -- LIVE provenance, as for nodes above (decision 24).
                       -- Retracting the only assertion behind a tie must
                       -- dissolve the tie from the live graph, superseded
-                      -- rows included (final review U11, 2026-09-23).
+                      -- rows included (2026-09-23).
                       AND EXISTS (SELECT 1 FROM core.assertion a
                                    WHERE a.edge_id = e.id
                                      AND a.retracted_at IS NULL
@@ -544,6 +560,7 @@ class GraphService:
             ).fetchall()
 
         if not p.one_mode.enabled():
+            comps |= {c for r in rows if r[6] in keep for c in (r[14] or [])}
             edge_out = [_edge_row(r) for r in rows if r[6] in keep]
             left_out = None
             if p.review_scope == REVIEW_SCOPE_ACCEPTED:
@@ -551,16 +568,21 @@ class GraphService:
                 # caller already sees: a count never reaches past them.
                 edge_out, left = _review_split(edge_out)
                 left_out = {"ties": left}
-            return Subgraph(node_out, edge_out, p.describe(), truncated, left_out)
+            return Subgraph(node_out, edge_out, p.describe(), truncated, left_out,
+                            compartments=frozenset(comps))
         # Whether a row is in the preset is worked out from the already
         # selected `et.is_social_tie` (r[12]) and never stored on the row,
         # so no row gains a key and `/graph` serialises exactly today's rows.
         type_set = set(types or ())
-        return one_mode_subgraph(
+        sub = one_mode_subgraph(
             p, node_out,
             [(_edge_row(r), bool(r[12]) if types is None else r[1] in type_set)
              for r in rows],
             truncated)
+        # Every fetched tie, drawn or not: derived ties name no label of
+        # their own, so what they came from is what the document carries.
+        sub.compartments = frozenset(comps | {c for r in rows for c in (r[14] or [])})
+        return sub
 
     # -- what the caller is not being shown (docs/14 U2) -------------------
     def withheld(self, p: Projection) -> Withheld:
@@ -694,6 +716,7 @@ class GraphService:
              if e["src_node_id"] in seen and e["dst_node_id"] in seen],
             {**full.projection, "ego": str(centre), "depth": depth},
             full.truncated,
+            compartments=full.compartments,
         )
 
     def shortest_path(self, p: Projection, src: UUID, dst: UUID) -> list[UUID]:

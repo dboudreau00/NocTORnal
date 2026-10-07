@@ -166,6 +166,29 @@ def test_a_revoked_compartment_hides_them_too(conn, svc):
     assert svc.inbox(alice) == []
 
 
+def test_a_case_raised_above_the_recipient_hides_its_notifications(conn, svc):
+    """2026-10-07: the filter read only the labels the notification was
+    raised with, so an AMBER analyst shut out of a case raised to RED still
+    read its notices in the centre, and the outbox still sent them. Read
+    against the case as it stands, as a lowered clearance is."""
+    from noctornal_api.transports import dispatch_due
+
+    alice, bob = _user(conn, clearance="AMBER"), _user(conn)
+    case_id = _case(conn, alice)
+    _raise(svc, alice, actor_id=bob, case_id=case_id, classification="AMBER")
+    assert svc.unread_count(alice) == 1
+    conn.execute('UPDATE core."case" SET classification = %s WHERE id = %s',
+                 ("RED", case_id))
+    assert svc.unread_count(alice) == 0 and svc.inbox(alice) == []
+    dispatch_due(conn, send_mail=lambda m: None)
+    state, cause = conn.execute(
+        """SELECT d.state, d.cause FROM notify.delivery d
+             JOIN notify.notification n ON n.id = d.notification_id
+            WHERE n.recipient_id = %s AND d.channel = 'SMTP'""",
+        (alice,)).fetchone()
+    assert (state, cause) == ("SUPPRESSED", "REVOKED")
+
+
 def test_the_filter_is_in_sql_so_a_limit_cannot_truncate_visible_rows(conn, svc):
     """Filtering in Python after LIMIT would return a short page and call it
     the end of the list."""
@@ -479,6 +502,54 @@ def test_compartmented_material_never_leaves_either(conn, svc):
             WHERE n.recipient_id = %s AND d.channel = 'SMTP'""",
         (alice,)).fetchone()
     assert row[0] == "REFUSED" and row[1] == "compartmented_material"
+
+
+def _smtp_row(conn, recipient):
+    return conn.execute(
+        """SELECT d.state, d.redacted, d.detail FROM notify.delivery d
+             JOIN notify.notification n ON n.id = d.notification_id
+            WHERE n.recipient_id = %s AND d.channel = 'SMTP'""",
+        (recipient,)).fetchone()
+
+
+def test_a_case_raised_after_queueing_is_gated_at_its_new_label(conn, svc):
+    """2026-10-07: the drain judged a delivery by the labels the
+    notification was raised with, so a case raised to RED between the queue
+    and the drain (a digest, quiet hours, a retry) sent its code and summary
+    out marked TLP:AMBER. The case's labels are composed in as they stand at
+    the drain, as an export composes them."""
+    from noctornal_api.transports import dispatch_due
+
+    alice, bob = _user(conn, clearance="RED"), _user(conn)
+    case_id = _case(conn, alice)
+    address = conn.execute("SELECT email FROM iam.app_user WHERE id = %s",
+                           (alice,)).fetchone()[0]
+    _raise(svc, alice, actor_id=bob, case_id=case_id, classification="AMBER")
+    conn.execute('UPDATE core."case" SET classification = %s WHERE id = %s',
+                 ("RED", case_id))
+    sent = []
+    dispatch_due(conn, send_mail=lambda m: sent.append(m))
+    assert _smtp_row(conn, alice) == ("REFUSED", True, "above_platform_floor")
+    mine = [m.get_content() for m in sent if m["To"] == address]
+    assert len(mine) == 1 and "no case material" in mine[0]
+    assert "Something happened on OP-X." not in mine[0]
+
+
+def test_a_case_compartment_added_after_queueing_keeps_the_summary_in(conn, svc):
+    """The same race on the other axis: a compartment the case gained since
+    the notification was raised refuses the content."""
+    from noctornal_api.transports import dispatch_due
+
+    alice = _user(conn, clearance="RED", compartments=("OPERATION-X",))
+    bob = _user(conn)
+    case_id = _case(conn, alice)
+    _raise(svc, alice, actor_id=bob, case_id=case_id, classification="AMBER")
+    conn.execute("INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+                 "ON CONFLICT (key) DO NOTHING", ("OPERATION-X", "OPERATION-X"))
+    conn.execute('UPDATE core."case" SET compartments = %s WHERE id = %s',
+                 (["OPERATION-X"], case_id))
+    dispatch_due(conn, send_mail=lambda m: None)
+    assert _smtp_row(conn, alice) == ("REFUSED", True, "compartmented_material")
 
 
 def test_a_transport_failure_is_a_row_and_backs_off(conn, svc):

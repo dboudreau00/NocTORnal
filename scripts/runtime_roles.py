@@ -29,7 +29,17 @@ replays exactly the migrations' own SQL, so the two cannot disagree.
 3. On THIS database: the runtime grants for both roles (0108's
    `grants_sql`, the shape 0060 set plus every later revoke), then 0109's
    IAM-plane lockdown for the request role when the database is at or past
-   0109.
+   0109, then the two later revisions that take columns back from it
+   (0143: the credential columns of iam.app_user; 0144: the step-up column
+   of iam.session) when the database is at or past them.
+   Then 0155's column grants on the ingest records, credentials and
+   authorisations when it is at or past 0155 (`grant`). 0108's replay hands
+   both roles table UPDATE on every table, so without the 0155 step a role
+   created after that revision ran would get back the columns it took away
+   (F51, 2026-10-02). And 0156's GRANTS_SQL when at or past 0156: the same
+   blanket grant hands DELETE on the persona act queue back, and no role may
+   have it (A collector process, 2026-10-02). And the revoke of the two ledger
+   sequences from both roles (0169), which the same blanket grant hands back.
 
 It never drops or alters any other role, and it touches only the database
 DATABASE_URL names.
@@ -80,6 +90,14 @@ def _migration(prefix: str):
     return module
 
 
+def _migration_named(stem: str):
+    path = next(VERSIONS.glob(f"*_{stem}.py"))
+    spec = importlib.util.spec_from_file_location(f"m_{stem}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def create_statements() -> list[str]:
     out = []
     for role, attributes in ROLE_ATTRIBUTES.items():
@@ -96,6 +114,45 @@ def _at_or_past(conn, revision: str) -> bool:
     return bool(row and row[0] >= revision)
 
 
+def grant(conn) -> None:
+    """Step 3: replay the migrations' runtime grants on this database, in
+    chain order, each only once the database has reached it."""
+    grants = _migration("0108")
+    conn.execute(grants.grants_sql(APP_ROLE))
+    conn.execute(grants.grants_sql(WORKER_ROLE))
+    if _at_or_past(conn, "0109"):
+        conn.execute(_migration("0109").UPGRADE_SQL)
+    # 0108's blanket grant hands back UPDATE and DELETE on core.assertion;
+    # the claims guard takes them off again (graph-assertion-claims-mutable,
+    # 2026-10-03). Found by name and read for its own revision id, so
+    # renumbering it when the branches are merged cannot break this replay
+    # (verify round, 2026-10-03).
+    guard = _migration_named("assertion_marked_once")
+    if _at_or_past(conn, guard.revision):
+        conn.execute(guard.GRANTS_SQL)
+
+    # 0108's grants hand table SELECT back on iam.app_user and 0109's the
+    # mfa_satisfied_at UPDATE, so the two revisions that take them away
+    # are replayed after them (rls-6 and rls-7, 2026-10-03).
+    for revision in ("0143", "0144"):
+        if _at_or_past(conn, revision):
+            conn.execute(_migration(revision).PRIVILEGES_SQL)
+    # 0155's GRANTS_SQL only: its guards are created once, by the migration.
+    if _at_or_past(conn, "0155"):
+        conn.execute(_migration("0155").GRANTS_SQL)
+    # 0156's too (A collector process, 2026-10-02): no DELETE on the persona
+    # act queue, which 0108's blanket grant hands back to a new role.
+    if _at_or_past(conn, "0156"):
+        conn.execute(_migration("0156").GRANTS_SQL)
+    # The ledger sequences are drawn by the chain triggers as the owner, so
+    # neither runtime role holds them (2026-10-03). 0108's blanket grant hands
+    # every sequence back, so the revoke is replayed. Found by name, as the
+    # claims guard is above.
+    sequences = _migration_named("ledger_sequences_trigger_drawn")
+    if _at_or_past(conn, sequences.revision):
+        conn.execute(sequences.REVOKE_SQL)
+
+
 def ensure(conn) -> int:
     superuser = conn.execute(
         "SELECT rolsuper FROM pg_roles WHERE rolname = current_user").fetchone()[0]
@@ -108,11 +165,7 @@ def ensure(conn) -> int:
         return 1
     for statement in create_statements():
         conn.execute(statement)
-    grants = _migration("0108")
-    conn.execute(grants.grants_sql(APP_ROLE))
-    conn.execute(grants.grants_sql(WORKER_ROLE))
-    if _at_or_past(conn, "0109"):
-        conn.execute(_migration("0109").UPGRADE_SQL)
+    grant(conn)
     print(f"{APP_ROLE} and {WORKER_ROLE} exist and are granted on this database.")
     print(f"NOCTORNAL_APP_DB_ROLE={APP_ROLE}")
     print(f"NOCTORNAL_WORKER_DB_ROLE={WORKER_ROLE}")

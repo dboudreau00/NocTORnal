@@ -144,6 +144,9 @@ let me = { user_id: 'admin' };
 const stub = (n) => function () { log.push(n); };
 const hideIdleWarning = stub('hideIdleWarning'), guardUnsaved = stub('guard');
 const disconnectLive = stub('disconnectLive'), closePalette = stub('closePalette');
+// The walkthrough (2026-10-06): not under test here.
+function closeTour() {}
+function maybeShowWelcomeTour() {}
 const rememberResume = stub('rememberResume'), openReauth = stub('openReauth');
 const describeLapse = stub('describeLapse'), adoptStepUp = stub('adoptStepUp');
 const noteSessionActivity = stub('activity'), renderAccountChip = stub('chip');
@@ -157,7 +160,7 @@ const refreshGlassChip = stub('refreshGlassChip');
 const adoptSessionFacts = stub('facts'), applyResume = stub('resume');
 const renderHeaderRole = stub('headerRole');   // ux02-cases, 2026-09-23
 const relinkLive = stub('relinkLive');         // ux01-firstrun, 2026-09-23
-const endReauthChange = stub('endReauthChange'); // final review u5, 2026-09-24
+const endReauthChange = stub('endReauthChange'); // 2026-09-24
 const api = async () => me;
 """ + "\n".join(_fn(n) for n in (
         "clearSessionSecrets", "stopSessionClock", "sessionLapsed",
@@ -213,6 +216,9 @@ const watchPresence = stub('watch'), forgetHeldLive = stub('forgetHeld');
 const halfSession = () => false, adoptSessionFacts = stub('facts');
 const applyResume = stub('resume'), clearSessionBanners = stub('banners');
 const clearSessionSecrets = stub('secrets'), showCaseList = async () => {};
+// The walkthrough (2026-10-06): not under test here.
+function closeTour() {}
+function maybeShowWelcomeTour() {}
 const api = async () => ({ user_id: 'u' });
 const rememberResume = stub('rememberResume'), closePalette = stub('closePalette');
 const stopGraph = stub('stopGraph'), disconnectLive = stub('disconnectLive');
@@ -459,8 +465,8 @@ const discardPage = stub('discardPage');       // ux01-firstrun, 2026-09-23
 """ + _const("REAUTH_CHANGE") + "\n".join(
         _fn(n) for n in ("closeReauth", "leaveReauth", "stopSessionClock",
                          "endReauthChange")) + r"""
-// And a one-time password held for the sheet's new-password stage (final
-// review u5, 2026-09-24): it still signs in until it is replaced.
+// And a one-time password held for the sheet's new-password stage (2026-09-24): it still
+// signs in until it is replaced.
 const type = () => { $('reauth-password').value = 'hunter2'; $('reauth-totp').value = '123456';
   REAUTH_CHANGE.password = 'one-time'; $('reauth-new').value = 'typed new'; };
 const left = () => [$('reauth-password').value, $('reauth-totp').value,

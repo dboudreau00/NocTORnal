@@ -27,6 +27,7 @@ A third arrived with gap-closed-case-writes (2026-09-23):
 from __future__ import annotations
 
 import hmac
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from collections.abc import Iterator
@@ -38,6 +39,8 @@ from psycopg.types.json import Json
 
 from noctornal_api.cases import CONTENT_READ_ONLY_STATES
 from noctornal_api.db import (
+    SystemContextMisconfigured,
+    SystemContextUnavailable,
     SystemPurpose,
     bind_session,
     connect_request,
@@ -60,6 +63,8 @@ from noctornal_api.security.sessions import (
 )
 from noctornal_api.stores import PgAccessResolver, PgSessionStore
 from noctornal_api.wording import agree
+
+log = logging.getLogger(__name__)
 
 _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 SESSION_COOKIE = "__Host-session"
@@ -118,6 +123,21 @@ def _bearer(authorization: str | None) -> str | None:
     return None
 
 
+#: The 401 for a request that presents no session credential at all. One
+#: sentence in one place: `session_token` raises it and
+#: `http/body_ceiling.py` answers an unauthenticated upload with it before
+#: reading a byte (2026-10-07), and the two must agree.
+NO_SESSION_DETAIL = "no session token"
+
+
+def presents_session_credential(request: Request) -> bool:
+    """Whether `session_token` would find a token on this request: a
+    non-empty Bearer value, else the session cookie. Nothing is validated;
+    this is only the question of whether anything was presented."""
+    return bool(_bearer(request.headers.get("authorization"))
+                or request.cookies.get(SESSION_COOKIE))
+
+
 def session_token(
     request: Request,
     authorization: str | None = Header(default=None),
@@ -139,7 +159,7 @@ def session_token(
         return bearer
     cookie = request.cookies.get(SESSION_COOKIE)
     if not cookie:
-        raise Problem(401, "Unauthenticated", "no session token")
+        raise Problem(401, "Unauthenticated", NO_SESSION_DETAIL)
     if request.method in _UNSAFE_METHODS:
         sent = request.headers.get(CSRF_HEADER)
         expected = request.cookies.get(CSRF_COOKIE)
@@ -184,8 +204,10 @@ def current_user(
     service = SessionService(PgSessionStore(conn))
     result = service.validate(raw, touch=False)
     if not result.ok:
-        audit_auth_event(conn, "AUTH_SESSION_REJECTED", None, None,
-                         {"reason": result.reason})
+        # No row for a token that matches nothing, one per real session
+        # per window otherwise, with the source (http_ui-004, 2026-10-03).
+        from noctornal_api.http.session_rejections import record_rejected_session
+        record_rejected_session(conn, request, result)
         raise Problem(401, "Unauthenticated", "invalid or expired session")
     s = result.session
     if refuse_unbound_session(
@@ -198,10 +220,20 @@ def current_user(
     # On an exempt connection (the owner, in development and the suite)
     # nothing is compared and nothing changes.
     refuse_unbindable_session(conn, s, raw)
-    s = service.touch(s)
+    touched = service.touch(s)
+    if touched is None:
+        # Revoked, expired or idle between the read above and the slide
+        # (authz-session-revoke-bypass, 2026-10-03): the same generic 401,
+        # and no second audit row, since the revocation was its own event.
+        raise Problem(401, "Unauthenticated", "invalid or expired session")
+    s = touched
     # Who a row-level security refusal is audited against, when one
     # escapes to the error handler (http/errors.py, S1).
     request.state.noctornal_user_id = s.user_id
+    # The same, so a side connection that writes that row can be bound to the
+    # session and keep its actor (0150, 2026-10-03).
+    from noctornal_api.security.tokens import rls_proof
+    request.state.noctornal_rls_proof = rls_proof(raw)
     return CurrentUser(s.user_id, s.id, s.mfa_satisfied_at)
 
 
@@ -215,9 +247,10 @@ def refuse_unbindable_session(conn, session, raw: str) -> None:
     binding = bind_session(conn, raw)
     if binding.exempt or binding.actor == session.user_id:
         return
-    audit_auth_event(conn, "RLS_BINDING_FAILED", session.user_id, None,
-                     {"session_id": str(session.id),
-                      "reason": "unbound" if binding.actor is None else "mismatch"})
+    audit_auth_event_as_system(
+        conn, "RLS_BINDING_FAILED", session.user_id, None,
+        {"session_id": str(session.id),
+         "reason": "unbound" if binding.actor is None else "mismatch"})
     raise Problem(401, "Unauthenticated", "invalid or expired session")
 
 
@@ -252,14 +285,16 @@ def refuse_unbound_session(conn, session, *, ip: str | None,
     mismatched = binding_mismatch(session, ip=ip, user_agent=user_agent)
     if not mismatched:
         return False
-    audit_auth_event(conn, "SESSION_BINDING_REFUSED", session.user_id, None,
-                     {"session_id": str(session.id), "mismatched": mismatched,
-                      "path": path,
-                      "unbound": session.ip is None and session.user_agent is None})
+    audit_auth_event_as_system(
+        conn, "SESSION_BINDING_REFUSED", session.user_id, None,
+        {"session_id": str(session.id), "mismatched": mismatched,
+         "path": path,
+         "unbound": session.ip is None and session.user_agent is None})
     return True
 
 
-def audit_auth_event(conn, action: str, actor_id, case_id, detail: dict) -> None:
+def audit_auth_event(conn, action: str, actor_id, case_id, detail: dict,
+                     *, ip_hash: bytes | None = None) -> None:
     """Append to the hash-chained audit log. Authentication and
     authorization outcomes are auditable events (docs/05).
 
@@ -267,13 +302,57 @@ def audit_auth_event(conn, action: str, actor_id, case_id, detail: dict) -> None
     writes the same SESSION_BINDING_REFUSED row from the websocket
     handshake, and two spellings of one audit action is how an audit
     query comes back short.
+
+    `ip_hash` names the source (http_ui-004, 2026-10-03): a refused
+    session presentation without one could not be attributed.
     """
     conn.execute(
         """INSERT INTO audit.event
-               (actor_id, actor_kind, action, object_type, object_id, case_id, detail)
-           VALUES (%s, %s, %s, 'auth', NULL, %s, %s)""",
-        (actor_id, "USER" if actor_id else "SYSTEM", action, case_id, Json(detail)),
+               (actor_id, actor_kind, action, object_type, object_id, case_id,
+                detail, ip_hash)
+           VALUES (%s, %s, %s, 'auth', NULL, %s, %s, %s)""",
+        (actor_id, "USER" if actor_id else "SYSTEM", action, case_id, Json(detail),
+         ip_hash),
     )
+
+
+def audit_auth_event_as_system(conn, action: str, actor_id, case_id,
+                               detail: dict) -> None:
+    """`audit_auth_event` for a row that names a user this connection is not
+    bound to: a refused session (the binding comes after the checks) or a
+    session that has just been revoked (a sign-out).
+
+    The database attributes a request-role row only to the user the
+    connection is bound to (0150, evidence-ledger-actor-time-forgeable,
+    2026-10-03), and demotes a claim it cannot verify to `unverified_actor_id`
+    in the detail. These are authentication outcomes the server has itself
+    established, so the system role, which is how the product writes for a
+    person it has authenticated, writes them and the row keeps its actor. A
+    process with no system role to hand (the sample origin holds none) writes
+    on `conn` as before, and the row is demoted rather than lost."""
+    try:
+        with system_connection(SystemPurpose.AUTH, reuse=conn) as sconn:
+            audit_auth_event(sconn, action, actor_id, case_id, detail)
+    except SystemContextUnavailable as exc:
+        note_system_fallback(exc, action)
+        audit_auth_event(conn, action, actor_id, case_id, detail)
+
+
+def note_system_fallback(exc: SystemContextUnavailable, action: str) -> None:
+    """Say so when an authentication row falls back to a write the database
+    cannot attribute (g49v-system-fallback-silent, 2026-10-03).
+
+    "No system role in this process" is a deployment shape (the sample origin)
+    and stays quiet. A system connection that is configured and WRONG (not
+    exempt from row security, or in production the owner or a superuser) is a
+    misconfiguration, and the row it costs keeps its claim only in
+    `detail.unverified_actor_id`: that is logged at ERROR, with the reason the
+    connection was refused (names the setting, never its value), so an
+    operator finds it before an investigation needs the actor. The row is
+    still written, never lost."""
+    if isinstance(exc, SystemContextMisconfigured):
+        log.error("%s written without a verified actor: the system "
+                  "database connection is misconfigured: %s", action, exc)
 
 
 def effective_labels(

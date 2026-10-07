@@ -43,6 +43,7 @@ from noctornal_api.approvals import (
     ApprovalService,
     case_requires_dual_control,
     policy_mode,
+    relax_seasoning_days,
 )
 from noctornal_api.http.deps import (
     CurrentUser,
@@ -54,9 +55,70 @@ from noctornal_api.http.deps import (
     require_step_up,
     user_ceiling,
 )
+from noctornal_api.http.element_gate import (
+    BASIS_SELECTOR_REFUSAL,
+    check_basis_selector,
+    disclosure_mode,
+    gate_element,
+    visible_node_ids,
+    withheld_notice,
+)
 from noctornal_api.http.errors import Problem, safe_detail
+from noctornal_api.projections import DISCLOSURE_NONE
+from noctornal_api.security.access import tlp_from_name
 
 router = APIRouter(prefix="/cases/{case_id}/approvals", tags=["approvals"])
+
+#: The operation whose payload names two entities (2026-10-03).
+MERGE_OPERATION = "node.merge"
+
+
+def _merge_pair(payload) -> tuple[UUID, UUID] | None:
+    """The two entity ids a node.merge payload names, or None when it does
+    not name two well-formed ids."""
+    try:
+        return (UUID(str((payload or {})["source_node_id"])),
+                UUID(str((payload or {})["target_node_id"])))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
+def _hidden_merge_requests(conn: psycopg.Connection, user: CurrentUser,
+                           case_id: UUID, items) -> set[UUID]:
+    """The node.merge requests among `items` ((id, operation, payload)
+    triples) whose two entities the viewer may not both see (http_ui-011,
+    graph-merge-ledger-and-approvals-leak, 2026-10-03). The listing returned
+    their payload (both node ids and the reason) and the justification
+    verbatim to every case reader, while `_merge_subjects` already withheld
+    the entities' labels. A request that does not name two well-formed ids
+    names nothing the viewer can be shown to see, so it counts as hidden:
+    failing closed."""
+    pairs = {rid: _merge_pair(payload) for rid, operation, payload in items
+             if operation == MERGE_OPERATION}
+    if not pairs:
+        return set()
+    seen = visible_node_ids(conn, user, case_id,
+                            {i for p in pairs.values() if p for i in p})
+    return {rid for rid, p in pairs.items()
+            if p is None or not (p[0] in seen and p[1] in seen)}
+
+
+def _merge_request_visible(conn: psycopg.Connection, user: CurrentUser,
+                           case_id: UUID, record: ApprovalRequest) -> bool:
+    return not _hidden_merge_requests(
+        conn, user, case_id, [(record.id, record.operation, record.payload)])
+
+
+def _hidden_merge_request_count(conn: psycopg.Connection, user: CurrentUser,
+                                case_id: UUID, state: str | None) -> int:
+    """How many node.merge requests of the case, under the listing's state
+    filter, the viewer is not shown: over the case, not one page."""
+    items = conn.execute(
+        """SELECT id, operation, payload FROM core.approval_request
+            WHERE case_id = %s AND operation = %s
+              AND (%s::text IS NULL OR state = %s)""",
+        (case_id, MERGE_OPERATION, state, state)).fetchall()
+    return len(_hidden_merge_requests(conn, user, case_id, items))
 
 _STATES = frozenset({"PENDING", "APPROVED", "REJECTED", "WITHDRAWN", "CONSUMED"})
 
@@ -201,16 +263,24 @@ def _merge_subjects(conn: psycopg.Connection, user: CurrentUser,
 
 def _approvers_reached(conn: psycopg.Connection,
                        rows: list[ApprovalRequest]) -> dict:
-    """How many APPROVAL_REQUESTED notifications each request raised."""
+    """How many APPROVAL_REQUESTED notifications each request raised.
+
+    The notices are the signers' rows, which row-level security shows to
+    their recipients alone, so the count runs as a withheld count on a
+    system connection (F51, 2026-10-02). The ids are the requests the
+    caller has already read under policy, and only a number comes back."""
+    from noctornal_api.db import SystemPurpose, system_connection
+
     ids = [r.id for r in rows]
     if not ids:
         return {}
-    return {row[0]: row[1] for row in conn.execute(
-        """SELECT object_id, count(*) FROM notify.notification
-            WHERE kind = 'APPROVAL_REQUESTED'
-              AND object_type = 'approval_request'
-              AND object_id = ANY(%s)
-            GROUP BY object_id""", (ids,))}
+    with system_connection(SystemPurpose.WITHHELD, reuse=conn) as sconn:
+        return {row[0]: row[1] for row in sconn.execute(
+            """SELECT object_id, count(*) FROM notify.notification
+                WHERE kind = 'APPROVAL_REQUESTED'
+                  AND object_type = 'approval_request'
+                  AND object_id = ANY(%s)
+                GROUP BY object_id""", (ids,))}
 
 
 def _names(conn: psycopg.Connection, rows: list[ApprovalRequest]) -> dict:
@@ -234,7 +304,21 @@ def list_approvals(
     if state is not None and state not in _STATES:
         raise Problem(400, "Invalid request",
                       f"unknown state {state!r}; one of {', '.join(sorted(_STATES))}")
-    rows = ApprovalService(conn).list_for_case(case_id, state=state, limit=limit)
+    # 2026-10-03: a node.merge request is listed only to a viewer who may
+    # see both of its entities; the rest are said as the case allows, under
+    # `withheld`, counted over every such request in the case (this state
+    # filter included), not just this page. The page is cut after the
+    # filter, from the route's own cap, so requests the viewer cannot see do
+    # not push the ones they can off it.
+    rows = ApprovalService(conn).list_for_case(case_id, state=state, limit=500)
+    hidden = _hidden_merge_requests(
+        conn, user, case_id, [(r.id, r.operation, r.payload) for r in rows])
+    rows = [r for r in rows if r.id not in hidden][:limit]
+    mode = disclosure_mode(conn, case_id)
+    withheld = withheld_notice(
+        mode, 0 if mode == DISCLOSURE_NONE
+        else _hidden_merge_request_count(conn, user, case_id, state),
+        noun="requests")
     out = [_out(r).model_dump(mode="json") for r in rows]
     # Who asked and who decided, by NAME. The card printed the payload's
     # UUIDs and nothing about either person, so dual control was a blind
@@ -243,10 +327,15 @@ def list_approvals(
     names = _names(conn, rows)
     subjects = _merge_subjects(conn, user, case_id, rows)
     reached = _approvers_reached(conn, rows)
+    svc = ApprovalService(conn)
     for item, r in zip(out, rows, strict=True):
         item["requested_by_name"] = names.get(r.requested_by)
         item["decided_by_name"] = names.get(r.decided_by) if r.decided_by else None
         item["subjects"] = subjects.get(r.id)
+        # F39 (2026-10-02): what stops THIS viewer approving it yet, said
+        # before they try. None for every request the seasoning rule does
+        # not cover and for a viewer nothing stops.
+        item["signer_block"] = svc.signer_block_for(r, user.user_id)
         # ux08-triage:approval-reach-warning-dropped (2026-09-23). Reach
         # is not stored on the request, but the notifications it raised
         # are, so a listing can say "nobody was told" for as long as that
@@ -257,13 +346,16 @@ def list_approvals(
         item["operation_description"] = op.description if op else None
     # Case operations only (F9, 2026-09-24): a deployment-wide one is not
     # raised here, and listing it offered an operation this route refuses.
-    return {"approvals": out,
+    body = {"approvals": out,
             "operations": {k: {"permission": v.permission,
                                "signer_permission": v.signer_permission,
                                "description": v.description,
                                "ttl_seconds": int(v.ttl.total_seconds())}
                            for k, v in OPERATIONS.items()
                            if v.scope == "case"}}
+    if withheld:
+        body["withheld"] = withheld
+    return body
 
 
 def _relax_payload_problem(conn: psycopg.Connection, case_id: UUID,
@@ -299,6 +391,43 @@ def _relax_payload_problem(conn: psycopg.Connection, case_id: UUID,
                        "The switch changed after this was prepared: reload "
                        "and ask again.")
     return None
+
+
+def _merge_request_labels(conn: psycopg.Connection, user: CurrentUser,
+                          case_id: UUID, payload: dict) -> dict:
+    """A node.merge request names two entities of this case the requester
+    may merge, or it is not raised (http_ui-011, 2026-10-03). Unchecked, a
+    request named a hidden entity and a random id alike with a 201, and its
+    justification went to every signer whatever they could see. One 404 for
+    an entity that is missing, in another case or above the requester. The
+    notice to the signers is labelled at the stricter of the two entities,
+    as the merge's own notification is, so a signer below either is not
+    sent the justification."""
+    pair = _merge_pair(payload)
+    if pair is None:
+        raise Problem(400, "Invalid request",
+                      "a node.merge request names source_node_id and "
+                      "target_node_id, the two entities to merge")
+    classifications, compartments = [], frozenset()
+    for node_id in pair:
+        cls, comp = gate_element(
+            conn, user, case_id=case_id, kind="node", element_id=node_id,
+            permission_key=OPERATIONS[MERGE_OPERATION].permission,
+            missing_detail="no such node in this case")
+        classifications.append(cls)
+        compartments |= comp
+    # The basis selector is checked when the request is raised, as it is when
+    # it is spent, so a payload that cannot merge never reaches a signer.
+    basis = (payload or {}).get("basis_selector_id")
+    if basis:
+        try:
+            basis_id = UUID(str(basis))
+        except ValueError:
+            raise Problem(400, "Invalid request",
+                          BASIS_SELECTOR_REFUSAL) from None
+        check_basis_selector(conn, user, case_id=case_id, selector_id=basis_id)
+    return {"element_classification": max(classifications, key=tlp_from_name),
+            "element_compartments": compartments}
 
 
 #: Per-operation checks a request's payload must pass before it is raised,
@@ -339,10 +468,13 @@ def raise_request(
         problem = check(conn, case_id, body.payload)
         if problem is not None:
             raise problem
+    labels = (_merge_request_labels(conn, user, case_id, body.payload)
+              if body.operation == MERGE_OPERATION else {})
     try:
         record = ApprovalService(conn).request(
             operation=body.operation, case_id=case_id, payload=body.payload,
-            justification=body.justification, requested_by=user.user_id)
+            justification=body.justification, requested_by=user.user_id,
+            **labels)
     except ApprovalError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
     return _out(record, reach=_request_reach(record))
@@ -376,7 +508,14 @@ def decide(
     record = svc.get(request_id)
     # Authorization before existence: an unauthorised caller gets the same
     # 404 whether or not the request is real (deps.py rule 2).
-    if record is None or record.case_id != case_id:
+    if (record is None or record.case_id != case_id
+            # Before the signer permission is asked (graph-merge-approval-
+            # hidden, 2026-10-03): a caller who lacks it was
+            # told 403 "missing permission" for a merge request naming
+            # entities above them and 404 for a random id, which said the
+            # request exists. The listing's 404, as for no request, whoever
+            # asks.
+            or not _merge_request_visible(conn, user, case_id, record)):
         raise Problem(404, "Not found", "no such approval request in this case")
     operation = OPERATIONS.get(record.operation)
     if operation is None:
@@ -387,6 +526,10 @@ def decide(
     # After `case.read` from the dependency, so a break-glass use counts
     # once (sec-breakglass-double-count, 2026-09-23), here and in
     # `raise_request`.
+    # (2026-10-03: a signer who may not see both entities of a merge was
+    # shown them as None and signed anyway, and this response handed back the
+    # payload and the justification: the visibility check above is the
+    # listing's 404.)
     authorize_object(conn, user, case_id=case_id,
                      permission_key=operation.signer_permission,
                      after_case_gate=True)
@@ -412,7 +555,11 @@ def withdraw(
     requester may have lost access to. The same 404 as `decide`."""
     svc = ApprovalService(conn)
     record = svc.get(request_id)
-    if record is None or record.case_id != case_id:
+    if (record is None or record.case_id != case_id
+            # 2026-10-03: the payload comes back in the response, so a
+            # merge request whose entities the caller can no longer both
+            # see is the listing's 404.
+            or not _merge_request_visible(conn, user, case_id, record)):
         raise Problem(404, "Not found", "no such approval request in this case")
     try:
         return _out(svc.withdraw(request_id, actor_id=user.user_id,
@@ -592,6 +739,12 @@ class PolicyOut(BaseModel):
     dual_control_merge_effective: bool = False
     dual_control_merge_epoch: int = 0
     relax_signers: int = 0
+    #: F39 (2026-10-02). The window a second person must have held
+    #: `case.update` on the case for, in days (0: the rule is off), and,
+    #: while nobody counted in `relax_signers` yet qualifies, the instant the
+    #: first colleague does. None when there is no such colleague.
+    relax_seasoning_days: int = 0
+    relax_next_eligible: datetime | None = None
 
 
 _DISCLOSURE = frozenset({"NONE", "PRESENCE", "COUNT"})
@@ -601,23 +754,43 @@ policy_router = APIRouter(prefix="/cases/{case_id}/policy", tags=["approvals"])
 
 
 def _relax_signers(conn: psycopg.Connection, case_id: UUID,
-                   user_id: UUID) -> int:
-    """Active accounts other than the caller, assigned to the case under a
+                   user_id: UUID, *, days: int) -> tuple[int, datetime | None]:
+    """The colleagues who could approve turning the switch off now, and
+    when the first of the others will be able to.
+
+    Active accounts other than the caller, assigned to the case under a
     role carrying the relax operation's signer permission, whose clearance
     and compartments dominate the case: the people who could read the
-    request and decide it."""
-    return conn.execute(
-        """SELECT count(DISTINCT u.id)
-             FROM iam.case_assignment ca
-             JOIN iam.app_user u ON u.id = ca.user_id
-             JOIN iam.role_permission rp ON rp.role_key = ca.role_key
-                                        AND rp.permission_key = %s
-             JOIN core."case" c ON c.id = ca.case_id
-            WHERE ca.case_id = %s AND u.is_active AND u.id <> %s
-              AND (ca.expires_at IS NULL OR ca.expires_at > now())
-              AND c.classification <= u.tlp_clearance
-              AND c.compartments <@ u.compartments""",
-        (OPERATIONS[RELAX].signer_permission, case_id, user_id)).fetchone()[0]
+    request and decide it. Since F39 (2026-10-02) only those whose
+    assignment is `days` days old count (the database's clock, the same
+    comparison `assignment_block` makes); with `days` 0 everyone does. The
+    second figure is the soonest a colleague who does not count yet will:
+    None when somebody counts already, or when nobody else holds the
+    permission."""
+    row = conn.execute(
+        """SELECT count(DISTINCT u.id) FILTER (WHERE seasoned),
+                  min(eligible_from) FILTER (WHERE NOT seasoned)
+             FROM (SELECT u.id,
+                          ca.granted_at + make_interval(hours => %(days)s::int * 24)
+                              AS eligible_from,
+                          (%(days)s::int = 0
+                           OR ca.granted_at
+                              + make_interval(hours => %(days)s::int * 24)
+                              <= now()) AS seasoned
+                     FROM iam.case_assignment ca
+                     JOIN iam.app_user u ON u.id = ca.user_id
+                     JOIN iam.role_permission rp ON rp.role_key = ca.role_key
+                                                AND rp.permission_key = %(perm)s
+                     JOIN core."case" c ON c.id = ca.case_id
+                    WHERE ca.case_id = %(case)s AND u.is_active
+                      AND u.id <> %(me)s
+                      AND (ca.expires_at IS NULL OR ca.expires_at > now())
+                      AND c.classification <= u.tlp_clearance
+                      AND c.compartments <@ u.compartments) u""",
+        {"days": days, "perm": OPERATIONS[RELAX].signer_permission,
+         "case": case_id, "me": user_id}).fetchone()
+    counting = int(row[0])
+    return counting, (None if counting else row[1])
 
 
 def _policy_out(conn: psycopg.Connection, case_id: UUID,
@@ -628,13 +801,16 @@ def _policy_out(conn: psycopg.Connection, case_id: UUID,
         (case_id,)).fetchone()
     if row is None:
         raise Problem(404, "Not found", "case does not exist")
+    days = relax_seasoning_days()
+    signers, next_eligible = _relax_signers(conn, case_id, user_id, days=days)
     return PolicyOut(
         dual_control_merge=bool(row[0]), withheld_disclosure=row[1],
         dual_control_merge_mode=policy_mode(conn, "node.merge"),
         dual_control_merge_effective=case_requires_dual_control(
             conn, case_id, "node.merge"),
         dual_control_merge_epoch=int(row[2]),
-        relax_signers=_relax_signers(conn, case_id, user_id))
+        relax_signers=signers, relax_seasoning_days=days,
+        relax_next_eligible=next_eligible)
 
 
 @policy_router.get("", response_model=PolicyOut)
@@ -664,6 +840,10 @@ def set_policy(
     `case.policy.relax` request raised against the switch as it stands,
     consumed here in the same transaction as the change. The database
     refuses the change without one (migration case_merge_relax_two_people).
+    Since F39 (2026-10-02) that second person must have held `case.update`
+    on the case for the deployment's window (seven days unless declared),
+    which the decide route checks when they approve and this route checks
+    again, at the time they approved, before the approval is spent.
     Turning it ON stays one signature: a tightening that needs a second
     person is one nobody makes. Under a deployment that requires a second
     signature on every merge, a case cannot turn it off at all.
@@ -716,6 +896,13 @@ def set_policy(
         if approval is None or approval.case_id != case_id:
             raise Problem(404, "Not found",
                           "no such approval request in this case")
+        # F39 (2026-10-02): was the second person seasoned when they
+        # signed. Before the transaction, so a refusal recorded out of band
+        # is not rolled back with it (approvals.py, the out-of-band rule).
+        try:
+            svc.refuse_unseasoned_spend(approval, actor_id=user.user_id)
+        except ApprovalError as exc:
+            raise Problem(409, "Conflict", safe_detail(exc)) from exc
 
     # One literal statement per setting. docs/05: "Parameterised queries
     # only; no string-built SQL anywhere" -- and a column name interpolated

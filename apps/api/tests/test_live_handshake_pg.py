@@ -252,10 +252,11 @@ def _wait(cond, seconds: float) -> bool:
 
 
 @contextlib.contextmanager
-def _server(app):
+def _server(app, **extra):
     """uvicorn on an ephemeral loopback port, in a thread, with the
     backend the launch scripts get (`ws="auto"`). The listening socket is
-    bound here so the port is known before the server thread starts."""
+    bound here so the port is known before the server thread starts.
+    `extra` is more of `uvicorn.Config`'s arguments (`ws_max_size`)."""
     import uvicorn
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
@@ -264,7 +265,7 @@ def _server(app):
     config = uvicorn.Config(
         app, host="127.0.0.1", port=port, ws="auto", lifespan="off",
         log_config=None, log_level="warning", access_log=False,
-        timeout_graceful_shutdown=3)
+        timeout_graceful_shutdown=3, **extra)
     server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]},
                               daemon=True, name="uvicorn-under-test")
@@ -355,3 +356,37 @@ def test_a_hostile_peer_holds_nothing_past_the_budget(monkeypatch):
         finally:
             for s in opened:
                 s.close()
+
+
+def test_a_first_frame_over_the_transport_bound_is_closed_1009_before_the_hello_is_read(
+        monkeypatch):
+    """The hello's own 4096-character check runs after
+    `receive()` has buffered the frame, and uvicorn's default limit is
+    16 MiB, so eight silent-then-huge sockets held about 800 MiB. With the
+    `--ws-max-size` every launch line passes (`live.WS_MAX_SIZE`) the server
+    closes 1009 at the frame header, so the app never sees the frame; and
+    without it the same frame reaches `_read_hello`, which answers 1008.
+    The ordinary hello still gets its ordinary answer under the bound."""
+    import json
+
+    from websockets.exceptions import ConnectionClosed
+    from websockets.sync.client import connect
+    live = _budget(monkeypatch, pending=8, per_peer=8)
+
+    def closed_by(port: int, text: str):
+        with connect(f"ws://127.0.0.1:{port}{LIVE}", open_timeout=5,
+                     proxy=None) as ws:
+            ws.send(text)
+            with pytest.raises(ConnectionClosed) as gone:
+                ws.recv(timeout=10)
+        return gone.value.rcvd.code, gone.value.rcvd.reason
+
+    hello = json.dumps({"token": "t" * 43, "case_id": None})
+    big = "x" * (live.WS_MAX_SIZE + 1)
+    with _server(_app(), ws_max_size=live.WS_MAX_SIZE) as (_server_obj, port):
+        assert closed_by(port, big)[0] == 1009
+        assert closed_by(port, hello) == (1008, "no such case")
+        assert _wait(lambda: live._pending.count == 0, 5.0)
+    with _server(_app()) as (_server_obj, port):
+        assert closed_by(port, big) == (1008, "bad hello"), (
+            "without the bound the frame is buffered and parsed first")

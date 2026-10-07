@@ -9,9 +9,9 @@ installed; the static checks still run.
   in flight drew the old instant's numbers under the new graph;
 - c18: with every hypothesis ruled out, the matrix said nothing had been
   scored beside cards that counted the stances;
-- u13: the "Score an assertion" picker kept the previous case's assertion
+- the "Score an assertion" picker kept the previous case's assertion
   after a switch, with Score enabled;
-- u14: the trend was not re-read after a run, so it left out the run just
+- the trend was not re-read after a run, so it left out the run just
   computed;
 - x-ach-withheld: the ACH pane never said that evidence above the reader
   had been left out.
@@ -38,6 +38,7 @@ function renderAnalytics() { drawn += 1; }
 function storedRunStatus() { return 'Showing the run of x.'; }
 function loadKeyPlayer() {}
 function loadConcor() {}
+function loadRege() {}
 function loadMetricHistory() {}
 """ + _const("AN_PROJECTION_CHANGED") + "\n" + "\n".join(
     _fn(n) for n in ("countOf", "agree", "closeClause", "analysisFailureText",
@@ -125,7 +126,7 @@ def test_both_in_flight_guards_compare_the_projection_they_were_asked_under():
 
 
 # ---------------------------------------------------------------------------
-# u14: the trend re-read when a run lands
+# the trend re-read when a run lands
 # ---------------------------------------------------------------------------
 
 def _trend_harness() -> str:
@@ -136,6 +137,7 @@ function renderAnalytics() {}
 function storedRunStatus() { return 'Showing the run of x.'; }
 function loadKeyPlayer() {}
 function loadConcor() {}
+function loadRege() {}
 const reread = [];
 function loadMetricHistory(node, label) { reread.push([node, label]); }
 """ + _const("AN_PROJECTION_CHANGED") + "\n" + "\n".join(
@@ -184,7 +186,7 @@ def test_a_run_that_lands_re_reads_the_open_trend():
 
 
 # ---------------------------------------------------------------------------
-# u13: the ACH scorer across a case switch
+# the ACH scorer across a case switch
 # ---------------------------------------------------------------------------
 
 def _ach_pick_harness() -> str:

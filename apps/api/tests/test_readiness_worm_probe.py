@@ -30,7 +30,7 @@ refused under GOVERNANCE too, so a store that downgraded passed claiming
 COMPLIANCE and gained a locked canary per probe; the mode is now read back.
 C9: preserved samples carry a legal hold and no retention, and the
 preservation check proved only a retention; it now proves a hold as well.
-U6: a transport error while tidying turned a proven check red.
+A transport error while tidying turned a proven check red.
 
 Most of this file drives a FAKE client, because the failure it exists for
 (a store that accepts the lock and deletes anyway) is not one the dev
@@ -627,7 +627,7 @@ def test_a_version_still_locked_is_kept_and_a_tidy_failure_keeps_the_proof():
     ServerError("server failed with HTTP status code 503", 503),
 ], ids=lambda exc: type(exc).__name__)
 def test_a_transport_error_while_tidying_keeps_the_proof(failure):
-    """Final review U6, 2026-09-23. The tidy runs after the proof passed
+    """2026-09-23. The tidy runs after the proof passed
     and is best effort, but it caught only S3Error, and the probe's client
     retries nothing. A reset or a slow page during the listing escaped
     through `_guarded`, and the row went red with "start the object store"

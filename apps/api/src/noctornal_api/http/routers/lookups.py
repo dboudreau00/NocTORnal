@@ -41,7 +41,9 @@ def _refused(exc: lookups.LookupRefused) -> JSONResponse:
     status = exc.status
     title = {400: "Invalid request", 403: "Forbidden", 409: "Conflict"}.get(status,
                                                                           "Conflict")
-    return JSONResponse(status_code=status, content={
+    # A problem with two extension members, so the problem media type too
+    # (2026-10-07: it was served as application/json).
+    return JSONResponse(status_code=status, media_type="application/problem+json", content={
         "type": "about:blank", "title": title, "status": status,
         "detail": safe_detail(exc), "code": exc.code,
         "retry_at": exc.retry_at.isoformat() if exc.retry_at else None})

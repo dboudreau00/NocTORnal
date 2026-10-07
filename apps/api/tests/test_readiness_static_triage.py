@@ -12,6 +12,7 @@ Email prefix `rsq-` (rst- is test_retention_storage_pg's). Env-gated on DATABASE
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from uuid import uuid4
 
 import pytest
@@ -49,6 +50,34 @@ def conn():
     c.close()
 
 
+@contextmanager
+def _own_queue(conn):
+    """A transaction that is always rolled back, in which the static-triage
+    queue holds only what the test puts there.
+
+    `_sample_static_analysis` reads the whole of `lab.static_run`, so runs
+    other suites left queued went stale during a long full run and failed
+    these tests (beta, 2026-10-07). Every run already there that the check
+    reads is set aside, ended a day ago, for the test's duration; the
+    rollback restores it untouched.
+    """
+    with conn.transaction(force_rollback=True):
+        conn.execute("""UPDATE lab.static_run
+                           SET status = 'ABANDONED',
+                               started_at = coalesce(started_at,
+                                                     now() - interval '1 day'),
+                               finished_at = now() - interval '1 day',
+                               failure = coalesce(failure, 'set aside by a test')
+                         WHERE status <> 'RUNNING'""")
+        yield
+
+
+@pytest.fixture
+def queue(conn):
+    with _own_queue(conn):
+        yield conn
+
+
 def _sample(conn, who):
     from noctornal_api.samples import SampleService
     return SampleService(conn, MemoryStore()).submit(pe_image() + uuid4().bytes,
@@ -65,27 +94,58 @@ def test_the_rows_are_not_blocking_and_follow_the_rows_at_the_base():
         assert name not in readiness.UI_TARGETS
 
 
-def test_it_fails_only_when_the_queue_is_stale(conn):
+def test_it_fails_only_when_the_queue_is_stale(queue):
+    conn = queue
     who = make_user(conn, PREFIX)
     s = _sample(conn, who)
     fresh = readiness._sample_static_analysis(conn)
     assert fresh.ok, fresh.evidence
     conn.execute("UPDATE lab.static_run SET queued_at = now() - interval "
                  "'2 hours' WHERE sample_id = %s", (s.id,))
-    done_recently = conn.execute(
-        """SELECT count(*) FROM lab.static_run WHERE status = 'DONE'
-            AND finished_at > now() - interval '60 minutes'""").fetchone()[0]
     stale = readiness._sample_static_analysis(conn)
-    if done_recently:
-        # A pass finished within the hour: the queue is draining.
-        assert stale.ok
-    else:
-        assert not stale.ok and "schedule scripts/lab_triage.py" in stale.action
+    assert not stale.ok and "schedule scripts/lab_triage.py" in stale.action
+    # A pass finished within the hour: the queue is draining.
     t = _sample(conn, who)
     conn.execute("""UPDATE lab.static_run SET status = 'DONE',
                         started_at = now(), finished_at = now()
                      WHERE sample_id = %s""", (t.id,))
     assert readiness._sample_static_analysis(conn).ok
+
+
+@pytest.mark.parametrize("status", ["FAILED", "SKIPPED", "ABANDONED"])
+def test_a_run_that_ended_otherwise_within_the_hour_is_a_drainer_too(queue, status):
+    """Only lab_triage ends a run, so a run it FAILED, SKIPPED or ABANDONED
+    within the hour proves a drainer ran as much as a DONE one; the check
+    used to read only DONE and told an operator whose drainer was working
+    through refusals to schedule one (2026-10-07)."""
+    conn = queue
+    who = make_user(conn, PREFIX)
+    s = _sample(conn, who)
+    conn.execute("UPDATE lab.static_run SET queued_at = now() - interval "
+                 "'2 hours' WHERE sample_id = %s", (s.id,))
+    assert not readiness._sample_static_analysis(conn).ok
+    t = _sample(conn, who)
+    conn.execute("""UPDATE lab.static_run SET status = %s, started_at = now(),
+                        finished_at = now(), failure = 'refused'
+                     WHERE sample_id = %s""", (status, t.id))
+    check = readiness._sample_static_analysis(conn)
+    assert check.ok, check.evidence
+
+
+def test_a_stale_run_left_by_another_suite_cannot_reach_these_tests(conn):
+    """The isolation above, shown: a committed queued run older than the
+    stale window (what a long full run left behind) does not reach a check
+    inside `_own_queue`, and the rollback gives the run back unchanged."""
+    left = _sample(conn, make_user(conn, PREFIX))
+    conn.execute("UPDATE lab.static_run SET queued_at = now() - interval "
+                 "'2 hours' WHERE sample_id = %s", (left.id,))
+    before = conn.execute("SELECT status, queued_at FROM lab.static_run "
+                          "WHERE sample_id = %s", (left.id,)).fetchone()
+    with _own_queue(conn):
+        assert readiness._sample_static_analysis(conn).ok
+    after = conn.execute("SELECT status, queued_at FROM lab.static_run "
+                         "WHERE sample_id = %s", (left.id,)).fetchone()
+    assert after == before and before[0] == "QUEUED"
 
 
 def test_it_fails_on_a_settings_problem_and_on_a_selftest_failure(conn, monkeypatch):
@@ -104,7 +164,8 @@ def test_it_fails_on_a_settings_problem_and_on_a_selftest_failure(conn, monkeypa
     assert not check.ok and "selftest" in check.evidence
 
 
-def test_it_passes_with_a_caveat_on_other_platforms_and_without_yara_x(conn, monkeypatch):
+def test_it_passes_with_a_caveat_on_other_platforms_and_without_yara_x(queue, monkeypatch):
+    conn = queue
     from noctornal_api import lab_static, lab_triage, yara_rules
     real = lab_triage.selftest
 
@@ -134,10 +195,11 @@ def test_it_passes_with_a_caveat_on_other_platforms_and_without_yara_x(conn, mon
      "parser exploit"),
 ])
 def test_the_exposure_caveat_names_only_what_applies_and_agrees(
-        conn, monkeypatch, exposure, says, never):
+        queue, monkeypatch, exposure, says, never):
     """The verifier saw "the database host: ... would reach them" with one
     exposure (F11, 2026-09-24). Each fact is named only when the selftest
     reported it, and the sentence reads the same for one or two."""
+    conn = queue
     from noctornal_api import lab_triage
     real = lab_triage.selftest
 

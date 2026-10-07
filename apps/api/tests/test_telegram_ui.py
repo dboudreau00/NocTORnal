@@ -156,7 +156,9 @@ def test_the_telegram_poll_confirm_names_persona_and_egress(tmp_path):
 
 @needs_node
 def test_a_due_telegram_chat_shows_its_chat_and_exit_not_a_host(tmp_path):
-    got = _run_tg(["dueRow", "dueAgo", "personaLabel", "telegramPollText"], r"""
+    # actCall since 2026-10-02 (A collector process): a persona source's
+    # Poll now is a persona act the collector runs.
+    got = _run_tg(["dueRow", "dueAgo", "personaLabel", "telegramPollText", "actCall"], r"""
     globalThis.apiAnswer = () => ({ items_new: 1, items_seen: 1, warnings: [] });
     const row = dueRow({ id: 's1', name: 'Ops chat', kind: 'TELEGRAM', base_url: null,
       max_rps: 0.2, parser_key: 'telegram', requires_authority: true,
@@ -220,7 +222,9 @@ def test_a_chat_row_draws_its_state_and_offers_the_verbs_it_may_use(tmp_path):
 
 @needs_node
 def test_the_join_form_needs_the_box_ticked_and_a_note(tmp_path):
-    got = _run(["openTelegramJoin"], r"""
+    # actCall since 2026-10-02 (A collector process): the join is a
+    # persona act the collector runs.
+    got = _run(["openTelegramJoin", "actCall"], r"""
     const card = mk('div');
     const reloads = [];
     openTelegramJoin(card, { source_id: 's1' }, (t) => reloads.push(t));

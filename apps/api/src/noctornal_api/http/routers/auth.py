@@ -8,6 +8,7 @@ answerable.
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -15,9 +16,9 @@ from uuid import uuid4
 import psycopg
 from fastapi import APIRouter, Depends, Request, Response
 from psycopg.types.json import Json
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from noctornal_api.db import SystemPurpose, system_connection
+from noctornal_api.db import SystemContextUnavailable, SystemPurpose, system_connection
 from noctornal_api.http.deps import (
     COOKIE_ATTRS,
     CSRF_COOKIE,
@@ -25,6 +26,7 @@ from noctornal_api.http.deps import (
     CurrentUser,
     current_user,
     get_conn,
+    note_system_fallback,
     session_token,
 )
 from noctornal_api.http.errors import Problem
@@ -47,13 +49,53 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 class LoginBody(BaseModel):
-    email: str
-    password: str
-    totp_code: str | None = None
+    # Bounded (http_ui-006, 2026-10-03): this route is unauthenticated and
+    # a failed attempt is audited, so the sizes are the caller's to choose
+    # only within these. 254 is the longest address SMTP carries; the
+    # passwords leave room above MAX_PASSWORD_LENGTH so the policy, not the
+    # parser, words that refusal.
+    email: str = Field(max_length=254)
+    password: str = Field(max_length=4096)
+    totp_code: str | None = Field(default=None, max_length=64)
     # The password the person chooses, sent only when the server has said
     # it must be changed (0066; gap-password-reset, 2026-09-23). Absent
     # on every ordinary sign-in.
-    new_password: str | None = None
+    new_password: str | None = Field(default=None, max_length=4096)
+
+
+#: How much of a submitted address a failed sign-in records verbatim
+#: (http_ui-006, 2026-10-03).
+AUDIT_EMAIL_CHARS = 64
+
+
+#: What an address looks like, and no more: one `@`, no whitespace, and a
+#: dot in the domain with something on each side of it. A shape test, not
+#: a validator; it exists to tell an address from something typed into the
+#: wrong box.
+_ADDRESS_SHAPE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+
+
+def _audit_email(email: str) -> dict:
+    """The submitted address as a failed sign-in records it: verbatim up
+    to AUDIT_EMAIL_CHARS when it is shaped like an address, and past that
+    the head, the length and a sha256 prefix, so the officer can still tell
+    repeated submissions apart. Until 2026-10-03 the whole string went into
+    the append-only log, and with no body ceiling one unauthenticated
+    request made a permanent multi-megabyte row (http_ui-006).
+
+    A value that is not shaped like an address records only its length and
+    the prefix (2026-10-07): the sign-in box is where people
+    type a password by mistake, and for an unknown account the row would
+    otherwise keep it in clear in a log nothing can delete from. An
+    address-shaped password (`Hunter2@home.net`) is not told apart from an
+    address and is the residual docs/17 records."""
+    if not _ADDRESS_SHAPE.fullmatch(email):
+        return {"email_length": len(email),
+                "email_sha256": hashlib.sha256(email.encode()).hexdigest()[:16]}
+    if len(email) <= AUDIT_EMAIL_CHARS:
+        return {"email": email}
+    return {"email": email[:AUDIT_EMAIL_CHARS], "email_length": len(email),
+            "email_sha256": hashlib.sha256(email.encode()).hexdigest()[:16]}
 
 
 def _ip_hash(request: Request) -> bytes | None:
@@ -72,13 +114,17 @@ def _ip_hash(request: Request) -> bytes | None:
     return hashlib.sha256(ip.encode()).digest()
 
 
-def _audit(conn, action: str, actor_id, detail: dict, request: Request) -> None:
+def _audit(conn, action: str, actor_id, detail: dict, request: Request,
+           *, outcome: str = "SUCCESS") -> None:
+    # `outcome`: a failed sign-in is DENIED, not the column's default
+    # SUCCESS (http_ui-006, 2026-10-03).
     conn.execute(
         """INSERT INTO audit.event
-               (actor_id, actor_kind, action, object_type, object_id, detail, ip_hash)
-           VALUES (%s, %s, %s, 'auth', NULL, %s, %s)""",
+               (actor_id, actor_kind, action, object_type, object_id, detail,
+                ip_hash, outcome)
+           VALUES (%s, %s, %s, 'auth', NULL, %s, %s, %s)""",
         (actor_id, "USER" if actor_id else "SYSTEM", action, Json(detail),
-         _ip_hash(request)),
+         _ip_hash(request), outcome),
     )
 
 
@@ -158,7 +204,7 @@ def _login(body: LoginBody, request: Request,
     # A recovery code is checked here and spent only once the sign-in is
     # known to go ahead (`spend`, below): the must-change and
     # no-change-pending refusals come first, and until 2026-09-24 each of
-    # them cost the person a single-use code (final review u4).
+    # them cost the person a single-use code (2026-09-24).
     service = AuthService(PgUserStore(conn))
     result = service.authenticate(
         body.email, body.password, body.totp_code, spend_recovery=False
@@ -172,14 +218,16 @@ def _login(body: LoginBody, request: Request,
         # explains it. Until 2026-09-11 this was an InvalidTag out of the
         # store and a 500 to the analyst.
         _audit(conn, "AUTH_FAILED", result.user_id,
-               {"reason": result.audit_reason, "email": body.email}, request)
+               {"reason": result.audit_reason, **_audit_email(body.email)},
+               request, outcome="DENIED")
         raise Problem(503, "Service unavailable", SECOND_FACTOR_UNAVAILABLE)
     if not result.ok:
         consume_on_failure(request, "auth.login_failed")
         # The specific cause is audited server-side and NEVER returned —
         # a distinct response would confirm which factor was right.
         _audit(conn, "AUTH_FAILED", result.user_id,
-               {"reason": result.audit_reason, "email": body.email}, request)
+               {"reason": result.audit_reason, **_audit_email(body.email)},
+               request, outcome="DENIED")
         raise Problem(401, "Unauthenticated", "invalid credentials")
     must_change = _password_change_due(conn, result.user_id, body, request)
     if not service.spend(result):
@@ -189,7 +237,8 @@ def _login(body: LoginBody, request: Request,
         # has been changed yet, the new password included.
         consume_on_failure(request, "auth.login_failed")
         _audit(conn, "AUTH_FAILED", None,
-               {"reason": "bad_recovery_code", "email": body.email}, request)
+               {"reason": "bad_recovery_code", **_audit_email(body.email)},
+               request, outcome="DENIED")
         raise Problem(401, "Unauthenticated", "invalid credentials")
     if must_change:
         change_password(conn, result.user_id, body.new_password,
@@ -257,7 +306,7 @@ def _password_change_due(conn, user_id, body: LoginBody,
       `PASSWORD_CHANGE_REQUIRED_TYPE`, and NO session. A TOTP code this
       request carried has been spent (replay protection), so the console
       asks for a fresh one with the new password. A recovery code has
-      not: `login` spends it only after this answers (final review u4);
+      not: `login` spends it only after this answers (2026-09-24);
     - the flag is set and a new password came: True, and `login` stores
       it and clears the flag in one statement (`iam_admin.change_password`)
       once the second factor is spent, then mints the session with it;
@@ -297,8 +346,18 @@ def logout(request: Request,
     user would evict their other devices; that is a separate, deliberate
     capability (password change, admin kill-all)."""
     SessionService(PgSessionStore(conn)).revoke(user.session_id, "logout")
-    _audit(conn, "AUTH_LOGOUT", user.user_id, {"session_id": str(user.session_id)},
-           request)
+    # The revoke ended this connection's binding, and the database attributes
+    # a request-role row only to the user its connection is bound to (0150,
+    # 2026-10-03), so the sign-out is written by the system role, as sign-in
+    # is. With none to hand the row is written here and demoted, not lost.
+    try:
+        with system_connection(SystemPurpose.AUTH, reuse=conn) as sconn:
+            _audit(sconn, "AUTH_LOGOUT", user.user_id,
+                   {"session_id": str(user.session_id)}, request)
+    except SystemContextUnavailable as exc:
+        note_system_fallback(exc, "AUTH_LOGOUT")
+        _audit(conn, "AUTH_LOGOUT", user.user_id,
+               {"session_id": str(user.session_id)}, request)
     response = Response(status_code=204)
     # Clear the cookies so the browser stops presenting a dead token. With
     # the attributes they were SET with: until 2026-09-09 this was
@@ -442,6 +501,12 @@ def me(user: CurrentUser = Depends(current_user),
         # not as a 500 the client would retry.
         raise Problem(401, "Unauthenticated", "session refers to no account")
     display_name, email, clearance = row
+    # Through the definer (rls-6, 2026-10-03): the request role may not
+    # read the hashes it counts. None means the connection is no longer
+    # bound to this account, a session revoked while this request ran.
+    remaining = PgUserStore(conn).recovery_codes_remaining(user.user_id)
+    if remaining is None:
+        raise Problem(401, "Unauthenticated", "invalid or expired session")
     expires = conn.execute(
         "SELECT expires_at FROM iam.session WHERE id = %s", (user.session_id,),
     ).fetchone()
@@ -458,7 +523,7 @@ def me(user: CurrentUser = Depends(current_user),
         # The COUNT only. Knowing you are down to your last code is
         # actionable; the codes themselves exist in plaintext exactly once,
         # at the moment they are issued.
-        recovery_codes_remaining=PgUserStore(conn).count_recovery_codes(user.user_id),
+        recovery_codes_remaining=remaining,
         idle_timeout_seconds=int(IDLE_TIMEOUT.total_seconds()),
         session_expires_in_seconds=max(0, int(left)),
         step_up_fresh_seconds=max(0, int(fresh_left)),
@@ -512,9 +577,10 @@ def issue_recovery_codes(
 
 
 class PasswordChangeBody(BaseModel):
-    current_password: str
-    totp_code: str
-    new_password: str
+    # Bounded as LoginBody is (http_ui-006, 2026-10-03).
+    current_password: str = Field(max_length=4096)
+    totp_code: str = Field(max_length=64)
+    new_password: str = Field(max_length=4096)
 
 
 # Metered like sign-in, because it IS a credential check: the current

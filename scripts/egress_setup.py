@@ -63,6 +63,7 @@ if _HERE not in sys.path:
 from _env import load_env_local  # noqa: E402
 from psycopg.types.json import Json  # noqa: E402
 from noctornal_api import egress, egress_ledger  # noqa: E402
+from noctornal_api.config import published_credentials  # noqa: E402
 from noctornal_api.egress_admin import EgressAdminError, EgressAdminService  # noqa: E402
 from noctornal_api.security import egress_seal  # noqa: E402
 
@@ -160,7 +161,7 @@ def keygen() -> str:
         f"NOCTORNAL_EGRESS_SEAL_KEY={keys[egress_seal.SEAL_KEY_ENV]}",
         f"NOCTORNAL_EGRESS_CLIENT_KEY={keys['NOCTORNAL_EGRESS_CLIENT_KEY']}",
         f"NOCTORNAL_EGRESS_FINGERPRINT_KEY={keys[egress_seal.FINGERPRINT_KEY_ENV]}",
-        "# infra/production/egress-client.env (api and cron):",
+        "# infra/production/egress-client.env (api, cron, the collector, lab-cron and embed-pass):",
         f"NOCTORNAL_EGRESS_CLIENT_KEY={keys['NOCTORNAL_EGRESS_CLIENT_KEY']}",
         f"NOCTORNAL_EGRESS_FINGERPRINT_KEY={keys[egress_seal.FINGERPRINT_KEY_ENV]}",
         f"NOCTORNAL_EGRESS_SEAL_PUBLIC={keys[egress_seal.SEAL_PUBLIC_ENV]}",
@@ -217,7 +218,12 @@ def compose_version() -> tuple[int, int] | None:
                              capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
         return None
-    match = re.search(r"(\d+)\.(\d+)", out or "")
+    return _version_of(out)
+
+
+def _version_of(text: str | None) -> tuple[int, int] | None:
+    """The major and minor of a `docker compose version --short` answer."""
+    match = re.search(r"(\d+)\.(\d+)", text or "")
     return (int(match.group(1)), int(match.group(2))) if match else None
 
 
@@ -236,6 +242,13 @@ def preflight(directory: Path, *, compose=compose_version) -> list[str]:
         for key in keys:
             if not values.get(key):
                 problems.append(f"{name} has no {key}.")
+    for name, values in files.items():
+        # A template value left in place (`replace-me`, which the
+        # database password lines of two of these files ship, and which
+        # agreeing in both files does not make private). Names the variable,
+        # never the value (infra-12, 2026-10-03).
+        for published in published_credentials(values):
+            problems.append(f"{name}: {published.refusal}")
     for name, values in files.items():
         for key, want in (("NOCTORNAL_EGRESS_CLIENT_KEY", 32),
                           ("NOCTORNAL_EGRESS_FINGERPRINT_KEY", 32),
@@ -327,6 +340,12 @@ def adopt(conn, user_id, via, *, ask=input, out=print) -> list[str]:
             f"deployment's own address), any public host on ports "
             f"{', '.join(str(p) for p in passive['allowed_ports'])}, carrying feeds "
             f"labelled up to {passive['ceiling']}")
+        if passive.get("feeds_above_ceiling"):
+            # egress-rss-floor (2026-10-03): nothing above AMBER leaves, so a
+            # feed labelled above it is not carried and is not polled.
+            out("  Some active feeds carry a label above AMBER, which never "
+                "leaves this deployment, so the collector does not poll them: "
+                "collect them by hand, or correct the label if it is wrong.")
     for route in proposal["routes"]:
         out(f"  the {route['name']} route allowing {route['entry']}")
         if route.get("confirm_network"):
@@ -355,6 +374,11 @@ def _parser() -> argparse.ArgumentParser:
         sub.add_parser(name)
     pre = sub.add_parser("preflight")
     pre.add_argument("--dir", default=str(PROD_DIR))
+    # Run inside the application image (a production host has no python with
+    # this tree's dependencies), where there is no docker to ask: the host's
+    # shell asks it and passes the answer, `$(docker compose version --short)`
+    # (2026-10-07).
+    pre.add_argument("--compose-version")
 
     def policy_options(p):
         p.add_argument("--ports")
@@ -430,7 +454,8 @@ def run(argv: list[str], *, ask=input, secret=getpass.getpass, stdin=None,
         out(role_sql())
         return 0
     if args.command == "preflight":
-        problems = preflight(Path(args.dir), compose=compose)
+        problems = preflight(Path(args.dir), compose=compose if args.compose_version is None
+                             else lambda: _version_of(args.compose_version))
         for problem in problems:
             out(problem)
         if problems:

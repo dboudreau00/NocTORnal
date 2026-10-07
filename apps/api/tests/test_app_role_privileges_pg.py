@@ -161,6 +161,36 @@ def _read_only(table: str) -> bool:
     return table.split(".", 1)[0] in schemas or table in tables
 
 
+def _later_migration_dicts(attr: str) -> dict[str, tuple[str, ...]]:
+    """One dict, `attr`, read from every migration after 0060 the way
+    GUARDED_TABLES is."""
+    out: dict[str, tuple[str, ...]] = {}
+    for path in sorted(MIGRATION.parent.glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if path.name <= MIGRATION.name:
+            continue
+        spec = importlib.util.spec_from_file_location(f"m{path.stem[:4]}", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        out.update(getattr(module, attr, {}))
+    return out
+
+
+def _column_selects() -> dict[str, tuple[str, ...]]:
+    """Tables a later migration made readable by named columns only
+    (`RUNTIME_COLUMN_SELECTS`; 0143 is the first, iam.app_user without
+    its credential columns, rls-6 2026-10-03). Table-level SELECT is
+    false there by design, so reachability is any column's SELECT."""
+    return _later_migration_dicts("RUNTIME_COLUMN_SELECTS")
+
+
+def _runtime_column_updates() -> dict[str, tuple[str, ...]]:
+    """The tables whose UPDATE a later migration narrowed to named columns
+    for the runtime role, with those columns: 0109's two on the IAM plane,
+    and 0155's ingest records, credentials and authorisations (F51,
+    2026-10-02)."""
+    return _later_migration_dicts("RUNTIME_COLUMN_UPDATES")
+
+
 def _scalar(conn, sql, params=None):
     # `None` rather than `()`: psycopg only runs its client-side binder when
     # params is not None, and the binder treats `%` as a placeholder marker.
@@ -337,18 +367,34 @@ def test_the_ledgers_are_readable_appendable_and_nothing_else(conn):
         assert not got["TRIGGER"], (table, got)
 
 
-def test_the_ledger_sequences_are_usable_or_every_audited_action_fails(conn):
-    """The grant that reads as boilerplate and is not.
+#: The ledger sequences drawn by a SECURITY DEFINER chain trigger (0149,
+#: 2026-10-03): the trigger draws them as the owner inside the chain lock, so
+#: since 0169 the runtime role holds no privilege on them and the column has
+#: no default.
+DEFINER_DRAWN = {"audit.event": "seq", "core.evidence_custody": "id"}
 
-    This database has exactly three sequences and all three sit behind
-    append-only ledgers. A column DEFAULT `nextval(...)` is evaluated as the
-    INSERTING role, so without USAGE the very first audited action fails --
-    and it fails saying `permission denied for sequence event_seq_seq`, which
-    names the sequence and not the table, sending whoever reads the log to the
-    wrong place.
+
+def test_the_ledger_sequences_are_usable_or_every_audited_action_fails(conn):
+    """The grant that reads as boilerplate and is not, for the sequences a
+    column DEFAULT still draws.
+
+    A column DEFAULT `nextval(...)` is evaluated as the INSERTING role, so
+    without USAGE the very first write to such a ledger fails, saying
+    `permission denied for sequence ...`, which names the sequence and not
+    the table, sending whoever reads the log to the wrong place.
+
+    Two of the three ledger sequences are not like that any more. 0149 moved
+    their draw into the chain trigger, which runs as the owner INSIDE the
+    chain lock (so seq order is chain order), and 0169 took the runtime
+    role's USAGE and SELECT away and dropped the defaults: nothing legitimate
+    draws them, and `SELECT last_value` read the whole log's volume to a
+    caller who may read none of it. That is
+    `test_the_definer_drawn_sequences_are_the_triggers_alone`.
     """
     seen = 0
     for table, column in LEDGER_SEQUENCE_COLUMN.items():
+        if table in DEFINER_DRAWN:
+            continue
         seq = _scalar(conn, "SELECT pg_get_serial_sequence(%s, %s)",
                       (table, column or "id"))
         if column is None:
@@ -368,7 +414,31 @@ def test_the_ledger_sequences_are_usable_or_every_audited_action_fails(conn):
         assert _scalar(conn, "SELECT has_sequence_privilege(%s, %s, 'SELECT')",
                        (APP_DB_ROLE, seq))
         seen += 1
-    assert seen == 3, f"expected three ledger sequences, checked {seen}"
+    assert seen == 1, f"expected one default-drawn ledger sequence, checked {seen}"
+
+
+def test_the_definer_drawn_sequences_are_the_triggers_alone(conn):
+    for table, column in DEFINER_DRAWN.items():
+        seq = _scalar(conn, "SELECT pg_get_serial_sequence(%s, %s)", (table, column))
+        assert seq is not None, f"{table}.{column} lost its sequence"
+        for role in (APP_DB_ROLE, "noctornal_worker"):
+            if not _scalar(conn, "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = %s)",
+                           (role,)):
+                continue
+            for privilege in ("USAGE", "SELECT", "UPDATE"):
+                assert not _scalar(
+                    conn, "SELECT has_sequence_privilege(%s, %s, %s)",
+                    (role, seq, privilege)), (
+                    f"{role} holds {privilege} on {seq}: a caller can read the "
+                    f"ledger's volume or burn its sequence")
+        default = _scalar(
+            conn,
+            "SELECT column_default FROM information_schema.columns "
+            "WHERE table_schema || '.' || table_name = %s AND column_name = %s",
+            (table, column))
+        assert default is None, (
+            f"{table}.{column} has a default again ({default}): the draw is back "
+            f"outside the chain lock")
 
 
 def test_an_ordinary_table_carries_the_full_four(conn):
@@ -409,17 +479,72 @@ def test_every_table_in_every_product_schema_is_reachable(conn):
 
     ledgers = set(m.LEDGERS)
     guarded = _guarded_after_0060()
+    column_selects = _column_selects()
+    by_column = _runtime_column_updates()
     unreachable = {}
     for table in tables:
         got = _table_privileges(conn, table)
+        if table in column_selects:  # 0143: named columns only
+            got["SELECT"] = _scalar(
+                conn, "SELECT has_any_column_privilege(%s, %s, 'SELECT')",
+                (APP_DB_ROLE, table))
         wanted = ("SELECT", "INSERT") if table in ledgers else guarded.get(
             table, ("SELECT", "INSERT", "UPDATE", "DELETE"))
+        if table in by_column:  # 0155: UPDATE by column, checked below
+            wanted = tuple(p for p in wanted if p != "UPDATE")
         if _read_only(table):  # 0109, the IAM plane
             wanted = ("SELECT",)
         missing = [p for p in wanted if not got[p]]
         if missing:
             unreachable[table] = missing
     assert not unreachable, unreachable
+
+
+def test_a_column_confined_table_is_updatable_in_exactly_its_columns(conn):
+    """F51, 2026-10-02: 0155 took table UPDATE on the ingest records, the
+    victims' credentials and the reveal authorisations from the runtime
+    role and gave back only the columns a request writes, because a row
+    policy says which rows and not which columns. No table UPDATE, every
+    declared column, and no other column, on each such table, 0109's two
+    included."""
+    confined = _runtime_column_updates()
+    assert {"ingest.record", "ingest.victim_credential",
+            "ingest.pii_authorisation"} <= set(confined), confined
+    wrong = {}
+    for table, columns in confined.items():
+        if _table_privileges(conn, table)["UPDATE"]:
+            wrong[table] = "table-level UPDATE"
+            continue
+        names = [r[0] for r in conn.execute(
+            """SELECT attname FROM pg_attribute
+                WHERE attrelid = %s::regclass AND attnum > 0 AND NOT attisdropped""",
+            (table,)).fetchall()]
+        held = {c for c in names if _scalar(
+            conn, "SELECT has_column_privilege(%s, %s, %s, 'UPDATE')",
+            (APP_DB_ROLE, table, c))}
+        if held != set(columns):
+            wrong[table] = {"extra": sorted(held - set(columns)),
+                            "missing": sorted(set(columns) - held)}
+    assert not wrong, wrong
+
+
+#: Reference vocabulary nothing writes at run time (0172, 2026-10-07): the ontology, the
+#: comms catalogue and the
+#: ingest categories. A row here decides which identifier is a merge lead
+#: and which one a platform is indexed on, for every case at once.
+VOCABULARY = ("core.node_type", "core.edge_type", "core.selector_type",
+              "comms.platform", "ingest.category_rule")
+
+
+def test_the_vocabulary_is_readable_and_not_writable(conn):
+    for table in VOCABULARY:
+        got = _table_privileges(conn, table)
+        assert got["SELECT"], (table, got)
+        assert not (got["INSERT"] or got["UPDATE"] or got["DELETE"]), (
+            f"{table} is reference vocabulary and the runtime role can "
+            f"write it: {got}")
+        assert _read_only(table), (
+            f"{table} is not declared read-only by any migration")
 
 
 def test_the_version_table_is_readable_and_not_writable(conn):

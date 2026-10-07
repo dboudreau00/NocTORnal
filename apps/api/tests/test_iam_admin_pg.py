@@ -379,3 +379,35 @@ def test_the_collection_roles_are_grantable_from_the_panel(conn):
         "the allowlist names a role this deployment's seed does not have")
     # SERVICE is a machine identity and stays out on purpose.
     assert "SERVICE" not in GRANTABLE_ROLES
+
+
+def test_every_clearance_the_database_holds_can_be_set_from_the_panel(conn):
+    """AMBER_STRICT was missing from the panel's list, so an AMBER_STRICT
+    account (bootstrap and break-glass grant it) could not be set, and the
+    console's select, holding no such option, showed the first one, CLEAR:
+    pressing Set clearance there lowered the account without a word."""
+    from pathlib import Path
+
+    from noctornal_api.iam_admin import _TLP
+    held = [r[0] for r in conn.execute(
+        "SELECT unnest(enum_range(NULL::core.tlp))::text").fetchall()]
+    assert list(_TLP) == held
+    admin = _mk(conn, "SYS_ADMIN")
+    target = _mk(conn, "ANALYST", clearance="AMBER_STRICT")
+    _svc(conn).set_clearance(target.user_id, clearance="RED",
+                             actor_id=admin.user_id)
+    _svc(conn).set_clearance(target.user_id, clearance="AMBER_STRICT",
+                             actor_id=admin.user_id)
+    assert conn.execute(
+        "SELECT tlp_clearance::text FROM iam.app_user WHERE id = %s",
+        (target.user_id,)).fetchone()[0] == "AMBER_STRICT"
+    static = Path(__file__).resolve().parents[1] / "src" / "noctornal_api" / "http" / "static"
+    js = (static / "app.js").read_text(encoding="utf-8")
+    pair = js[js.index("function clearancePair("):]
+    pair = pair[:pair.index("\n}\n")]
+    assert "for (const c of TLP)" in pair
+    assert "const TLP = ['CLEAR', 'GREEN', 'AMBER', 'AMBER_STRICT', 'RED'];" in js
+    html = (static / "index.html").read_text(encoding="utf-8")
+    form = html[html.index('id="adm-clearance"'):]
+    form = form[:form.index("</select>")]
+    assert all(f">{c}<" in form for c in held)

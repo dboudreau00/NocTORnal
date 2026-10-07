@@ -34,14 +34,19 @@ never by its message, for the same reason.
 ## What the child can still reach
 
 The environment it is started with holds no credential (`child_env` in
-`lab_triage`), but on Linux a process can read `/proc/<pid>/environ` of
-any dumpable process running as the same user, which includes its
+`analysis_runner`), but on Linux a process can read `/proc/<pid>/environ`
+of any dumpable process running as the same user, which includes its
 parent, the other API workers and a container's PID 1, and it shares the
-container's network. So a parser exploit in the child is a compromise of
-the process that started it. The selftest reports both facts
-(`exposure`), readiness shows them, and docs/16 records the residual; a
-separate container with no secrets and no network is the fix, and is a
-deployment change this build does not make.
+container's network. So a parser exploit in a child started beside the
+application is a compromise of the process that started it. The selftest
+reports both facts (`exposure`) and readiness shows them.
+
+Since 2026-10-02 (docs/17 F42) production starts this module in the
+isolated analysis worker instead (`analysis_worker`, compose.yml's
+`analysis-worker`): a container with no secrets to read and no network to
+reach, where the same selftest reports the same two facts about a
+container that has neither to give. The child is the same module either
+way, started by the same `analysis_runner.run_local`.
 """
 from __future__ import annotations
 
@@ -142,7 +147,13 @@ def apply_limits(memory_bytes: int, cpu_s: int) -> str:
         soft, hard = resource.getrlimit(which)
         if hard != resource.RLIM_INFINITY and value > hard:
             value = hard
-        resource.setrlimit(which, (value, value))
+        ceiling = value
+        if which == resource.RLIMIT_CPU and (hard == resource.RLIM_INFINITY or value < hard):
+            # One second of headroom: at the soft limit the kernel sends
+            # SIGXCPU, which the runner reads as the time limit; with the two
+            # equal it sends SIGKILL, which reads like any other kill.
+            ceiling = value + 1
+        resource.setrlimit(which, (value, ceiling))
     return kind
 
 

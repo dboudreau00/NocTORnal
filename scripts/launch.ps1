@@ -308,6 +308,24 @@ if (Test-Path -LiteralPath $EnvLocal) {
         $value = $trimmed.Substring($split + 1).Trim().Trim('"').Trim("'")
         if (-not $name) { continue }
 
+        # A name that changes how programs start is left out (2026-10-03). This loop is
+        # data, not script, but it
+        # still set any name, so `PATH`, `PYTHONPATH` or `COMSPEC` in a
+        # handed-over file redirected the next program this script starts.
+        # Not an allow-list on purpose: a new setting would silently stop
+        # loading. The same list is in scripts/_env.py, release/install.sh,
+        # scripts/launch.sh and scripts/open-ui.ps1; a test holds all five
+        # together. -contains and
+        # -like are case-insensitive, as Windows names are.
+        $refusedExact    = @('PATH', 'PATHEXT', 'HOME', 'COMSPEC', 'IFS', 'ENV', 'CDPATH', 'GLOBIGNORE', 'SHELLOPTS', 'BASHOPTS', 'PROMPT_COMMAND', 'PS1', 'PS2', 'PS3', 'PS4', 'PSMODULEPATH')
+        $refusedPrefixes = @('BASH_', 'LD_', 'DYLD_', 'PYTHON', 'DOCKER_', 'COMPOSE_', 'GIT_', 'PIP_', 'NODE_')
+        $refused = ($refusedExact -contains $name)
+        foreach ($prefix in $refusedPrefixes) { if ($name -like "$prefix*") { $refused = $true } }
+        if ($refused) {
+            Write-Detail "$name ignored: it changes how programs start (set it in your shell if you mean it)"
+            continue
+        }
+
         # `$null -ne`, not `IsNullOrWhiteSpace`. GetEnvironmentVariable
         # returns $null when the variable does not exist and "" when it
         # exists and is empty -- and a variable that is DEFINED AND EMPTY
@@ -333,6 +351,26 @@ if (Test-Path -LiteralPath $EnvLocal) {
     }
 }
 
+# The key store is private to this user from the first byte (infra-9,
+# 2026-10-03). On Windows a new file inherits its folder's ACL, which is
+# every account that can read the project directory, and nothing restricted
+# it afterwards. The file is created empty, restricted, and only then
+# written, so the keys never exist in a file others can read. Not fatal when
+# icacls refuses (a FAT volume, say): the installer says so and goes on,
+# because a stopped install would leave no key store at all.
+function Protect-EnvLocal {
+    param([string] $Path)
+    if ($env:OS -ne 'Windows_NT') { return }
+    try {
+        $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        & icacls.exe $Path /inheritance:r /grant:r "*${sid}:(F)" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "icacls exited $LASTEXITCODE" }
+    }
+    catch {
+        Write-Note "Could not restrict $Path to this user ($($_.Exception.Message)). Do it by hand: icacls `"$Path`" /inheritance:r /grant:r `"%USERNAME%:F`""
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($env:NOCTORNAL_TOTP_KEK)) {
     $bytes = New-Object byte[] 32
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
@@ -350,12 +388,16 @@ if ([string]::IsNullOrWhiteSpace($env:NOCTORNAL_TOTP_KEK)) {
         # keys if it is kept here too. They said only that users would
         # re-enrol their authenticators (Alpha 6 pre-release check,
         # 2026-09-23).
+        # Create it empty and restrict it BEFORE the key is written.
+        New-Item -ItemType File -Path $EnvLocal -Force | Out-Null
+        Protect-EnvLocal -Path $EnvLocal
         $header = @(
             '# NocTORnal local key store. Created by scripts/launch.ps1.',
             '#',
             '# NOCTORNAL_TOTP_KEK seals every secret the database stores encrypted,',
-            '# except the egress exits, which are sealed to the egress proxy''s own key:',
-            '# enrolled authenticators, collection persona credentials, stored victim',
+            '# except the egress exits, which are sealed to the egress proxy''s own key,',
+            '# and collection persona credentials, which NOCTORNAL_PERSONA_KEK seals:',
+            '# enrolled authenticators, stored victim',
             '# credentials, each sample''s data key, and the credentials of the outbound',
             '# integrations an administrator configures (Jira and lookup provider',
             '# credentials). LOSING THIS FILE LOSES ALL OF',
@@ -383,8 +425,9 @@ if ([string]::IsNullOrWhiteSpace($env:NOCTORNAL_TOTP_KEK)) {
     Write-Host "      $EnvLocal" -ForegroundColor Yellow
     Write-Host '' -ForegroundColor Yellow
     Write-Host '    That file is now your key store. The key seals every secret the' -ForegroundColor Yellow
-    Write-Host '    database stores encrypted: authenticators, persona and victim' -ForegroundColor Yellow
-    Write-Host '    credentials, Jira and lookup provider credentials, and the keys of' -ForegroundColor Yellow
+    Write-Host '    database stores encrypted but persona credentials, which have a' -ForegroundColor Yellow
+    Write-Host '    key of their own: authenticators, victim credentials, Jira and' -ForegroundColor Yellow
+    Write-Host '    lookup provider credentials, and the keys of' -ForegroundColor Yellow
     Write-Host '    stored samples. If you lose it, every user has to re-enrol their' -ForegroundColor Yellow
     Write-Host '    authenticator app, and none of the rest can be decrypted again.' -ForegroundColor Yellow
     Write-Host '    There is no recovery and no default key.' -ForegroundColor Yellow
@@ -394,6 +437,22 @@ if ([string]::IsNullOrWhiteSpace($env:NOCTORNAL_TOTP_KEK)) {
 }
 elseif (-not $kekFromEnvironment) {
     Write-Good 'TOTP key ready'
+}
+
+# A collector process (2026-10-02): persona credentials seal under a key of
+# their own. On this machine the API holds it and runs persona acts inline
+# (NOCTORNAL_COLLECTOR_INLINE below); in production only the collector
+# service does. Appended, never replacing anything in the file.
+if ([string]::IsNullOrWhiteSpace($env:NOCTORNAL_PERSONA_KEK)) {
+    $pbytes = New-Object byte[] 32
+    $prng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $prng.GetBytes($pbytes) } finally { $prng.Dispose() }
+    $pgenerated = [Convert]::ToBase64String($pbytes)
+    Add-Content -LiteralPath $EnvLocal -Value @(
+        '# NOCTORNAL_PERSONA_KEK seals every collection persona credential. Lost, every persona is enrolled again.',
+        "NOCTORNAL_PERSONA_KEK=$pgenerated")
+    $env:NOCTORNAL_PERSONA_KEK = $pgenerated
+    Write-Good 'persona key generated and saved to .env.local'
 }
 
 # ---------------------------------------------------------------------------
@@ -433,6 +492,10 @@ $defaults = [ordered]@{
     # 2026-09-24: raw markup of collected forum pages, again without
     # object lock, because it is deleted with its document.
     COLLECT_RAW_BUCKET = 'noctornal-collect-raw'
+    # A collector process (2026-10-02): there is no collector process on
+    # this machine, so persona acts run inside the API, as they always did
+    # here. Refused in production.
+    NOCTORNAL_COLLECTOR_INLINE = '1'
 }
 
 foreach ($name in $defaults.Keys) {
@@ -637,5 +700,5 @@ Write-Host ''
 # Uvicorn logs to stderr. Run it bare - not piped, not redirected - so the log
 # reaches the console as plain text and Ctrl+C reaches the process.
 $ErrorActionPreference = 'Continue'
-& $Python -m uvicorn 'noctornal_api.http.app:app' --host 127.0.0.1 --port $Port
+& $Python -m uvicorn 'noctornal_api.http.app:app' --host 127.0.0.1 --port $Port --ws-max-size 8192
 exit $LASTEXITCODE

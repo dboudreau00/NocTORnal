@@ -3,10 +3,11 @@
 2026-09-25. `noctornal_worker` is what `db.connect_system` connects as: the
 work that must see every row. BYPASSRLS is the one power it has over
 `noctornal_app`; privilege for privilege it holds what the request role
-holds plus the IAM-plane writes 0109 took from the request role, and in
-particular the same closed ledgers and insert-only records. A later
-migration that revokes something from one runtime role and forgets the
-other fails here.
+holds plus the IAM-plane writes 0109 took from the request role and the
+whole-table UPDATE 0155 narrowed to columns for the request role on the
+ingest records and credentials (F51, 2026-10-02), and in particular the
+same closed ledgers and insert-only records. A later migration that
+revokes something from one runtime role and forgets the other fails here.
 
 Catalog reads over the owner's connection, gated like
 test_app_role_privileges_pg.py; CI creates both roles before migrating.
@@ -76,6 +77,9 @@ def test_it_owns_nothing_and_is_a_member_of_nothing_that_does(conn):
 
 def test_privilege_for_privilege_it_is_the_request_role_plus_the_iam_plane(conn):
     lockdown = _migration("0109")
+    narrowed = _migration("0155")
+    sealed = _migration("0143").RUNTIME_COLUMN_SELECTS
+    vocabulary = _migration("0172").RUNTIME_READ_ONLY_TABLES
     tables = [r[0] for r in conn.execute(
         """SELECT n.nspname || '.' || quote_ident(c.relname)
              FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -84,8 +88,11 @@ def test_privilege_for_privilege_it_is_the_request_role_plus_the_iam_plane(conn)
     assert len(tables) >= 100
     differ = {}
     for table in tables:
+        # 0172 (2026-10-07) closed the reference vocabulary to the request
+        # role only; the system role keeps what it held.
         read_only = (table.split(".", 1)[0] in lockdown.RUNTIME_READ_ONLY_SCHEMAS
-                     or table in lockdown.RUNTIME_READ_ONLY_TABLES)
+                     or table in lockdown.RUNTIME_READ_ONLY_TABLES
+                     or table in vocabulary)
         for priv in PRIVILEGES:
             worker = conn.execute("SELECT has_table_privilege(%s, %s, %s)",
                                   (s.WORKER_ROLE, table, priv)).fetchone()[0]
@@ -95,9 +102,78 @@ def test_privilege_for_privilege_it_is_the_request_role_plus_the_iam_plane(conn)
                 # The system role writes the IAM plane unless an older
                 # migration closed the table to both runtime roles.
                 continue
+            if priv == "UPDATE" and table in narrowed.SYSTEM_KEEPS_UPDATE:
+                # 0155 (F51, 2026-10-02): the purge, a compartment rename,
+                # scoring and the re-wrap write columns no request does.
+                continue
+            if priv == "SELECT" and table in sealed:
+                # 0143 (rls-6, 2026-10-03): the request role reads the sealed
+                # credential columns of this table by column, the system role
+                # keeps the table.
+                continue
             if worker != app:
                 differ[(table, priv)] = {"worker": worker, "app": app}
     assert not differ, differ
+
+
+def _column_updates(conn, role: str, table: str) -> set[str]:
+    return {r[0] for r in conn.execute(
+        """SELECT attname FROM pg_attribute
+            WHERE attrelid = %s::regclass AND attnum > 0 AND NOT attisdropped
+              AND has_column_privilege(%s, attrelid, attnum, 'UPDATE')""",
+        (table, role)).fetchall()}
+
+
+def test_on_the_ingest_records_it_keeps_only_what_a_system_path_writes(conn):
+    """0155 (F51, 2026-10-02). On the reveal authorisations no system
+    connection writes anything but the count, so the system role is the
+    request role exactly: query_count and nothing else. On the records and
+    the credentials it keeps table UPDATE, which the purge, a compartment
+    rename, scoring and the KEK re-wrap need, and so every column the
+    request role holds."""
+    narrowed = _migration("0155")
+    for table, columns in narrowed.RUNTIME_COLUMN_UPDATES.items():
+        app = _column_updates(conn, s.APP_ROLE, table)
+        worker = _column_updates(conn, s.WORKER_ROLE, table)
+        assert app == set(columns), (table, app)
+        whole = conn.execute("SELECT has_table_privilege(%s, %s, 'UPDATE')",
+                             (s.WORKER_ROLE, table)).fetchone()[0]
+        if table in narrowed.SYSTEM_KEEPS_UPDATE:
+            assert whole and app < worker, (table, worker)
+        else:
+            assert not whole and worker == app, (table, worker)
+
+
+def test_ensure_replays_the_column_grants_after_the_blanket_ones(conn):
+    """`scripts/runtime_roles.py ensure` replays 0108's blanket grant, which
+    hands both roles table UPDATE on every table; without 0155's replay
+    after it, a role created after 0155 ran would get the authorisation's
+    window and a record's case back (F51, 2026-10-02). Run inside a
+    transaction that is rolled back, on this test database only."""
+    import psycopg
+
+    scripts = VERSIONS.parents[2] / "scripts"
+    spec = importlib.util.spec_from_file_location("runtime_roles_t", scripts / "runtime_roles.py")
+    roles = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(roles)
+    narrowed = _migration("0155")
+    seen = {}
+    try:
+        with conn.transaction():
+            roles.grant(conn)
+            for table in narrowed.RUNTIME_COLUMN_UPDATES:
+                seen[table] = {
+                    role: (conn.execute("SELECT has_table_privilege(%s, %s, 'UPDATE')",
+                                        (role, table)).fetchone()[0],
+                           _column_updates(conn, role, table))
+                    for role in (s.APP_ROLE, s.WORKER_ROLE)}
+            raise psycopg.Rollback()
+    except psycopg.Rollback:
+        pass
+    for table, columns in narrowed.RUNTIME_COLUMN_UPDATES.items():
+        assert seen[table][s.APP_ROLE] == (False, set(columns)), (table, seen[table])
+        if table not in narrowed.SYSTEM_KEEPS_UPDATE:
+            assert seen[table][s.WORKER_ROLE] == (False, set(columns)), (table, seen[table])
 
 
 def test_the_iam_plane_is_writable_to_it_and_read_only_to_the_request_role(conn):

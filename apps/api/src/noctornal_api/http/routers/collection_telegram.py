@@ -21,15 +21,26 @@ never a library's text: the foundation's answers for a wait, a refused
 credential and an abandoned session, and Telegram's own for an egress
 refusal (503), a transport failure (502) and a chat Telegram will not show
 this persona (409).
+
+## Where the act runs (A collector process, 2026-10-02)
+
+Not here. Each act route checks what it always checked first (the
+permissions, the second factor, the readiness register, the chat's
+visibility), then queues the act in `collect.persona_act` for the
+collector, the one process that holds the persona key, and answers with
+the act's outcome when it finishes within NOCTORNAL_ACT_WAIT_SECONDS, or
+202 with the act while it is queued. The outcome is the same status and
+sentence as before, through `act_problem`. Development's inline mode
+(NOCTORNAL_COLLECTOR_INLINE) runs it here, in this request.
 """
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 import psycopg
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 
 from noctornal_api.collection import (
     CollectionError,
@@ -50,20 +61,42 @@ from noctornal_api.http.routers.collection import (
     get_adapters,
     refuse_unready,
 )
+from noctornal_api.security.access import AccessResolutionError, tlp_from_name
 from noctornal_api.telegram import (
     ReferenceRefused,
     TelegramEgressRefused,
     TelegramProxyBusy,
     TelegramSecretInvalid,
     TelegramTransportFailed,
+    clean_text,
 )
 from noctornal_api.telegram_service import (
     TelegramActError,
     TelegramChats,
+    check_create_request,
+    normal_reference,
     set_window,
 )
 
 router = APIRouter(prefix="/collection/telegram", tags=["collection"])
+
+
+def _storable(value: str) -> str:
+    """U+0000 is text pydantic accepts and Postgres cannot store: it raised
+    UntranslatableCharacter on the act's INSERT, so a join note or a reason
+    carrying one answered 500 (2026-10-03). clean_text
+    swaps it, and a lone surrogate should one ever get here, for U+FFFD, one
+    character for one, so the field's own length limits still hold. (A lone
+    surrogate in a request body never gets here: pydantic refuses it with a
+    422. Neither does a JSON body with a NUL escape, since the request layer
+    refuses one with a 422 before any route parses it, http_ui-014,
+    2026-10-03: `http/body_ceiling.py`. This is what holds for a model built
+    anywhere else, and is the second wall.)"""
+    return clean_text(value, len(value)) or ""
+
+
+#: Free text a route queues in an act's parameters.
+Storable = Annotated[str, AfterValidator(_storable)]
 
 EGRESS_ANSWER = ("The egress proxy refused the connection to Telegram. The "
                  "egress log says why.")
@@ -109,8 +142,50 @@ def _problem(exc: Exception) -> Problem:
     return Problem(400, "Invalid request", safe_detail(exc))
 
 
+MEMBER_MARKED = "The chat is now a member chat. "
+
+
+def act_problem(kind: str, exc: Exception) -> Problem:
+    """The answer for a Telegram act's outcome, whichever process ran it
+    (A collector process, 2026-10-02): `_problem`, and for a mark as
+    member the sentence that says the mark stood."""
+    problem = _problem(exc)
+    if (kind == "TELEGRAM_MARK_MEMBER" and problem.status == 409
+            and not isinstance(exc, TelegramActError)):
+        problem.detail = MEMBER_MARKED + (problem.detail or "")
+    return problem
+
+
 def _chats(conn, adapters, factory) -> TelegramChats:
     return TelegramChats(conn, adapters=adapters, transport_factory=factory)
+
+
+def _act(conn, user, kind: str, *, source_id: UUID | None, classification: str,
+         params: dict, adapters, factory):
+    """Queue the act for the collector, the one process that holds the
+    persona key (A collector process, 2026-10-02), and answer as the route
+    always did once it has run, or 202 while it waits. Development's
+    inline mode runs it here."""
+    from noctornal_api.http.routers.collection_acts import act_answer
+
+    return act_answer(conn, user, kind=kind, source_id=source_id,
+                      classification=classification, params=params,
+                      adapters=adapters, factory=factory)
+
+
+def _chat_label(conn, source_id: UUID, clearance: str,
+                compartments=None) -> str:
+    """The chat's source label, at which its act is held; a chat the
+    caller may not see (its label above them, or a compartment they do not
+    hold, F43) answers exactly as a missing one, before anything is
+    queued."""
+    from noctornal_api.telegram_service import _chat_row
+
+    try:
+        return _chat_row(conn, source_id, clearance,
+                         compartments)["classification"]
+    except CollectionNotFound as exc:
+        raise _problem(exc) from None
 
 
 # ---------------------------------------------------------------------------
@@ -132,10 +207,11 @@ def persona_window(
     """A Telegram persona's active hours in UTC, or none. Outside them the
     persona rests and its chats wait. 404 for a persona the caller may not
     see."""
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     try:
         return set_window(conn, persona_id, body.active_window_utc,
-                          actor_id=user.user_id, clearance=clearance.name)
+                          actor_id=user.user_id, clearance=clearance.name,
+                          compartments=held)
     except CollectionNotFound as exc:
         raise Problem(404, "Not found", safe_detail(exc)) from exc
     except CollectionError as exc:
@@ -166,13 +242,17 @@ def list_chats(
 class ChatCreate(BaseModel):
     persona_id: UUID
     ref: str = Field(min_length=1, max_length=400)
-    name: str = Field(min_length=3, max_length=120)
+    name: Storable = Field(min_length=3, max_length=120)
     classification: str = Field(min_length=3, max_length=20)
     default_reliability: str = Field(default="F", pattern="^[A-F]$")
     access_mode: Literal["PUBLIC_READ", "MEMBER"] = "PUBLIC_READ"
     poll_interval_s: int = Field(default=1800, ge=300, le=7 * 86400)
     jitter_pct: int = Field(default=25, ge=0, le=50)
     max_rps: float = Field(default=0.2, ge=0.05, le=1.0)
+    #: F43 (2026-10-03): the compartments the chat's
+    #: source and everything it collects are filed under; the creator must
+    #: hold each. Until now this route could not set them.
+    compartments: list[str] = Field(default_factory=list, max_length=32)
 
 
 @router.post("/chats", response_model=dict, status_code=201,
@@ -190,22 +270,39 @@ def create_chat(
     persona. A reference Telegram does not resolve and a chat already added
     by somebody the caller cannot see answer the same."""
     refuse_unready(conn)
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
+    # Everything that needs no key and no network is refused here, before
+    # anything is queued (2026-10-03): a private invite link is
+    # a bearer join credential, and the queue's rows are never deleted, so
+    # it must never be written; a typo is a cheap 400 now, not one that
+    # waits for the collector. Only the reference as it was understood is
+    # queued, never the text typed.
     try:
-        return _chats(conn, adapters, factory).create(
-            persona_id=body.persona_id, ref=body.ref, name=body.name,
-            classification=body.classification,
-            default_reliability=body.default_reliability,
-            access_mode=body.access_mode, poll_interval_s=body.poll_interval_s,
-            jitter_pct=body.jitter_pct, max_rps=body.max_rps,
-            actor_id=user.user_id, clearance=clearance.name)
+        parsed = check_create_request(body.ref, body.access_mode,
+                                      body.classification,
+                                      compartments=body.compartments,
+                                      held_compartments=held)
     except CollectionError as exc:
         raise _problem(exc) from None
+    params = body.model_dump()
+    params["ref"] = normal_reference(parsed)
+    # Held at the label asked for. One that is no label, or above the
+    # caller, is held at their own clearance and refused when it runs, in
+    # create's own words and order (2026-10-02).
+    try:
+        label = (body.classification
+                 if tlp_from_name(body.classification) <= clearance
+                 else clearance.name)
+    except AccessResolutionError:
+        label = clearance.name
+    return _act(conn, user, "TELEGRAM_RESOLVE", source_id=None,
+                classification=label, params=params,
+                adapters=adapters, factory=factory)
 
 
 class JoinBody(BaseModel):
     acknowledge_overt: Literal[True]
-    note: str = Field(min_length=10, max_length=500)
+    note: Storable = Field(min_length=10, max_length=500)
 
 
 @router.post("/chats/{source_id}/join", response_model=dict,
@@ -222,22 +319,19 @@ def join_chat(
     authority target confirmed first."""
     authorize_global(conn, user, "collection.run", force_step_up=True)
     refuse_unready(conn)
-    clearance, _ = user_ceiling(conn, user.user_id)
-    try:
-        return _chats(conn, adapters, factory).join(
-            source_id, note=body.note, actor_id=user.user_id,
-            clearance=clearance.name)
-    except CollectionError as exc:
-        raise _problem(exc) from None
+    clearance, held = user_ceiling(conn, user.user_id)
+    return _act(conn, user, "TELEGRAM_JOIN", source_id=source_id,
+                classification=_chat_label(conn, source_id, clearance.name, held),
+                params={"note": body.note}, adapters=adapters, factory=factory)
 
 
 class ReasonBody(BaseModel):
-    reason: str = Field(min_length=5, max_length=500)
+    reason: Storable = Field(min_length=5, max_length=500)
 
 
 class RebindBody(BaseModel):
     persona_id: UUID
-    reason: str = Field(min_length=5, max_length=500)
+    reason: Storable = Field(min_length=5, max_length=500)
 
 
 @router.post("/chats/{source_id}/persona", response_model=dict,
@@ -254,13 +348,11 @@ def rebind_chat(
     """Read a chat through another Telegram persona, resolved through that
     persona first."""
     refuse_unready(conn)
-    clearance, _ = user_ceiling(conn, user.user_id)
-    try:
-        return _chats(conn, adapters, factory).rebind(
-            source_id, persona_id=body.persona_id, reason=body.reason,
-            actor_id=user.user_id, clearance=clearance.name)
-    except CollectionError as exc:
-        raise _problem(exc) from None
+    clearance, held = user_ceiling(conn, user.user_id)
+    return _act(conn, user, "TELEGRAM_REBIND", source_id=source_id,
+                classification=_chat_label(conn, source_id, clearance.name, held),
+                params={"persona_id": body.persona_id, "reason": body.reason},
+                adapters=adapters, factory=factory)
 
 
 @router.post("/chats/{source_id}/member", response_model=dict,
@@ -277,17 +369,13 @@ def mark_member_chat(
     """Mark a public chat as a member chat (never back), then check the
     persona's membership without joining."""
     refuse_unready(conn)
-    clearance, _ = user_ceiling(conn, user.user_id)
-    chats = _chats(conn, adapters, factory)
-    try:
-        return chats.mark_member(source_id, reason=body.reason,
-                                 actor_id=user.user_id, clearance=clearance.name)
-    except CollectionError as exc:
-        problem = _problem(exc)
-        if problem.status == 409 and not isinstance(exc, TelegramActError):
-            problem.detail = ("The chat is now a member chat. "
-                              + (problem.detail or ""))
-        raise problem from None
+    clearance, held = user_ceiling(conn, user.user_id)
+    # The mark and the check run together, where the persona key is
+    # (2026-10-02); act_problem says the mark stood when the check refused.
+    return _act(conn, user, "TELEGRAM_MARK_MEMBER", source_id=source_id,
+                classification=_chat_label(conn, source_id, clearance.name, held),
+                params={"reason": body.reason}, adapters=adapters,
+                factory=factory)
 
 
 @router.post("/chats/{source_id}/membership", response_model=dict,
@@ -303,20 +391,18 @@ def check_membership(
     """Whether Telegram reports the persona a member of a member chat. Reads
     the persona's own view of the chat and never joins."""
     refuse_unready(conn)
-    clearance, _ = user_ceiling(conn, user.user_id)
-    try:
-        return _chats(conn, adapters, factory).check_membership(
-            source_id, actor_id=user.user_id, clearance=clearance.name)
-    except CollectionError as exc:
-        raise _problem(exc) from None
+    clearance, held = user_ceiling(conn, user.user_id)
+    return _act(conn, user, "TELEGRAM_MEMBERSHIP", source_id=source_id,
+                classification=_chat_label(conn, source_id, clearance.name, held),
+                params={}, adapters=adapters, factory=factory)
 
 
 def _set_active(source_id, body, user, conn, adapters, active: bool) -> dict:
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     try:
         return _chats(conn, adapters, None).set_active(
             source_id, active=active, reason=body.reason, actor_id=user.user_id,
-            clearance=clearance.name)
+            clearance=clearance.name, compartments=held)
     except CollectionError as exc:
         raise _problem(exc) from None
 

@@ -161,7 +161,38 @@ def test_untouched_chain_verifies(tamperable):
     assert report.checked > 0, "nothing was checked; the assertion below is vacuous"
     assert report.intact, [b.kind for b in report.breaks]
     assert report.genesis_count == 1
-    assert not report.forks
+    # No fork written since 0149. A database that predates it may carry the
+    # forks the old id order made (below the boundary), which are legacy.
+    assert not [f for f in report.forks if f.id > (report.fork_boundary or 0)]
+
+
+def test_only_the_rows_that_do_not_verify_leave_the_database(tamperable):
+    """2026-10-07, as for the audit chain: the custody verifier handed
+    every row of the ledger back to Python. A scoped clean run now answers
+    one summary row, with the count and span of what it checked."""
+    from noctornal_api.custody_verify import verify_custody_chain
+
+    evidence_id, uid = _exhibit(tamperable, "rows")
+    ids = _seed(tamperable, evidence_id, uid, n=5)
+    returned = []
+
+    class _Counter:
+        def execute(self, sql, params=None):
+            cur = tamperable.execute(sql, params)
+            if "judged" not in sql:
+                return cur
+            rows = cur.fetchall()
+            returned.append(len(rows))
+
+            class _Rows:
+                def fetchall(self):
+                    return rows
+            return _Rows()
+
+    report = verify_custody_chain(_Counter(), evidence_id=evidence_id)
+    assert report.intact and report.checked == 5
+    assert (report.first_id, report.last_id) == (ids[0], ids[-1])
+    assert returned == [1]
 
 
 def test_in_place_edit_of_the_note_is_a_CONTENT_break(tamperable):
@@ -316,7 +347,7 @@ def test_deleted_tail_row_is_a_KNOWN_blind_spot(tamperable):
         f"the blind spot closed -- update the docstring: " \
         f"{[(b.kind, b.id) for b in after.breaks]}"
     assert after.breaks == ()
-    assert after.forks == ()
+    assert not [f for f in after.forks if f.id > (after.fork_boundary or 0)]
     assert after.genesis_count == 1
     # `checked`, `last_id` and `tail_row_hash` all move (measured on a
     # two-row tail delete: 166->164, 861->859, 0c42c7d6->330df2cd), while
@@ -422,10 +453,13 @@ def _forge_second_genesis(conn, evidence_id, uid) -> int:
     from noctornal_api.custody_verify import _HASH_EXPR
 
     conn.execute("ALTER TABLE core.evidence_custody DISABLE TRIGGER USER")
+    # `id` is drawn here: the chain trigger draws it, and with the trigger
+    # stood down nothing else does (0169 took the column default away).
     forged = conn.execute(
         """INSERT INTO core.evidence_custody
-               (evidence_id, action, actor_id, detail, prev_hash, row_hash)
-           VALUES (%s, 'ACQUIRED', %s, '{}'::jsonb, NULL, decode('00','hex'))
+               (id, evidence_id, action, actor_id, detail, prev_hash, row_hash)
+           VALUES (nextval('core.evidence_custody_id_seq'), %s, 'ACQUIRED', %s,
+                   '{}'::jsonb, NULL, decode('00','hex'))
            RETURNING id""",
         (evidence_id, uid)).fetchone()[0]
     conn.execute(

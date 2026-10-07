@@ -170,6 +170,26 @@ def test_a_refused_source_is_409_and_writes_no_run(conn, api, monkeypatch):
                         (source,)).fetchone()[0] == 0
 
 
+def test_poll_now_of_a_deactivated_feed_fetches_nothing(conn, api, monkeypatch):
+    """Only the authority path asked whether a source was deactivated, so a
+    feed an operator had switched off was still fetched by Poll now (2026-10-07)."""
+    from noctornal_api import collection
+    client, _stub = api
+    _uid, amber = _caller(conn)
+    fetched: list[str] = []
+
+    def fetch(url, **_kw):
+        fetched.append(url)
+        return b"<rss><channel></channel></rss>", 200, None, None
+
+    monkeypatch.setattr(collection, "fetch", fetch)
+    source = h.source(conn, P, kind="RSS", parser="rss", classification="GREEN",
+                      base_url="https://feed.example.test/rss", active=False)
+    r = client.post(f"{API}/sources/{source}/run", headers=amber, json={})
+    assert r.status_code == 409 and "deactivated" in r.json()["detail"], r.text
+    assert fetched == []
+
+
 def test_the_confirmer_pressing_poll_now_is_409_with_no_run_row(conn, api):
     client, stub = api
     recorder, _ = h.user(conn, P, roles=("COLLECTOR",))

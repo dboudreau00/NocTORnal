@@ -114,6 +114,7 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
 from noctornal_api.collection import (
+    _SOURCE_VISIBLE_HELD,
     PERSONA_VISIBLE_SQL,
     SOURCE_KINDS,
     Adapter,
@@ -126,6 +127,7 @@ from noctornal_api.collection import (
     PersonaVault,
     SourceRefused,
     _attr,
+    _held,
     active_window,
     default_adapters,
     header_text_problem,
@@ -225,13 +227,13 @@ def due_sources(
     Filtered by the caller's own ceiling. A source above it is not "due"
     to this caller; its name and URL are what its label protects.
     """
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, keys = user_ceiling(conn, user.user_id)
     svc = CollectionService(conn, adapters)
-    due = svc.due_sources(clearance=clearance.name)
+    due = svc.due_sources(clearance=clearance.name, compartments=keys)
     # 2026-09-24: what waits on a person, by reason. A held source is
     # not polled, not rescheduled and not a failure.
     held = [{**h, "id": str(h["id"])}
-            for h in svc.held_sources(clearance=clearance.name)]
+            for h in svc.held_sources(clearance=clearance.name, compartments=keys)]
     # F5.3 (2026-09-24). A due Telegram chat names its chat and exit.
     due = telegram_service.attach_due_facts(conn, due)
     return {"due": [{**d, "id": str(d["id"])} for d in due],
@@ -307,10 +309,13 @@ def unhealthy(
     parser that genuinely stopped matching pads the alert with non-alerts
     — which is how a list that exists to be watched stops being watched.
     """
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     svc = CollectionService(conn)
-    rows = svc.unhealthy_sources(clearance=clearance.name)
-    never = svc.never_polled_sources(clearance=clearance.name)
+    # The reader's compartments too (2026-10-03):
+    # these two lists named a compartmented source to a reader without the key.
+    rows = svc.unhealthy_sources(clearance=clearance.name, compartments=held)
+    never = svc.never_polled_sources(clearance=clearance.name,
+                                     compartments=held)
     return {"sources": rows, "count": len(rows),
             "never_polled": never, "never_polled_count": len(never),
             "notice": ("Never-polled sources are listed separately: added "
@@ -377,7 +382,21 @@ def run_once(
     # the detail says which, and naming the failing checks is what makes
     # this one distinguishable to a caller who is not reading this file.
     refuse_unready(conn)
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
+    # A collector process (2026-10-02): a source a persona reads is polled
+    # by the collector, the one process holding the persona key, so this
+    # route queues it as a persona act and answers with its outcome (or
+    # 202 while it is queued). A feed no persona reads polls here, as
+    # before. A source above the caller, or filed under a compartment they
+    # do not hold (F43), is the same 404 either way.
+    persona_read = _persona_read_label(conn, source_id, clearance.name, adapters,
+                                       held)
+    if persona_read is not None:
+        from noctornal_api.http.routers.collection_acts import act_answer
+        return act_answer(
+            conn, user, kind="SOURCE_POLL", source_id=source_id,
+            classification=persona_read, adapters=adapters, factory=None,
+            params={"persona_id": body.persona_id, "watch_id": body.watch_id})
     try:
         # The poll on a system connection (S1, 2026-09-25), as the cron's
         # is: a new item dedupes against every stored version of it and
@@ -388,35 +407,66 @@ def run_once(
         with system_connection(SystemPurpose.COLLECTION, reuse=conn) as sconn:
             result = CollectionService(sconn, adapters).run_once(
                 source_id, actor_id=user.user_id, persona_id=body.persona_id,
-                watch_id=body.watch_id, clearance=clearance.name)
-    except (SourceRefused, PersonaResting, AuthorityError) as exc:
-        # ABOVE `except CollectionError`, as CollectionBusy is: each is "you
-        # are allowed, this cannot run", and nothing was done. A refused
-        # source is configuration, a resting persona is outside its hours,
-        # and the confirmer is refused as the runner before any run row;
-        # 400 "Invalid request" would tell the caller to
-        # fix a request with nothing wrong in it.
-        raise Problem(409, "Conflict", safe_detail(exc)) from exc
-    except PersonaUnavailable as exc:
-        # 409 rather than 403: the caller is allowed, the persona is not
-        # usable -- suspended, burnt, or cooling down.
-        raise Problem(409, "Conflict", safe_detail(exc)) from exc
-    except CollectionBusy as exc:
-        # ABOVE `except CollectionError` and it must stay there: CollectionBusy
-        # is a subclass, so until 2026-09-10 it was caught below and answered
-        # 400 "Invalid request" -- for a request that was entirely valid and
-        # did nothing at all. The case that produces it is the ordinary one
-        # the lock exists for and `run_once`'s docstring names: an analyst
-        # double-clicking Run, or this pane overlapping the cron in
-        # scripts/collection_poll.py. 409 says the true thing, which is that
-        # the poll is already happening; 400 told them to fix a request that
-        # had nothing wrong with it, and left retrying -- the correct
-        # response -- looking like the wrong one.
-        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+                watch_id=body.watch_id, clearance=clearance.name,
+                compartments=held)
+    except CollectionError as exc:
+        raise run_problem(exc) from exc
+    return run_body(result)
+
+
+def _persona_read_label(conn: psycopg.Connection, source_id: UUID,
+                        clearance: str, adapters: dict,
+                        compartments=None) -> str | None:
+    """The source's label when a persona reads it (its adapter names a
+    persona platform), else None. A source above the caller, outside their
+    compartments, or none at all, is the run route's 404 as ever."""
+    from noctornal_api.collection import _source_row
+
+    try:
+        source = _source_row(conn, source_id, clearance, compartments)
     except CollectionNotFound as exc:
         raise Problem(404, "Not found", safe_detail(exc)) from exc
-    except CollectionError as exc:
-        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+    adapter = adapters.get(source.parser_key)
+    if adapter is None or _attr(adapter, "persona_platform") is None:
+        return None
+    return source.classification
+
+
+def run_problem(exc: CollectionError) -> Problem:
+    """The run route's answer for a refused or failed poll: one mapping for
+    the poll run here and the one the collector runs (2026-10-02). The
+    order is the old `except` chain's: a subclass before its parent."""
+    if isinstance(exc, (SourceRefused, PersonaResting, AuthorityError)):
+        # Before the CollectionError fallback, as CollectionBusy is: each is
+        # "you are allowed, this cannot run", and nothing was done. A
+        # refused source is configuration, a resting persona is outside its
+        # hours, and the confirmer is refused as the runner before any run
+        # row; 400 "Invalid request" would tell the caller to fix a request
+        # with nothing wrong in it.
+        return Problem(409, "Conflict", safe_detail(exc))
+    if isinstance(exc, PersonaUnavailable):
+        # 409 rather than 403: the caller is allowed, the persona is not
+        # usable: suspended, burnt, or cooling down.
+        return Problem(409, "Conflict", safe_detail(exc))
+    if isinstance(exc, CollectionBusy):
+        # Before the CollectionError fallback and it must stay there:
+        # CollectionBusy is a subclass, so until 2026-09-10 it was caught
+        # below and answered 400 "Invalid request", for a request that was
+        # entirely valid and did nothing at all. The case that produces it
+        # is the ordinary one the lock exists for and `run_once`'s docstring
+        # names: an analyst double-clicking Run, or this pane overlapping
+        # the scheduled poll in scripts/collection_poll.py. 409 says the
+        # true thing, which is that the poll is already happening; 400 told
+        # them to fix a request that had nothing wrong with it, and left
+        # retrying (the correct response) looking like the wrong one.
+        return Problem(409, "Conflict", safe_detail(exc))
+    if isinstance(exc, CollectionNotFound):
+        return Problem(404, "Not found", safe_detail(exc))
+    return Problem(400, "Invalid request", safe_detail(exc))
+
+
+def run_body(result) -> dict:
+    """What a finished poll answers, here and from the collector."""
     return {
         "run_id": str(result.run_id),
         "items_seen": result.items_seen,
@@ -459,11 +509,13 @@ def personas(
     caller's ceiling against the source's label (`PersonaVault.personas`
     says how, and why a source-less persona is always shown).
     """
-    clearance, _ = user_ceiling(conn, user.user_id)
-    personas = PersonaVault(conn).personas(clearance=clearance.name)
+    clearance, held = user_ceiling(conn, user.user_id)
+    personas = PersonaVault(conn).personas(clearance=clearance.name,
+                                           compartments=held)
     # F5.2 (2026-09-24). A Telegram persona row carries its enrolment,
     # hold and chat count; never a secret column.
-    personas = telegram_service.attach_persona_facts(conn, personas, clearance.name)
+    personas = telegram_service.attach_persona_facts(
+        conn, personas, clearance.name, held)
     return {
         "personas": personas,
         "notice": ("Secrets are never returned by any endpoint. " + L3_NOTICE),
@@ -478,11 +530,78 @@ class PersonaStatusBody(BaseModel):
     cooldown_hours: int | None = Field(default=None, ge=1, le=24 * 90)
 
 
+#: The persona statuses that STOP it: a forum persona holds no session past one.
+_STOPS = ("LOCKED", "BURNED")
+
+
+def _sign_out_forum(conn: psycopg.Connection, persona_id: UUID, user: CurrentUser,
+                    clearance: str, held, adapters: dict) -> str | None:
+    """Sign a forum persona out of its boards before it is stopped; None
+    for any other persona and for one that holds no session, else a sentence
+    on what was and was not reached.
+
+    The board's own sign-out needs the sealed session, which only the
+    collector can open (the persona vault split, decision 174, merged with
+    the authenticated forum path 2026-10-03), so this asks the collector
+    for it as a persona act, a STOP (`FORUM_SIGN_OUT`), and waits for it a
+    bounded time, as every act route does. Development's inline mode runs it
+    here, where the API holds the persona key. It is the courtesy and may
+    not be reached: whatever happens the stop goes on, and `PersonaVault`
+    clears the sealed session in the same call, so an act the collector
+    starts later finds nothing to sign out of. Never raises into the stop: a
+    persona the caller cannot see is left for `set_status` to answer 404."""
+    from noctornal_api import persona_acts
+
+    row = conn.execute(
+        f"""SELECT a.platform::text, a.session_sealed_at IS NOT NULL,
+                   coalesce((SELECT max(s.classification)
+                               FROM collect.source s
+                              WHERE s.collection_account_id = a.id
+                                 OR s.id = a.source_id),
+                            %(clearance)s::core.tlp)::text
+              FROM collect.collection_account a
+             WHERE a.id = %(id)s AND {PERSONA_VISIBLE_SQL}""",
+        {"id": persona_id, "clearance": clearance,
+         "held": _held(held)}).fetchone()
+    if row is None or row[0] not in ("XENFORO", "MYBB") or not row[1]:
+        return None
+    unreached = ("The forum's own sign-out was not reached; the session this "
+                 "product held was cleared by the stop.")
+    try:
+        act = persona_acts.submit(
+            conn, user_id=user.user_id, session_id=user.session_id,
+            mfa_at=user.session_mfa_at, kind="FORUM_SIGN_OUT",
+            params={"persona_id": str(persona_id)}, classification=row[2],
+            source_id=None)
+        if persona_acts.inline_mode():
+            act, body = persona_acts.run_inline(conn, act, adapters=adapters)
+        else:
+            act = persona_acts.wait(conn, act["id"], user_id=user.user_id,
+                                    seconds=persona_acts.wait_seconds())
+            body = ((act.get("result") or {}).get("body")
+                    if act and act["status"] == "DONE" else None)
+            if act and act["status"] in persona_acts.LIVE:
+                # The collector has not started it: the stop clears the
+                # session now, so there is nothing left for the act to do.
+                persona_acts.cancel(conn, act["id"], user_id=user.user_id,
+                                    clearance=clearance)
+    except Exception:  # noqa: BLE001 - a stop is always allowed
+        import logging
+        logging.getLogger("noctornal.collection").warning(
+            "the forum sign-out of persona %s failed; the stop goes on",
+            persona_id, exc_info=True)
+        return unreached
+    if body and any(s.get("reached") for s in body.get("signed_out", [])):
+        return "The persona was signed out of its forum, and its session cleared."
+    return unreached
+
+
 @router.post("/personas/{persona_id}/status", response_model=dict)
 def set_persona_status(
     persona_id: UUID, body: PersonaStatusBody,
     user: CurrentUser = Depends(require_global("collection_account.manage")),
     conn: psycopg.Connection = Depends(get_conn),
+    adapters: dict = Depends(get_adapters),
 ) -> dict:
     """Suspend or restore a persona, with a reason.
 
@@ -498,18 +617,30 @@ def set_persona_status(
     caller could burn a persona on a RED source the persona list hid from
     them, and an unknown id got a 200 for a write that never happened.
     """
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     cooldown = (timedelta(hours=body.cooldown_hours)
                 if body.cooldown_hours else None)
+    # A STOP of a forum persona signs it out of its boards first, through
+    # its own route in a stop context, run by the collector as a persona act
+    # (2026-10-03; the vault split). The sign-out is the
+    # courtesy and may not be reached; the clearing of what this product
+    # holds sealed is the guarantee, and `PersonaVault` makes it on every
+    # stop whatever happens here.
+    signed_out = (_sign_out_forum(conn, persona_id, user, clearance.name, held,
+                                  adapters)
+                  if body.status in _STOPS else None)
     try:
         written = PersonaVault(conn).set_status(
             persona_id, body.status, actor_id=user.user_id,
-            reason=body.reason, cooldown=cooldown, clearance=clearance.name)
+            reason=body.reason, cooldown=cooldown, clearance=clearance.name,
+            compartments=held)
     except CollectionNotFound as exc:
         raise Problem(404, "Not found", safe_detail(exc)) from exc
     except CollectionError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     answer = {"persona_id": str(persona_id), "status": body.status}
+    if signed_out:
+        answer["forum_sign_out"] = signed_out
     # 2026-09-24: HEALTHY under a platform's hold or lock changes the
     # person's status only, and the answer says the persona stays paused.
     if written.get("notice"):
@@ -537,10 +668,10 @@ def egress_separation(
     `[]` about a RED source would report "clean" about a forum they are
     not cleared to know exists.
     """
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     try:
         findings = PersonaVault(conn).check_egress_separation(
-            source_id, clearance=clearance.name)
+            source_id, clearance=clearance.name, compartments=held)
     except CollectionNotFound as exc:
         raise Problem(404, "Not found", safe_detail(exc)) from exc
     return {"source_id": str(source_id), "findings": findings,
@@ -567,9 +698,10 @@ def runs(
     a raw SELECT on `collection_run` with no join, so it could not have
     filtered even if asked: the label lives on the source.
     """
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     rows = CollectionService(conn).runs(
-        source_id=source_id, limit=limit, clearance=clearance.name)
+        source_id=source_id, limit=limit, clearance=clearance.name,
+        compartments=held)
     return {"runs": rows, "count": len(rows),
             "note": ("A run with items_seen > 0 and items_new = 0 across "
                      "several polls is usually a parser that stopped "
@@ -820,8 +952,9 @@ def list_sources(
     exit, its authority state and the refusal it would meet; the parsers
     this build has; the declared ceilings; and whether the caller may add
     sources (`can_manage`) or change who reads one (`can_bind`)."""
-    clearance, _ = user_ceiling(conn, user.user_id)
-    rows = CollectionService(conn, adapters).sources(clearance=clearance.name)
+    clearance, held = user_ceiling(conn, user.user_id)
+    rows = CollectionService(conn, adapters).sources(clearance=clearance.name,
+                                                     compartments=held)
     manage = _holds(conn, user, "source.manage")
     return {"sources": rows, "count": len(rows),
             "adapters": _adapter_rows(adapters),
@@ -850,6 +983,9 @@ class SourceCreate(BaseModel):
     parser_config: dict = Field(default_factory=dict)
     collection_account_id: UUID | None = None
     egress_profile_id: UUID | None = None
+    #: F43 (2026-10-02): the compartments the source and everything it
+    #: collects are filed under; the creator must hold each.
+    compartments: list[str] = Field(default_factory=list, max_length=32)
 
 
 @router.post("/sources", response_model=dict, status_code=201,
@@ -866,7 +1002,7 @@ def create_source(
     authority is recorded and confirmed by two people."""
     if body.collection_account_id is not None or body.egress_profile_id is not None:
         authorize_global(conn, user, "collection_account.manage")
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     try:
         source = CollectionService(conn, adapters).create_source(
             kind=body.kind, name=body.name, base_url=body.base_url,
@@ -876,7 +1012,8 @@ def create_source(
             max_rps=body.max_rps, parser_config=body.parser_config,
             collection_account_id=body.collection_account_id,
             egress_profile_id=body.egress_profile_id, actor_id=user.user_id,
-            clearance=clearance.name)
+            clearance=clearance.name, compartments=body.compartments,
+            held_compartments=held)
     except CollectionNotFound as exc:
         raise Problem(404, "Not found", safe_detail(exc)) from exc
     except CollectionError as exc:
@@ -894,11 +1031,15 @@ class ReasonBody(BaseModel):
 
 def _set_active(source_id: UUID, body: ReasonBody, user: CurrentUser,
                 conn: psycopg.Connection, active: bool) -> dict:
-    clearance, _ = user_ceiling(conn, user.user_id)
+    # The holder's own compartments (2026-10-03): this
+    # passed none, so the key holder who created a compartmented source met
+    # a 404 on the one control that stops it.
+    clearance, held = user_ceiling(conn, user.user_id)
     try:
         return CollectionService(conn).set_source_active(
             source_id, active=active, reason=body.reason,
-            actor_id=user.user_id, clearance=clearance.name)
+            actor_id=user.user_id, clearance=clearance.name,
+            compartments=held)
     except CollectionNotFound as exc:
         raise Problem(404, "Not found", safe_detail(exc)) from exc
     except CollectionError as exc:
@@ -935,10 +1076,11 @@ def run_detail(
 ) -> dict:
     """One poll with its custody log of what it asked for, read under the
     SOURCE's label: 404 above it, as for an id that is not a run."""
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     try:
         return CollectionService(conn).run_detail(run_id,
-                                                  clearance=clearance.name)
+                                                  clearance=clearance.name,
+                                                  compartments=held)
     except CollectionNotFound as exc:
         raise Problem(404, "Not found", safe_detail(exc)) from exc
 
@@ -1010,11 +1152,12 @@ def create_persona(
                 + list(_attr(reader, "validate_persona")(dict(body.fingerprint))))
     if problems:
         raise Problem(400, "Invalid request", " ".join(problems))
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     if body.venue_source_id is not None and conn.execute(
-            """SELECT 1 FROM collect.source WHERE id = %s
-                  AND classification <= %s::core.tlp""",
-            (body.venue_source_id, clearance.name)).fetchone() is None:
+            f"""SELECT 1 FROM collect.source s WHERE s.id = %(id)s
+                  AND {_SOURCE_VISIBLE_HELD}""",
+            {"id": body.venue_source_id, "clearance": clearance.name,
+             "held": _held(held)}).fetchone() is None:
         raise Problem(404, "Not found", "no such source, or it is above your clearance")
     try:
         persona = PersonaVault(conn).create(
@@ -1040,8 +1183,9 @@ def egress_profiles(
     endpoint or its key id. `available` is false when any persona holds the
     profile: that one bit of presence is the accepted PRESENCE disclosure
     (docs/05)."""
-    clearance, _ = user_ceiling(conn, user.user_id)
-    rows = PersonaVault(conn).egress_profiles(clearance=clearance.name)
+    clearance, held = user_ceiling(conn, user.user_id)
+    rows = PersonaVault(conn).egress_profiles(clearance=clearance.name,
+                                              compartments=held)
     return {"egress_profiles": rows, "count": len(rows),
             "notice": ("One persona, one egress profile: two personas seen "
                        "from one exit can be linked by any competent site.")}
@@ -1067,13 +1211,13 @@ def bind_source(
     and collection_account.manage is step-up. The authority recorded for
     the old binding stops covering the source at once, and the answer says
     so."""
-    clearance, _ = user_ceiling(conn, user.user_id)
+    clearance, held = user_ceiling(conn, user.user_id)
     try:
         return CollectionService(conn, adapters).bind_source(
             source_id, persona_id=body.collection_account_id,
             egress_profile_id=body.egress_profile_id, reason=body.reason,
             reset_cursor=body.reset_cursor, actor_id=user.user_id,
-            clearance=clearance.name)
+            clearance=clearance.name, compartments=held)
     except CollectionNotFound as exc:
         raise Problem(404, "Not found", safe_detail(exc)) from exc
     except CollectionError as exc:
@@ -1081,10 +1225,11 @@ def bind_source(
 
 
 def persona_visible(conn: psycopg.Connection, persona_id: UUID,
-                    clearance: str) -> bool:
+                    clearance: str, compartments=None) -> bool:
     """For an attended act's route: whether the caller may see the
-    persona (set_status's predicate)."""
+    persona (set_status's predicate, compartments included)."""
     return conn.execute(
         f"SELECT 1 FROM collect.collection_account a "
         f"WHERE a.id = %(id)s AND {PERSONA_VISIBLE_SQL}",
-        {"id": persona_id, "clearance": clearance}).fetchone() is not None
+        {"id": persona_id, "clearance": clearance,
+         "held": _held(compartments)}).fetchone() is not None

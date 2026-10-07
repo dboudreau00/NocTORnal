@@ -263,8 +263,8 @@ def _drawn(client, token, case_id, **params) -> dict:
 
 
 def test_a_tie_with_no_live_claim_reads_low_and_leaves_the_graph(conn, client):
-    """This test held the opposite until the final review (U11,
-    2026-09-23): that the tie KEPT the withdrawn claim's grade. A tie no
+    """This test held the opposite until the final review (2026-09-23): that the tie KEPT
+    the withdrawn claim's grade. A tie no
     live claim grades now reads LOW, the ungraded value. With no live
     assertion at all it has left the graph, as before."""
     token = _owner(conn)
@@ -911,8 +911,8 @@ def test_the_backfill_repairs_drift_and_honours_an_old_correction(conn, client):
     - a LOW tie carrying a weight fix graded HIGH: a claim about the
       weight, not the tie, so the backfill must leave it LOW.
     - a HIGH tie whose founding claim was withdrawn while a weight fix
-      still stands: no live claim grades it, so it takes LOW (final review
-      U11, 2026-09-23) instead of keeping the withdrawn HIGH.
+      still stands: no live claim grades it, so it takes LOW (2026-09-23) instead of keeping
+      the withdrawn HIGH.
     """
     from noctornal_api.db import dsn
     import psycopg

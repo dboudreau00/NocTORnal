@@ -142,7 +142,9 @@ try {
     # constraints.txt since 2026-09-23 (sec-pin-dependencies): both
     # installers refuse to run without it.
     foreach ($needed in @('alembic.ini', 'release/install.ps1',
-                          'release/install.sh', 'apps/api/pyproject.toml',
+                          'release/install.sh', 'release/START-HERE.md',
+                          'release/start.sh', 'release/start.ps1',
+                          'apps/api/pyproject.toml',
                           'constraints.txt',
                           'infra/docker-compose.yml', 'LICENSE')) {
         if (-not (Test-Path (Join-Path $Destination $needed))) {
@@ -247,28 +249,40 @@ try {
         # Passing the directory itself wraps everything in one folder,
         # which is what every release archive a developer has ever
         # downloaded does.
-        # ZipFile.CreateFromDirectory, not Compress-Archive.
+        # One entry per file, named by this script with forward slashes,
+        # not ZipFile.CreateFromDirectory and not Compress-Archive.
         #
-        # `includeBaseDirectory: $true` is the wrapper, done by the API
-        # rather than by argument-shape trickery, and this is the
-        # documented .NET entry point rather than a cmdlet whose path
-        # handling has changed between PowerShell versions.
+        # CreateFromDirectory stores the PLATFORM separator under Windows
+        # PowerShell 5.1 (.NET Framework keeps backslashes for an app that
+        # targets it), and only pwsh 7 writes forward slashes. A 5.1 package
+        # carried `pkg\release\install.sh` in all 1108 entries: Info-ZIP
+        # unzip warned "appears to use backslashes as path separators" and
+        # exited 1, and Python's zipfile wrote 1108 loose files with
+        # backslashes in their names and no release/ folder (Beta 1 clean
+        # machine, 2026-10-07). The wrapper directory is the first segment
+        # of every name, as `includeBaseDirectory` made it.
+        Add-Type -AssemblyName System.IO.Compression
         Add-Type -AssemblyName System.IO.Compression.FileSystem
-        [System.IO.Compression.ZipFile]::CreateFromDirectory(
-            $Destination, $zipPath,
-            [System.IO.Compression.CompressionLevel]::Optimal,
-            $true)
+        $wrapper = Split-Path -Leaf $Destination
+        $base = (Resolve-Path -LiteralPath $Destination).ProviderPath.TrimEnd('\') + '\'
+        $writer = [System.IO.Compression.ZipFile]::Open(
+            $zipPath, [System.IO.Compression.ZipArchiveMode]::Create)
+        try {
+            foreach ($file in Get-ChildItem -LiteralPath $Destination -Recurse -File -Force) {
+                $name = $wrapper + '/' + ($file.FullName.Substring($base.Length) -replace '\\', '/')
+                [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                    $writer, $file.FullName, $name,
+                    [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+            }
+        }
+        finally { $writer.Dispose() }
 
         # Confirm the wrapper is actually there rather than assuming it.
         # This script has already shipped one artefact it had "verified"
         # without executing -- see the install.ps1 parse check above.
         #
-        # Split on EITHER separator. The zip format stores forward slashes
-        # and the archive on disk does use them, but .NET's
-        # ZipArchiveEntry.FullName reports the platform separator here, so
-        # a check that split on '/' alone saw one 300-segment "root" and
-        # failed a perfectly good archive. Accepting both is correct
-        # whichever way the runtime reports it.
+        # Split on EITHER separator, so a backslash name is counted below
+        # rather than reported as hundreds of roots.
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
         try {
@@ -276,6 +290,8 @@ try {
                 ForEach-Object { ($_.FullName -split '[\\/]')[0] } |
                 Sort-Object -Unique)
             $entryCount = $archive.Entries.Count
+            $backslashed = @($archive.Entries |
+                Where-Object { $_.FullName.Contains([char]92) }).Count
         }
         finally { $archive.Dispose() }
         if ($roots.Count -ne 1) {
@@ -283,20 +299,15 @@ try {
                  "have exactly one wrapper directory: " + ($roots -join ', '))
         }
 
-        # NOT checked here: whether the stored separators are forward
-        # slashes. They must be -- a zip carrying backslashes makes Unix
-        # `unzip` create files literally named "dir\sub\file" instead of
-        # directories -- but this runtime cannot answer the question.
-        # .NET's ZipArchiveEntry.FullName reports the PLATFORM separator on
-        # read, so a check here reports backslashes for an archive whose
-        # stored bytes are correct. An earlier version of this script did
-        # exactly that and refused to package a perfectly good zip.
-        #
-        # ZipFile.CreateFromDirectory writes spec-compliant forward slashes,
-        # which is one of the reasons it is used above instead of
-        # Compress-Archive. Confirm from outside PowerShell if it matters:
-        #     python -c "import zipfile,sys; print(zipfile.ZipFile(sys.argv[1]).namelist()[:3])" <zip>
-        Good "wrote $zipPath ($entryCount entries, wrapped in '$($roots[0])')"
+        # The stored separators ARE checked. ZipArchiveEntry.FullName is the
+        # name as stored, under 5.1 and 7 alike (measured 2026-10-07); the
+        # comment here used to say it reported the platform separator, which
+        # is how a 5.1 zip full of backslashes was passed as good.
+        if ($backslashed) {
+            Die ("the zip has $backslashed entry names with a backslash; " +
+                 "unzip on Linux and macOS would not rebuild the folders.")
+        }
+        Good "wrote $zipPath ($entryCount entries, wrapped in '$($roots[0])', forward slashes)"
         Warn 'A recipient unzipping this on Linux/macOS must run:'
         Warn '    chmod +x release/install.sh'
         Warn 'and on Windows must launch it as:'
@@ -305,7 +316,7 @@ try {
     }
 
     Write-Host ''
-    Say 'Done. Tell the recipient to start at release/INSTALL.md.'
+    Say 'Done. Tell the recipient to start at release/START-HERE.md.'
     Write-Host ''
 }
 finally { Pop-Location }

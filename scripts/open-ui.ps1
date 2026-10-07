@@ -65,6 +65,21 @@ if (Test-Path -LiteralPath $EnvLocal) {
         $name  = $trimmed.Substring(0, $split).Trim()
         $value = $trimmed.Substring($split + 1).Trim().Trim('"').Trim("'")
         if (-not $name) { continue }
+        # A name that changes how programs start is left out, as in
+        # launch.ps1 (2026-10-03): `PATH` or `PYTHONPATH` in
+        # a handed-over file would redirect the python started below. The
+        # same list is in scripts/_env.py, release/install.sh,
+        # scripts/launch.sh and scripts/launch.ps1; a test holds all five
+        # together. -contains and -like are case-insensitive, as Windows
+        # names are.
+        $refusedExact    = @('PATH', 'PATHEXT', 'HOME', 'COMSPEC', 'IFS', 'ENV', 'CDPATH', 'GLOBIGNORE', 'SHELLOPTS', 'BASHOPTS', 'PROMPT_COMMAND', 'PS1', 'PS2', 'PS3', 'PS4', 'PSMODULEPATH')
+        $refusedPrefixes = @('BASH_', 'LD_', 'DYLD_', 'PYTHON', 'DOCKER_', 'COMPOSE_', 'GIT_', 'PIP_', 'NODE_')
+        $refused = ($refusedExact -contains $name)
+        foreach ($prefix in $refusedPrefixes) { if ($name -like "$prefix*") { $refused = $true } }
+        if ($refused) {
+            Write-Host "    $name ignored: it changes how programs start (set it in your shell if you mean it)"
+            continue
+        }
         if ([string]::IsNullOrWhiteSpace(
                 [System.Environment]::GetEnvironmentVariable($name, 'Process'))) {
             [System.Environment]::SetEnvironmentVariable($name, $value, 'Process')

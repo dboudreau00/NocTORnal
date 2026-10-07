@@ -224,6 +224,11 @@ def _cleanup(conn, sample_id, *user_ids, case_id=None):
     held = conn.execute(
         "SELECT count(*) FROM lab.sample_access WHERE sample_id = %s",
         (sample_id,)).fetchone()[0]
+    # A held sample's triage run is a queue entry, not a ledger: left QUEUED
+    # it went stale over a long run and failed the readiness tests that
+    # read the whole queue (2026-10-07).
+    conn.execute("DELETE FROM lab.static_run WHERE sample_id = %s "
+                 "AND status = 'QUEUED'", (sample_id,))
     if not held:
         conn.execute("DELETE FROM lab.sample WHERE id = %s", (sample_id,))
     if case_id and not held:

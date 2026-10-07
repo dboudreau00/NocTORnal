@@ -742,6 +742,28 @@ def test_a_grant_cannot_be_born_already_dead(conn, client):
     assert _assignment_count(conn, case_id, analyst_id) == 1
 
 
+def test_a_liaison_grant_must_end(conn, client):
+    """docs/05: an external liaison is time-boxed, `expires_at` required.
+    The route accepted a LIAISON grant with no end until 2026-10-07."""
+    _, owner_email, _ = _make_user(conn, global_roles=("CASE_OWNER",))
+    owner = _session(conn, owner_email)
+    case_id = _create_case(client, owner)
+    liaison_id, _, _ = _make_user(conn, clearance="AMBER")
+
+    open_ended = client.post(f"/api/v1/cases/{case_id}/users", headers=_auth(owner),
+                             json={"user_id": str(liaison_id), "role_key": "LIAISON"})
+    assert open_ended.status_code == 400, open_ended.text
+    assert "expires_at" in open_ended.json()["detail"]
+    assert _assignment_count(conn, case_id, liaison_id) == 0
+
+    future = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
+    ok = client.post(f"/api/v1/cases/{case_id}/users", headers=_auth(owner),
+                     json={"user_id": str(liaison_id), "role_key": "LIAISON",
+                           "expires_at": future})
+    assert ok.status_code == 200, ok.text
+    assert _assignment_count(conn, case_id, liaison_id) == 1
+
+
 def test_an_expiry_with_no_offset_is_refused_and_not_guessed(conn, client):
     """`2027-03-14T17:00:00` is valid ISO 8601 with no offset.
 

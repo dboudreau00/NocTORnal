@@ -32,7 +32,12 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 import psycopg
 
-from noctornal_api.notifications import Notification, NotificationService
+from noctornal_api.notifications import (
+    COALESCED,
+    Notification,
+    NotificationService,
+    OpenNotice,
+)
 from noctornal_api.wording import agree, count_of
 
 log = logging.getLogger(__name__)
@@ -62,6 +67,9 @@ def merge_performed(conn: psycopg.Connection, *, case_id: UUID, merge_id: UUID,
                     #: relationships that survived the merge somewhere else,
                     #: which is a destruction described as a move.
                     self_loops_deleted: int = 0,
+                    #: Duplicates of a tie the survivor already held, set
+                    #: aside because the merger could not read them.
+                    duplicates_folded: int = 0,
                     element_classification: str | None = None,
                     element_compartments: frozenset[str] = frozenset()) -> None:
     """docs/01 asks for this one by name: "Merges require `graph.merge` with
@@ -94,6 +102,15 @@ def merge_performed(conn: psycopg.Connection, *, case_id: UUID, merge_id: UUID,
                  f"{agree(self_loops_deleted, 'it', 'them')}. Reversing the "
                  f"merge brings {agree(self_loops_deleted, 'it', 'them')} back."
                  if self_loops_deleted else "")
+              + (f" A further "
+                 f"{count_of(duplicates_folded, 'relationship', 'relationships')} "
+                 f"duplicated {agree(duplicates_folded, 'a tie', 'ties')} the "
+                 f"survivor already held and "
+                 f"{agree(duplicates_folded, 'was', 'were')} set aside rather "
+                 f"than moved, because the person merging could not read "
+                 f"{agree(duplicates_folded, 'it', 'them')}. Reversing the "
+                 f"merge brings {agree(duplicates_folded, 'it', 'them')} back."
+                 if duplicates_folded else "")
               + f"\n\nReason given: {reason}\n\n"
               f"Merging is the operation most likely to quietly corrupt a "
               f"case. If this is wrong, it is reversible from the "
@@ -129,7 +146,14 @@ def merge_reversed(conn: psycopg.Connection, *, case_id: UUID, merge_id: UUID,
 
 def approval_requested(conn: psycopg.Connection, *, case_id: UUID,
                        request_id: UUID, operation: str, permission: str,
-                       justification: str, actor_id: UUID) -> int:
+                       justification: str, actor_id: UUID,
+                       # The labels of what the request names (a node.merge
+                       # names two entities): the body quotes the
+                       # justification, so a signer below them is not sent
+                       # it (http_ui-011, 2026-10-03).
+                       element_classification: str | None = None,
+                       element_compartments: frozenset[str] = frozenset(),
+                       ) -> int:
     """Tell everyone on the case who could actually approve it.
 
     Not the case owner, and not everyone assigned: the people who hold the
@@ -177,6 +201,8 @@ def approval_requested(conn: psycopg.Connection, *, case_id: UUID,
                   f"checked the specific parameters, not that you trust the "
                   f"person asking."),
             classification=classification, compartments=compartments,
+            element_classification=element_classification,
+            element_compartments=element_compartments,
             object_type="approval_request", object_id=request_id,
             actor_id=actor_id)
         if raised is not None:
@@ -332,20 +358,15 @@ def evidence_integrity_alarm(conn: psycopg.Connection, *, case_id: UUID,
     That is a cap of one per concurrent request rather than one per
     request, which is the difference the amplifier turned on.
 
+    The guard runs inside `notify.enqueue` since F51 (2026-10-02): the
+    open alarm is the OWNER'S row, which row security hides from the
+    analyst whose read found the mismatch, so a read here would always
+    find nothing and the amplifier would be back.
+
     The custody and audit rows are written by `evidence.py` regardless and
     are the durable record; this only decides whether the OWNER'S PHONE
     rings again about something they have already been told.
     """
-    outstanding = conn.execute(
-        """SELECT 1 FROM notify.notification
-            WHERE kind = 'EVIDENCE_INTEGRITY_ALARM'
-              AND object_type = 'evidence' AND object_id = %s
-              AND acknowledged_at IS NULL
-            LIMIT 1""", (evidence_id,)).fetchone()
-    if outstanding is not None:
-        log.info("exhibit %s already has an unacknowledged integrity alarm; "
-                 "not raising another", evidence_id)
-        return None
     code, classification, compartments = _case(conn, case_id)
     labels = conn.execute(
         "SELECT classification, compartments, title FROM core.evidence "
@@ -364,8 +385,10 @@ def evidence_integrity_alarm(conn: psycopg.Connection, *, case_id: UUID,
            if on_read else
            "found by an explicit verify of the stored bytes against the hash "
            "recorded at acquisition")
-    return NotificationService(conn).notify_case_owner(
+    raised = NotificationService(conn).enqueue_case_owner(
         case_id,
+        # One unacknowledged alarm per exhibit, whoever holds it.
+        open_notice=OpenNotice(anyone=True, same_object=True),
         kind="EVIDENCE_INTEGRITY_ALARM",
         subject=f"{code}: an exhibit failed its integrity check",
         # No exhibit title here: this line may be emailed, and titles are
@@ -386,6 +409,10 @@ def evidence_integrity_alarm(conn: psycopg.Connection, *, case_id: UUID,
         element_classification=labels[0] if labels else None,
         element_compartments=frozenset(labels[1] or []) if labels else frozenset(),
         object_type="evidence", object_id=evidence_id, actor_id=actor_id)
+    if raised.outcome == COALESCED:
+        log.info("exhibit %s already has an unacknowledged integrity alarm; "
+                 "not raising another", evidence_id)
+    return raised.notification
 
 
 def case_reviews_due(conn: psycopg.Connection, *, as_of: date | None = None,
@@ -426,6 +453,9 @@ def case_reviews_due(conn: psycopg.Connection, *, as_of: date | None = None,
     """
     if as_of is None:
         as_of = conn.execute("SELECT current_date").fetchone()[0]
+    # Every case and every owner's earlier reminder: the drain's NOTIFY
+    # system connection reads both whole (F51, 2026-10-02), and on a
+    # filtered one this sweep would remind owners twice.
     rows = conn.execute(
         """SELECT id, code, review_due, classification, compartments
              FROM core."case"
@@ -643,42 +673,50 @@ def persona_suspended(conn: psycopg.Connection, *, persona_id: UUID,
     visibility predicate reads), AMBER when there is none, so a manager that
     predicate hides from the persona is never told about it: the
     notification service refuses a recipient below the label (suppression
-    2). When collect.source gains compartments through the compartment
-    contract, the union of those sources' compartments goes on it too. One
+    2). Since F43 (2026-10-03) the union of those
+    sources' compartments is on it too, so a manager who does not hold every
+    key of a source the persona reads is not told about it either. One
     unacknowledged notification per persona at a time, the integrity
     alarm's guard: a platform refusing a credential on every poll must not
-    ring a phone on every poll. Returns how many were raised."""
-    outstanding = conn.execute(
-        """SELECT 1 FROM notify.notification
-            WHERE kind = 'PERSONA_SUSPENDED'
-              AND object_type = 'collection_account' AND object_id = %s
-              AND acknowledged_at IS NULL LIMIT 1""", (persona_id,)).fetchone()
-    if outstanding is not None:
-        return 0
+    ring a phone on every poll. Returns how many were raised.
+
+    The guard is asked of `notify.enqueue` with the first manager's notice
+    (F51, 2026-10-02): an open one held by ANY manager is another person's
+    row, which row security hides from the operator whose act was refused.
+    Once the first call has answered, the rest of this fan-out is not
+    coalesced against the notice it has just written."""
     row = conn.execute(
         """SELECT a.handle, a.platform_uid,
                   (SELECT max(s.classification)::text FROM collect.source s
+                    WHERE s.id = a.source_id OR s.collection_account_id = a.id),
+                  (SELECT coalesce(array_agg(DISTINCT k), '{}')
+                     FROM collect.source s, unnest(s.compartments) AS k
                     WHERE s.id = a.source_id OR s.collection_account_id = a.id)
              FROM collect.collection_account a WHERE a.id = %s""",
         (persona_id,)).fetchone()
     if row is None:
         return 0
-    handle, uid, label = row
+    handle, uid, label, keys = row
     svc = NotificationService(conn)
     raised = 0
+    guard: OpenNotice | None = OpenNotice(anyone=True, same_object=True)
     for user_id in _global_holders(conn, "collection_account.manage"):
-        if svc.notify(
-                recipient_id=user_id, case_id=None,
-                kind="PERSONA_SUSPENDED",
-                subject="A collection persona was suspended",
-                summary=("A platform refused a persona's credential. "
-                         "Collection through it is paused."),
-                body=(f"Persona {handle} ({uid or 'no account id recorded'}) "
-                      f"was locked: {reason}\n\nOpen Feeds, Sources, "
-                      f"Personas."),
-                classification=label or "AMBER", compartments=frozenset(),
-                object_type="collection_account",
-                object_id=persona_id) is not None:
+        result = svc.enqueue(
+            recipient_id=user_id, case_id=None,
+            kind="PERSONA_SUSPENDED",
+            subject="A collection persona was suspended",
+            summary=("A platform refused a persona's credential. "
+                     "Collection through it is paused."),
+            body=(f"Persona {handle} ({uid or 'no account id recorded'}) "
+                  f"was locked: {reason}\n\nOpen Feeds, Sources, "
+                  f"Personas."),
+            classification=label or "AMBER", compartments=frozenset(keys or ()),
+            object_type="collection_account",
+            object_id=persona_id, open_notice=guard)
+        if result.outcome == COALESCED:
+            return 0
+        guard = None
+        if result.notification is not None:
             raised += 1
     return raised
 
@@ -719,21 +757,15 @@ def collection_authority_pending(conn: psycopg.Connection, *,
     confirm it, except the person who acted (who is never the second
     person). GREEN, case-less, naming no persona and no source, and at most
     one unacknowledged per authority and recipient, so adding sources one at
-    a time does not stack notifications."""
+    a time does not stack notifications. That check is the recipient's row,
+    so `notify.enqueue` makes it (F51, 2026-10-02)."""
     svc = NotificationService(conn)
     raised = 0
     for user_id in _global_holders(conn, "collection.authority.confirm"):
         if user_id == actor_id:
             continue
-        waiting = conn.execute(
-            """SELECT 1 FROM notify.notification
-                WHERE kind = 'COLLECTION_AUTHORITY_PENDING'
-                  AND object_type = 'collection_authority' AND object_id = %s
-                  AND recipient_id = %s AND acknowledged_at IS NULL
-                LIMIT 1""", (authority_id, user_id)).fetchone()
-        if waiting is not None:
-            continue
         if svc.notify(
+                open_notice=OpenNotice(same_object=True),
                 recipient_id=user_id, case_id=None,
                 kind="COLLECTION_AUTHORITY_PENDING",
                 subject="A collection authority needs a second person",
@@ -855,22 +887,6 @@ def _screening_recipients(conn: psycopg.Connection) -> list[UUID]:
     return people
 
 
-def _open_alert(conn: psycopg.Connection, recipient: UUID, kind: str, *,
-                window: timedelta, case_id: UUID | None = None,
-                unread: bool = False) -> bool:
-    """Whether the recipient already holds an open notice of this kind from
-    within the window (unacknowledged, or unread with `unread`)."""
-    state = "read_at" if unread else "acknowledged_at"
-    return conn.execute(
-        f"""SELECT 1 FROM notify.notification
-             WHERE recipient_id = %s AND kind = %s
-               AND created_at > now() - %s
-               AND {state} IS NULL
-               AND (%s::uuid IS NULL OR case_id = %s::uuid)
-             LIMIT 1""",
-        (recipient, kind, window, case_id, case_id)).fetchone() is not None
-
-
 _TRIGGER_WORDS = {"SUBMISSION": "when it was submitted",
                   "LIST_IMPORT": "when a list was imported",
                   "RESCAN": "in a screening pass"}
@@ -923,11 +939,10 @@ def screening_match(conn: psycopg.Connection, *, result_id: UUID,
             + " already sent to a sandbox, which nothing here can recall. "
               "The record names where.")
     for recipient in recipients:
-        if _open_alert(conn, recipient, "SAMPLE_SCREENING_MATCH",
-                       window=ALERT_WINDOW):
-            coalesced += 1
-            continue
-        raised = svc.notify(
+        # The recipient's open alert is their row: `notify.enqueue` reads it
+        # (F51, 2026-10-02).
+        result = svc.enqueue(
+            open_notice=OpenNotice(within=ALERT_WINDOW),
             recipient_id=recipient, case_id=None,
             kind="SAMPLE_SCREENING_MATCH", priority=URGENT,
             subject="A sample matched a prohibited-content list",
@@ -945,7 +960,9 @@ def screening_match(conn: psycopg.Connection, *, result_id: UUID,
                   f"there without another alert."),
             classification="GREEN", compartments=frozenset(),
             object_type="sample_screening", object_id=result_id)
-        if raised is not None:
+        if result.outcome == COALESCED:
+            coalesced += 1
+        elif result.notification is not None:
             notified += 1
             if designated and recipient == designated[0]:
                 told_person = True
@@ -965,16 +982,15 @@ def sample_withdrawn(conn: psycopg.Connection, *, sample_id: UUID,
     own = conn.execute(
         "SELECT classification, compartments FROM lab.sample WHERE id = %s",
         (sample_id,)).fetchone()
-    # The owner as a lock fact (S1, 2026-09-25), whoever is asking.
-    owner = conn.execute('SELECT owner_user_id FROM iam.case_facts(%s)',
-                         (case_id,)).fetchone()
-    if own is None or owner is None:
+    if own is None:
         return False
-    if _open_alert(conn, owner[0], "SAMPLE_WITHDRAWN", window=ALERT_WINDOW,
-                   case_id=case_id, unread=True):
-        return "coalesced"
-    raised = NotificationService(conn).notify_case_owner(
-        case_id, kind="SAMPLE_WITHDRAWN",
+    # The owner as a lock fact (S1, 2026-09-25), whoever is asking, and
+    # their open notice read by `notify.enqueue`, since it is their row
+    # (F51, 2026-10-02).
+    result = NotificationService(conn).enqueue_case_owner(
+        case_id, open_notice=OpenNotice(within=ALERT_WINDOW, same_case=True,
+                                        unread=True),
+        kind="SAMPLE_WITHDRAWN",
         subject=f"{code}: a sample was withdrawn",
         summary=(f"A sample attached to {code} was withdrawn by "
                  f"prohibited-content screening. The Security Officer holds "
@@ -987,7 +1003,9 @@ def sample_withdrawn(conn: psycopg.Connection, *, sample_id: UUID,
         element_classification=own[0],
         element_compartments=frozenset(own[1] or []),
         object_type="sample_screening", object_id=result_id)
-    return raised is not None
+    if result.outcome == COALESCED:
+        return "coalesced"
+    return result.notification is not None
 
 
 def _sample_labels(conn: psycopg.Connection, sample_id: UUID):
@@ -1057,6 +1075,31 @@ def detonation_signoff_requested(conn: psycopg.Connection, *,
               f"person who signs it off. Nothing is sent until you approve "
               f"it, and it lapses in 72 hours. Open the Lab: the request is "
               f"listed under Detonations awaiting your sign-off."),
+        detonation_id=detonation_id, actor_id=requester_id)
+
+
+def detonation_named(conn: psycopg.Connection, *, detonation_id: UUID,
+                     sample_id: UUID, named_id: UUID, requester_id: UUID,
+                     target: str, exposure_level: str) -> Notification | None:
+    """A record-only VENDOR or PUBLIC detonation names this person as its
+    authoriser (lab-3, 2026-10-03). The record is the requester's word; the
+    named person is told so they can object, which they could not before.
+    Labelled as the sign-off request is, so a person who cannot read the
+    sample is told nothing."""
+    row = _sample_labels(conn, sample_id)
+    code = row[1] if row else None
+    head = (f"{code}: you are named as a detonation's authoriser" if code
+            else "You are named as a detonation's authoriser")
+    where = "a public" if exposure_level == "PUBLIC" else "a vendor"
+    return _detonation_notice(
+        conn, recipient=named_id, sample_id=sample_id,
+        kind="DETONATION_NAMED", subject=head,
+        summary=("A colleague recorded a detonation outside the product and "
+                 "named you as the person who agreed to it."),
+        body=(f"A colleague recorded sending a sample to {target}, {where} "
+              f"sandbox, and named you as the person who agreed. The product "
+              f"did not send it and you were not asked in the product. If you "
+              f"did not agree, tell the case lead: the record stays as written."),
         detonation_id=detonation_id, actor_id=requester_id)
 
 

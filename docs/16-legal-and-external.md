@@ -24,6 +24,79 @@ where legal advice is required.
 
 ---
 
+## Read this before you hold anything
+
+**Legal review is required before any active case load.** An active case
+load is any case that holds material about real people, real victims or
+real infrastructure that is not already public, or that collects from or
+about them: a real investigation, real stealer-log or breach data, a persona
+operated against a real target, captured messages, or a fetch of a real
+attacker's page. Until counsel for each jurisdiction you operate in has
+worked through [docs/18](18-legal-review-pack.md) and the answers are
+written down, use this software only on synthetic data or on published
+reporting that contains no personal data. The software refuses several
+operations until a declaration is recorded, but a declaration is a string it
+stores. It cannot tell whether the declaration is true, and a false one
+produces a working system and an unlawful deployment.
+
+**Holding this information is itself dangerous, to other people and to you.**
+The platform is built to hold exactly the material that most needs care.
+Each of these is a reason to involve counsel before the first real load, not
+after a problem:
+
+1. **Possession can be the offence.** Attacker-chosen files will sooner or
+   later include material that is unlawful to hold whatever the reason, and
+   "I was investigating" is not a defence everywhere. Holding known-material
+   hash sets may also need specific authorisation. Preserving such material
+   and destroying it can each be required, and each can be forbidden, in a
+   different jurisdiction (L1).
+2. **You become the custodian of other people's data.** Stealer logs and
+   breach data describe thousands of people who are not suspects: their
+   credentials, session tokens and personal details. Data-protection and
+   breach-notification duties can attach to you as the holder, and a breach
+   of your own deployment exposes those people a second time (L2).
+3. **You are a target.** A store of open investigations, personas, sources and
+   victim data is worth more to the actors under investigation, and to anyone
+   else, than almost anything else you hold. Compromise can end an
+   operation, expose sources and persona identities, and put people at risk.
+   The store is also the record the other side will want to read.
+4. **Collection can be an offence.** Operating a persona under a false
+   identity, reading a members-only space, capturing a conversation, or
+   fetching or entering anything into an attacker's page can engage
+   computer-misuse, interception, terms-of-service and entrapment law,
+   regardless of intent (L3, L4, L5).
+5. **A graph is a set of allegations.** Grading an assertion does not make it
+   true. Joining a handle to a real person wrongly, or keeping a person in a
+   case longer than a basis exists, can harm an innocent individual and
+   expose you to claims. What you hold may have to be disclosed in
+   proceedings, including material that undermines your own case.
+6. **Retention is a liability, not a convenience.** Keep material for the
+   shortest period the basis supports. A legal hold, a purge obligation and a
+   preservation order can conflict, and the 90 day stealer-log period and the
+   other defaults here are placeholders somebody typed (D3, D4).
+7. **Copies multiply exposure.** Exports, backups, screenshots, reports and
+   lookups carry the classification of what they show. A screenshot of a real
+   case is real case material. Sharing one is a disclosure.
+8. **The people doing the work are exposed too.** Analysts reading attacker
+   material, prohibited content or victim data carry a welfare risk and, for
+   some material, a legal one. Limiting and supporting that exposure is an
+   operator duty (L1).
+9. **A second person limits one person's error, not a shared one.** The
+   two-person controls here stop a single person acting alone. They do not
+   make an unlawful act lawful, and they do not help if both people are
+   wrong in the same way.
+
+**If something you should not hold arrives unexpectedly** (suspected
+prohibited content above all), stop, do not open, copy or forward it, do not
+delete it on your own judgment, and contact counsel and your designated
+person first. The REJECTED path preserves by default for that reason.
+
+Nothing in this document is legal advice. It is a list of reasons to get
+some, from someone qualified in each jurisdiction you operate in (decision
+13 names the United States and Canada, and they differ).
+
+---
+
 ## 🔴 BLOCKING
 
 ### L1: Prohibited content in the sample store
@@ -128,7 +201,8 @@ the subjects of the investigation.
 
 **Built:** Phase 4 (`collection.py`, persona vault). Credentials are
 envelope-encrypted and decrypted only inside `PersonaVault.use()`, which
-runs in the API process. There is no separate collector (invariant 7).
+in production runs in the collector process, the one service holding the
+persona key (invariant 7; until 2026-10-02 it ran in the API process).
 
 **Assumes nothing about authority.** The software will happily drive an
 account into a forum. Whether *you* may is not a software question.
@@ -180,8 +254,10 @@ is required, which is stricter than `comms._NEEDS_AUTHORITY`, where a
 PERSONA_PARTY conversation needs none. A group chat's messages carry
 thousands of uninvolved people's words and typed account ids: they are
 collected documents under the CHAT_EXPORT retention rule, outside case
-minimisation, and no route or script sweeps collected documents yet
-(docs/17). Adding a chat by its id reads up to 500 entries of the persona's
+minimisation. `scripts/retention_sweep.py` sweeps them once past their
+clock, run by an operator under a declared authority and never by the cron
+loop: who runs it, and under which authority, is for counsel and the owner
+(docs/17 F30). Adding a chat by its id reads up to 500 entries of the persona's
 own conversation list to find it; everything but the matched chat is
 dropped in memory and never logged or stored. Media is never downloaded
 (L1).
@@ -589,19 +665,34 @@ a reset meter: it admits the subject it was refusing with a full burst.
 Both compose files run Redis with `noeviction`, so at the 1 GB cap it
 refuses writes instead, and each limit falls back to its declared
 `on_backend_failure`. The development file ran `allkeys-lru` until Alpha 6.
-The readiness check `redis_limiter_store` reads the policy with `CONFIG
-GET` and fails on an evicting one, or reports it as unknown where `CONFIG`
-is disabled. `redis_limiter_isolated` counts the keys in the limiter's
-database that are not under its `rl:` prefix, and the keys in the
-instance's other databases, and fails on either; it reads no value and
-reports no key name.
+The readiness check `redis_limiter_store` reads the policy from `INFO
+memory` (`CONFIG GET` only where INFO will not say, since 2026-10-02) and
+fails on an evicting one, or reports it as unknown where neither answers.
+`redis_limiter_isolated` counts the keys in the limiter's database that are
+not under its `rl:` prefix, and the keys in the instance's other databases,
+and fails on either; it reads no value and reports no key name.
+
+Since 2026-10-02 the isolation is also the server's own. The production
+Redis runs an ACL file in which the default user is disabled and the
+limiter's user, `noctornal_limiter`, may read and write keys under `rl:`
+alone and run only the commands the limiter sends
+(`ratelimit_redis.LIMITER_ACL_COMMANDS`), and `REDIS_URL` signs in as that
+user. Three of those commands see past `rl:` without reading or writing a
+key: `SCAN` lists every key name in the database, `INFO` reports the
+server's statistics, and `ACL GETUSER` reads any user's rules and password
+hashes; the census and the readiness row need all three.
+`redis_limiter_isolated` reads the ACL back over the limiter's connection
+(`ACL WHOAMI`, `ACL GETUSER`) and, under `NOCTORNAL_ENV=production`, fails
+when the limiter signs in as `default`, when `default` is enabled, or when
+the limiter's user can reach more than that.
 
 **Confirm** the production deployment gives the limiter its own Redis
 instance, running `noeviction`: `maxmemory` is per instance, so a
-co-tenant in another database fills the same memory. The check sees a
-co-tenant only while it holds keys, and cannot see a second server behind
-the same address. This is a deployment fix, not a code one, and it is the
-kind that gets missed.
+co-tenant in another database fills the same memory. The bundled compose
+file's ACL refuses every other client, but another user added to that ACL
+by hand would be seen only by the key count, while it holds keys, and a
+second server behind the same address is not visible at all. This is a
+deployment fix, not a code one, and it is the kind that gets missed.
 
 ### C9: Sample origin split
 
@@ -609,7 +700,7 @@ Invariant 10 requires sample bytes to be served from a **separate origin**.
 `samples.download()` refuses unless `NOCTORNAL_SAMPLE_ORIGIN` is configured,
 is a real second origin rather than a second name for the application's
 (`NOCTORNAL_BASE_URL`), and the process serving the request is configured
-as that origin (`NOCTORNAL_PUBLIC_ORIGIN`) -- decided from configuration,
+as that origin (`NOCTORNAL_PUBLIC_ORIGIN`), decided from configuration,
 never from the request, since 2026-09-09. Unset means the split is OFF and
 every download refuses; the readiness register says so.
 

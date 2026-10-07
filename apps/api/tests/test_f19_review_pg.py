@@ -91,6 +91,12 @@ def conn():
         c.execute(f"DELETE FROM iam.break_glass WHERE user_id IN {sub}")
         c.execute(f"DELETE FROM core.evidence WHERE case_id IN {csub} "
                   f"AND id NOT IN {pinned_evidence}")
+        # The triage queue is a queue, not a ledger: the static runs of a
+        # sample that custody pins stayed QUEUED, went stale over a long
+        # run and failed the readiness tests that read the whole queue
+        # (2026-10-07). A deleted sample takes its own along.
+        c.execute(f"DELETE FROM lab.static_run WHERE status = 'QUEUED' AND "
+                  f"sample_id IN (SELECT id FROM lab.sample WHERE submitted_by IN {sub})")
         c.execute(f"DELETE FROM lab.sample WHERE submitted_by IN {sub} "
                   f"AND id NOT IN {pinned_samples}")
         c.execute(f"DELETE FROM iam.user_role WHERE user_id IN {sub}")
@@ -108,6 +114,9 @@ def conn():
                   f"AND id NOT IN (SELECT submitted_by FROM lab.sample) "
                   f"AND id NOT IN (SELECT acquired_by FROM core.evidence) "
                   f'AND id NOT IN (SELECT owner_user_id FROM core."case")')
+    assert c.execute(f"SELECT count(*) FROM lab.static_run WHERE status = 'QUEUED' "
+                     f"AND sample_id IN (SELECT id FROM lab.sample "
+                     f"                   WHERE submitted_by IN {sub})").fetchone()[0] == 0
     c.close()
 
 

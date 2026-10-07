@@ -120,6 +120,17 @@ class PgUserStore(UserStore):
     def count_recovery_codes(self, user_id: UUID) -> int:
         return len(self.get_recovery_hashes(user_id))
 
+    def recovery_codes_remaining(self, user_id: UUID) -> int | None:
+        """The count alone, through the definer 0143 adds (rls-6,
+        2026-10-03): the request role cannot read the hashes, and the
+        function answers only for the account the connection is bound to.
+        None when it will not answer: no such account, or not the bound
+        one (a session revoked while the request ran). `count_recovery_codes`
+        stays for the owner's shell tools."""
+        row = self._c.execute(
+            "SELECT iam.recovery_codes_remaining(%s)", (user_id,)).fetchone()
+        return int(row[0]) if row and row[0] is not None else None
+
     def get_totp_secret(self, user_id: UUID) -> str | None:
         row = self._c.execute(
             "SELECT totp_secret_ciphertext, totp_key_id FROM iam.app_user WHERE id = %s",
@@ -358,8 +369,8 @@ class PgAccessResolver:
         # a request the gate then refused (no such permission on the case
         # role, a compartment the caller is not read into, no assignment at
         # all under a global grant) still added to `action_count` and wrote
-        # a BREAK_GLASS_ACTION row for access that never happened (final
-        # review U19, 2026-09-23). `evaluate()` is pure, so asking it here
+        # a BREAK_GLASS_ACTION row for access that never happened (2026-09-23). `evaluate()`
+        # is pure, so asking it here
         # is the same decision every caller then makes.
         if use_of is not None and count_use and evaluate(ctx).allowed:
             from noctornal_api.break_glass import BreakGlassService
@@ -475,15 +486,35 @@ class PgSessionStore(SessionStore):
             user_agent=row[10],
         )
 
-    def update(self, record: SessionRecord) -> None:
-        self._c.execute(
+    def slide(self, session_id: UUID, at: datetime,
+              idle_floor: datetime) -> datetime | None:
+        """Slide the idle window of a session that is still live, as one
+        statement (authz-session-revoke-bypass, 2026-10-03).
+
+        It replaces a whole-row `update` that wrote last_seen_at,
+        mfa_satisfied_at, revoked_at and revoke_reason from a record read
+        before the write, with `WHERE id` alone: a revocation committed by
+        another connection in between was written back to NULL. This names
+        `last_seen_at` only, so it cannot carry a stale revocation, and its
+        WHERE matches only an unrevoked, unexpired session inside its idle
+        window, so a dead session is never touched back to life; the caller
+        reads no row as "no longer live". GREATEST keeps two concurrent
+        requests from moving the window backwards (0144's guard refuses a
+        backwards move from the request role), and LEAST holds what is
+        written to the database's own clock plus a minute: 0144's guard
+        refuses a slide more than five minutes ahead of it, so an API host
+        whose clock runs fast would otherwise turn every request into a
+        refusal (rls-7, 2026-10-03)."""
+        row = self._c.execute(
             """UPDATE iam.session
-                  SET last_seen_at = %s, mfa_satisfied_at = %s,
-                      revoked_at = %s, revoke_reason = %s
-                WHERE id = %s""",
-            (record.last_seen_at, record.mfa_satisfied_at, record.revoked_at,
-             record.revoke_reason, record.id),
-        )
+                  SET last_seen_at = GREATEST(last_seen_at,
+                                              LEAST(%s, now() + interval '1 minute'))
+                WHERE id = %s AND revoked_at IS NULL
+                  AND expires_at > %s AND last_seen_at > %s
+            RETURNING last_seen_at""",
+            (at, session_id, at, idle_floor),
+        ).fetchone()
+        return row[0] if row else None
 
     def revoke(self, session_id: UUID, reason: str, at: datetime) -> bool:
         cur = self._c.execute(

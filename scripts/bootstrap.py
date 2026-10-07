@@ -394,7 +394,12 @@ def cmd_create_user(args: argparse.Namespace) -> None:
     print("  If your authenticator shows something else, the enrolment did not")
     print("  take. Fix it now rather than at the login screen.")
     print()
-    _print_next(args.email, roles)
+    # The installers pass --no-next (Beta 1 clean machine, 2026-10-07): inside
+    # step 6 this block told a person to sign in to an API step 8 had not
+    # started, and to load OP-SHOWCASE-26 just before step 7 offered
+    # Latticework. Their closing card says both, once the API is up.
+    if not getattr(args, "no_next", False):
+        _print_next(args.email, roles)
 
 
 #: The console the installers and launchers start, on their default port.
@@ -1244,8 +1249,9 @@ def cmd_session(args: argparse.Namespace) -> None:
     and NOCTORNAL_TOTP_KEK, and anyone holding those could write this row by
     hand. The session it creates is an ordinary one — same 12 hour absolute
     and 30 minute idle expiry, same revocation — so nothing downstream is
-    weakened. The proper fix on a real deployment is recovery codes (see
-    docs/05), which are not built yet.
+    weakened. The proper fix on a real deployment is a recovery code
+    (`security/recovery.py`, docs/05), which signs a person in without the
+    authenticator.
 
     It is UNBOUND, and that is deliberate. 0058 records the address and
     User-Agent a session was minted from, and `SessionService.create` takes
@@ -1363,6 +1369,10 @@ def _build_parser() -> argparse.ArgumentParser:
     create.add_argument(
         "--roles", default=DEFAULT_ROLES, metavar="R1,R2",
         help=f"comma-separated GLOBAL roles (default {DEFAULT_ROLES})",
+    )
+    create.add_argument(
+        "--no-next", action="store_true",
+        help="leave out the closing 'Next' block; the installers print their own",
     )
     create.set_defaults(func=cmd_create_user)
 

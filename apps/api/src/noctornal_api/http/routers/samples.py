@@ -106,6 +106,7 @@ from noctornal_api.http.deps import (
     system_conn,
     user_ceiling,
 )
+from noctornal_api.http.body_ceiling import credential_in_body
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import (
     BodyCappedRoute,
@@ -114,7 +115,7 @@ from noctornal_api.http.limits import (
     enforce,
     rate_limit,
 )
-from noctornal_api import fuzzyhash, lab_similarity, lab_triage
+from noctornal_api import fuzzyhash, lab_archive, lab_similarity, lab_triage
 from noctornal_api.config import SAMPLE_CAP_ENV, cap_is_declared
 from noctornal_api.iam_admin import IamAdminService
 from noctornal_api.ratelimit import ip_subject
@@ -304,6 +305,11 @@ class SampleOut(BaseModel):
     screening_outcome: str = "NOT_SCREENED"
     screened_at: str | None = None
     screening_lists_consulted: int | None = None
+    #: Archive expansion (phase 8, 2026-10-02): the archive sample this
+    #: one was cut from, and its path inside it; the detail's `archive`
+    #: carries the tree at the reader's labels.
+    parent_sample_id: str | None = None
+    archive_path: str | None = None
 
 
 def _out(s: Sample, names: dict | None = None,
@@ -347,6 +353,8 @@ def _out(s: Sample, names: dict | None = None,
                         "why": fuzzyhash.COMMON_IMPHASHES.get(s.imphash or "")},
         screening_outcome=s.screening_outcome,   # F13
         screened_at=s.screened_at.isoformat() if s.screened_at else None,
+        parent_sample_id=str(s.parent_sample_id) if s.parent_sample_id else None,
+        archive_path=s.archive_path,
     )
 
 
@@ -612,8 +620,7 @@ def preserved_for_authorisation(
     user: CurrentUser = Depends(require_global("sample.preserved.authorise")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """The Security Officer's way in to the preserved samples (final review
-    U3, 2026-09-23).
+    """The Security Officer's way in to the preserved samples (2026-09-23).
 
     Authorising and revoking a retrieval were offered only inside the Lab's
     sample card, which is `GET /samples/{id}` under `sample.read`, and
@@ -1018,6 +1025,9 @@ def detail(
            # F14. Whether this sample may be sent to the configured
            # sandbox now, and why not: the one eligibility reader.
            "sandbox": _sandbox_for(conn, sample_id),
+           # Phase 8 (2026-10-02). The archive this sample was cut from
+           # and the members cut from it, each at the reader's labels.
+           "archive": lab_archive.tree_for(conn, sample_id, **ceiling),
            # What this reader may do here, so the card offers the lab's
            # own work (assign, record an analysis, reject, detonate) to the
            # people who can do it and says who can to everybody else.
@@ -1246,6 +1256,14 @@ def _credential_presented(request: Request) -> None:
     connection -- exactly as one who sends junk in `Authorization`
     always has.
     """
+    # lab-5 (2026-10-03): the origin split is asked FIRST, as the exhibit
+    # route's `_production_presented` does, so a ticket posted to the
+    # application process is refused before `redeem_download_ticket` spends
+    # it and audits a redemption that served nothing. Configuration only,
+    # so this still opens no connection.
+    split = origin_split()
+    if not split.serves_here:
+        raise Problem(409, "Conflict", split.refusal or "")
     if (request.headers.get("authorization")
             or request.cookies.get(SESSION_COOKIE)
             or request.headers.get("transfer-encoding")):
@@ -1316,6 +1334,7 @@ def _download_actor(request: Request, conn: psycopg.Connection,
 @router.post("/{sample_id}/download",
              dependencies=[Depends(_meter_download)])
 @body_cap(_TICKET_BODY_CAP, what="a download ticket")
+@credential_in_body
 def download(
     sample_id: UUID,
     request: Request,
@@ -1899,11 +1918,18 @@ def request_detonation(
              if body.authorised_by else None)
     return {"id": str(det_id), "mode": "record",
             "submitted": False,
+            # lab-3 (2026-10-03): PENDING, and the named person has not
+            # confirmed anything in the product; they have been told.
+            "status": "PENDING",
+            "authoriser_confirmed": False,
             "authorised_by_name": (named or {}).get("name"),
             "authorised_by_email": (named or {}).get("email"),
             # F14. A record-only request is never sent, whether or not
             # a sandbox is configured.
-            "notice": "Recorded only. This request is never sent anywhere."}
+            "notice": ("Recorded only. This request is never sent anywhere."
+                       + (" The person you named has not confirmed it in the "
+                          "product, and they have been told it names them."
+                          if body.authorised_by else ""))}
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,131 @@
-# Clean-VM install, Linux, step by step
+# Clean-machine install, Linux, step by step
+
+This is the record of installing NocTORnal on a machine that has never seen
+it, run by following `release/START-HERE.md` as a new user would. The
+newest run is first. The first run on a clean machine, which found the
+defects that made the installer a wizard, follows it, then the Alpha 6
+re-runs.
+
+## Beta 1 release candidate, 2026-10-07
+
+**Result: PASS.** The release candidate, packaged from git exactly as the
+release is, on a machine rebuilt again from its base image, with START-HERE's
+prerequisites and nothing else: `bash release/install.sh --demo` ran all eight
+steps with no traceback, the console answered after 6 minutes 11 seconds (most
+of it pulling 1.1 GB of images) and the first sign-in, password and
+authenticator code, was accepted at 6 minutes 52 seconds. The walkthrough ran
+its six steps, the demo case's analysis named its broker, a new case took an
+exhibit and a tie citing it, and a stop, a start, a reboot and a start again
+kept everything. After a reboot nothing runs until `bash release/start.sh`.
+One thing a new user may meet: a tab chosen while a case is still opening is
+switched back to Graph when the case finishes loading; choosing it again
+works.
+
+## Beta 1 run, 2026-10-07
+
+**Result: PASS WITH NOTES.** A new user who follows START-HERE on a pristine
+Ubuntu 24.04 machine gets a working console. One command installs it, they
+sign in with a password and an authenticator code, the walkthrough shows, and
+real work succeeds. Nothing found blocks a beta used on non-sensitive data.
+Nine installer and document defects were found and fixed, each with a
+regression test, and the fixes were proved on the machine.
+
+### The machine, and what was run
+
+- **Machine.** An Ubuntu 24.04 virtual machine rebuilt from its base image
+  for the run. At the start it had no Docker, no `unzip`, no Python and no
+  venv package.
+- **Package.** The release zip as `scripts/package_release.ps1 -Zip` makes
+  it: 1,108 entries.
+- **The installer without its prerequisites** stopped at step 1 on the venv
+  package and left nothing on disk. Without the docker group it stopped on
+  "engine is not reachable". Both messages said what to do.
+- **The prerequisites as START-HERE names them** (the venv package, Docker
+  Engine from Docker's own instructions, and the docker group) took 252
+  seconds.
+- **The first install**, `bash release/install.sh --demo` with its answers
+  from a file and no terminal, answered on `/ui/` after 461 seconds, about
+  5.5 minutes of it pulling 1.1 GB of images. The database was at its head
+  revision, the account was created, the demo case was loaded and there was
+  no traceback. Everything listened on 127.0.0.1 only, `.env.local` was mode
+  600, and the install added 1.49 GB (`.venv` is 273 MB of it).
+- **The console**, in Chromium 153 inside the machine: sign-in took 0.5
+  seconds, the six-step tour opened by itself and Help, Getting started
+  opened it again. On the demo case the graph, the entities, Analysis (which
+  names `oriel` after Run analysis) and Search worked. A new case, an exhibit
+  upload (its SHA-256 shown), two entities and a MEMBER_OF link citing the
+  exhibit (3 of 3 elements evidenced) and the readiness page (11 of 45 checks
+  need attention, 4 blocking) all worked. 24 screenshots were taken.
+- **Stop and start** (Ctrl+C, `docker compose down`, `bash release/start.sh`)
+  took 21 seconds with the data intact.
+- **Re-running the installer.** While the API was up it stopped in step 1.
+  Stopped, it re-ran fully in 31 seconds with `.env.local` unchanged byte for
+  byte.
+- **A reboot.** The containers do not come back on their own (they have no
+  restart policy); `start.sh` brought everything up in 19 seconds with both
+  cases there.
+- **Uninstall and reinstall**, at a pseudo-terminal (email, display name,
+  Enter, Enter), was up in 58 seconds; the interactive path worked, including
+  the demo question, and the console walk passed again.
+
+### Measurements
+
+| | |
+|---|---|
+| From the install command to a working console, prerequisites in place | 7 minutes 41 seconds (about 5.5 minutes of it image download) |
+| Preparing a bare Ubuntu first | about 4 minutes more |
+| Sign-in | under 1 second |
+| A reinstall with the images cached | 58 seconds |
+| Stop and start | 21 seconds; after a reboot 19 seconds |
+| Disk added by the install | 1.49 GB |
+
+What a user must do by hand on Linux: install the venv package
+(`sudo apt update && sudo apt install python3.12-venv`), install Docker Engine
+with its Compose plugin, add themselves to the docker group
+(`sudo usermod -aG docker $USER`) and log out and in, and on a server image
+install `unzip`. Every user must save the password and enrol the TOTP secret
+(the QR is drawn for a dark terminal; on a light one, type the secret in),
+keep the installer's terminal open while using the console, run
+`bash release/start.sh` after every reboot, choose Run analysis in the
+Analysis pane, make a second account for the Security Officer role, and reach
+the console of a remote machine through an SSH tunnel.
+
+### Findings, and what was done about each
+
+| Severity | Where | What | Status |
+|---|---|---|---|
+| medium | `scripts/package_release.ps1`, the zip step | Under Windows PowerShell 5.1 all 1,108 zip entries were stored with backslashes, so `unzip` warned and exited 1, and Python's zipfile extracted 1,108 loose files and no folders. PowerShell 7 writes correct zips. | Fixed: the packager names every entry itself and refuses a backslash; 5.1 now gives 0 backslashes and the machine's `unzip` exits 0 |
+| low | `bootstrap.py` create-user, both installers | Its "Next" block said to sign in before the API was up, and to load a showcase case right before step 7 offers the demo. | Fixed (`--no-next`) |
+| low | step 7 of both installers | A re-run with `--demo` said "case code already in use", and the closing card offered the same failing command. | Fixed |
+| low | `install.sh` | It printed `./release/install.sh --port 8001` and `$0 --port`, and an unzipped file has no execute bit, so those gave "Permission denied". | Fixed: every printed command runs the script through bash |
+| low | step 1 preview | It said "write .env.local with fresh random keys" even on a re-run, where the user's keys were already copied in. | Fixed |
+| low | README, "Verifying the install" | It ran `set -a; . ./.env.local`, executing the file, where INSTALL.md reads it as data. | Fixed |
+| low | `START-HERE.md` | The Docker link sent Linux users to Docker Desktop, its check passes before the docker group step that stops the install, and `unzip` is absent on server images. | Fixed |
+| low | `START-HERE.md` | "Open Analysis. It singles out oriel" while the pane is empty until Run analysis, which then lists `mer_florin` first. | Fixed |
+| low | `INSTALL.md` | No word on reaching the console of a machine installed over SSH. | Fixed |
+| consistency | README and INSTALL prerequisites tables | The disk figures were stale. | Fixed: they are this run's measurements, and a test holds the two tables equal |
+| consistency | README, release README, ARCHITECTURE, CONVENTIONS, ROADMAP-REMAINING | The counters were stale and `test_doc_invariants` failed three tests. | Fixed: they are generated by `scripts/refresh_counters.py` |
+| consistency | `release/README.md` | It was still titled Alpha. | Fixed |
+| info | the packaging host | `core.autocrlf=true` makes `.py` and `.md` files CRLF inside the zip built on Windows; `.sh` stays LF. It works. | Stated |
+| info | `infra/docker-compose.yml` | `pgvector:pg16` and `redis:7-alpine` are floating tags. | Stated (docs/17) |
+
+### Not done
+
+- `install.ps1` was never run, because there was no clean Windows machine. It
+  was read, parsed (no errors under Windows PowerShell 5.1 and PowerShell 7),
+  and its new Python snippet was run against a database. Nothing was tried on
+  macOS.
+- No human with an authenticator app: the codes were computed from the printed
+  secret.
+- The browser was headless Chromium, not Google Chrome.
+- The reinstall proved the fixes from an overlay on the packaged tree, not from
+  a committed package.
+- Listening addresses were checked with `ss` inside the machine, not from a
+  second network namespace, and the full test suite was not run there.
+
+---
+
+## The first clean-machine run, 2026-09-17, kept as it was
 
 **Date:** 2026-09-17
 **Artefact tested:** `git archive HEAD` of `main` at `4c43ea8`, made on

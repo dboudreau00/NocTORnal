@@ -4,8 +4,22 @@
 > in the README first.** Five legal decisions, L1 to L5, gate any use of
 > this software against real material. Installing it is fine; pointing it
 > at a real case is not, until those are settled.
+>
+> **Legal review is required before any active case load**, and holding this
+> material is dangerous in its own right: possession can be an offence, and
+> a store of victim data and open investigations is a target. Until counsel
+> has worked through `docs/18-legal-review-pack.md`, load only synthetic data
+> or published reporting with no personal data. See "Read this before you
+> hold anything" at the top of `docs/16-legal-and-external.md`.
 
 ---
+
+## The quick path
+
+**[START-HERE.md](START-HERE.md) is the one page to follow first.** It says
+what you need, gives the three install steps for each system, explains the
+first sign-in, and lists the five commonest problems with their fixes. This
+document is the detail behind it.
 
 ## The short version
 
@@ -27,14 +41,32 @@ zip additionally carries Mark-of-the-Web; bare `.\install.ps1` is
 blocked either way. A `.sh` out of a zip has no execute bit, so `./` fails
 with "permission denied" before bash ever sees it.
 
-That is the whole thing. It checks what it needs, installs the Python
-packages into a virtual environment of its own, starts the services,
-creates the database, makes you an account (on Windows it prints the
-command that does, see step 6 below), starts the API and prints the
-console URL. It does not open a browser.
+That is the whole thing. It is a wizard of eight numbered steps ("Step 3
+of 8"). Step 1 looks at your computer and prints what it found (system,
+Python, Docker, the API's port) before anything is changed. Then it installs
+the Python packages into a virtual environment of its own, starts the
+services, creates the database, makes you an account (on both systems, and
+before the API starts), offers a fictional demo case, starts the API and
+prints a closing card with the console URL. When a terminal and a desktop
+are present it offers to open the page in your browser; `--open` (`-Open`
+on Windows) does so without asking.
 
 Re-running it is safe. Every step checks before it acts and reports what
-it found.
+it found. If a step fails it says in one sentence what to do.
+
+Two questions are asked of a person at the keyboard and never otherwise.
+When standard input is not a terminal (a pipe, cron, CI, a test harness) the
+only input it reads is the email and then the display name for the account,
+and the demo case loads only if you ask for it:
+
+| Flag | Windows | Effect |
+|---|---|---|
+| `--demo` | `-Demo` | load the fictional demo case without asking |
+| `--no-demo` | `-NoDemo` | do not load it and do not ask |
+| `--open` | `-Open` | open the console in your browser once it is up |
+
+The demo case is the synthetic network `bootstrap.py demo-network` makes,
+marked TLP:CLEAR. All of it is fictional.
 
 ---
 
@@ -50,7 +82,7 @@ machine with 8 GB of RAM.
 | **Python** | 3.12 | With `venv` and `ensurepip`. On Debian and Ubuntu those are a separate package: `sudo apt update && sudo apt install python3.12-venv`. 3.13 is what it is developed on. |
 | **Docker** | with Compose v2 | Docker Engine and its Compose plugin on Linux; Docker Desktop on Windows and macOS. Runs four containers: Postgres, Redis, MinIO, Mailpit. |
 | **Memory** | 8 GB tested | The four containers used about 300 MB at idle after the showcase seed. Postgres is configured with `shared_buffers=512MB`, so it grows past that under load. |
-| **Disk** | 2 GB free | 1.4 GB was added by the install and the showcase seed: 1.1 GB of images, a 189 MB `.venv`, and the data. Installing Docker Engine on a bare Ubuntu took about 0.75 GB before that. |
+| **Disk** | 2 GB free | 1.5 GB was added by the Beta 1 install alone (measured 2026-10-07): 1.1 GB of images, a 273 MB `.venv`, and the data. Installing Docker Engine and the venv package on a bare Ubuntu took about 0.8 GB before that. |
 | **OS** | Windows 10/11, macOS 12+, Linux | PowerShell 5.1 is supported and specifically tested for. |
 
 Optional, and only for the features that use them:
@@ -79,9 +111,11 @@ and newer only, so on macOS 13 leave `--with-yara` off.
 
 Nothing hidden, in this order:
 
-1. **Checks Python and Docker.** Stops with a specific instruction if
-   either is missing or too old, if Python cannot build a virtual
-   environment, or if the Docker engine is not reachable.
+1. **Checks your computer, and changes nothing.** Prints the system,
+   Python and Docker versions and whether the API's port is free. Stops with
+   a specific instruction if Python or Docker is missing or too old, if
+   Python cannot build a virtual environment, if the Docker engine is not
+   reachable, or if the port is taken.
 2. **Creates a virtual environment** at `.venv` and installs the API and
    the ontology package into it.
 3. **Generates secrets** into `.env.local`, a TOTP key-encryption key and
@@ -93,13 +127,16 @@ Nothing hidden, in this order:
 4. **Starts the containers** and waits for Postgres to report healthy.
 5. **Applies the database migrations** (`alembic upgrade head`).
 6. **Creates your account** if no user exists, and prints the password
-   once with the enrolment QR for your authenticator.
+   once with the enrolment QR for your authenticator. When a terminal is
+   attached it then waits until you press Enter, so you have saved the
+   password before anything else is printed.
 
-   > **Windows note (R8).** `install.ps1` hands off to `launch.ps1`, which
-   > prints a banner telling you to run `create-user` in a second terminal,
-   > and then starts uvicorn, whose log scrolls that banner off the
-   > screen within seconds. If you reach the sign-in page with no
-   > credentials, that is why. Run:
+   > **Windows note (R8, fixed).** `install.ps1` used to hand off to
+   > `launch.ps1`, whose server log scrolled the password and the QR code
+   > off the screen within seconds, so a new user reached the sign-in page
+   > with no credentials. It now makes the account before it starts the
+   > API, as `install.sh` does, and waits for you. If you installed with an
+   > older copy and have no credentials, run:
    >
    > ```powershell
    > .venv\Scripts\python scripts\bootstrap.py create-user --email you@example.org --name "Your Name"
@@ -108,9 +145,13 @@ Nothing hidden, in this order:
    > It works in a fresh terminal with no exports: `bootstrap.py` reads
    > `.env.local` itself.
 
-7. **Starts the API** on 127.0.0.1 and prints the console URL. If the
-   port is already taken it stops and says so instead (see
-   Troubleshooting).
+7. **Offers the demo case**, a fictional one, so there is something to
+   explore (see the flags above).
+8. **Starts the API** on 127.0.0.1 and prints the closing card: the console
+   URL, the email to sign in with, how to start it again, how to stop it and
+   where the help is. The port is checked in step 1, so if it is already
+   taken the installer stops there and says so, before it builds anything
+   (see Troubleshooting).
 
 Every one of those is idempotent. Stopping it half way and running it
 again does the right thing.
@@ -125,7 +166,9 @@ because Docker's forwarding rules are applied before ufw's. So do not
 change them to `0.0.0.0` in `infra/docker-compose.yml`: a host firewall
 would not close them again. To reach the MinIO console or Mailpit from
 another machine, use an SSH tunnel, for example
-`ssh -L 9001:127.0.0.1:9001 you@the-host`.
+`ssh -L 9001:127.0.0.1:9001 you@the-host`. The console is the same on a
+machine you installed over SSH: `ssh -L 8000:127.0.0.1:8000 you@the-host`,
+then open <http://127.0.0.1:8000/ui/> on your own computer.
 
 A stack started by an earlier release keeps its old bindings, on every
 interface, until its containers are recreated from this file.
@@ -241,9 +284,14 @@ working on a broken host, not as the normal way in.
 # stop the containers:
 docker compose -f infra/docker-compose.yml down
 
-# start everything again:
-./release/install.sh          # or: powershell -ExecutionPolicy Bypass -File .\release\install.ps1
+# start everything again (the start scripts run scripts/launch.sh and
+# scripts/launch.ps1 and nothing else):
+bash release/start.sh         # or: powershell -ExecutionPolicy Bypass -File .\release\start.ps1
 ```
+
+Re-running the installer starts everything too, and is how you pick up a new
+release. `start.cmd` in the project folder does the same on Windows when you
+double-click it.
 
 Data lives in Docker volumes and survives `down`. To destroy it
 completely, add `-v`, which deletes every case, exhibit and audit row,
@@ -257,11 +305,20 @@ Settings come from the environment or `.env.local`. **Nothing has a
 default secret**; a missing value produces a deliberate, explained refusal
 rather than an insecure fallback.
 
+`.env.local` names settings and nothing else. The installer, both launchers and
+`scripts/_env.py` leave out a name that changes how programs start (`PATH`,
+`HOME`, anything beginning `PYTHON`, `LD_`, `DYLD_`, `BASH_`, `DOCKER_`,
+`COMPOSE_`, `GIT_`, `PIP_` or `NODE_`, `PSModulePath`, and a few shell
+variables such as `IFS` and `ENV`), say so by name, and never print its value.
+If you really need one, set it in your own shell.
+
 The ones worth knowing:
 
 | Variable | Effect if unset |
 |---|---|
-| `NOCTORNAL_TOTP_KEK` | The API will not start. Generated for you at install. |
+| `NOCTORNAL_TOTP_KEK` | A production start refuses. In development the API starts and sign-in is refused with a named 503, because no TOTP secret can be sealed or opened. Generated for you at install. |
+| `NOCTORNAL_PERSONA_KEK` | A collection persona's credential can be neither sealed nor opened, so a persona cannot be enrolled or used and every act or poll that needs one is refused by name. A key of its own, never the TOTP key. Generated for you at install. In production only the collector service holds it (`infra/production/collector.env`). |
+| `NOCTORNAL_COLLECTOR_INLINE` | Persona acts are queued for the collector process and wait for it. A development install sets it to `1`, so the API runs them itself; it is refused in production. Written for you at install. |
 | `NOCTORNAL_INGEST_PEPPER` | Ingest keys cannot be issued. Generated for you. |
 | `NOCTORNAL_PROHIBITED_CONTENT_POLICY`<br>`NOCTORNAL_DESIGNATED_PERSON` | **Sample ingest returns 451.** This is L1, and the refusal is the point. Set both only once counsel has written the policy. |
 | `NOCTORNAL_SAMPLE_ORIGIN` | Sample downloads are refused. Invariant 10 requires malware bytes to come from a **separate origin**; an origin split that is only written down does not survive the first hurried deploy. |
@@ -271,8 +328,63 @@ The ones worth knowing:
 | `NOCTORNAL_LIVE_MAX_PENDING` | A quarter of the subscriber ceiling (50 by default) of sockets that are open but not yet authenticated, per process. A peer with no session pays for these, so the budget is small, and a full budget is refused before the WebSocket handshake completes so that a refused socket holds nothing. |
 | `NOCTORNAL_LIVE_MAX_PENDING_PER_PEER` | 8 of those per peer address, the same address the rate limiter uses, trusted proxy hops included. |
 | `NOCTORNAL_LIVE_HELLO_SECONDS` | 10 seconds for an accepted socket to send its hello before it is closed and its slot returned. |
-| `REDIS_URL` | Rate limiting falls back to per-process, and says so loudly at startup. |
+| `NOCTORNAL_RELAX_SEASONING_DAYS` | 7 days: the second person who approves turning off a case's merge requirement must have held `case.update` on that case for at least this long, read from the assignment's grant time by the database clock. `0` turns the rule off and is the only value that does; a value that is not a whole number from 0 to 365 is held to 7 and refused at a production boot. |
+| `NOCTORNAL_ACT_WAIT_SECONDS` | 8 seconds: how long a route waits for the collector to finish a persona act it queued, before it answers "queued". Never more than 25. |
+| `NOCTORNAL_ACT_TTL_SECONDS` | 900 seconds (15 minutes): how long a queued persona act may wait to be claimed before it lapses. Held between 60 and 3600. |
+| `NOCTORNAL_DB_CONNECT_TIMEOUT` | 10 seconds to make a database connection before giving up. A value below 1 is held to 1, and one that is not a whole number reads as 10. |
+| `NOCTORNAL_EGRESS_DB_WORKERS` | 8 threads for the egress proxy's reads of the database, from 1 to 64. Read by the proxy alone. |
+| `NOCTORNAL_ANALYSIS_SOCKET`, `NOCTORNAL_ANALYSIS_LOCAL`, `NOCTORNAL_ANALYSIS_WORKER_CONCURRENCY`, `NOCTORNAL_ANALYSIS_WORKER_MAX_BYTES` | The isolated analysis worker (`infra/production/README.md`, Analysis worker, has the table). With no socket a production process refuses to parse hostile bytes; `NOCTORNAL_ANALYSIS_LOCAL=1` parses in a local child on purpose, and the register says so. The worker runs 2 requests at once (1 to 16) and reads at most 1 GiB. |
+| `NOCTORNAL_ARCHIVE_MAX_MEMBERS`, `NOCTORNAL_ARCHIVE_MAX_TOTAL_BYTES`, `NOCTORNAL_ARCHIVE_MAX_MEMBER_BYTES`, `NOCTORNAL_ARCHIVE_MAX_RATIO`, `NOCTORNAL_ARCHIVE_MAX_DEPTH`, `NOCTORNAL_ARCHIVE_WALL_S`, `NOCTORNAL_ARCHIVE_MAX_TREE_MEMBERS` | Archive expansion limits. Unset: 200 members (1 to 10,000), 256 MiB of members in all, 64 MiB for one member, a ratio of 100 (2 to 10,000), 2 levels (1 to 5), 60 seconds (10 to 600), and 1,000 members across a whole tree (never below the per-archive count). A value that does not parse, or a byte cap the analysis memory cannot hold, is a named refusal at a production start. |
+| `NOCTORNAL_SAMPLE_ANALYSIS_MEMORY`, `NOCTORNAL_SAMPLE_ANALYSIS_MAX_BYTES`, `NOCTORNAL_SAMPLE_FUZZY_MAX_BYTES`, `NOCTORNAL_SAMPLE_ANALYSIS_TIMEOUT_S`, `NOCTORNAL_SAMPLE_ANALYSIS_CONCURRENCY` | The bounds of a static-triage child. Unset: 2 GiB of address space (256 MiB to 64 GiB); the largest sample analysed is the sample upload cap or a third of what the memory leaves after the parser (about 512 MiB), whichever is less; the largest sample fuzzy-hashed is 32 MiB, or the analysis maximum if less; 300 seconds of wall clock for a step (10 to 3600); 1 run at once (1 to 8). A setting that does not parse, or a maximum the memory cannot hold, is a named refusal at a production start. |
+| `NOCTORNAL_YARA_SCAN_TIMEOUT_S`, `NOCTORNAL_YARA_MAX_UPLOAD_BYTES` | A YARA scan of one sample stops after 60 seconds (5 to 600), and a rule set upload may be 32 MiB (1 MiB to 256 MiB). |
+| `NOCTORNAL_EMBED_WORDING` | `on`: similar wording runs in this process, reads no model file and sends nothing. `off` turns it off; any other value is reported as a problem and leaves it on. |
+| `NOCTORNAL_EMBED_MEANING_URL` and the other `NOCTORNAL_EMBED_MEANING_*` settings | Unset, similar meaning is off and nothing is sent. Set, it names the base address of a model server that speaks the OpenAI embeddings protocol (http or https, no user name or password, no query), reached only through the `embeddings` egress route, and needs `_MODEL` and `_CEILING` (the highest TLP it may receive, which has no default). Optional: `_KEY` (kept out of every log), `_AUTHORITY` (the recorded authority to send case text) and `_MESSAGE_AUTHORITY` (the same for message text), `_LOCAL_HOST` (declares that the host in the URL is this host, development on a direct route only), `_NETWORK` (the private network of IPv4 /16 or narrower, or IPv6 /64, that a named endpoint may resolve into), `_CA_FILE`, `_REVISION`, `_QUERY_PREFIX`, `_DOCUMENT_PREFIX`, `_DIMENSIONS`, `_MAX_CHARS` (2000, 200 to 32000), `_BATCH` (16, 1 to 128) and `_TIMEOUT_S` (30, 1 to 300). A setting with a placeholder, or one that does not parse, is a named problem and leaves meaning off. |
+| `REDIS_URL` | Rate limiting falls back to per-process, and says so loudly at startup. In production it must sign in as `noctornal_limiter`, and the `redis` service refuses to start otherwise. |
 | `NOCTORNAL_ENABLE_DOCS` | The OpenAPI schema stays off. It publishes the full route inventory of a law-enforcement case system, so it is opt-in. |
+
+---
+
+## A production deployment
+
+Everything above installs a development stack on this machine. A
+deployment other people use is `infra/production/` (one host, Docker
+Compose, TLS, an egress proxy), and `infra/production/README.md` is its
+procedure. The installers do one job there, on the host's own `python3`
+(3.8 or later, no virtual environment), and start nothing:
+
+```bash
+sudo ./release/install.sh --production-secrets
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\release\install.ps1 -ProductionSecrets
+```
+
+With `sudo` on Linux, because those files are root's, mode 600, and run as
+anybody else it can read none of them; on Windows, run it as the user who
+owns them. A file it may not read is one sentence naming the file.
+
+It writes and checks the secrets files beside the compose file. The schema
+owner's credential goes in `postgres-init.env` and `migrate.env`, each
+read by one service, and never in `secrets.env`, which every application
+service reads (`docs/17` F52). The rate limiter's Redis gets a password and a
+`REDIS_URL` that signs in as the limiter's own user, the only one that
+Redis has. It prints the name of each change and never a value, and keeps
+a backup of every file before it changes it.
+
+Run it after every `git pull`, before `up`. From a release before
+2026-10-02 it is required: it moves the owner's credential out of an
+existing `secrets.env`, and until it has, the migrate job and Redis each
+refuse to start with a sentence naming it, and nothing that waits on them
+starts. [secrets-upgrade/README.md](secrets-upgrade/README.md) is that
+upgrade step by step, with the way back.
+
+**Backups and restore** are in `infra/production/README.md`, Day-to-day.
+Read its Restoring paragraphs before you rely on a backup: a restore needs
+the three runtime roles to exist before `pg_restore` runs, and a mirror of
+the evidence bucket keeps the bytes of an exhibit lodged since Alembic 0139
+but not the object version it records, so a restored exhibit reads as
+missing until an owner step is run.
 
 ---
 
@@ -280,7 +392,7 @@ The ones worth knowing:
 
 **"port 8000 is already in use"**: an earlier copy of the API is still
 running, or something else holds the port. Both installers stop with this
-before starting the API. If it is an earlier copy, the stack is already
+in step 1, before they build anything. If it is an earlier copy, the stack is already
 up at <http://127.0.0.1:8000/ui/>. Otherwise stop what holds the port, or
 pass `--port 8001` (`-Port 8001` on Windows).
 
@@ -291,8 +403,9 @@ lives. This reads as a broken install and is not one.
 **`alembic` stops with "DATABASE_URL is not set or is empty"** in a new
 terminal: unlike `bootstrap.py`, Alembic reads the environment only, and
 it does not guess a target. Load `.env.local` first
-(`set -a; . ./.env.local; set +a`, or the PowerShell line under
-Verifying the install).
+(`eval "$(.venv/bin/python scripts/_env.py export)"`, which reads the file as
+data and runs nothing from it, or the PowerShell line under Verifying the
+install).
 
 **A new route returns 404 after you changed the code**: the API runs
 without `--reload`. Static files (the UI) are served from disk and update
@@ -357,7 +470,7 @@ and pytest does not read the file itself.
 
 ```bash
 # macOS / Linux
-set -a; . ./.env.local; set +a
+eval "$(.venv/bin/python scripts/_env.py export)"
 docker compose -f infra/docker-compose.yml exec -T postgres createdb -U noctornal noctornal_scratch
 docker compose -f infra/docker-compose.yml exec -T postgres psql -U noctornal -d noctornal_scratch -q -f /docker-entrypoint-initdb.d/00-extensions.sql
 export DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:5432/noctornal_scratch
@@ -367,7 +480,7 @@ export DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:
 
 ```powershell
 # Windows
-Get-Content .env.local | Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*=' } | ForEach-Object { $k, $v = $_ -split '=', 2; Set-Item "env:$k" $v }
+Get-Content .env.local | Where-Object { $_ -match '^[A-Za-z_][A-Za-z0-9_]*=' -and $_ -notmatch '^(PATH|PATHEXT|HOME|COMSPEC|IFS|ENV|CDPATH|GLOBIGNORE|SHELLOPTS|BASHOPTS|PROMPT_COMMAND|PS[1-4]|PSMODULEPATH)=|^(BASH_|LD_|DYLD_|PYTHON|DOCKER_|COMPOSE_|GIT_|PIP_|NODE_)' } | ForEach-Object { $k, $v = $_ -split '=', 2; Set-Item "env:$k" $v }
 docker compose -f infra/docker-compose.yml exec -T postgres createdb -U noctornal noctornal_scratch
 docker compose -f infra/docker-compose.yml exec -T postgres psql -U noctornal -d noctornal_scratch -q -f /docker-entrypoint-initdb.d/00-extensions.sql
 $env:DATABASE_URL = 'postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:5432/noctornal_scratch'

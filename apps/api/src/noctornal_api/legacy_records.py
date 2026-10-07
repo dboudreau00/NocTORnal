@@ -4,15 +4,18 @@ lists and none writes (L1, L2 and L5, 2026-09-24).
 Four kinds, each listed by `scripts/legacy_records.py` on the server and
 counted on the readiness register:
 
-- **Undated Triage claims.** Since final review u6 (2026-09-24) an accept
+- **Undated Triage claims.** Since 2026-09-24 an accept
   dates its claim from the cited document. Claims accepted earlier carry
   no `observed_at`, so First seen and Last seen ignore them. Invariant 5
-  (CONVENTIONS.md) says a claim's own columns are never written again, so
-  nothing here fills the date: amending that invariant is the owner's
-  decision, and until it is recorded as one no code path writes
-  `observed_at` on an existing claim. The listing gives each claim the
-  date its document gives, so an analyst can add a dated claim where it
-  matters.
+  (CONVENTIONS.md) says a claim's own columns are never written again, and
+  the owner decided on 2026-10-02 that it is NOT amended (docs/00 open
+  question 11): nothing here fills the date, and no code path writes
+  `observed_at` on an existing claim. An analyst gives a claim its date by
+  supersession (`GraphWriteService.supersede_assertion`, the inspector's
+  Date this claim): a new claim carrying the date and the analyst's
+  rationale and citing the old one, which is stamped superseded and is
+  otherwise as it was recorded, and so leaves this listing. The listing
+  gives each claim the date its document gives.
 - **ATTRIBUTE claims below their material.** Since final review c1 an
   accept refuses an ATTRIBUTE claim onto an entity labelled below what it
   was found in, and since C12 the route refuses an entity in another case.
@@ -29,8 +32,11 @@ counted on the readiness register:
   carry a compartment an ingest feed now uses for victim data, captured
   before a key forced it.
 - **URLs whose identity changed.** `url_norm` keeps a fragment that names
-  a resource since L5. Stored selectors are not rewritten: a shared row's
-  raw value is only its first observation, so no machine can split it.
+  a resource since L5, and drops a URL's userinfo and its password, token
+  and key parameters since 2026-10-03 (graph-url-selector-keeps-
+  credentials). Stored selectors are not rewritten: a shared row's raw
+  value is only its first observation, so no machine can split it. A
+  stored URL that carries a credential is listed, and printed without it.
 
 The output names cases, entities and identifiers (a Tox ID or a social
 URL is personal data): it is for the server, never for a ticket. Counts
@@ -413,7 +419,9 @@ def url_identity_changes(conn: psycopg.Connection) -> UrlIdentityReport:
                       s.norm_value, s.observation_cnt, s.node_id
                  FROM core.selector s
                  JOIN core."case" c ON c.id = s.case_id
-                WHERE s.selector_type = ANY(%s) AND s.raw_value LIKE '%%#%%'
+                WHERE s.selector_type = ANY(%s)
+                  AND (s.raw_value LIKE '%%#%%' OR s.norm_value LIKE '%%@%%'
+                       OR s.norm_value LIKE '%%?%%' OR s.norm_value LIKE '%%;%%')
                 ORDER BY c.code, s.norm_value""",
             (list(URL_TYPES),)).fetchall():
         new = _renorm(stype, raw)
@@ -469,7 +477,9 @@ def _deception_count(conn: psycopg.Connection, sql: str, *,
     for row in conn.execute(sql).fetchall():
         for i in range(pairs):
             raw, stored = row[2 * i], row[2 * i + 1]
-            if raw is None or stored is None or "#" not in raw:
+            # '@', '?' and ';': a credential url_norm now drops (2026-10-03).
+            if raw is None or stored is None or not any(
+                    ch in raw for ch in "#@?;"):
                 continue
             new = _renorm("URL", raw)
             if new is not None and new != stored:

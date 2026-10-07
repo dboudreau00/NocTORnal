@@ -7,12 +7,12 @@ release-candidate review (2026-09-24).
   counted in that pill.
 - c13: the Evidence register never re-read what each exhibit backs after
   a link, a claim, a retraction or another analyst's change.
-- u7: the coverage chip counted the whole projection during an ego or a
+- the coverage chip counted the whole projection during an ego or a
   set focus while its title said it counted the canvas.
-- u8: the metrics cache key left out a tie's evidence flag, so a cached
+- the metrics cache key left out a tie's evidence flag, so a cached
   answer reported a server and canvas disagreement that did not exist.
-- u9: Space re-pressed the rail's Graph tab instead of peeking.
-- u10: closing a case with unsaved placements lit the unsaved dot on an
+- Space re-pressed the rail's Graph tab instead of peeking.
+- closing a case with unsaved placements lit the unsaved dot on an
   inert Save layout, then dropped the placements without a word.
 
 Pure, like test_sociogram_canvas and test_sociogram_graph_pane: the
@@ -439,7 +439,7 @@ def test_the_console_script_declares_itself_where_window_chrome_is_fixed():
 
 
 # ---------------------------------------------------------------------------
-# u7: the coverage chip during a focus
+# the coverage chip during a focus
 # ---------------------------------------------------------------------------
 
 _COVERAGE_HARNESS = _COMMON + r"""
@@ -478,7 +478,7 @@ console.log(JSON.stringify(out));
 
 
 def test_the_coverage_chip_counts_the_focus_on_the_canvas():
-    """u7: the ego focus drew 104 elements and the chip said "0 of 592",
+    """the ego focus drew 104 elements and the chip said "0 of 592",
     under a title saying it counted the canvas."""
     got = _run(_COVERAGE_HARNESS)
     assert got["whole"]["text"] == "evidence: 30 of 592 elements (5%) rest on an exhibit"
@@ -493,7 +493,7 @@ def test_the_coverage_chip_counts_the_focus_on_the_canvas():
 
 
 # ---------------------------------------------------------------------------
-# u8: the metrics cache key and a tie's evidence
+# the metrics cache key and a tie's evidence
 # ---------------------------------------------------------------------------
 
 _METRICS_HARNESS = _COMMON + r"""
@@ -517,7 +517,7 @@ function api(path) {
 }
 function clearTimeout() {}
 const SIZE_METRICS = [['degree', 'Degree']];
-""" + "\n".join(_fn(f) for f in ("subgraphKey", "metricsKey", "metricsUp", "refreshMetrics",
+""" + "\n".join(_fn(f) for f in ("caseCan", "subgraphKey", "metricsKey", "metricsUp", "refreshMetrics",
                                  "applyMetrics", "computeRanks", "backedCount",
                                  "coverageLine")) + "\n" + _const("METRICS_CACHE_MAX") + r"""
 (async () => {
@@ -532,7 +532,7 @@ const SIZE_METRICS = [['degree', 'Degree']];
 
 
 def test_a_tie_linked_to_an_exhibit_is_not_served_the_old_metrics():
-    """u8: subgraphKey mixed a node's has_evidence and not a tie's, so the
+    """subgraphKey mixed a node's has_evidence and not a tie's, so the
     metrics answer from before the link was served again and the chip's
     title reported "The metrics service counted 0" against the canvas's 1."""
     got = _run(_METRICS_HARNESS)
@@ -544,11 +544,11 @@ def test_a_tie_linked_to_an_exhibit_is_not_served_the_old_metrics():
 
 
 # ---------------------------------------------------------------------------
-# u9: Space on the rail's Graph tab
+# Space on the rail's Graph tab
 # ---------------------------------------------------------------------------
 
 def test_space_peeks_from_the_selected_graph_tab_in_the_rail():
-    """u9: a click on Graph in the rail leaves the focus on the tab, which
+    """a click on Graph in the rail leaves the focus on the tab, which
     is outside the pane, and Space re-selected the pane already open."""
     script = r"""
 const canvas = { tagName: 'CANVAS' };
@@ -573,7 +573,7 @@ console.log(JSON.stringify(out));
 
 
 # ---------------------------------------------------------------------------
-# u10: closing a case with placements unsaved
+# closing a case with placements unsaved
 # ---------------------------------------------------------------------------
 
 _LAYOUT_HARNESS = _COMMON + r"""

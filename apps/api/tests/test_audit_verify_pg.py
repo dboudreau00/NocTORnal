@@ -141,6 +141,50 @@ def test_windowed_run_reports_that_it_is_windowed(tamperable):
     assert windowed.first_seq > full.first_seq
 
 
+class _RowCounter:
+    """The connection, counting how many rows the chain query hands back."""
+
+    def __init__(self, conn):
+        self._c = conn
+        self.returned: list[int] = []
+
+    def execute(self, sql, params=None):
+        cur = self._c.execute(sql, params)
+        if "judged" not in sql:
+            return cur
+        rows = cur.fetchall()
+        self.returned.append(len(rows))
+
+        class _Rows:
+            def fetchall(self):
+                return rows
+        return _Rows()
+
+
+def test_only_the_rows_that_do_not_verify_leave_the_database(tamperable):
+    """2026-10-07: every row of the chain came back to Python, 380 MB
+    and 35 seconds of the API process for a 1.5 million row log. A clean
+    chain now answers one summary row however long it is, and a tampered
+    one adds the rows that do not verify."""
+    from noctornal_api.audit_verify import verify_chain
+
+    since = _seed(tamperable, n=12)
+    spy = _RowCounter(tamperable)
+    report = verify_chain(spy, since_seq=since)
+    assert report.intact and report.checked == 12
+    assert report.last_seq - report.first_seq == 11
+    assert spy.returned == [1]
+
+    tamperable.execute("ALTER TABLE audit.event DISABLE TRIGGER USER")
+    tamperable.execute(
+        """UPDATE audit.event SET action = 'NOTHING_HAPPENED'
+            WHERE seq = (SELECT max(seq) - 2 FROM audit.event)""")
+    spy = _RowCounter(tamperable)
+    report = verify_chain(spy, since_seq=since)
+    assert [b.kind for b in report.breaks] == ["CONTENT"]
+    assert report.checked == 12 and spy.returned == [1]
+
+
 def test_empty_window_is_not_reported_as_a_pass(tamperable):
     """`intact` on zero rows means "nothing to say", never "verified".
 
@@ -169,11 +213,14 @@ def _forge_clean_fork(conn, action="FORKED_TWIN") -> None:
     """
     from noctornal_api.audit_verify import _HASH_EXPR
 
+    # `seq` is given: the chain trigger draws it, and with the trigger stood
+    # down nothing else does (0169 took the column default away).
     conn.execute("ALTER TABLE audit.event DISABLE TRIGGER USER")
     conn.execute(
         """INSERT INTO audit.event
-               (actor_kind, action, outcome, detail, prev_hash, row_hash)
-           SELECT 'USER', %s, 'SUCCESS', '{}'::jsonb, e.prev_hash, decode('00','hex')
+               (seq, actor_kind, action, outcome, detail, prev_hash, row_hash)
+           SELECT nextval('audit.event_seq_seq'), 'USER', %s, 'SUCCESS',
+                  '{}'::jsonb, e.prev_hash, decode('00','hex')
              FROM audit.event e
             WHERE e.seq = (SELECT max(seq) FROM audit.event)""",
         (action,))
@@ -182,18 +229,19 @@ def _forge_clean_fork(conn, action="FORKED_TWIN") -> None:
              WHERE e.seq = (SELECT max(seq) FROM audit.event)""")
 
 
-def test_a_fork_is_reported_but_is_NOT_tampering(tamperable):
-    """Two rows sharing a predecessor must not make the chain "broken".
+def test_a_fork_written_since_0149_is_reported_AND_is_tampering(tamperable):
+    """Two rows sharing a predecessor, written after the boundary 0149
+    records, are a break.
 
-    This is the case that fires on real history. `seq` is drawn from
-    `nextval()` before the chaining trigger takes its advisory lock, so
-    concurrent writers can chain off the same tail; the development
-    database carries 67 such forks in 60,181 rows, none of them tampering.
-
-    Counting them as breaks made `/audit/verify` answer BROKEN on
-    untouched history — the one answer a tamper-evidence tool cannot
-    afford, and the SECOND time this module made that mistake (the first
-    was assuming `seq` order was chain order). Hence a named test.
+    This test used to say the opposite, for the reason its docstring gave:
+    `seq` was drawn from `nextval()` before the chaining trigger took its
+    advisory lock, so concurrent writers could chain off the same tail, and
+    counting forks as breaks made `/audit/verify` answer BROKEN on untouched
+    history. That held until 0149 (2026-10-03), which draws the number inside
+    the lock. A fork written since cannot come from honest traffic and is the
+    dead-end row an owner can delete without orphaning anything. The legacy
+    half (a fork with a claimant at or below the boundary is listed, not a
+    break) is `test_ledger_chain_g49_pg.py`.
     """
     from noctornal_api.audit_verify import verify_chain
 
@@ -202,12 +250,11 @@ def test_a_fork_is_reported_but_is_NOT_tampering(tamperable):
 
     report = verify_chain(tamperable, since_seq=since)
     assert report.forks, "the fork was not detected at all"
-    assert [f.kind for f in report.forks] == ["FORK", "FORK"], \
-        "both claimants must be named — which one is the intruder is not " \
-        "something the verifier can decide"
-    # THE POINT: no tampering was found, so the chain is not "broken".
-    assert not report.breaks, [b.kind for b in report.breaks]
-    assert report.intact, "a fork must not be reported as tampering"
+    assert [f.kind for f in report.forks] == ["FORK", "FORK"], (
+        "both claimants must be named, because which one is the intruder is "
+        "not something the verifier can decide")
+    assert [b.kind for b in report.breaks] == ["FORK", "FORK"]
+    assert not report.intact, "a fork written since 0149 must not read intact"
 
 
 def test_a_fork_does_not_mask_real_tampering(tamperable):
@@ -252,8 +299,9 @@ def _forge_second_genesis(conn, action="SECOND_GENESIS") -> None:
     conn.execute("ALTER TABLE audit.event DISABLE TRIGGER USER")
     conn.execute(
         f"""INSERT INTO audit.event
-                (actor_kind, action, outcome, detail, prev_hash, row_hash)
-            SELECT 'USER', %s, 'SUCCESS', '{{}}'::jsonb, NULL, {_HASH_EXPR}
+                (seq, actor_kind, action, outcome, detail, prev_hash, row_hash)
+            SELECT nextval('audit.event_seq_seq'), 'USER', %s, 'SUCCESS',
+                   '{{}}'::jsonb, NULL, {_HASH_EXPR}
               FROM (SELECT NULL::bytea AS prev_hash, now() AS occurred_at,
                            NULL::uuid AS actor_id, 'USER' AS actor_kind,
                            %s AS action, NULL::text AS object_type,
@@ -318,14 +366,15 @@ def test_the_anchor_is_checked_over_the_whole_table_not_the_window(tamperable):
 # ---------------------------------------------------------------------------
 
 def test_the_chaining_lock_serialises_concurrent_writers(tamperable):
-    """`ChainReport.intact` excludes forks, and the reason given for years
-    was that ordinary concurrency produces them -- `seq` is drawn before
-    the trigger takes its lock, so two writers chain off one tail.
+    """With one transaction holding the xact advisory lock mid-INSERT, a
+    second connection's INSERT blocks until commit.
 
-    It does not. With one transaction holding the xact advisory lock
-    mid-INSERT, a second connection's INSERT blocks until commit. If this
-    ever stops being true, the fork explanation becomes correct again and
-    the docstring in `audit_verify.py` must be changed back.
+    This was once offered as the reason forks "are not known to be reachable
+    by ordinary traffic". It measured the lock and not the choice of tail:
+    `seq` was drawn before the lock, so a writer that locked second could
+    still chain off a row with a higher number. 0149 draws the number inside
+    the lock (see `test_ledger_chain_g49_pg.py` for the concurrency proof);
+    this stays as the proof that the lock itself holds.
     """
     import psycopg
 

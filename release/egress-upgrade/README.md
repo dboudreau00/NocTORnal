@@ -8,6 +8,16 @@ decides each connection by route and records it
 data. It needs keys, three small files, one database role and its routes,
 in this order.
 
+Every `python scripts/egress_setup.py ...` below needs the application's
+own libraries, which a host `python3` does not have, so it runs in the new
+image. Build that first (`git pull`, then `docker compose -p noctornal-prod
+-f infra/production/compose.yml build`) and put `docker compose -p
+noctornal-prod -f infra/production/compose.yml run --rm --no-deps api` in
+front of each command (`-T` as well for `keygen` and `role-sql`, whose
+output you copy). Preflight reads the files from the host and asks the
+host's Compose for its version, so it takes the longer form in
+`infra/production/README.md`, Keys and files.
+
 ## 0. Check Docker Compose
 
 ```sh
@@ -32,13 +42,19 @@ labelled with the file it belongs in. Nothing is written anywhere.
 ```sh
 cp infra/production/egress-proxy.env.example  infra/production/egress-proxy.env
 cp infra/production/egress-client.env.example infra/production/egress-client.env
-cp infra/production/postgres-init.env.example infra/production/postgres-init.env
+[ -e infra/production/postgres-init.env ] || cp infra/production/postgres-init.env.example infra/production/postgres-init.env
 chmod 600 infra/production/egress-*.env infra/production/postgres-init.env
 ```
 
 Fill them from step 1. Choose a password for the egress role and write it in
 `postgres-init.env` and inside `NOCTORNAL_EGRESS_DATABASE_URL`. None of this
 goes in `secrets.env`.
+
+The `cp` of `postgres-init.env` is guarded because that file may already be
+there: from the 2026-10-02 release it also holds the schema owner's password
+(`release/secrets-upgrade/README.md`), and a copy of the template over it
+would put a placeholder back in its place. Write the egress password into the
+file that is there.
 
 ## 3. Create the role on the existing volume
 

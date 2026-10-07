@@ -234,6 +234,23 @@ detached slot, is refused before gpg runs. A signature made by a signing
 subkey confirms a claim of the published primary, and both fingerprints
 are on the row.
 
+**A fingerprint copied from gpg (F37).** gpg prints a fingerprint as ten
+groups of four hex digits (sixteen for a v5 key) with a second space in the
+middle, and the parser used to cut a value at the first run of two spaces, so
+such a line kept twenty of its forty hex characters and could neither confirm a
+key nor attribute a signature. On a PGP fingerprint line the parser now keeps
+whole hex groups, whatever whitespace separates them, and only what follows the
+last group is cut as a comment. The change is narrow: it applies to a line a
+label resolves to PGP_FPR, or one with no recognised label whose shape is a
+fingerprint, to exactly ten or sixteen groups, and to no other kind of line. It
+changes the digest `block_fingerprint` for a block that carries such a line, so
+`parser_version` moved from `cb-1` to `cb-2`: a block parsed under cb-1 keeps
+its reading, and two blocks of one text under the two versions are not compared
+as copies of each other. Nothing re-reads a stored block (the same text
+submitted to the same case returns the first parse), so the blocks parsed
+before are found by `parser_version` and are corrected by parsing the text
+again in a case of its own.
+
 **The key registry (F10b).** A vendor key is added to the case by paste or
 file with where it was obtained. It is filed at the floor of what it
 cites. Nothing is confirmed when it is added: a person compares its

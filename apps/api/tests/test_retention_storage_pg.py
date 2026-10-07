@@ -608,7 +608,97 @@ def test_one_refusal_in_a_batch_of_three_counts_one_row_not_its_versions(conn):
     assert _purged_at(conn, gone_a) is not None
     assert _purged_at(conn, gone_b) is not None
     assert _purged_at(conn, refused) is None
-    assert _tombstone_outcome(conn, case_id) == STORAGE_LOCKED
+    # One tombstone per outcome since 2026-10-07 (this asserted a single
+    # LOCKED tombstone for the batch, the destroyed two included).
+    assert _outcomes(conn, case_id) == [(STORAGE_DELETED, 2), (STORAGE_LOCKED, 1)]
+
+
+def _outcomes(conn, case_id) -> list[tuple[str, int]]:
+    return sorted((s["storage_outcome"], s["object_count"])
+                  for s in RetentionService(conn).tombstones(case_id))
+
+
+def test_each_storage_outcome_gets_its_own_tombstone(conn):
+    """2026-10-07. The batch wrote ONE tombstone carrying its worst
+    outcome and counting every exhibit, so a sweep that destroyed two
+    exhibits and was refused on a third recorded three LOCKED and no
+    destruction at all; the sweep that later destroyed the third recorded
+    it again. Every destroyed exhibit must be recorded once, as DELETED, and
+    a refusal must not swallow the destructions beside it."""
+    owner = _user(conn)
+    case_id = _expired_case(conn, owner)
+    gone_a = _evidence(conn, case_id, owner)
+    gone_b = _evidence(conn, case_id, owner)
+    refused = _evidence(conn, case_id, owner)
+    _purge(conn, _PerKeyStore({
+        _key(conn, gone_a): (1, 1, 0),
+        _key(conn, gone_b): (1, 1, 0),
+        _key(conn, refused): (1, 0, 1),
+    }), owner=owner, case_id=case_id)
+    assert _outcomes(conn, case_id) == [(STORAGE_DELETED, 2), (STORAGE_LOCKED, 1)]
+
+    # The lock ends; the next sweep destroys the third and records only it.
+    _purge(conn, _VersionedStore(seen=1, removed=1, locked=0),
+           owner=owner, case_id=case_id)
+    outcomes = _outcomes(conn, case_id)
+    assert outcomes == [(STORAGE_DELETED, 1), (STORAGE_DELETED, 2),
+                        (STORAGE_LOCKED, 1)]
+    assert sum(n for o, n in outcomes if o == STORAGE_DELETED) == 3
+    assert conn.execute(
+        "SELECT count(*) FROM core.evidence WHERE case_id = %s "
+        "AND purged_at IS NOT NULL", (case_id,)).fetchone()[0] == 3
+
+
+def test_a_destroyed_exhibit_says_so_in_its_own_custody_trail(conn):
+    """2026-10-07: an exhibit's custody trail ended at its last read,
+    so the record that goes to court did not say who destroyed it, when or
+    under what rule; only `purged_at` did. A refused one is not destroyed,
+    and its trail says nothing of the kind."""
+    owner = _user(conn)
+    case_id = _expired_case(conn, owner)
+    gone = _evidence(conn, case_id, owner)
+    refused = _evidence(conn, case_id, owner)
+    _purge(conn, _PerKeyStore({
+        _key(conn, gone): (1, 1, 0), _key(conn, refused): (1, 0, 1),
+    }), owner=owner, case_id=case_id)
+
+    def trail(ev):
+        return conn.execute(
+            """SELECT action, actor_id, detail FROM core.evidence_custody
+                WHERE evidence_id = %s ORDER BY id""", (ev,)).fetchall()
+    assert trail(gone) == [("DESTROYED", owner, {
+        "rule": "case.retention_until", "storage_outcome": STORAGE_DELETED})]
+    assert trail(refused) == []
+
+
+def test_an_out_of_schedule_purge_records_each_outcome_apart(conn):
+    """The same on the dual-control path, each tombstone naming the
+    approval that authorised it."""
+    from noctornal_api.approvals import ApprovalService
+
+    owner = _user(conn)
+    approver = _user(conn)
+    case_id = _live_case(conn, owner)
+    gone = _evidence(conn, case_id, owner)
+    refused = _evidence(conn, case_id, owner)
+    payload = {"case_id": str(case_id),
+               "evidence_ids": sorted([str(gone), str(refused)]),
+               "authority": "test: out of schedule, mixed"}
+    svc_a = ApprovalService(conn)
+    req = svc_a.request(operation="evidence.purge", case_id=case_id,
+                        payload=payload, requested_by=owner,
+                        justification="destruction ordered before expiry")
+    svc_a.decide(req.id, decided_by=approver, approve=True)
+    RetentionService(conn, _PerKeyStore({
+        _key(conn, gone): (1, 1, 0), _key(conn, refused): (1, 0, 1),
+    })).purge_out_of_schedule(
+        actor_id=owner, authority="test: out of schedule, mixed",
+        approval_request_id=req.id, case_id=case_id,
+        evidence_ids=[gone, refused])
+    assert _outcomes(conn, case_id) == [(STORAGE_DELETED, 1), (STORAGE_LOCKED, 1)]
+    assert conn.execute(
+        "SELECT count(*) FROM core.purge_tombstone WHERE case_id = %s "
+        "AND approval_request_id = %s", (case_id, req.id)).fetchone()[0] == 2
 
 
 # ---------------------------------------------------------------------------

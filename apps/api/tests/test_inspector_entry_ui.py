@@ -263,7 +263,7 @@ def test_the_outcome_is_said_on_the_element_and_the_source_is_not_inherited(
     assert f"noteCreated('{prefix}', out.id," in body
     assert "setMsg(okBox, assertion.evidence_id" not in body, (
         "a status line written and hidden in the same moment is never read")
-    # The second round (the 2026-09-23 verifier): the corner banner stack
+    # Found 2026-09-23: the corner banner stack
     # sat over the inspector's title, stacked per entry, took the error
     # edge for a success and outlived a case switch.
     assert "banner(" not in body, "the outcome is not a corner banner"

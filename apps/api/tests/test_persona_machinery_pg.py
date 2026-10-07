@@ -184,11 +184,12 @@ def test_a_machine_transition_is_audited_as_system(conn):
 
 def test_destroy_secret_leaves_no_sealed_row(conn):
     from noctornal_api.collection import PersonaVault
-    from noctornal_api.security import sealed
+    from noctornal_api.security import persona_sealed
 
+    # The persona ring's inventory since 2026-10-02 (A collector process):
+    # the TOTP ring's no longer holds the column.
     def sealed_personas():
-        return sum(g.rows for g in sealed.inventory(conn)
-                   if g.table == "collect.collection_account")
+        return sum(g.rows for g in persona_sealed.key_groups(conn))
 
     pid = _persona(conn, secret="to-be-destroyed-1")
     before = sealed_personas()
@@ -552,7 +553,7 @@ def test_create_refuses_an_exit_another_persona_holds_whatever_its_status(conn):
     from noctornal_api.collection import BURNED, CollectionError, PersonaVault
 
     actor, _ = h.user(conn, P, roles=("COLLECTOR",))
-    egress = h.egress_profile(conn, P)
+    egress = h.egress_profile(conn, P, persona_capable=True)
     vault = PersonaVault(conn)
     first = vault.create(handle=f"{P}first", platform="TELEGRAM",
                          egress_profile_id=egress, actor_id=actor)

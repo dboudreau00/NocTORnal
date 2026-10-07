@@ -65,7 +65,10 @@ limits its own CPU and memory before it reads a byte, under a wall clock
 the parent enforces by killing it. A page that does not parse within the
 limits is abandoned and reported as parser drift. The residual, a memory
 safety defect in lexbor itself, is docs/17's, with decision 53 (the RSS
-parser's DOCTYPE refusal) as the precedent.
+parser's DOCTYPE refusal) as the precedent. Since 2026-10-02 (docs/17 F42)
+a production deployment starts that child in the isolated analysis
+worker, a container with no secrets and no network, so such a defect
+reaches neither; the child is this module either way.
 
 Everything else is bounded too: a page is at most 4 MiB, at most 200 posts
 or threads are read from one page, a body at most 200,000 characters, a
@@ -84,7 +87,11 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 PLATFORMS = ("xenforo", "mybb")
-PAGE_KINDS = ("thread", "board", "member")
+#: `login` and `session` (the authenticated forum path, 2026-10-02) are
+#: read as pages that were asked for: a sign-in page is not a wall when
+#: the member adapter asked for one.
+PAGE_KINDS = ("thread", "board", "member", "login", "session")
+SESSION_KINDS = ("login", "session")
 
 #: The largest page handed to the parser (the adapters' max_page_bytes).
 MAX_PAGE_BYTES = 4 * 1024 * 1024
@@ -647,6 +654,23 @@ def board_page_url(loc: Located, page: int = 1) -> str:
         return _xf_url(loc, f"forums/{name}/" + (f"page-{page}" if page > 1 else ""))
     url = f"{loc.origin}{loc.prefix}forumdisplay.php?fid={loc.id}"
     return url + (f"&page={page}" if page > 1 else "")
+
+
+def login_page_url(loc: Located) -> str:
+    """The forum's own sign-in page, on the source's origin and install
+    path (the authenticated forum path, 2026-10-02)."""
+    if loc.platform == "xenforo":
+        return _xf_url(loc, LOGIN_PATH["xenforo"])
+    return f"{loc.origin}{loc.prefix}{LOGIN_PATH['mybb']}"
+
+
+def logout_url(loc: Located, token: str | None = None) -> str:
+    """Where a sign-out goes: XenForo takes a POST to logout/ with its
+    form token in the body; MyBB a GET with its logout key in the query."""
+    if loc.platform == "xenforo":
+        return _xf_url(loc, LOGOUT_PATH["xenforo"])
+    url = f"{loc.origin}{loc.prefix}{LOGOUT_PATH['mybb']}"
+    return url + (f"&logoutkey={urllib.parse.quote(token, safe='')}" if token else "")
 
 
 def member_page_url(loc: Located, uid: int) -> str:
@@ -1236,7 +1260,248 @@ _PARSERS = {
     ("mybb", "thread"): lambda tree, config, now: parse_mybb_thread(tree, config=config, now=now),
     ("mybb", "board"): lambda tree, config, now: parse_mybb_board(tree, config=config, now=now),
     ("mybb", "member"): lambda tree, config, now: parse_mybb_member(tree),
+    # The authenticated forum path (2026-10-02): the sign-in form, and what
+    # a page says about the session it was read with.
+    ("xenforo", "login"): lambda tree, config, now: parse_login_form("xenforo", tree),
+    ("mybb", "login"): lambda tree, config, now: parse_login_form("mybb", tree),
+    ("xenforo", "session"): lambda tree, config, now: parse_session_state("xenforo", tree),
+    ("mybb", "session"): lambda tree, config, now: parse_session_state("mybb", tree),
 }
+
+
+# ---------------------------------------------------------------------------
+# The sign-in form and the session (the authenticated forum path, 2026-10-02)
+# ---------------------------------------------------------------------------
+
+#: What a form may carry back: at most this many hidden fields, each name
+#: and value capped, so a hostile sign-in page cannot grow the child's
+#: answer or the POST the adapter makes from it.
+MAX_FORM_FIELDS = 20
+MAX_FIELD_NAME = 64
+MAX_FIELD_VALUE = 512
+MAX_ACTION_CHARS = 2048
+#: The hidden field that carries each platform's form token. Its value is
+#: what the adapter posts back; it is never stored (collection_context
+#: scrubs it from any markup kept).
+TOKEN_FIELD = {"xenforo": "_xfToken", "mybb": "my_post_key"}
+LOGIN_FIELD = {"xenforo": "login", "mybb": "username"}
+PASSWORD_FIELD = "password"
+#: Where each platform's sign-in page lives, relative to the forum's root.
+LOGIN_PATH = {"xenforo": "login/", "mybb": "member.php?action=login"}
+LOGOUT_PATH = {"xenforo": "logout/", "mybb": "member.php?action=logout"}
+
+_CAPTCHA_MARKERS = ("g-recaptcha", "h-captcha", "cf-turnstile", "recaptcha",
+                    "hcaptcha", "captcha")
+_TWO_FACTOR_MARKERS = ("two-step", "two step", "two-factor", "two factor",
+                       "authenticator app", "verification code",
+                       "login_2fa", "totp")
+_JS_MARKERS = ("enable javascript", "javascript is required", "requires javascript",
+               "javascript must be enabled", "javascript:")
+_PASSWORD_CHANGE_MARKERS = ("must change your password", "change your password before",
+                            "password has expired", "password change is required",
+                            "account_password_change")
+_ERROR_SELECTORS = {"xenforo": ".blockMessage--error, .error, .errorOverlay",
+                    "mybb": ".error, #error, .red_alert"}
+_LOGOUT_KEY = re.compile(r"(?:[?&](?:amp;)?logoutkey=)([A-Za-z0-9]{1,64})")
+
+#: Where other people's words live on each platform's pages: a post and its
+#: author block, a signature, a thread title and its preview in a listing, a
+#: profile's blurb. The session reader decides what a page says about the
+#: persona's sign-in from the board's own chrome ONLY (2026-10-03): a post that reads "my
+#: password has expired", mentions a
+#: CAPTCHA or an authenticator app, or links to /logout/ was making a
+#: signed-in page read as a forced password change and a guest page read as a
+#: signed-in one (a dead session then passed the probe and the run was
+#: stored as read by the member). Anything of the board's that a poster can
+#: write sits under one of these; a theme this list does not know leaves a
+#: poster's words in the chrome's reading, which docs/17 records.
+_USER_CONTENT = {
+    "xenforo": ("article.message, .message, .message-body, .bbWrapper, "
+                ".message-userContent, .message-signature, .message-cell--user, "
+                ".structItem-title, .structItem-snippet, .p-title, "
+                ".p-description, .memberHeader-blurb"),
+    "mybb": (".post, .post_body, .post_content, .post_author, .post_head, "
+             ".signature, .subject_new, .subject_old, .subject_editable, "
+             ".forumdisplay_regular, .forumdisplay_sticky, .lastpost"),
+}
+
+
+def _chrome_only(platform: str, tree):
+    """`tree` without the words of the board's members, in place: a tree is
+    read once, for one verdict, so nothing else needs them."""
+    selector = _USER_CONTENT.get(platform)
+    if selector:
+        _decompose_all(tree.css(selector))
+    return tree
+
+
+def _lower_text(tree, cap: int = 200_000) -> str:
+    body = tree.body if tree.body is not None else tree.root
+    return node_text(body, cap).lower() if body is not None else ""
+
+
+def _hidden_fields(form) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for field in form.css("input")[:200]:
+        kind = (_attr(field, "type") or "text").lower()
+        name = _attr(field, "name")
+        if not name or kind not in ("hidden",):
+            continue
+        name = name[:MAX_FIELD_NAME]
+        if name in out or len(out) >= MAX_FORM_FIELDS:
+            continue
+        value = _attr(field, "value") or ""
+        if not value.isprintable():
+            continue
+        out[name] = value[:MAX_FIELD_VALUE]
+    return out
+
+
+def _login_form(tree):
+    """The first form with a password field that is not a pop-up, or
+    None: the form a sign-in page asks to be filled in."""
+    for form in tree.css("form")[:50]:
+        if form.css_first('input[type="password"]') is None:
+            continue
+        parent, depth, popup = form.parent, 0, False
+        while parent is not None and depth < 40:
+            classes = _attr(parent, "class") or ""
+            if _attr(parent, "id") in _POPUP_IDS or any(
+                    c in classes for c in _POPUP_CLASSES):
+                popup = True
+                break
+            parent, depth = parent.parent, depth + 1
+        if not popup:
+            return form
+    return None
+
+
+def _blocks(platform: str, tree, text: str) -> dict:
+    """The conditions under which a sign-in is refused rather than tried:
+    a CAPTCHA or bot challenge, a second factor, a page that needs
+    JavaScript, a forced password change. Each is a flag; the adapter
+    names it and stops."""
+    captcha = any(m in text for m in _CAPTCHA_MARKERS) or bool(
+        tree.css_first('input[name*="captcha" i], img[src*="captcha" i], '
+                       '.g-recaptcha, .h-captcha, .cf-turnstile'))
+    two_factor = any(m in text for m in _TWO_FACTOR_MARKERS)
+    root = tree.css_first("html")
+    template = (_attr(root, "data-template") or "") if root is not None else ""
+    body = tree.body
+    body_template = (_attr(body, "data-template") or "") if body is not None else ""
+    if platform == "xenforo" and "login_2fa" in (template, body_template):
+        two_factor = True
+    if platform == "xenforo" and "two-step" in template:
+        two_factor = True
+    password_change = any(m in text for m in _PASSWORD_CHANGE_MARKERS) or (
+        "password_change" in template)
+    return {"captcha": captcha, "two_factor": two_factor,
+            "password_change": password_change}
+
+
+def parse_login_form(platform: str, tree) -> dict:
+    """A sign-in page as the member adapter reads it: where the form posts,
+    its hidden fields (the platform's token among them), and the names of
+    the login and password inputs; or why it must not be filled in. Never
+    the page's own text: a sign-in page is served by the board under
+    investigation."""
+    _chrome_only(platform, tree)
+    text = _lower_text(tree)
+    out: dict = {"kind": "login", **_blocks(platform, tree, text),
+                 "form": None, "js_required": False}
+    form = _login_form(tree)
+    if form is None:
+        out["js_required"] = any(m in text for m in _JS_MARKERS)
+        return out
+    action = (_attr(form, "action") or "")[:MAX_ACTION_CHARS]
+    if action.lower().startswith("javascript:"):
+        out["js_required"] = True
+        return out
+    method = (_attr(form, "method") or "get").lower()
+    fields = _hidden_fields(form)
+    login = None
+    for field in form.css("input")[:200]:
+        kind = (_attr(field, "type") or "text").lower()
+        name = _attr(field, "name") or ""
+        if kind in ("text", "email") and name and login is None:
+            login = name[:MAX_FIELD_NAME]
+    password = None
+    for field in form.css('input[type="password"]')[:5]:
+        name = _attr(field, "name") or ""
+        if name:
+            password = name[:MAX_FIELD_NAME]
+            break
+    out["form"] = {"action": action, "method": method, "fields": fields,
+                   "login_field": login or LOGIN_FIELD[platform],
+                   "password_field": password or PASSWORD_FIELD,
+                   "token_field": TOKEN_FIELD[platform],
+                   "token_present": TOKEN_FIELD[platform] in fields}
+    if platform == "mybb" and "action" not in fields:
+        out["form"]["fields"]["action"] = "do_login"
+    return out
+
+
+def _signed_in(platform: str, tree) -> bool:
+    if platform == "xenforo":
+        root = tree.css_first("html")
+        if root is not None and (_attr(root, "data-logged-in") or "").lower() == "true":
+            return True
+        return tree.css_first(".p-navgroup--member, a[href*='/logout/']") is not None
+    return tree.css_first('a[href*="action=logout"]') is not None
+
+
+def _logout_token(platform: str, tree) -> str | None:
+    if platform == "xenforo":
+        root = tree.css_first("html")
+        token = _attr(root, "data-csrf") if root is not None else None
+        if not token:
+            field = tree.css_first('input[name="_xfToken"]')
+            token = _attr(field, "value") if field is not None else None
+        return token[:MAX_FIELD_VALUE] if token and token.isprintable() else None
+    link = tree.css_first('a[href*="action=logout"]')
+    href = _attr(link, "href") if link is not None else None
+    m = _LOGOUT_KEY.search(href or "")
+    if m:
+        return m.group(1)
+    field = tree.css_first('input[name="my_post_key"]')
+    token = _attr(field, "value") if field is not None else None
+    return token[:MAX_FIELD_VALUE] if token and token.isprintable() else None
+
+
+def parse_session_state(platform: str, tree) -> dict:
+    """What a page says about the session it was read with: `signed_in`;
+    `login` (a sign-in form, with `refused` when the page carries an error
+    block, which after a sign-in attempt means the credential was not
+    accepted); `two_factor`, `captcha`, `js_required` or
+    `password_change` (each stops the adapter by name). With the token a
+    sign-out needs, which is never stored. Read from the board's chrome
+    only: see `_USER_CONTENT`."""
+    _chrome_only(platform, tree)
+    text = _lower_text(tree)
+    blocks = _blocks(platform, tree, text)
+    out: dict = {"kind": "session", "logout_token": _logout_token(platform, tree)}
+    if blocks["captcha"] and not _signed_in(platform, tree):
+        out["state"] = "captcha"
+        return out
+    if blocks["two_factor"] and not _signed_in(platform, tree):
+        out["state"] = "two_factor"
+        return out
+    if blocks["password_change"]:
+        out["state"] = "password_change"
+        return out
+    if _signed_in(platform, tree):
+        out["state"] = "signed_in"
+        return out
+    form = _login_form(tree)
+    if form is not None:
+        out["state"] = "login"
+        out["refused"] = tree.css_first(_ERROR_SELECTORS[platform]) is not None
+        return out
+    if any(m in text for m in _JS_MARKERS):
+        out["state"] = "js_required"
+        return out
+    out["state"] = "signed_out"
+    return out
 
 
 def parse_page(platform: str, page_kind: str, body: bytes, *,
@@ -1256,6 +1521,12 @@ def parse_page(platform: str, page_kind: str, body: bytes, *,
     tree = _html(text)
     if is_challenge(platform, text, tree):
         return {"state": "challenge"}
+    if page_kind in SESSION_KINDS:
+        # A sign-in page is what the member adapter asked for (2026-10-02);
+        # the session reader states the page's own verdict.
+        out = _PARSERS[(platform, page_kind)](tree, dict(config or {}), now)
+        out.setdefault("state", "ok")
+        return out
     if is_login_wall(platform, tree, status=status, url=url, page_kind=page_kind):
         return {"state": "login"}
     out = _PARSERS[(platform, page_kind)](tree, dict(config or {}), now)

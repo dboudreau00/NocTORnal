@@ -250,6 +250,15 @@ def _clearance(conn, user_id) -> str:
     return user_ceiling(conn, user_id)[0].name
 
 
+def _held(conn, user_id) -> frozenset:
+    """The operator's own compartments: a persona bound to a source filed
+    under a key they do not hold is as missing to them as one above their
+    ceiling (F43; 2026-10-03)."""
+    from noctornal_api.http.deps import user_ceiling
+
+    return user_ceiling(conn, user_id)[1]
+
+
 def enrol(conn, persona_id: UUID, *, actor_id: UUID, replace: bool) -> str:
     from noctornal_api.telegram import (
         TelegramPasswordNeeded,
@@ -271,6 +280,7 @@ def enrol(conn, persona_id: UUID, *, actor_id: UUID, replace: bool) -> str:
         raise Refused(" ".join(problems))
     with enrolment_session(conn, persona_id, actor_id=actor_id,
                            clearance=_clearance(conn, actor_id),
+                           compartments=_held(conn, actor_id),
                            purpose="enrol") as ctx:
         api_id_text = input("api_id: ").strip()
         phone = input("Phone number: ").strip()
@@ -357,6 +367,7 @@ def import_session(conn, persona_id: UUID, *, actor_id: UUID, replace: bool,
                       "data-centre networks, so it is not imported.")
     with enrolment_session(conn, persona_id, actor_id=actor_id,
                            clearance=_clearance(conn, actor_id),
+                           compartments=_held(conn, actor_id),
                            purpose="import") as ctx:
         async def check(transport):
             me = await transport.open()
@@ -392,6 +403,7 @@ def logout(conn, persona_id: UUID, *, actor_id: UUID, reason: str,
     try:
         with persona_session(conn, persona_id, actor_id=actor_id,
                              clearance=_clearance(conn, actor_id),
+                             compartments=_held(conn, actor_id),
                              purpose="logout", source_id=None,
                              need="PUBLIC_READ", platform="TELEGRAM",
                              stopping=True, needs_secret=True) as ctx:
@@ -465,8 +477,31 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     load_env_local()
     from noctornal_api.collection import CollectionError
+    from noctornal_api.config import enforce_persona_key_boundary
     from noctornal_api.db import SystemPurpose, connect_system
 
+    # A collector process (2026-10-02): a session is sealed and opened with
+    # the persona key, which in production only the collector holds, so in
+    # production this runs in the collector service and refuses elsewhere,
+    # before it asks anybody to sign in.
+    try:
+        enforce_persona_key_boundary(collector=True)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    # The boundary above does nothing outside production, so the ring is
+    # read here too, everywhere, before anybody is asked to sign in
+    # (2026-10-03): without NOCTORNAL_PERSONA_KEK a development
+    # machine upgraded without its launcher used to take the whole Telegram
+    # login, burn a code, and only then fail storing the session with a
+    # traceback. All three commands open or seal a session with this key.
+    from noctornal_api.security import persona_envelope
+    try:
+        persona_envelope.ring()
+    except persona_envelope.PersonaKeyError as exc:
+        print(f"The persona key ring is not usable here, so nothing was "
+              f"asked of anyone: {exc}", file=sys.stderr)
+        return 2
     try:
         # S1 (2026-09-25): a script binds no user, so on the request role it
         # would see nothing under row-level security.

@@ -268,12 +268,22 @@ def test_a_red_source_is_due_only_for_a_red_caller_and_for_the_worker(conn):
     would be the scheduler silently polling nothing."""
     from noctornal_api.collection import CollectionService
 
+    # egress-rss-floor (2026-10-03): a RED feed is never polled (invariant 8),
+    # so it is HELD with its sentence rather than due, and the caller's
+    # ceiling filters that list as it filters the due one. An AMBER feed is
+    # the one that is due, and it keeps the three readings.
+    amber_feed = _source(conn, classification="AMBER", due=True)
     red = _source(conn, classification="RED", due=True)
     svc = CollectionService(conn)
-    assert str(red) not in _ids(svc.due_sources(clearance="AMBER")), (
-        "a RED source's name and URL were reported as due to an AMBER caller")
-    assert str(red) in _ids(svc.due_sources(clearance="RED"))
-    assert str(red) in _ids(svc.due_sources(clearance=None)), (
+    assert str(amber_feed) in _ids(svc.due_sources(clearance="AMBER"))
+    assert str(amber_feed) in _ids(svc.due_sources(clearance="RED"))
+    assert str(amber_feed) in _ids(svc.due_sources(clearance=None))
+    for reader in ("AMBER", "RED", None):
+        assert str(red) not in _ids(svc.due_sources(clearance=reader))
+    assert str(red) not in _ids(svc.held_sources(clearance="AMBER")), (
+        "a RED source's name and URL were reported to an AMBER caller")
+    assert str(red) in _ids(svc.held_sources(clearance="RED"))
+    assert str(red) in _ids(svc.held_sources(clearance=None)), (
         "the worker path must apply NO filter, or the scheduler polls nothing")
 
 
@@ -360,8 +370,10 @@ def test_the_routers_pass_the_callers_own_ceiling_to_the_service(conn, client):
         assert r.status_code == 200, r.text
         return r.json()
 
-    assert str(red) not in _ids(get("/sources/due", amber)["due"])
-    assert str(red) in _ids(get("/sources/due", red_hdr)["due"])
+    # egress-rss-floor (2026-10-03): a RED feed is refused, so it is listed
+    # as held ("refused"), not due; the caller's ceiling filters that list.
+    assert str(red) not in _ids(get("/sources/due", amber)["refused"])
+    assert str(red) in _ids(get("/sources/due", red_hdr)["refused"])
 
     unhealthy = get("/sources/unhealthy", amber)
     assert str(red) not in _ids(unhealthy["sources"])

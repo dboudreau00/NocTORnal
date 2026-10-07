@@ -25,7 +25,8 @@ APP_ONLY = ("postgres", "redis", "minio", "minio-init", "migrate", "api",
             "sample-origin", "cron",
             "lab-triage",  # static triage's own loop (F11, 2026-09-25)
             "lab-cron",    # screening and the sandbox dispatch (F13, F14)
-            "embed-pass")  # the similarity pass (F6)
+            "embed-pass",  # the similarity pass (F6)
+            "collector")   # the persona key's one holder (2026-10-02)
 
 
 class Unparseable(ValueError):
@@ -236,7 +237,7 @@ def _subnet(doc, name) -> ipaddress.IPv4Network:
 
 def test_the_reader_resolves_anchors_and_merges(doc):
     api = doc["services"]["api"]
-    assert api["image"].startswith("noctornal-api:") and "build" in api
+    assert api["image"].startswith("noctornal-api:") and api["pull_policy"] == "never"
     assert doc["x-egress-ip"] == "172.31.243.11"
 
 
@@ -270,7 +271,11 @@ def test_only_the_proxy_joins_exits_and_models_and_only_it_and_caddy_join_edge(d
     assert members["exits"] == {"egress-proxy"}
     assert members["models"] == {"egress-proxy"}
     assert members["edge"] == {"caddy", "egress-proxy"}
-    assert set(doc["services"]) == set(APP_ONLY) | {"caddy", "egress-proxy"}
+    # The analysis worker joins no network at all (docs/17 F42):
+    # test_analysis_worker_compose.py holds it there.
+    assert set(doc["services"]) == set(APP_ONLY) | {"caddy", "egress-proxy",
+                                                    "analysis-worker"}
+    assert not _nets(doc["services"]["analysis-worker"])
 
 
 def test_caddy_keeps_its_trusted_address_and_publishes_only_80_and_443(doc):
@@ -279,7 +284,9 @@ def test_caddy_keeps_its_trusted_address_and_publishes_only_80_and_443(doc):
     assert set(nets) == {"noctornal", "edge"}
     assert nets["noctornal"]["ipv4_address"] == doc["x-caddy-ip"]
     assert caddy["ports"] == ["80:80", "443:443"]
-    assert _env_files(caddy) == [("secrets.env", True)]
+    # caddy.env, not secrets.env (infra-5, 2026-10-03): the TLS terminator
+    # holds its three values and none of the platform's secrets.
+    assert _env_files(caddy) == [("caddy.env", True)]
 
 
 def test_the_proxy_is_unpublished_on_its_own_address_with_its_own_env(doc):
@@ -334,3 +341,24 @@ def test_the_reader_fails_closed_on_what_it_does_not_read():
         Reader("a: *nowhere\n").document()
     with pytest.raises(Unparseable):
         Reader("a: !tag x\n").document()
+
+
+def test_the_readme_names_every_place_that_carries_a_movable_subnet():
+    """2026-10-07: the README's answer to `Pool
+    overlaps` said to change the subnet in two places, and five more keys
+    (the egress address and the internal networks, on six services) carry it.
+    A move done as written left the proxy listening on an address its network
+    no longer had. Every key that names the noctornal or the edge subnet is
+    in that section, and the two subnets the code holds are said to be fixed."""
+    readme = (ROOT / "infra" / "production" / "README.md").read_text(encoding="utf-8")
+    section = readme.split("### If `up` fails creating the network", 1)[1].split("\n## ", 1)[0]
+    keys = set()
+    for line in COMPOSE.read_text(encoding="utf-8").splitlines():
+        code = _strip_comment(line.strip())
+        if re.search(r"172\.31\.24[34]\.", code):
+            keys.add(code.lstrip("- ").split(":", 1)[0])
+    assert keys == {"x-caddy-ip", "x-egress-ip", "subnet", "NOCTORNAL_EGRESS_PROXY_URL",
+                    "NOCTORNAL_EGRESS_LISTEN", "NOCTORNAL_EGRESS_INTERNAL_CIDRS"}, keys
+    for key in keys:
+        assert key in section, key
+    assert "EXITS_NETWORK" in section and "MODELS_NETWORK" in section

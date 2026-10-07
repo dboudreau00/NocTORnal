@@ -41,6 +41,7 @@ import contextvars
 import email.utils
 import hashlib
 import hmac
+import html
 import http.client
 import ipaddress
 import re
@@ -89,6 +90,9 @@ MAX_REDIRECTS = 5
 #: this system holding every persona credential should not have a code
 #: path whose memory use is chosen by a monitored source.
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+#: A body is read this much at a time, so what one read holds beside the
+#: body itself is bounded whatever the chunking (2026-10-07).
+READ_PIECE = 64 * 1024
 
 #: The whole of one call, by the wall clock, when the caller names no
 #: allowance: every hop, every connect attempt, the TLS handshake, the
@@ -386,6 +390,30 @@ def redact(text: str | None, *, secrets: tuple[str, ...] = ()) -> str:
     out = _SECRET_PATTERNS[2].sub("[REDACTED]", out)
     out = _SECRET_PATTERNS[3].sub(r"\1\2\3[REDACTED]", out)
     out = _SECRET_PATTERNS[4].sub(r"\1=[REDACTED]", out)
+    return out
+
+
+def scrub_live_secrets(text: str | None, *, markup: bool = False) -> str:
+    """`text` with every live secret removed, EXACTLY and nothing else.
+
+    `redact` is for an error message: it also masks anything shaped like a
+    credential, which would change an investigator's words. This is for
+    material that is stored as evidence (a collected post, its markup): only
+    a secret this process holds is removed, in each form `redact` knows and,
+    with `markup`, the HTML-escaped forms a page spells it in. A board that
+    reflects the persona's password or session cookie back into a page
+    otherwise gets it stored (2026-10-07)."""
+    if not text:
+        return text or ""
+    out = text
+    for value in _LIVE_SECRETS.get():
+        if len(value) < MIN_REDACTABLE_LENGTH:
+            continue
+        forms = set(_secret_forms(value))
+        if markup:
+            forms.update((html.escape(value, quote=True), html.escape(value, quote=False)))
+        for form in sorted(forms, key=len, reverse=True):
+            out = out.replace(form, "[REDACTED]")
     return out
 
 
@@ -1289,8 +1317,18 @@ def _one_exchange(hop: Hop, *, route: EgressRoute, method: str,
             # between "exactly at the limit" and "more coming" is
             # knowable. The cap bounds the MEMORY; the time is bounded by
             # `deadline`, whose watchdog ends this read wherever it has got
-            # to (c2, 2026-09-24).
-            data = response.read(max_bytes + 1)
+            # to (c2, 2026-09-24). In pieces: one read of a chunked body
+            # holds an object per chunk until the end, so 16 MiB served as
+            # two-byte chunks cost a gigabyte in one call (2026-10-07); a piece holds at
+            # most READ_PIECE of them.
+            held = bytearray()
+            while len(held) <= max_bytes:
+                piece = response.read(min(READ_PIECE, max_bytes + 1 - len(held)))
+                if not piece:
+                    break
+                held += piece
+            data = bytes(held)
+            del held
             if deadline.spent():
                 raise deadline.exceeded()
             if len(data) > max_bytes:

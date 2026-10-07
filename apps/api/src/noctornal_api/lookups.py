@@ -20,8 +20,8 @@ caller by its anchor source, and it offers the operation for the type;
 not declared below what the case already holds for it, and no hash of an
 unscreened sample leaves by any subject kind; (5) the egress gate at the
 subject's current labels and the provider's ceiling; (6) personal data is
-refused outright (docs/16 L2); (7) a SAMPLE subject needs screening that
-is not built yet (docs/16 L1); (8) a fresh cached answer at or above the
+refused outright (docs/16 L2); (7) a SAMPLE subject leaves only once
+prohibited-content screening has cleared it (docs/16 L1); (8) a fresh cached answer at or above the
 subject's label is served and nothing is sent; (9) the exposure echo; (10)
 a lookup that is not NONE names an eligible authoriser with a note; (11)
 the row.
@@ -36,6 +36,7 @@ reserve) / 100)), so interactive work always has room.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import logging
 import math
@@ -51,7 +52,12 @@ from psycopg.types.json import Json
 
 from noctornal_api import lookup_adapters, pinned_http, providers
 from noctornal_api.cases import CONTENT_READ_ONLY_STATES
-from noctornal_api.db import SystemPurpose, system_connection
+from noctornal_api.db import (
+    SystemContextUnavailable,
+    SystemPurpose,
+    is_exempt,
+    system_connection,
+)
 from noctornal_api.egress import Destination, can_egress
 from noctornal_api.egress_policy import EgressRoute
 from noctornal_api.ingest import IngestError, hash_secret
@@ -206,18 +212,25 @@ class Subject:
 
 def window_counts(conn, provider, now: datetime | None = None) -> dict:
     """Per quota window: the limit, how many attempts it holds, and the
-    queued share. Counts only."""
+    queued share. Counts only.
+
+    Every attempt on the provider counts, whichever case it was for, so
+    they are counted as the LOOKUPS purpose (F51, 2026-10-02): the caller's
+    own view would count only the attempts of lookups they may read, and a
+    full window would read as having room."""
     now = now or datetime.now(timezone.utc)
+    limits = {window: limit for window, limit in provider.quotas.items() if limit}
     out = {}
-    for window, limit in provider.quotas.items():
-        if not limit:
-            continue
-        start, _end = _window(window, now)
-        used = conn.execute(
-            "SELECT count(*) FROM ingest.lookup_attempt WHERE provider_id = %s "
-            "AND sent_at > %s AND sent_at <= %s", (provider.id, start, now)).fetchone()[0]
-        out[window] = {"limit": limit, "used": int(used),
-                       "queue_share": _share(limit, provider.queue_reserve_pct)}
+    if not limits:
+        return out
+    with system_connection(SystemPurpose.LOOKUPS, reuse=conn) as counter:
+        for window, limit in limits.items():
+            start, _end = _window(window, now)
+            used = counter.execute(
+                "SELECT count(*) FROM ingest.lookup_attempt WHERE provider_id = %s "
+                "AND sent_at > %s AND sent_at <= %s", (provider.id, start, now)).fetchone()[0]
+            out[window] = {"limit": limit, "used": int(used),
+                           "queue_share": _share(limit, provider.queue_reserve_pct)}
     return out
 
 
@@ -251,6 +264,16 @@ class LookupService:
         self._route_for = route_for
         self._adapters = adapters if adapters is not None else lookup_adapters.ADAPTERS
         self._vault = vault_factory
+
+    def _on(self, conn: psycopg.Connection) -> LookupService:
+        """This service on `conn`, with the same fetcher, routes, adapters
+        and vault: the half of a request that runs as the LOOKUPS purpose
+        (F51, 2026-10-02). On an exempt connection that is `self`."""
+        if conn is self._c:
+            return self
+        twin = copy.copy(self)
+        twin._c = conn
+        return twin
 
     # -- who ---------------------------------------------------------------------
 
@@ -366,25 +389,49 @@ class LookupService:
             raise NotVisible()
         return found
 
+    def _held_by_rows(self, subject: Subject) -> tuple[list[str], set[str]]:
+        """The labels of EVERY selector row of the subject's value in the
+        case, at the labels of its owner and of the row itself (0134).
+
+        The index keeps one row per value and labels, so a value an AMBER
+        entity and a RED one both hold is two rows, and the first of them
+        would under-label what a lookup of it carries out. Read as the
+        LOOKUPS purpose, like the check below it: this check permits on
+        absence, so it must see a row above the caller."""
+        with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as held_conn:
+            held_rows = held_conn.execute(
+                """SELECT greatest(s.classification, n.classification),
+                          s.compartments || coalesce(n.compartments, '{}')
+                     FROM core.selector s
+                     LEFT JOIN LATERAL iam.element_facts('node', s.node_id) n ON true
+                    WHERE s.case_id = %s AND s.selector_type = %s
+                      AND s.norm_value = %s""",
+                (subject.case_id, subject.selector_type, subject.value)).fetchall()
+        labels: list[str] = []
+        comps: set[str] = set()
+        for cls, row_comps in held_rows:
+            labels.append(cls)
+            comps |= set(row_comps or [])
+        return labels, comps
+
     def _derived(self, subject: Subject) -> tuple[str, frozenset[str]]:
         """What the case already holds for this value: its selector's node,
         prior lookups of the same fingerprint, and pending NODE proposals
         naming it, at their own read labels."""
-        labels, comps = [], set()
-        row = self._c.execute(
-            """SELECT n.classification, n.compartments FROM core.selector s
-                 LEFT JOIN LATERAL iam.element_facts('node', s.node_id) n ON true
-                WHERE s.case_id = %s AND s.selector_type = %s AND s.norm_value = %s""",
-            (subject.case_id, subject.selector_type, subject.value)).fetchone()
-        if row is not None:
-            labels.append(row[0])
-            comps |= set(row[1] or [])
-        for cls, node_comps in self._c.execute(
+        labels, comps = self._held_by_rows(subject)
+        # Every earlier lookup of the value in the case, read as the LOOKUPS
+        # purpose (F51, 2026-10-02): this check permits on absence, and the
+        # caller's own view would miss a lookup above them, so a value looked
+        # up at AMBER could be declared GREEN and sent. What a refusal says
+        # is the one VALUE_RESTRICTED sentence whatever it found.
+        with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as sconn:
+            prior = sconn.execute(
                 """SELECT greatest(l.classification, n.classification), n.compartments
                      FROM ingest.lookup l LEFT JOIN LATERAL iam.element_facts('node', l.node_id) n ON true
                     WHERE l.case_id = %s AND l.query_fingerprint = %s""",
                 (subject.case_id, query_fingerprint(subject.selector_type,
-                                                    subject.value))).fetchall():
+                                                    subject.value))).fetchall()
+        for cls, node_comps in prior:
             labels.append(cls)
             comps |= set(node_comps or [])
         from noctornal_api import proposals as proposal_module
@@ -402,8 +449,8 @@ class LookupService:
 
     def _sample_hashes(self, subject: Subject, clearance: str,
                        held: frozenset[str]) -> str | None:
-        """Any lab.sample holding this hash, in any case or none: screening
-        is absent everywhere, so the hash of never-screened material leaves
+        """Any lab.sample holding this hash, in any case or none, that
+        screening has not cleared: the hash of unscreened material leaves
         by no subject kind. The sentence is the sample one only when the
         caller can see the sample."""
         column = _HASH_TYPES.get(subject.selector_type)
@@ -466,28 +513,33 @@ class LookupService:
         can_request = self.holds(user_id, case_id, "lookup.request", case_cls, case_comp)
         now = datetime.now(timezone.utc)
         out = []
-        for (pid,) in rows:
-            p = providers.get_provider(self._c, pid)
-            adapter = self._adapters.get(p.adapter)
-            if adapter is None:
-                continue
-            ops = [{"key": op.key, "description": op.description,
-                    "selector_types": sorted(op.selector_types)}
-                   for op in adapter.operations
-                   if selector_type is None or selector_type in op.selector_types]
-            if not ops:
-                continue
-            state = providers.route_state(self._c, p, route_for=self._route_for)
-            out.append({
-                "id": str(p.id), "display_name": p.display_name,
-                "exposure_level": p.exposure_level,
-                "consequence": providers.consequence(p.exposure_level,
-                                                     network=state.get("network"),
-                                                     basis=p.exposure_basis),
-                "classification_ceiling": p.classification_ceiling,
-                "operations": ops, "signoff_required": p.exposure_level in SIGNOFF_REQUIRED,
-                "availability": self._availability(p, now),
-                "can_request": can_request, "switch": switch})
+        # One LOOKUPS connection for every provider's windows (F51,
+        # 2026-10-02): availability counts every attempt, whichever case.
+        with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as sconn:
+            counter = self._on(sconn)
+            for (pid,) in rows:
+                p = providers.get_provider(self._c, pid)
+                adapter = self._adapters.get(p.adapter)
+                if adapter is None:
+                    continue
+                ops = [{"key": op.key, "description": op.description,
+                        "selector_types": sorted(op.selector_types)}
+                       for op in adapter.operations
+                       if selector_type is None or selector_type in op.selector_types]
+                if not ops:
+                    continue
+                state = providers.route_state(self._c, p, route_for=self._route_for)
+                out.append({
+                    "id": str(p.id), "display_name": p.display_name,
+                    "exposure_level": p.exposure_level,
+                    "consequence": providers.consequence(p.exposure_level,
+                                                         network=state.get("network"),
+                                                         basis=p.exposure_basis),
+                    "classification_ceiling": p.classification_ceiling,
+                    "operations": ops,
+                    "signoff_required": p.exposure_level in SIGNOFF_REQUIRED,
+                    "availability": counter._availability(p, now),
+                    "can_request": can_request, "switch": switch})
         return out
 
     def _availability(self, p, now: datetime) -> dict:
@@ -564,6 +616,15 @@ class LookupService:
         if status in CONTENT_READ_ONLY_STATES:
             return ("case_read_only", f"This case is {status}, so nothing is sent from it.",
                     False)
+        if subject.kind == "SELECTOR":
+            # A selector row is the labels of its own owner, and since 0134 a
+            # value another entity holds above it is a row of its own, so the
+            # row of the lower one no longer says what the value is held at.
+            # Held to the stricter, in the VALUE kind's own sentence.
+            held_labels, held_comps = self._held_by_rows(subject)
+            if (_above(_max(*held_labels), subject.classification)
+                    or not held_comps <= subject.compartments):
+                return "value_restricted", VALUE_RESTRICTED, False
         if subject.kind == "VALUE":
             derived, derived_comps = self._derived(subject)
             if _above(derived, subject.classification) or \
@@ -595,16 +656,22 @@ class LookupService:
     def _cached(self, subject: Subject, provider, operation: str,
                 fingerprint: bytes) -> UUID | None:
         """A fresh answer at or above the subject's label (a lower-labelled
-        answer is a miss, never a trigger error)."""
-        row = self._c.execute(
-            """SELECT id FROM ingest.lookup_result
-                WHERE case_id = %s AND provider_id = %s AND operation = %s
-                  AND query_fingerprint = %s AND purged_at IS NULL
-                  AND outcome IN ('FOUND', 'NOT_FOUND') AND fresh_until > now()
-                  AND classification >= %s::core.tlp
-                ORDER BY fetched_at DESC LIMIT 1""",
-            (subject.case_id, provider.id, operation, fingerprint,
-             subject.classification)).fetchone()
+        answer is a miss, never a trigger error).
+
+        Read as the LOOKUPS purpose (F51, 2026-10-02): an answer above the
+        requester is served from the cache, and withheld from them by the
+        read that shows it, rather than sent for a second time because
+        their own view could not see the first."""
+        with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as sconn:
+            row = sconn.execute(
+                """SELECT id FROM ingest.lookup_result
+                    WHERE case_id = %s AND provider_id = %s AND operation = %s
+                      AND query_fingerprint = %s AND purged_at IS NULL
+                      AND outcome IN ('FOUND', 'NOT_FOUND') AND fresh_until > now()
+                      AND classification >= %s::core.tlp
+                    ORDER BY fetched_at DESC LIMIT 1""",
+                (subject.case_id, provider.id, operation, fingerprint,
+                 subject.classification)).fetchone()
         return row[0] if row else None
 
     # -- request ---------------------------------------------------------------------------
@@ -617,15 +684,37 @@ class LookupService:
         clearance, _held, _active, _name = self._user(user_id)
         provider = self._provider(provider_id, clearance)
         fingerprint = query_fingerprint(subject.selector_type, subject.value)
+        if not self.holds(user_id, case_id, "lookup.request", subject.classification,
+                          subject.compartments):
+            raise LookupRefused("not_assigned", NO_ASSIGNMENT, status=403)
+        # F51 (2026-10-02): the subject, the provider and the assignment are
+        # the requester's to see, read above on the request connection at
+        # their labels. From the gates on, the request runs as the LOOKUPS
+        # purpose, as the drain does: the answer is stored at the label the
+        # provider decides (up to RED), proposals are raised from it, and
+        # the quota, the cache and the value check must see every row. What
+        # the requester is shown is read back on the request connection at
+        # their labels (routers/lookups._answer), the answer withheld above
+        # them exactly as before.
+        with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as sconn:
+            return self._on(sconn)._gate_and_send(
+                subject, provider, operation, fingerprint, user_id=user_id,
+                confirm_exposure=confirm_exposure, authorised_by=authorised_by,
+                authorisation_note=authorisation_note,
+                queue_if_limited=queue_if_limited, now=now)
+
+    def _gate_and_send(self, subject: Subject, provider, operation: str, fingerprint: bytes,
+                       *, user_id: UUID, confirm_exposure: str, authorised_by: UUID | None,
+                       authorisation_note: str | None, queue_if_limited: bool,
+                       now: datetime | None) -> dict:
+        """`request` from the gates on, on a LOOKUPS connection."""
+        case_id = subject.case_id
 
         def refuse(code, detail, egress=False):
             return self._refuse(code, detail, case_id=case_id, user_id=user_id,
                                 provider_key=provider.key, fingerprint=fingerprint,
                                 egress=egress)
 
-        if not self.holds(user_id, case_id, "lookup.request", subject.classification,
-                          subject.compartments):
-            raise LookupRefused("not_assigned", NO_ASSIGNMENT, status=403)
         gate = self.gates(subject, provider, operation, user_id=user_id,
                           fingerprint=fingerprint)
         if gate is not None:
@@ -743,12 +832,25 @@ class LookupService:
                  now: datetime | None = None) -> None:
         """Inside the caller's transaction: lock the row and the provider,
         count the windows, record the attempt, move the row to SENDING."""
-        now = now or self._c.execute("SELECT clock_timestamp()").fetchone()[0]
+        # F51 (2026-10-02): the windows count every attempt on the provider,
+        # whichever case it was for. A connection row security filters would
+        # count part of them and send past the quota, so a reservation is
+        # made on a LOOKUPS connection (a request, a sign-off, the provider
+        # test, the drain) or not at all.
+        if not is_exempt(self._c):
+            raise SystemContextUnavailable(
+                "a lookup's reservation counts every attempt on its provider and "
+                "must run on a system connection")
         row = self._c.execute(
             "SELECT provider_id, attempts, exposure_level, subject_kind, state "
             "FROM ingest.lookup WHERE id = %s FOR UPDATE", (lookup_id,)).fetchone()
         provider_id, attempts, _level, _kind, _state = row
         provider = providers.get_provider(self._c, provider_id, for_update=True)
+        # The clock is read once the provider is locked: read before it, a
+        # reservation that waited on the lock counted the windows up to a
+        # moment earlier than the attempt the holder had just written, missed
+        # it, and sent past a full quota (2026-10-07).
+        now = now or self._c.execute("SELECT clock_timestamp()").fetchone()[0]
         if provider.cooldown_until and provider.cooldown_until > now:
             raise CoolingDown("cooling_down", "The provider asked to slow down; it is "
                               f"cooling down until {provider.cooldown_until:%Y-%m-%d %H:%M} "
@@ -884,13 +986,16 @@ class LookupService:
         return {"hop": hop}
 
     def _result_label(self, case_id, provider, lookup_cls, node_id, extra=None) -> str:
-        # A provider test (a canary) has no case (F15.3, 2026-09-24).
-        row = self._c.execute('SELECT classification FROM core."case" WHERE id = %s',
+        # A provider test (a canary) has no case (F15.3, 2026-09-24). The
+        # case and the entity are read as facts (F51, 2026-10-02): a row
+        # hidden from the connection would read as none and the answer
+        # would be labelled below it.
+        row = self._c.execute("SELECT classification FROM iam.case_facts(%s)",
                               (case_id,)).fetchone() if case_id else None
         case_cls = row[0] if row else None
         node_cls = None
         if node_id:
-            row = self._c.execute("SELECT classification FROM core.node WHERE id = %s",
+            row = self._c.execute("SELECT classification FROM iam.element_facts('node', %s)",
                                   (node_id,)).fetchone()
             node_cls = row[0] if row else None
         return _max(lookup_cls, case_cls, provider.result_floor, extra, node_cls)
@@ -1152,6 +1257,19 @@ class LookupService:
 
     def sign_off(self, case_id: UUID, lookup_id: UUID, *, user_id: UUID, approve: bool,
                  note: str | None = None, now: datetime | None = None) -> dict:
+        """The named authoriser's decision. It runs as the LOOKUPS purpose
+        (F51, 2026-10-02), as the drain does: it re-reads the subject at the
+        REQUESTER's labels, reserves against every attempt on the provider,
+        and stores the answer at the provider's label, none of which is the
+        signer's view. Who may decide is unchanged (the named authoriser,
+        eligible now, after the route's gate); what the signer is then shown
+        is read back on the request connection at their labels."""
+        with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as sconn:
+            return self._on(sconn)._sign_off(case_id, lookup_id, user_id=user_id,
+                                             approve=approve, note=note, now=now)
+
+    def _sign_off(self, case_id: UUID, lookup_id: UUID, *, user_id: UUID, approve: bool,
+                  note: str | None, now: datetime | None) -> dict:
         from noctornal_api import notify_events
 
         verdict: object = None
@@ -1159,7 +1277,8 @@ class LookupService:
             row = self._c.execute(
                 """SELECT case_id, state, authorised_by, requested_by, signoff_expires_at < now(),
                           provider_id, operation, subject_kind, selector_id, sample_id,
-                          selector_type, query_value, classification, query_fingerprint
+                          selector_type, query_value, classification, query_fingerprint,
+                          exposure_level
                      FROM ingest.lookup WHERE id = %s FOR UPDATE""", (lookup_id,)).fetchone()
             if row is None or row[0] != case_id or row[1] != "AWAITING_SIGNOFF" \
                     or row[2] != user_id:
@@ -1197,6 +1316,17 @@ class LookupService:
                                                      subject.compartments):
                     gate = ("requester_withdrawn", "The requester may no longer send this.",
                             False)
+                elif provider.exposure_level != row[14]:
+                    # egress-lookup-signoff-exposure (2026-10-03): the
+                    # requester confirmed, and this person is signing, the
+                    # exposure the lookup recorded. A provider raised since
+                    # (VENDOR to PUBLIC) is a different disclosure, so the
+                    # drain's own refusal applies here too, whatever
+                    # re-enabled the provider in between.
+                    gate = ("exposure_changed",
+                            f"The exposure of this provider is now "
+                            f"{provider.exposure_level}, and this was asked for at "
+                            f"{row[14]}. The requester must ask again.", False)
                 else:
                     gate = self.gates(subject, provider, row[6], user_id=requester,
                                       fingerprint=bytes(row[13]))
@@ -1276,6 +1406,13 @@ class LookupService:
 
     # -- reads (current labels) ----------------------------------------------------------------
 
+    #: The answer's label comes from `iam.lookup_result_facts` (F51,
+    #: 2026-10-02), not from the join to the answer: under row-level
+    #: security an answer above the reader drops out of that join, the
+    #: strictest-of below would read low, and the outcome, status and counts
+    #: this read exists to withhold would be served. The join stays for the
+    #: counts, which are served only when the reader dominates the answer,
+    #: and the answer is then visible to them.
     _READ = """
         SELECT l.id, l.case_id, l.provider_id, p.display_name, l.exposure_level,
                l.operation, l.subject_kind, l.selector_type, l.query_value, l.state,
@@ -1287,7 +1424,7 @@ class LookupService:
                  AS read_label,
                (c.compartments || coalesce(n.compartments, '{}')
                   || coalesce(s.compartments, '{}')) AS read_comps,
-               greatest(r.classification, n.classification, s.classification,
+               greatest(rf.classification, n.classification, s.classification,
                         c.classification) AS result_label,
                r.findings_total, r.findings_proposed, l.purged_at
           FROM ingest.lookup l
@@ -1297,6 +1434,7 @@ class LookupService:
           LEFT JOIN iam.app_user au ON au.id = l.authorised_by
           LEFT JOIN LATERAL iam.element_facts('node', l.node_id) n ON true
           LEFT JOIN LATERAL iam.element_facts('sample', l.sample_id) s ON true
+          LEFT JOIN LATERAL iam.lookup_result_facts(l.result_id) rf ON true
           LEFT JOIN ingest.lookup_result r ON r.id = l.result_id"""
 
     def serialise(self, r, *, clearance: str, held: frozenset[str],
@@ -1460,7 +1598,16 @@ class LookupService:
     def test_provider(self, provider_id: UUID, *, actor_id: UUID) -> dict:
         """A CANARY with no case and no case material, so one administrator
         runs it whatever the provider's exposure. Status only: never an
-        error detail, an excerpt or a body."""
+        error detail, an excerpt or a body.
+
+        It runs as the LOOKUPS purpose (F51, 2026-10-02): the canary has no
+        case, so no request role sees its row, and its reservation counts
+        every attempt on the provider. The route's gate (integration.manage,
+        step-up) has run first."""
+        with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as sconn:
+            return self._on(sconn)._test_provider(provider_id, actor_id=actor_id)
+
+    def _test_provider(self, provider_id: UUID, *, actor_id: UUID) -> dict:
         provider = providers.get_provider(self._c, provider_id)
         if provider is None:
             raise NotVisible()
@@ -1541,28 +1688,34 @@ class LookupService:
             raise LookupRefused("too_many", f"More than {BATCH_MAX} would be planned; "
                                 "narrow the selection.")
         eligible, refused, cached = [], [], 0
-        for (selector_id,) in rows:
-            subject = self.resolve_subject(case_id, {"kind": "SELECTOR",
-                                                     "selector_id": selector_id},
-                                           user_id=user_id)
-            fingerprint = query_fingerprint(subject.selector_type, subject.value)
-            if not self.holds(user_id, case_id, "lookup.request", subject.classification,
-                              subject.compartments):
-                refused.append({"selector_id": str(selector_id), "code": "not_assigned",
-                                "detail": NO_ASSIGNMENT})
-                continue
-            gate = self.gates(subject, provider, operation, user_id=user_id,
-                              fingerprint=fingerprint)
-            if gate is not None:
-                refused.append({"selector_id": str(selector_id), "code": gate[0],
-                                "detail": gate[1]})
-                continue
-            if self._cached(subject, provider, operation, fingerprint):
-                cached += 1
-            eligible.append(str(selector_id))
-        to_send = len(eligible) - cached
-        digest = self._digest(provider, operation, eligible)
-        availability = self._pace(provider, to_send)
+        # The subjects are the planner's, read at their labels on the
+        # request connection; the gates, the cache and the windows on one
+        # LOOKUPS connection for the whole plan (F51, 2026-10-02), as a
+        # request reads them.
+        with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as sconn:
+            counter = self._on(sconn)
+            for (selector_id,) in rows:
+                subject = self.resolve_subject(case_id, {"kind": "SELECTOR",
+                                                         "selector_id": selector_id},
+                                               user_id=user_id)
+                fingerprint = query_fingerprint(subject.selector_type, subject.value)
+                if not self.holds(user_id, case_id, "lookup.request", subject.classification,
+                                  subject.compartments):
+                    refused.append({"selector_id": str(selector_id), "code": "not_assigned",
+                                    "detail": NO_ASSIGNMENT})
+                    continue
+                gate = counter.gates(subject, provider, operation, user_id=user_id,
+                                     fingerprint=fingerprint)
+                if gate is not None:
+                    refused.append({"selector_id": str(selector_id), "code": gate[0],
+                                    "detail": gate[1]})
+                    continue
+                if counter._cached(subject, provider, operation, fingerprint):
+                    cached += 1
+                eligible.append(str(selector_id))
+            to_send = len(eligible) - cached
+            digest = self._digest(provider, operation, eligible)
+            availability = counter._pace(provider, to_send)
         network = providers.route_state(self._c, provider,
                                         route_for=self._route_for).get("network")
         return {"eligible": len(eligible), "refused": refused, "cached": cached,
@@ -1627,7 +1780,12 @@ class LookupService:
         rows = self._selection(case_id, selection, user_id=user_id)
         refused_ids = {r["selector_id"] for r in planned["refused"]}
         queued = cached = 0
-        with self._c.transaction():
+        # The batch and its rows are the requester's own writes, at their
+        # labels, on the request connection; only the cache is read on a
+        # LOOKUPS connection, as `plan` read it (F51, 2026-10-02).
+        with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as sconn, \
+                self._c.transaction():
+            counter = self._on(sconn)
             batch_id = self._c.execute(
                 """INSERT INTO ingest.lookup_batch
                        (case_id, provider_id, operation, exposure_level, requested_by, note,
@@ -1642,7 +1800,7 @@ class LookupService:
                                                          "selector_id": selector_id},
                                                user_id=user_id)
                 fingerprint = query_fingerprint(subject.selector_type, subject.value)
-                hit = self._cached(subject, provider, operation, fingerprint)
+                hit = counter._cached(subject, provider, operation, fingerprint)
                 if hit:
                     self._insert(subject, provider, operation, fingerprint, user_id=user_id,
                                  state="CACHED", result_id=hit, batch_id=batch_id)
@@ -1673,18 +1831,35 @@ class LookupService:
                                 "cancels a batch.", status=403)
         if row[2] is not None:
             raise LookupRefused("already_cancelled", "This batch was already cancelled.")
-        with self._c.transaction():
-            self._c.execute(
+        # F51 (2026-10-02): a cancelled batch cancels EVERY queued row of it,
+        # a row above the person cancelling included, or the drain would send
+        # it later; so the cancel runs as the LOOKUPS purpose. The number it
+        # answers is the rows the canceller can read, as `batches` shows them
+        # (the conservative reading, docs/00 decision 149: a count of rows
+        # above the reader is withheld material); the audit row keeps the
+        # full count.
+        clearance, held, _a, _n = self._user(user_id)
+        readable = {r[0] for r in self._c.execute(
+            """SELECT l.id FROM ingest.lookup l
+                 JOIN core."case" c ON c.id = l.case_id
+                 LEFT JOIN LATERAL iam.element_facts('node', l.node_id) n ON true
+                 LEFT JOIN LATERAL iam.element_facts('sample', l.sample_id) s ON true
+                WHERE l.batch_id = %(batch)s AND l.state = 'QUEUED' AND """
+            + self._visible_clause(),
+            {"batch": batch_id, "clearance": clearance, "held": sorted(held)}).fetchall()}
+        with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as sconn, \
+                sconn.transaction():
+            sconn.execute(
                 """UPDATE ingest.lookup_batch SET cancelled_at = now(), cancelled_by = %s,
                           cancel_reason = %s WHERE id = %s""", (user_id, text, batch_id))
-            n = len(self._c.execute(
+            cancelled = [r[0] for r in sconn.execute(
                 """UPDATE ingest.lookup SET state = 'CANCELLED', refusal = %s
                     WHERE batch_id = %s AND state = 'QUEUED' RETURNING id""",
-                (f"batch cancelled: {text}"[:500], batch_id)).fetchall())
-            self._audit("LOOKUP_BATCH_CANCELLED", case_id=case_id, actor_id=user_id,
-                        object_type="lookup_batch", object_id=batch_id,
-                        detail={"cancelled": n})
-        return n
+                (f"batch cancelled: {text}"[:500], batch_id)).fetchall()]
+            self._on(sconn)._audit("LOOKUP_BATCH_CANCELLED", case_id=case_id,
+                                   actor_id=user_id, object_type="lookup_batch",
+                                   object_id=batch_id, detail={"cancelled": len(cancelled)})
+        return len(readable.intersection(cancelled))
 
     def batches(self, case_id: UUID, *, user_id: UUID) -> list[dict]:
         """Progress from the rows the reader can read only; a batch none of
@@ -1776,6 +1951,11 @@ def housekeeping(conn: psycopg.Connection) -> dict:
 
 def _drain_lock(provider_id: UUID) -> str:
     return f"ingest.lookup_drain:{provider_id}"
+
+
+class _Changed(Exception):
+    """A queued lookup or its provider changed under the drain between its
+    reading and its reservation; the pass stops for that provider."""
 
 
 def drain(conn: psycopg.Connection, *, limit: int = 200, max_seconds: float = 240.0,
@@ -1890,9 +2070,32 @@ def _drain_one(conn, svc: LookupService, lookup_id: UUID, provider, *,
         return "cached"
     if dry_run:
         return "sent"
+    # The provider was read once for the pass, and a pass may run for minutes:
+    # an exposure raised, a provider disabled or a lookup cancelled since then
+    # is read again here, under the locks the reservation takes, so nothing is
+    # sent on a stale reading (2026-10-07).
+    live = conn.execute(
+        """SELECT l.state, p.enabled AND p.retired_at IS NULL, p.exposure_level::text
+             FROM ingest.lookup l JOIN ingest.provider p ON p.id = l.provider_id
+            WHERE l.id = %s""", (lookup_id,)).fetchone()
+    if live is None or live[0] != "QUEUED":
+        return "skipped"
+    if live[2] != level:
+        return refuse("exposure_changed")
+    if not live[1]:
+        return "stop"
     try:
         with conn.transaction():
+            if conn.execute(
+                    """SELECT 1 FROM ingest.lookup l JOIN ingest.provider p
+                           ON p.id = l.provider_id
+                        WHERE l.id = %s AND l.state = 'QUEUED' AND p.enabled
+                          AND p.retired_at IS NULL AND p.exposure_level::text = %s
+                          FOR UPDATE OF l, p""", (lookup_id, level)).fetchone() is None:
+                raise _Changed
             svc._reserve(lookup_id, interactive=False, actor_id=None)
+    except _Changed:
+        return "stop"
     except (QuotaExhausted, CoolingDown) as exc:
         # This provider is done for the pass: its remaining queued rows wait
         # for the window.

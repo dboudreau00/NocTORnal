@@ -52,6 +52,19 @@ is not a failure.
 (readiness, configuration, unrouted, route refused, no authority, an
 endpoint error, a changed model); 0 otherwise. A retired index
 (refused=retired) is an administrator's choice, not a failure.
+
+2 when, under NOCTORNAL_ENV=production, the environment is one this job
+will not run on (docs/17 F52 and infra-12, 2026-10-02 and 2026-10-03): a
+credential that carries a value this repository publishes, the schema
+owner's password or DSN, which no runtime process may hold, or the persona
+key (or the collector's mark), which only the collector may hold (A collector
+process, 2026-10-02). The pass prints
+one line per variable on stderr, `embed_pass: refusing to run: <NAME> ...`,
+naming the variable and never its value, and touches nothing: it refuses
+before it reads its arguments or connects. It is the one helper every job
+calls first (`config.refuse_unsafe_job_environment`) and the one code every
+job gives it (`config.JOB_REFUSAL_EXIT`), 2 and not 1 so that an alert can
+tell a job that would not start from a pass that ran and failed an item.
 """
 from __future__ import annotations
 
@@ -66,6 +79,7 @@ if _HERE not in sys.path:
 
 from _env import load_env_local  # noqa: E402
 from noctornal_api import embedders  # noqa: E402
+from noctornal_api.config import JOB_REFUSAL_EXIT, refuse_unsafe_job_environment  # noqa: E402
 from noctornal_api.db import SystemPurpose, connect_system  # noqa: E402
 from noctornal_api.embeddings import EmbeddingService  # noqa: E402
 
@@ -94,6 +108,19 @@ _TABLE_BYTES = """SELECT coalesce(sum(pg_total_relation_size(c.oid)), 0)
 
 
 def main(argv: list[str] | None = None) -> int:
+    # First, before anything is read or connected to (docs/17 F52 and
+    # infra-12): this is a compose service that starts without waiting for
+    # the API, so with the template's placeholders, or with the schema
+    # owner's credential still in secrets.env, it ran beside an API that
+    # refused. Under NOCTORNAL_ENV=production a published credential or the
+    # owner's refuses the pass, and so does a persona key (A collector
+    # process, 2026-10-02 and 2026-10-03: this Lab worker holds none and the
+    # vault guard alone stood between it and one), all through the one helper
+    # every job calls (config.py). See "Exit code" above for 2.
+    refusals = refuse_unsafe_job_environment("embed_pass")
+    if refusals:
+        print("\n".join(refusals), file=sys.stderr)
+        return JOB_REFUSAL_EXIT
     parser = argparse.ArgumentParser(description="Fill the similarity indexes.")
     parser.add_argument("--role", choices=("wording", "meaning", "all"), default="all")
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT,

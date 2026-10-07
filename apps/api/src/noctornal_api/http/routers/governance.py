@@ -53,7 +53,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import psycopg
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from noctornal_api.break_glass import BreakGlassError, BreakGlassService, Grant
@@ -71,9 +71,10 @@ from noctornal_api.http.deps import (
     user_ceiling,
 )
 from noctornal_api.http.errors import Problem, safe_detail
-from noctornal_api.http.limits import rate_limit
+from noctornal_api.http.limits import enforce, rate_limit
 from noctornal_api.evidence import EvidenceError, EvidenceStorage
 from noctornal_api.retention import (
+    MAX_OUT_OF_SCHEDULE,
     UNRULED_RETAIN_DAYS,
     PurgeResult,
     RetentionError,
@@ -125,8 +126,8 @@ def _authorised_cases(conn: psycopg.Connection, user: CurrentUser,
     still compared `u.tlp_clearance` alone. An analyst whose grant opened
     case X could read `/retention/due?case_id=X`, while the same list
     without a case id, the Destroyed list and the "records unchanged"
-    count on a rule confirmation all left X out (final review U7,
-    2026-09-23). Asking `evaluate()` cannot drift, and it also records a
+    count on a rule confirmation all left X out (2026-09-23). Asking `evaluate()` cannot
+    drift, and it also records a
     use of the grant when the grant is what opens the case, exactly as
     the per-case form of these routes always has.
     """
@@ -178,6 +179,10 @@ def _own_evidence(conn: psycopg.Connection, evidence_id: UUID) -> UUID:
 def rules(
     user: CurrentUser = Depends(require_global("retention.read")),
     conn: psycopg.Connection = Depends(get_conn),
+    # The live records per category are counted on a system connection
+    # (F51, 2026-10-02): a category whose records all sit above the officer
+    # would otherwise read as not in use, and its missing rule as no gap.
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.RETENTION)),
 ) -> dict:
     """Every per-category rule, and which of them nobody has confirmed.
 
@@ -207,7 +212,7 @@ def rules(
                              if rule.confirmed_at else None),
         })
     unconfirmed = [r["category"] for r in out if r["is_placeholder"]]
-    in_use = _categories_in_use(conn, user, {c: r for c, r in found})
+    in_use = _categories_in_use(conn, user, {c: r for c, r in found}, sconn)
     unruled = [c["category"] for c in in_use if not c["has_rule"]]
     # The console prints this notice as it stands, so it says "rules" or
     # "rule" and names no design document: "6 rule(s) ... (docs/16 D3)"
@@ -231,7 +236,7 @@ def rules(
 
 
 def _categories_in_use(conn: psycopg.Connection, user: CurrentUser,
-                       rules: dict) -> list[dict]:
+                       rules: dict, sconn: psycopg.Connection) -> list[dict]:
     """Every ingest category with live records on the caller's cases, with
     the clock it actually runs on.
 
@@ -258,7 +263,9 @@ def _categories_in_use(conn: psycopg.Connection, user: CurrentUser,
              if _allowed_on_case(conn, user, r[0], "retention.read")]
     if not scope:
         return []
-    rows = conn.execute(
+    # `sconn` (F51, 2026-10-02): every live record on the officer's cases,
+    # whatever its own labels, as the deadline list counts them.
+    rows = sconn.execute(
         """SELECT category, count(*), min(retain_until)
              FROM ingest.record
             WHERE purged_at IS NULL AND case_id = ANY(%s)
@@ -303,6 +310,10 @@ def confirm_rule(
     category: str, body: ConfirmRuleBody,
     user: CurrentUser = Depends(require_global("retention.manage")),
     conn: psycopg.Connection = Depends(get_conn),
+    # The records the confirmation does not reach are counted on a system
+    # connection (F51, 2026-10-02), so a record above the officer is in the
+    # count it is told about rather than silently left out.
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.RETENTION)),
 ) -> dict:
     """Replace a placeholder with a decision, and record who made it.
 
@@ -335,7 +346,7 @@ def confirm_rule(
     except RetentionError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
     scope = _authorised_cases(conn, user, "retention.read")
-    unchanged = conn.execute(
+    unchanged = sconn.execute(
         """SELECT count(*) FROM ingest.record
             WHERE category = %s AND purged_at IS NULL
               AND retain_until IS NOT NULL AND case_id = ANY(%s)""",
@@ -419,10 +430,14 @@ def due(
     items = []
     for cid in scope:
         items.extend(svc.due(case_id=cid, as_of=as_of, limit=limit))
+    # evidence-due-leaks-hold-reason (2026-10-03): an exhibit above the
+    # caller is left out entirely, and the case's withheld-disclosure
+    # setting says how much is said about it.
+    items, withheld = _visible_due(conn, user, items, scope)
     items = items[:limit]
     held = [i for i in items if i.held]
     rows = _due_rows(conn, user, items)
-    return {
+    out = {
         "due": rows,
         "count": len(items),
         "on_legal_hold": len(held),
@@ -432,6 +447,97 @@ def due(
                    "deletion everywhere, so held items are "
                    "listed and flagged rather than quietly omitted."),
     }
+    if withheld:
+        out["withheld"] = withheld
+    return out
+
+
+#: The due items that carry labels of their own and are left out of a list
+#: for a caller above whose ceiling they sit: exhibits (the finding) and the
+#: Lab's samples, which the sweep took in the same change (lab-4), and, since
+#: due-labelled-records (2026-10-03), the partner's ingest records and the
+#: provider lookups and answers: a record's id, deadline and category (a
+#: stealer log, say) went to every retention.read holder whatever its
+#: compartment. A batch and a dead letter carry no labels and are still listed.
+_LABELLED_DUE = ("evidence", "sample", "ingest_record", "lookup",
+                 "lookup_result")
+
+#: Where each labelled kind's labels are read, as (id, classification,
+#: compartments). An exhibit and a sample are read as FACTS through
+#: `iam.element_facts`, so an item above the caller is known to be above them
+#: and not mistaken for a missing one. A record has no row-level policy and is
+#: read from its table. A lookup and its answer carry a classification and no
+#: compartments of their own (0128), and are read under the caller's own row
+#: security: one it may not read is absent, and an absent row is hidden below.
+_DUE_LABELS_FROM = {
+    "ingest_record": ("SELECT id, classification::text, compartments "
+                      "FROM ingest.record WHERE id = ANY(%s)"),
+    "lookup": ("SELECT id, classification::text, '{}'::text[] "
+               "FROM ingest.lookup WHERE id = ANY(%s)"),
+    "lookup_result": ("SELECT id, classification::text, '{}'::text[] "
+                      "FROM ingest.lookup_result WHERE id = ANY(%s)"),
+}
+
+
+def _visible_due(conn: psycopg.Connection, user: CurrentUser,
+                 items: list[DueItem], scope: list[UUID]
+                 ) -> tuple[list[DueItem], list[dict]]:
+    """The due items this caller may know of, and per case in `scope` what
+    the case's withheld-disclosure setting lets be said about the rest.
+
+    evidence-due-leaks-hold-reason (2026-10-03): the list is read on a
+    system connection (S1) and returned every exhibit, so a READ_ONLY or
+    ANALYST member received a RED exhibit's id, its deadline and the free
+    text of its legal hold ("informant identity at issue"), for any
+    `as_of`, while the register showed them 0 exhibits. An exhibit is now
+    within reach on its own labels, read as facts, against the caller's
+    ceiling on that case, exactly as the register decides; one that is not
+    is gone from every row and every count. What remains is the case's
+    choice (0030): NONE says nothing, PRESENCE whether anything is left
+    out, COUNT how many."""
+    labels: dict[tuple[str, UUID], tuple] = {}
+    for kind in _LABELLED_DUE:
+        ids = [i.object_id for i in items if i.object_type == kind]
+        if not ids:
+            continue
+        if kind in _DUE_LABELS_FROM:
+            rows = conn.execute(_DUE_LABELS_FROM[kind], (ids,)).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT x.id, f.classification::text, f.compartments
+                     FROM unnest(%s::uuid[]) AS x(id)
+                     CROSS JOIN LATERAL iam.element_facts(%s, x.id) f""",
+                (ids, kind)).fetchall()
+        labels.update({(kind, r[0]): (r[1], r[2]) for r in rows})
+    ceilings: dict[UUID, tuple] = {}
+    hidden: dict[UUID, int] = {}
+    kept: list[DueItem] = []
+    for i in items:
+        if i.object_type in _LABELLED_DUE:
+            if i.case_id not in ceilings:
+                ceilings[i.case_id] = user_ceiling(conn, user.user_id,
+                                                   case_id=i.case_id)
+            clearance, held = ceilings[i.case_id]
+            found = labels.get((i.object_type, i.object_id))
+            if (found is None or tlp_from_name(found[0]) > clearance
+                    or not frozenset(found[1] or []) <= held):
+                hidden[i.case_id] = hidden.get(i.case_id, 0) + 1
+                continue
+        kept.append(i)
+    said: list[dict] = []
+    for cid in scope:
+        row = conn.execute(
+            "SELECT withheld_disclosure FROM iam.case_facts(%s)",
+            (cid,)).fetchone()
+        mode = row[0] if row else "NONE"
+        if mode == "NONE":
+            continue
+        n = hidden.get(cid, 0)
+        entry = {"case_id": str(cid), "mode": mode, "incomplete": n > 0}
+        if mode == "COUNT":
+            entry["items"] = n
+        said.append(entry)
+    return kept, said
 
 
 class PurgeBody(BaseModel):
@@ -446,10 +552,17 @@ class PurgeBody(BaseModel):
     #: eventually be called by a script that meant to ask a question.
     dry_run: bool = True
     #: The `preview` a dry run of this case under this authority returned.
-    #: REQUIRED when `dry_run` is false (final review U20, 2026-09-23): the
+    #: REQUIRED when `dry_run` is false (2026-09-23): the
     #: real run is refused unless what is due is still exactly what that
     #: dry run counted. See `_preview_digest`.
     preview: str | None = Field(None, max_length=128)
+
+
+#: The fixed hold reasons the due list may show anyone who sees the row: the
+#: case's hold says nothing about the exhibit, and the exhibit's own hold is
+#: named without its free text.
+_CASE_HOLD_REASON = "case-level legal hold"
+_EXHIBIT_HOLD_REASON = "exhibit-level legal hold"
 
 
 def _due_rows(conn: psycopg.Connection, user: CurrentUser,
@@ -469,6 +582,12 @@ def _due_rows(conn: psycopg.Connection, user: CurrentUser,
     for i in items:
         if i.object_type == "evidence" and i.case_id is not None:
             by_case.setdefault(i.case_id, []).append(i.object_id)
+    # The free text of an exhibit's own hold goes only to a holder of
+    # retention.manage on the case, as a collected document's does (decision
+    # 74); everyone else is told it is held (evidence-due-leaks-hold-reason,
+    # 2026-10-03). A question, not an access, as for the titles.
+    reasons_ok = {cid for cid in by_case
+                  if _allowed_on_case(conn, user, cid, "retention.manage")}
     titles: dict[UUID, str] = {}
     for cid, ids in by_case.items():
         # A question, not an access: `_allowed_on_case` neither audits a
@@ -487,11 +606,15 @@ def _due_rows(conn: psycopg.Connection, user: CurrentUser,
     out = []
     for i in items:
         exhibit = i.object_type == "evidence"
+        reason = i.hold_reason
+        if (exhibit and reason and reason != _CASE_HOLD_REASON
+                and i.case_id not in reasons_ok):
+            reason = _EXHIBIT_HOLD_REASON
         out.append({
             "object_type": i.object_type, "object_id": str(i.object_id),
             "case_id": str(i.case_id) if i.case_id else None,
             "deadline": i.deadline.isoformat(), "rule": i.rule,
-            "legal_hold": i.held, "hold_reason": i.hold_reason,
+            "legal_hold": i.held, "hold_reason": reason,
             "past_deadline": i.deadline <= now,
             "category": i.category,
             "title": titles.get(i.object_id) if exhibit else None,
@@ -504,7 +627,7 @@ def _preview_digest(case_id: UUID, authority: str,
                     items: list[DueItem]) -> str:
     """What a dry run counted, as one value a real run must present again.
 
-    Final review U20, 2026-09-23. The real run took only a case and an
+    2026-09-23. The real run took only a case and an
     authority and ran `due()` afresh at destroy time, while the console's
     confirmation repeated the counts of a dry run of any age. A hold lifted
     in between meant "Destroy 3 exhibits" was confirmed and 14 went: the
@@ -529,7 +652,7 @@ def _counted(items: list[DueItem]) -> dict[str, int]:
     """Per-type counts of what a sweep would destroy, and what it holds
     back, in the units `PurgeResult` reports them."""
     out = {"evidence": 0, "document": 0, "ingest_record": 0,
-           "dead_letter": 0, "held": 0}
+           "dead_letter": 0, "sample": 0, "held": 0}
     for i in items:
         if i.held:
             out["held"] += 1
@@ -538,11 +661,35 @@ def _counted(items: list[DueItem]) -> dict[str, int]:
     return out
 
 
+def _dry_counts(items: list[DueItem]) -> dict[str, int]:
+    """A dry run's totals over the due items the caller may know of, in the
+    names `_purge_response` publishes them under, the way `purge_due`'s own
+    dry run counts the whole list. The service's totals include the exhibits
+    above the caller, so an AMBER lead with an empty register was told
+    `evidence_purged: 2, held_back: 1` whatever the case's withheld-disclosure
+    setting said (2026-10-07)."""
+    live = [i for i in items if not i.held]
+
+    def n(kind: str) -> int:
+        return sum(1 for i in live if i.object_type == kind)
+
+    return {"evidence_purged": n("evidence"), "documents_purged": n("document"),
+            "records_purged": n("ingest_record"),
+            "dead_letters_purged": n("dead_letter"),
+            "lookups_purged": n("lookup"),
+            "lookup_results_purged": n("lookup_result"),
+            "lookup_batches_purged": n("lookup_batch"),
+            "samples_purged": n("sample"),
+            "held_back": sum(1 for i in items
+                             if i.held and i.object_type != "document")}
+
+
 def _result_counts(result: PurgeResult) -> dict[str, int]:
     return {"evidence": result.evidence_purged,
             "document": result.documents_purged,
             "ingest_record": result.records_purged,
             "dead_letter": result.dead_letters_purged,
+            "sample": result.samples_purged,
             "held": result.held_back}
 
 
@@ -572,7 +719,22 @@ def _purger(conn: psycopg.Connection) -> RetentionService:
             "marking the rows purged and recording a destruction that did "
             "not happen. Set MINIO_ENDPOINT / MINIO_ACCESS_KEY / "
             "MINIO_SECRET_KEY / EVIDENCE_BUCKET.") from exc
-    return RetentionService(conn, storage)
+    return RetentionService(conn, storage, sample_stores=_sample_stores)
+
+
+def _sample_stores():
+    """The sample store, and the preservation store when the deployment
+    preserves rejected samples: built only when a purge has samples to
+    dispose of (lab-4, 2026-10-03). A missing credential is the purge's
+    warning, and the samples stay due."""
+    from noctornal_api.samples import (
+        PRESERVE,
+        PreservationStorage,
+        SampleStorage,
+        rejected_sample_disposition,
+    )
+    preserving = rejected_sample_disposition() == PRESERVE
+    return SampleStorage(), (PreservationStorage() if preserving else None)
 
 @router.post("/purge", response_model=dict,
              dependencies=[Depends(rate_limit("retention.destroy"))])
@@ -595,7 +757,7 @@ def purge(
     purger = _purger(sconn)
     # What is due NOW, read before anything is destroyed: a dry run hands
     # its digest back as `preview`, and a real run must present the digest
-    # of a dry run that still matches it (final review U20, 2026-09-23).
+    # of a dry run that still matches it (2026-09-23).
     # One `as_of` for this read and the sweep's own, so the clock cannot
     # move an item across its deadline between the check and the act.
     as_of = datetime.now(timezone.utc)
@@ -630,8 +792,18 @@ def purge(
         # exhibits" cannot tell anyone whether the exhibit their accepted
         # assertion rests on is one of them (ux15-report:due-list-no-
         # forward-view-no-names, 2026-09-23). The same rows `/due` returns,
-        # read at the same instant as the digest.
-        out["items"] = _due_rows(conn, user, items)
+        # read at the same instant as the digest, exhibits above the caller
+        # left out as `/due` leaves them (evidence-due-leaks-hold-reason,
+        # 2026-10-03); the counts above are the destruction's own.
+        visible, withheld = _visible_due(conn, user, items, [body.case_id])
+        out["items"] = _due_rows(conn, user, visible)
+        # The totals are the caller's too, and the case's setting says how
+        # much more is said: nothing under NONE, that the list is
+        # incomplete under PRESENCE, how many are left out under COUNT, as
+        # `/due` says it.
+        out.update(_dry_counts(visible))
+        if withheld:
+            out["withheld"] = withheld
     # The check above and the service's own read of what is due are two
     # statements, not one snapshot. The counts are compared afterwards so
     # that a change landing between them is SAID rather than papered over:
@@ -661,7 +833,9 @@ class OutOfScheduleBody(BaseModel):
     #: destruction, so this is not a field the router may make optional.
     approval_request_id: UUID
     case_id: UUID
-    evidence_ids: list[UUID] = Field(min_length=1)
+    #: Capped (evidence-purge-stalls-audit-chain, 2026-10-03): the rows and
+    #: their case stay locked while the store deletes each one.
+    evidence_ids: list[UUID] = Field(min_length=1, max_length=MAX_OUT_OF_SCHEDULE)
     authority: str = Field(min_length=10)
 
 
@@ -763,6 +937,9 @@ def _purge_response(result: PurgeResult, *, dry_run: bool) -> dict:
         "lookups_purged": result.lookups_purged,
         "lookup_results_purged": result.lookup_results_purged,
         "lookup_batches_purged": result.lookup_batches_purged,
+        # lab-4 (2026-10-03): samples of the expired case, disposed of as
+        # the deployment disposes of a rejected sample.
+        "samples_purged": result.samples_purged,
         "tombstones": [str(t) for t in result.tombstones],
         "warnings": result.warnings,
         "notice": (
@@ -824,13 +1001,31 @@ def tombstones(
 class LegalHoldBody(BaseModel):
     evidence_id: UUID
     on: bool = True
-    reason: str | None = None
+    #: Required both ways since 2026-10-03 (the service refuses under five
+    #: characters), and bounded as the document and case holds' are.
+    reason: str | None = Field(default=None, max_length=1000)
+
+
+def _meter_lift(request: Request, response: Response, conn: psycopg.Connection,
+                user: CurrentUser, on: bool) -> None:
+    """A LIFT spends the destruction meter; a placement does not.
+
+    The three hold routes were metered on `retention.destroy` whichever way
+    the hold went, so placing a fourth hold inside a few minutes was refused
+    (a burst of three, ten an hour, shared with the purges), and with the
+    meter's store down every placement was refused (2026-10-07).
+    Preservation is never the act a loop abuses; releasing is what makes
+    destruction lawful, so a lift keeps the tight meter and fails closed, and
+    a placement has the ordinary request meter."""
+    if not on:
+        enforce(request, response, "retention.destroy", f"u:{user.user_id}",
+                conn=conn, actor_id=user.user_id)
 
 
 @router.post("/legal-hold", response_model=dict,
-             dependencies=[Depends(rate_limit("retention.destroy"))])
+             dependencies=[Depends(rate_limit("request"))])
 def legal_hold(
-    body: LegalHoldBody,
+    body: LegalHoldBody, request: Request, response: Response,
     user: CurrentUser = Depends(require_global("retention.manage")),
     conn: psycopg.Connection = Depends(get_conn),
     # A hold is preservation, not a read, so it applies to an exhibit
@@ -845,12 +1040,15 @@ def legal_hold(
     -- so both are audited, and applying one requires a reason the service
     enforces.
     """
+    _meter_lift(request, response, conn, user, body.on)
     # The exhibit's OWN case, resolved from the row rather than taken on
     # trust. Without this the endpoint was a blind UPDATE by id: a holder
     # of the global role could LIFT a court-ordered hold on any exhibit in
     # the deployment and then purge it. Reproduced live.
     case_id = _own_evidence(conn, body.evidence_id)
     _case_scoped(conn, user, case_id, "retention.manage")
+    if not body.on:
+        _lift_within_reach(conn, user, case_id, body.evidence_id)
     try:
         RetentionService(sconn).set_legal_hold(
             body.evidence_id, actor_id=user.user_id, on=body.on,
@@ -861,6 +1059,94 @@ def legal_hold(
             "case_id": str(case_id), "legal_hold": body.on}
 
 
+def _lift_within_reach(conn: psycopg.Connection, user: CurrentUser,
+                       case_id: UUID, evidence_id: UUID) -> None:
+    """A hold is LIFTED only by somebody the exhibit's own labels admit.
+
+    evidence-hold-lift-below-label (2026-10-03): the route gated only on
+    the case, so an AMBER lead of an AMBER case, who could not see a RED
+    exhibit in the register at all, released a court hold on it in one
+    request and the scheduled purge could then destroy it. Placing a hold
+    stays open above the officer's labels (preservation, decision 144);
+    releasing one is the act that makes destruction lawful, so it takes the
+    full gate on the exhibit. Refused with the same 404 a missing exhibit
+    gets, so the answer says nothing about what is there; the gate writes
+    its AUTHZ_DENIED row."""
+    facts = element_labels(conn, "evidence", evidence_id)
+    if facts is None:
+        raise Problem(404, "Not found", "no such exhibit")
+    try:
+        authorize_object(conn, user, case_id=case_id,
+                         permission_key="retention.manage",
+                         after_case_gate=True, classification=facts[1],
+                         compartments=frozenset(facts[2] or []))
+    except Problem as exc:
+        if exc.status == 403:
+            raise Problem(404, "Not found", "no such exhibit") from None
+        raise
+
+
+class CaseHoldBody(BaseModel):
+    on: bool = True
+    #: Required both ways: a hold nobody can attribute is a hold nobody can
+    #: lift, and a lift nobody can attribute makes a purge nobody can defend.
+    reason: str = Field(min_length=5, max_length=1000)
+
+
+@router.post("/cases/{case_id}/legal-hold", response_model=dict,
+             dependencies=[Depends(rate_limit("request"))])
+def case_legal_hold(
+    case_id: UUID, body: CaseHoldBody, request: Request, response: Response,
+    user: CurrentUser = Depends(require_global("retention.manage")),
+    conn: psycopg.Connection = Depends(get_conn),
+    # The case row is written as a system purpose, as an exhibit hold is:
+    # a hold applies to everything the case holds, above the officer's own
+    # labels too, and it is audited.
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.RETENTION)),
+) -> dict:
+    """Freeze everything a case governs against every deletion path, or
+    release it, with a reason either way.
+
+    evidence-case-hold-unreachable (2026-10-03): the purge, the due list,
+    the lookup purge and the sample rules all read `core.case.legal_hold`,
+    and nothing in the product could set it, so a preservation order
+    covering a case could not be honoured: ingest records and lookups have
+    no hold of their own, and an exhibit lodged after the order had none.
+    `retention.manage` on the case through the full gate (step-up included,
+    and a closed case too: a hold works on a closed case). A purge of the
+    case running when the hold arrives finishes the exhibit it is destroying
+    and keeps every one after it: the purge claims each exhibit in a
+    transaction of its own and reads the hold under a share lock on the case
+    row. Placing is open to the gate
+    above; lifting also needs the caller cleared for everything the case
+    holds, the collected documents it cites included, so a lead below an
+    exhibit or a document cannot release a hold through the case that they
+    cannot release on the exhibit."""
+    from noctornal_api.retention import RetentionNotFound
+
+    _meter_lift(request, response, conn, user, body.on)
+    _case_scoped(conn, user, case_id, "retention.manage")
+    # A lift needs the lifter's own ceiling on this case to cover everything
+    # the case holds (the service refuses otherwise); a hold needs nothing
+    # more than the gate above.
+    clearance, held = user_ceiling(conn, user.user_id, case_id=case_id)
+    # case-hold-lift-documents (2026-10-03): the collected documents the
+    # case cites are counted against the caller's ceiling OUTSIDE this case,
+    # the one a document is read under. A break-glass grant scoped to this
+    # case raises `clearance` above, and must not release a document that
+    # grant does not let them open.
+    doc_clearance, doc_held = user_ceiling(conn, user.user_id)
+    try:
+        return RetentionService(sconn).set_case_legal_hold(
+            case_id, actor_id=user.user_id, on=body.on, reason=body.reason,
+            lifter_ceiling=(clearance.name, sorted(held)),
+            document_ceiling=(doc_clearance.name, sorted(doc_held)))
+    except RetentionNotFound as exc:
+        raise Problem(404, "Not found", "case does not exist") from exc
+    except RetentionError as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+
+
 class DocumentHoldBody(BaseModel):
     on: bool = True
     reason: str | None = Field(default=None, max_length=1000)
@@ -869,9 +1155,10 @@ class DocumentHoldBody(BaseModel):
 # A hold a person places on a collected document and every earlier
 # version of it (2026-09-24; docs/00 decision 74).
 @router.post("/documents/{document_id}/legal-hold", response_model=dict,
-             dependencies=[Depends(rate_limit("retention.destroy"))])
+             dependencies=[Depends(rate_limit("request"))])
 def document_legal_hold(
-    document_id: UUID, body: DocumentHoldBody,
+    document_id: UUID, body: DocumentHoldBody, request: Request,
+    response: Response,
     user: CurrentUser = Depends(require_global("retention.manage")),
     conn: psycopg.Connection = Depends(get_conn),
     # The hold on a system connection (S1, 2026-09-25): it must count and
@@ -894,6 +1181,7 @@ def document_legal_hold(
     from noctornal_api.http.deps import authorize_global
     from noctornal_api.retention import RetentionConflict, RetentionNotFound
 
+    _meter_lift(request, response, conn, user, body.on)
     authorize_global(conn, user, "collection.read")
     clearance, held = user_ceiling(conn, user.user_id)
     try:
@@ -1211,6 +1499,10 @@ def unreviewed(
     limit: int = Query(100, ge=1, le=500),
     user: CurrentUser = Depends(require_global("break_glass.review")),
     conn: psycopg.Connection = Depends(get_conn),
+    # Each grant's invoke row, for the clearance it raised from: an audit
+    # row the reviewer reads whether or not they also hold audit.read,
+    # which row security on the log asks for (F51, 2026-10-02).
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.BREAK_GLASS)),
 ) -> dict:
     """The security officer's queue. This is the control.
 
@@ -1246,7 +1538,7 @@ def unreviewed(
     # and "did it raise anything" is part of what the officer judges. Null
     # for a grant invoked before the level was recorded: the card then says
     # only which level was named, not that it raised it.
-    bases = {r[0]: r[1] for r in conn.execute(
+    bases = {r[0]: r[1] for r in sconn.execute(
         """SELECT object_id, detail->>'base_clearance' FROM audit.event
             WHERE action = 'BREAK_GLASS_INVOKED'
               AND object_type = 'break_glass' AND object_id = ANY(%s)""",
@@ -1305,7 +1597,7 @@ def review(
     It also refuses a grant that is still live, with a 409 that says to
     end it or wait. `/unreviewed` is the only list and End it now lives on
     its cards, so a verdict on a live grant hid it from every officer while
-    the raise ran on (final review U2, 2026-09-23).
+    the raise ran on (2026-09-23).
     """
     try:
         grant = BreakGlassService(sconn).review(

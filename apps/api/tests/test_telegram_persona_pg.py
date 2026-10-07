@@ -253,14 +253,22 @@ def test_a_person_needs_their_own_clearance_at_the_gate(conn):
 # --- the sealed session -------------------------------------------------------------
 
 def test_a_telegram_session_is_rewrapped_like_any_persona_secret(conn, monkeypatch):
+    """Rewritten 2026-10-02 (A collector process): a persona's session seals
+    under the persona ring, NOCTORNAL_PERSONA_KEK, which only the collector
+    holds in production, and a rotation of THAT ring moves it; the TOTP
+    ring's inventory no longer holds the column at all."""
     from noctornal_api.collection import PersonaVault
-    from noctornal_api.security.sealed import SEALED_COLUMNS, rewrap_table
+    from noctornal_api.security.persona_sealed import (
+        PERSONA_SEALED_COLUMNS,
+        move_and_rewrap,
+    )
+    from noctornal_api.security.sealed import SEALED_COLUMNS
     from noctornal_api.telegram import TelegramSecret
 
-    assert ("collect.collection_account", "secret_ciphertext",
-            "secret_key_id") in SEALED_COLUMNS
-    home = os.environ["NOCTORNAL_TOTP_KEK"]
-    other = base64.b64encode(b"telegram-rotated-kek-32-bytes!!!").decode()
+    column = ("collect.collection_account", "secret_ciphertext", "secret_key_id")
+    assert column in PERSONA_SEALED_COLUMNS and column not in SEALED_COLUMNS
+    home = os.environ["NOCTORNAL_PERSONA_KEK"]
+    other = base64.b64encode(b"telegram-rotated-pkek-32-bytes!!").decode()
     pid, _e, _uid = tp.persona(conn, P)
 
     def key_of():
@@ -268,23 +276,22 @@ def test_a_telegram_session_is_rewrapped_like_any_persona_secret(conn, monkeypat
                             "WHERE id = %s", (pid,)).fetchone()[0]
 
     before = key_of()
+    assert before.startswith("persona:")
     try:
-        monkeypatch.setenv("NOCTORNAL_TOTP_KEK", other)
-        monkeypatch.setenv("NOCTORNAL_TOTP_KEK_ID", "env:tg2")
-        monkeypatch.setenv("NOCTORNAL_TOTP_KEK_RETIRED", f"{before}={home}")
-        rewrap_table(conn, "collect.collection_account", "secret_ciphertext",
-                     "secret_key_id")
-        assert key_of() == "env:tg2"
+        monkeypatch.setenv("NOCTORNAL_PERSONA_KEK", other)
+        monkeypatch.setenv("NOCTORNAL_PERSONA_KEK_ID", "persona:tg2")
+        monkeypatch.setenv("NOCTORNAL_PERSONA_KEK_RETIRED", f"{before}={home}")
+        move_and_rewrap(conn)
+        assert key_of() == "persona:tg2"
         with PersonaVault(conn).lease(pid, actor_id=None, purpose="check") as lease:
             assert TelegramSecret.parse(lease.value).api_id == 1234567
     finally:
-        monkeypatch.setenv("NOCTORNAL_TOTP_KEK", home)
-        monkeypatch.setenv("NOCTORNAL_TOTP_KEK_ID", before)
-        monkeypatch.setenv("NOCTORNAL_TOTP_KEK_RETIRED", f"env:tg2={other}")
-        rewrap_table(conn, "collect.collection_account", "secret_ciphertext",
-                     "secret_key_id")
-        monkeypatch.delenv("NOCTORNAL_TOTP_KEK_ID")
-        monkeypatch.delenv("NOCTORNAL_TOTP_KEK_RETIRED")
+        monkeypatch.setenv("NOCTORNAL_PERSONA_KEK", home)
+        monkeypatch.setenv("NOCTORNAL_PERSONA_KEK_ID", before)
+        monkeypatch.setenv("NOCTORNAL_PERSONA_KEK_RETIRED", f"persona:tg2={other}")
+        move_and_rewrap(conn)
+        monkeypatch.delenv("NOCTORNAL_PERSONA_KEK_ID")
+        monkeypatch.delenv("NOCTORNAL_PERSONA_KEK_RETIRED")
     assert key_of() == before
 
 

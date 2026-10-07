@@ -140,8 +140,12 @@ def test_the_exit_code_is_the_return_value_of_main() -> None:
     returns, and the failure is invisible: the counters line still says
     `failed=3` and cron still reports success. Both scripts wire it the
     same way."""
+    # `main(sys.argv[1:])` is the same wiring for a script whose `main()`
+    # reads no arguments unless given them (notify_drain, 2026-10-07).
     for path in (SCRIPT, MODEL):
-        assert "raise SystemExit(main())" in ast.unparse(_tree(path)), (
+        text = ast.unparse(_tree(path))
+        assert ("raise SystemExit(main())" in text
+                or "raise SystemExit(main(sys.argv[1:]))" in text), (
             f"{path.name} does not turn main()'s return value into the "
             f"process exit code")
 
@@ -468,7 +472,7 @@ def test_a_second_runner_is_refused_while_the_first_holds_the_source(conn):
 
 
 @pg
-def test_two_different_sources_do_not_block_each_other(conn):
+def test_two_different_sources_do_not_block_each_other(conn, invalid_names_fail_fast):
     """Why the key is the source and not one global collector lock.
 
     Two different sources are two different sites: the politeness that
@@ -499,7 +503,7 @@ def test_two_different_sources_do_not_block_each_other(conn):
 
 
 @pg
-def test_the_lock_is_released_when_the_poll_fails(conn):
+def test_the_lock_is_released_when_the_poll_fails(conn, invalid_names_fail_fast):
     """A session lock outlives the statement that took it.
 
     So an exception escaping the poll would strand it for the life of the

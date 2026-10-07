@@ -49,7 +49,14 @@ from psycopg.types.json import Json
 
 from noctornal_api.cases import CONTENT_READ_ONLY_STATES
 from noctornal_api.graph import AssertionInput, GraphWriteError, GraphWriteService
+from noctornal_api.selectors import (
+    SelectorError,
+    SelectorStore,
+    carries_credential,
+    is_url_type,
+)
 from noctornal_api.wording import agree
+from noctornal_ontology.normalisers import credential_spans, redact_url_credentials
 
 # What a proposal can ask for. Deliberately small: anything an extractor
 # cannot express as one of these is not something it should be able to do
@@ -237,6 +244,10 @@ class ProposalRow:
     #: The lookup answer this proposal was raised from (F15.3, 2026-09-24;
     #: migration 0100). None for every other source.
     lookup_result_id: UUID | None = None
+    #: Not a column: set only on the row an accept returns, when the
+    #: accepted selector is already held by another entity in the index (a
+    #: merge lead; graph-selector-index-drift, 2026-10-03).
+    selector_owner_id: UUID | None = None
 
 
 def _row(r) -> ProposalRow:
@@ -282,13 +293,15 @@ CHANGE_CHANNEL = "noctornal_change"
 #: `iam.element_facts` (S1, 2026-09-25), not joins to `collect.document`
 #: and `comms.contact_block`: under row-level security a LEFT JOIN to a
 #: row the reader may not see reads as no row at all, and the
-#: strictest-of below would then LOWER the proposal to what is left.
+#: strictest-of below would then LOWER the proposal to what is left. The
+#: lookup answer's label comes from `iam.lookup_result_facts` for the same
+#: reason, since the answer went under policy (F51, 2026-10-02).
 _SOURCE_FROM = """
     FROM collect.proposal p
     JOIN core."case" c ON c.id = p.case_id
     LEFT JOIN LATERAL iam.element_facts('document', p.document_id) d ON true
     LEFT JOIN LATERAL iam.element_facts('proposal_block', p.id) b ON true
-    LEFT JOIN ingest.lookup_result lr ON lr.id = p.lookup_result_id"""
+    LEFT JOIN LATERAL iam.lookup_result_facts(p.lookup_result_id) lr ON true"""
 
 _PAYLOAD_CLS = """CASE WHEN p.payload->>'classification' IN
         ('CLEAR', 'GREEN', 'AMBER', 'AMBER_STRICT', 'RED')
@@ -326,7 +339,7 @@ class SourceLabels:
     compartments: frozenset[str]
 
 
-def announce(conn: psycopg.Connection, case_id: UUID) -> None:
+def announce(conn: psycopg.Connection, case_id: UUID, proposal_id: UUID) -> None:
     """Tell the live channel this case's triage queue changed.
 
     ux08-triage:stale-badges-and-list (2026-09-23). The Triage badge is
@@ -339,11 +352,24 @@ def announce(conn: psycopg.Connection, case_id: UUID) -> None:
     the gated route. Inside a transaction Postgres folds identical
     notifications into one, which is why a capture raises its proposals
     in one.
+
+    The hint names the labels of the proposal that changed (2026-10-07, as 0146 does for a
+    node or an edge): its read label and
+    the compartments of what it came from, the same expressions the queue
+    filters on. The live channel drops the hint for a reader who could not
+    read that proposal, so a case reader is not woken when a proposal above
+    their labels is queued: a timing channel, though a content-free one.
+    The labels are for that decision and never reach a client. One
+    statement, so a capture still pays one round trip per proposal.
     """
     conn.execute(
-        "SELECT pg_notify(%s, json_build_object('case_id', %s::uuid, "
-        "'kind', 'proposal', 'op', 'CHANGE')::text)",
-        (CHANGE_CHANNEL, case_id))
+        "SELECT pg_notify(%(channel)s, json_build_object("
+        "'case_id', p.case_id, 'kind', 'proposal', 'op', 'CHANGE', "
+        "'labels', json_build_array(json_build_array(" + _READ_LABEL + "::text, "
+        "ARRAY(SELECT DISTINCT k FROM unnest(" + _SOURCE_COMPARTMENTS + ") AS k "
+        "ORDER BY k))))::text)" + _SOURCE_FROM
+        + " WHERE p.id = %(id)s AND p.case_id = %(case)s",
+        {"channel": CHANGE_CHANNEL, "id": proposal_id, "case": case_id})
 
 
 class ProposalStore:
@@ -397,7 +423,7 @@ class ProposalStore:
             ).fetchone()[0]
         except psycopg.Error as exc:
             raise ProposalError(str(exc)) from exc
-        announce(self._c, case_id)
+        announce(self._c, case_id, made)
         return made
 
     def queue(self, case_id: UUID, *, state: str = STATE_PROPOSED,
@@ -586,8 +612,8 @@ class ProposalStore:
         one: a case-scoped break-glass grant raises a read of that case
         only, and this read spans them all.
 
-        A read-only case (CLOSED, ARCHIVED, PURGED) counts nothing (final
-        review u2, 2026-09-24). Accept, reject and defer are content writes
+        A read-only case (CLOSED, ARCHIVED, PURGED) counts nothing (2026-09-24). Accept,
+        reject and defer are content writes
         and all refuse there, proposals never expire, and an ARCHIVED case
         cannot be reopened, so a case closed with work in its queue said
         "2 proposals to triage" on the case list for good, as a nag nobody
@@ -641,6 +667,47 @@ class ProposalStore:
         return "p.case_id = %(case_id)s AND " + _READABLE, params
 
 
+def _refuse_credential_label(payload: dict) -> None:
+    """Refuse to write a link that carries a password, token or key as an
+    entity's label (graph-url-selector-keeps-credentials, 2026-10-03).
+
+    A capture since that date proposes the link without them; a proposal
+    raised before still carries them in its label, and accepting it would
+    put a victim's credential on the graph, in search and in reports. The
+    reviewer is told to reject it; capturing the text again raises the link
+    without the credential."""
+    attrs = payload.get("attrs") or {}
+    if carries_credential(attrs.get("selector_type"), payload.get("label")):
+        raise ProposalError(
+            "This link carries a password, token or key, which the graph "
+            "does not record. Nothing was written: reject the proposal. "
+            "Capturing the text again raises the link without it.")
+
+
+def _without_credentials(payload: dict) -> dict:
+    """The payload with a URL's password or token taken out of the copies of
+    the selector's value an accept would write onto the entity
+    (`attrs.raw_value`, and `attrs.value` of a lookup's).
+
+    A lab or sandbox extraction copied the value as the analysis recorded
+    it, and a proposal raised before 2026-10-03 may hold one, so the accept
+    redacts rather than refuses: the label of such a proposal is clean, a
+    refused one could not be raised again (a proposal in any state stops a
+    second one for the same label), and the reviewer would have nothing to
+    do but reject the finding (graph-url-selector-keeps-credentials,
+    2026-10-03, verify round)."""
+    attrs = payload.get("attrs")
+    if not isinstance(attrs, dict):
+        return payload
+    fixed = {k: redact_url_credentials(attrs[k])
+             for k in ("raw_value", "value")
+             if isinstance(attrs.get(k), str)
+             and redact_url_credentials(attrs[k]) != attrs[k]}
+    if not fixed:
+        return payload
+    return {**payload, "attrs": {**attrs, **fixed}}
+
+
 class ProposalReview:
     """The analyst-facing half: the ONLY path from a proposal into the
     graph, and it requires a human."""
@@ -670,7 +737,7 @@ class ProposalReview:
                 "been dispositioned")
 
         # When the material was seen: the post's own date, or failing that
-        # when it was captured (final review u6, 2026-09-24). First and
+        # when it was captured (2026-09-24). First and
         # last seen are derived from `observed_at` on an entity's live
         # claims (projections.seen_sql), and this claim never set it, so
         # every entity accepted from Triage read "no claim dates an
@@ -701,8 +768,8 @@ class ProposalReview:
             observed_at=observed_at,
             source_id=lookup_source, lookup_result_id=lookup_result,  # F15.3
         )
-        payload = row.payload or {}
-        node_id = edge_id = assertion_id = None
+        payload = _without_credentials(row.payload or {})
+        node_id = edge_id = assertion_id = selector_owner = None
         # The accept default and its floor: what the proposal came from,
         # never below the case (gap-capture-classification, 2026-09-23).
         labels = ProposalStore(self._c).source_labels(proposal_id)
@@ -751,6 +818,8 @@ class ProposalReview:
                     extra = element_compartments(
                         labels, self.case_compartments(row.case_id))
                 if row.kind == KIND_NODE:
+                    _refuse_credential_label(payload)
+                    self._refuse_userinfo_selector(row.document_id, payload)
                     node_id = self._graph.create_node(
                         case_id=row.case_id,
                         node_type=payload["node_type"],
@@ -761,6 +830,8 @@ class ProposalReview:
                         classification=written_at,
                         compartments=extra,
                     )
+                    selector_owner = self._index_selector(
+                        row.case_id, node_id, payload, observed_at)
                 elif row.kind == KIND_EDGE:
                     edge_id = self._graph.create_edge(
                         case_id=row.case_id,
@@ -868,14 +939,78 @@ class ProposalReview:
                              "edge_id": str(edge_id) if edge_id else None,
                              "classification": written_at,
                              "compartments": extra})
-                announce(self._c, row.case_id)
+                announce(self._c, row.case_id, proposal_id)
         except KeyError as exc:
             raise ProposalError(
                 f"proposal payload is missing {exc} for kind {row.kind}") from exc
         except GraphWriteError as exc:
             raise ProposalError(f"could not apply proposal: {exc}") from exc
         return replace(self.get_for_update(proposal_id),
-                       applied_assertion_id=assertion_id)
+                       applied_assertion_id=assertion_id,
+                       selector_owner_id=selector_owner)
+
+    def _refuse_userinfo_selector(self, document_id: UUID | None,
+                                  payload: dict) -> None:
+        """Refuse a selector that was read out of a password in a link.
+
+        A capture before 2026-10-03 read the userinfo of an `ftp://`,
+        `mysql://` or `smtp://` link as an e-mail address (only http and
+        https links were URL selectors), and proposed `Secret123@host`.
+        Such a proposal is clean on its face: nothing in its label says it
+        was a password. The document it cites does, so the span the
+        proposal was found at is checked against the document's own text,
+        and one inside a link's userinfo is refused with the same words as
+        a credentialled label (graph-url-selector-keeps-credentials,
+        2026-10-03, verify round). A URL selector is not checked, its
+        label is the form without the userinfo; a proposal that cites no
+        document, a purged one, or one this reader cannot read has no text
+        to check against."""
+        attrs = payload.get("attrs") or {}
+        start, end = attrs.get("char_start"), attrs.get("char_end")
+        if (document_id is None or is_url_type(attrs.get("selector_type"))
+                or not isinstance(start, int) or not isinstance(end, int)):
+            return
+        found = self._c.execute(
+            "SELECT body_text FROM collect.document WHERE id = %s",
+            (document_id,)).fetchone()
+        if not found or not found[0]:
+            return
+        if any(start < s_end and s_start < end
+               for s_start, s_end in credential_spans(found[0])):
+            raise ProposalError(
+                "This value was read out of a password in a link, which the "
+                "graph does not record. Nothing was written: reject the "
+                "proposal. Capturing the text again does not raise it.")
+
+    def _index_selector(self, case_id: UUID, node_id: UUID, payload: dict,
+                        observed_at: datetime | None) -> UUID | None:
+        """Record an accepted selector in the index against its new entity,
+        in the accept's transaction, and return another entity already
+        holding it (a merge lead), or None.
+
+        graph-selector-index-drift (2026-10-03). An accepted NODE proposal
+        named its selector type and nothing indexed it: core.selector stayed
+        empty, selector search found nothing, a second capture of the same
+        value in another form was proposed again, and a strong duplicate was
+        never surfaced. The index keeps its first owner, so a value another
+        entity already holds is reported, never taken (invariant 3: no
+        automatic merge). A value the ontology now refuses as that type is
+        refused here too, with its reason, as `create_node` refuses it."""
+        attrs = payload.get("attrs") or {}
+        selector_type = attrs.get("selector_type")
+        if not selector_type:
+            return None
+        try:
+            found = SelectorStore(self._c).record(
+                case_id=case_id, selector_type=selector_type,
+                raw_value=attrs.get("raw_value") or payload["label"],
+                node_id=node_id, observed_at=observed_at)
+        except SelectorError as exc:
+            raise ProposalError(
+                f"{exc} Nothing was written: reject the proposal.") from None
+        if found.node_id is not None and found.node_id != node_id:
+            return found.node_id
+        return None
 
     def reject(self, proposal_id: UUID, *, reviewed_by: UUID,
                note: str) -> ProposalRow:
@@ -940,7 +1075,7 @@ class ProposalReview:
             )
             self._audit(row.case_id, proposal_id, reviewed_by, action,
                         {"kind": row.kind, "origin": row.origin, "note": note})
-            announce(self._c, row.case_id)
+            announce(self._c, row.case_id, proposal_id)
         return self.get_for_update(proposal_id)
 
     def _audit(self, case_id: UUID, proposal_id: UUID, actor_id: UUID,

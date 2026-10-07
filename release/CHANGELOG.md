@@ -1,5 +1,712 @@
 # Changelog
 
+## Beta 1: 2026-10-07
+
+The first beta. It is a usable product: one command installs it on Linux,
+macOS or Windows (a wizard of eight numbered steps, the first of which only
+looks at the machine), `release/START-HERE.md` is the one page to follow, and
+the console walks a new user through a first sign-in. It is fit for other
+people to try on synthetic or published, non-personal data. It has not been
+audited, and it is still not lawful to operate against real material until
+docs/16 L1 to L5 are settled outside this codebase. Legal review is required
+before any active case load.
+
+It carries everything built since Alpha 7a. There was no Alpha 8 release: the
+section that stood here for it was a draft of the part of the build that had
+merged when work stopped on 2026-10-03, and what that draft listed as not in
+it was built afterwards and is in this release. Row-level security now stands
+behind the access gate on every case table, 82 in all and none deferred
+(F51). The persona vault is split into a collector process that alone holds
+the persona key (docs/00 decision 174), hostile bytes are parsed in an
+isolated worker with no secrets and no network (F42), the schema owner's
+password is out of the runtime services (F52), and the rate limiter's Redis
+runs under an ACL. The audit and custody chains append under their lock, the
+database refuses a forged or rewritten claim, and REGE, archive expansion,
+the authenticated forum path and compartments on collection sources are
+built. An adversarial review on 2026-10-03 kept 82 findings, 16 of them high.
+Every one is fixed or stated as a residual in docs/17, an independent
+re-verification re-ran each against the merged code, and nine release
+reviews then exercised install, analyst workflows, load, authorization,
+evidence and egress, collection and the Lab, the upgrade from Alpha 7a,
+the production deployment and code quality. The decisions this release took
+are docs/00 152 to 201.
+
+Alpha 7a stands at Alembic 0124, so an upgrade applies 49 revisions, 0125 to
+0173. Several change existing data, one holds an exclusive lock on the
+selector table for about 24 seconds per 300,000 rows, and three refuse to run
+over data they cannot take. The readiness register grows from 43 checks to
+45, none of the new ones blocking. The steps an existing deployment takes are
+the next subsection.
+
+7967 tests (`def test_` functions). The whole suite, run on a database built from nothing with every migration and with both runtime database roles present, passed 12073 and skipped 51.
+
+### Upgrading from Alpha 7a
+
+The measurements below were made on a database built by the Alpha 7a code
+itself and then upgraded: 10 cases, 275 entities, 737 ties, 1,015 claims,
+6,147 audit rows and 1,210 custody rows, with a copy of the same estate
+enlarged to 300,275 entities, 600,729 ties, 901,007 claims, 300,108 selector
+rows, 906,147 audit rows and 1.4 GB. Every revision commits on its own. On
+the first estate the whole upgrade took 0.53 seconds (about 2 seconds with
+the process start), and on the large copy 46.6 seconds (about 55 seconds).
+Three revisions are 89% of that: 0134, 0137 and 0168. The host was shared
+with other work, so read every figure as within a factor of two. 0172 and
+0173 were written after these runs and are not in them: 0172 only revokes
+privileges, and 0173 builds four indexes inside the migration, which took
+about 2 seconds on a case of a million claims.
+
+**1. Read this, plan the downtime, and stop everything that writes.** Allow
+about one minute per 300,000 selector rows, plus a few seconds: 0134 holds an
+ACCESS EXCLUSIVE lock on `core.selector` for the whole revision (24.1
+seconds for 300,000 rows). Stop the API, the sample origin, and on a
+production stack `cron`, `lab-triage`, `lab-cron` and `embed-pass`
+(development: stop `scripts/launch.*`). 0149 must run with no writer in the
+middle of an insert, because one mid-insert under the old function can land
+above the fork boundary it records and then read as a fresh break. Leave
+Postgres, Redis and MinIO running.
+
+**2. Back up.** The database (`pg_dump -Fc`), the evidence and raw buckets
+(`mc mirror`) and every env file beside the compose file, as
+`infra/production/README.md`, Day-to-day, says. Read what it now says about
+restoring: the mirror keeps the bytes of an exhibit but not the object
+version it was stored as, which every exhibit lodged after this upgrade
+records (0139), and a restore needs the three runtime roles to exist first.
+Both are under "Backups and restore" below.
+
+**3. Find what would stop the upgrade, as the schema owner, and correct it.**
+
+```sql
+-- 0130: a hand-written watch that names a Telegram chat by anything but its typed id
+SELECT id, name, target_kind, target_ref FROM collect.watch
+ WHERE upper(target_kind) = 'TELEGRAM_CHAT'
+   AND NOT (target_kind = 'TELEGRAM_CHAT' AND target_ref ~ '^[cg]:[1-9][0-9]{0,19}$');
+-- 0152: an index of the new name already there with another definition
+SELECT pg_get_indexdef(to_regclass('ingest.record_batch_case_idx'));
+```
+
+Correct a watch by giving it the chat's typed id (`UPDATE collect.watch SET
+target_kind = 'TELEGRAM_CHAT', target_ref = 'c:<id>' WHERE id = ...`, where
+the id is `collect.telegram_chat.durable_id`) or by changing its kind. Nothing
+in the product writes a watch, so only a row written by hand can stop 0130.
+A VALID index called `record_batch_case_idx` with another definition has to
+be dropped or renamed; an INVALID leftover is dropped and rebuilt. An
+operator with a very large `ingest.record` may build the index CONCURRENTLY
+beforehand, under the same name and definition.
+
+**4. Bring the secrets to this release (production).** `sudo
+./release/install.sh --production-secrets` moves `POSTGRES_PASSWORD` and
+`NOCTORNAL_MIGRATION_DATABASE_URL` into `postgres-init.env` and `migrate.env`,
+and the Redis password into an ACL user (`release/secrets-upgrade/README.md`).
+Create `collector.env` with `NOCTORNAL_PERSONA_KEK` from
+`collector.env.example` before `up`, even with no persona, or the collector
+restarts in a loop and nothing is polled.
+
+**5. The runtime roles must exist before the upgrade.** `noctornal_app` and
+`noctornal_worker` (production creates them at initdb). Seven revisions narrow
+them (0135, 0143, 0144, 0155, 0156, 0169 and 0172), and each is a no-op for a
+role that does not exist. A cluster
+whose roles are created later runs `python scripts/runtime_roles.py ensure`
+afterwards, which replays every grant and revoke in chain order.
+
+**6. Apply the migrations.** `alembic upgrade head` from the repository root,
+as the schema owner (production: `docker compose ... up -d --build`, whose
+`migrate` service runs `scripts/migrate_job.py`, which refuses to run on a
+published credential or without `migrate.env`). It prints one line from 0137
+when it rewrote anything: `[0137] stored URL credentials removed: nodes=...,
+proposals=...`. A refusal (0130, 0152 or 0170) leaves the database at the
+revision before it, and the Alpha 7a API must not be started against it;
+correct what the message names and run the same command again. What each
+revision does to an existing deployment:
+
+| Revision | What it does | Held until it commits | Notes |
+|---|---|---|---|
+| 0125 | Adds `notify.enqueue`, a definer function, the only writer of a notification for someone else | nothing | |
+| 0126 | Row-level security on the five notification tables | ACCESS EXCLUSIVE on them | scans nothing |
+| 0127 | Adds `iam.lookup_result_facts(uuid)` | nothing | |
+| 0128 | Row-level security on the four lookup tables; `ingest.lookup_result_dominates()` becomes a definer | ACCESS EXCLUSIVE on them | |
+| 0129 | Row-level security on `collect.telegram_chat` | ACCESS EXCLUSIVE | |
+| 0130 | CHECK on `collect.watch` that a Telegram chat is named by a typed id | ACCESS EXCLUSIVE on `collect.watch` | **Refuses** while a watch breaks it (step 3); the refusal names up to five watch ids and says the database is left at 0129 |
+| 0131 | `core.assertion.supersedes_id` and its guards; nothing is backfilled | ACCESS EXCLUSIVE on `core.assertion` | validates over every claim; 0.39 s for 901,007 claims |
+| 0132 | A merge is visible only where both its entities are | ACCESS EXCLUSIVE on `core.node_merge` | |
+| 0133 | Rebuilds the unique index on live ties with the labels in the key | ACCESS EXCLUSIVE and SHARE on `core.edge` | reads and sorts every live tie; 0.78 s for 600,729 |
+| 0134 | `core.selector` gains the owner's labels, **every owned selector row is rewritten**, the unique key gains the labels | **ACCESS EXCLUSIVE on `core.selector` for the whole revision** | the longest step: 24.1 s for 300,108 rows (27.7 s seen by a sampler). Dropping and rebuilding the two trigram indexes around it was measured and is not faster |
+| 0135 | Both runtime roles lose UPDATE and DELETE on claims, keeping UPDATE on the five mark columns; a claim is marked once and never truncated | SHARE ROW EXCLUSIVE on `core.assertion` | |
+| 0136 | `core.assertion.prior_value`, backfilled for corrections whose audit row matches | ACCESS EXCLUSIVE on `core.assertion` | rewrites only the matched corrections; 1.4 s for 901,007 claims and 906,147 audit rows |
+| 0137 | Takes credentials out of stored URLs (selectors, entity labels, proposals, extraction rows, `prior_value`) | row locks only | one SYSTEM audit row per entity rewritten, naming fields and no value, and one summary row; 14.2 s for the large copy. It does **not** touch claim rationales, captured document text, audit detail, or an e-mail selector read out of a non-http link's userinfo (docs/17 has the queries) |
+| 0138 | Selector rows owned by a retired entity lose their owner | row locks only | 85 ms for the large copy |
+| 0139 | `core.evidence.storage_version_id`, NULL on every existing exhibit (it reads the latest version of its key, as before) | ACCESS EXCLUSIVE on `core.evidence` | |
+| 0140 | An exhibit's hashes, size, case, key and bucket are fixed; the version id is set once | SHARE ROW EXCLUSIVE | |
+| 0141 | Drops UNIQUE (case, sha256); one live exhibit per bytes and labels, and one object per exhibit | ACCESS EXCLUSIVE and SHARE on `core.evidence` | an Alpha 7a database cannot hold two exhibits of the same bytes in one case, so it cannot refuse |
+| 0142 | A held exhibit is never marked destroyed and a destroyed one is never held | SHARE ROW EXCLUSIVE | |
+| 0143 | `noctornal_app` loses SELECT on the five credential columns of `iam.app_user` | none on tables | |
+| 0144 | `noctornal_app` loses UPDATE of `mfa_satisfied_at`; the session guard is restated | none on tables | sessions Alpha 7a minted keep working |
+| 0145 | `notify.enqueue` answers only a bound caller, as itself | nothing | |
+| 0146 | The change hint carries the labels of what changed | ACCESS EXCLUSIVE on `core.node` and `core.edge`, briefly | |
+| 0147 | A conversation's external key is unique per labels | ACCESS EXCLUSIVE and SHARE on `comms.conversation` | reads every conversation |
+| 0148 | CHECK that a personal notification address is one address, NOT VALID | ACCESS EXCLUSIVE on `notify.preference`, briefly | a stored list is kept, never delivered to, and its owner must set a new address |
+| 0149 | The audit and custody chains take their number inside the chain lock; records the fork boundaries | the two chain advisory locks | **needs the API and every job stopped** (step 1) |
+| 0150 | A trigger pins the request role's actor and time on an audit row | SHARE ROW EXCLUSIVE on `audit.event` | |
+| 0151 | A custody row's actor is the bound user | ACCESS EXCLUSIVE on `core.evidence_custody`, briefly | |
+| 0152 | Index `record_batch_case_idx` on `ingest.record (batch_id, case_id)`, built in the migration | SHARE on `ingest.record`, which blocks writers | **Refuses** over a VALID index of that name with another definition (step 3); 0.31 s for 300,000 records |
+| 0153 | Three definer functions for ingest records and dead letters | nothing | |
+| 0154 | Row-level security on `ingest.record`, `victim_credential`, `dead_letter` and `pii_authorisation` | ACCESS EXCLUSIVE on the four | |
+| 0155 | Column grants and three guard triggers on those tables | SHARE ROW EXCLUSIVE on three | |
+| 0156 | New table `collect.persona_act`, the collector's queue, under row security | on the new table only | |
+| 0157 | New table `collect.collector_heartbeat` | the new table only | |
+| 0158 | `lab.sample.parent_sample_id`, `archive_path`, three CHECKs, an index and a trigger | ACCESS EXCLUSIVE on `lab.sample` | validates every sample |
+| 0159, 0160 | A screening result can say its sample was isolated by a member of its archive; a finding can be of kind ARCHIVE | ACCESS EXCLUSIVE on the table, briefly | validates |
+| 0161 | `collect.collection_account` gains the sealed forum session | ACCESS EXCLUSIVE, briefly | |
+| 0162 | `collect.forum_post` and `forum_member` gain `provenance` (PUBLIC for every existing row), persona and authority | ACCESS EXCLUSIVE on both, briefly | no rewrite |
+| 0163, 0164 | `collect.source.compartments` (default none) and its binding; the Telegram chat policy honours them | ACCESS EXCLUSIVE, briefly | |
+| 0165 | A persona act kind for signing a forum persona out | ACCESS EXCLUSIVE on the empty queue | |
+| 0166, 0167 | The countersigning rule and the last screening pass read the audit log through definer functions | nothing | |
+| 0168 | Backfill, then row-level security on `audit.event` | ACCESS EXCLUSIVE on `audit.event` from the ENABLE to the commit | the backfill copies the triage rows of every record attached to a case before this revision onto the case, as SYSTEM rows dated at the migration, with the original seq, time and actor in `detail.carried`; 4.2 s for 300,000 attached records |
+| 0169 | The two ledger sequences lose their column defaults and both runtime roles lose USAGE and SELECT on them | ACCESS EXCLUSIVE on both tables, briefly | do not run `release/alpha6-upgrade/app-role-grants.sql` after this: it hands the sequences back (`scripts/runtime_roles.py ensure` replays the revoke) |
+| 0170 | Repairs a selector row whose compartments drifted from its owner's, then binds the column to the compartment catalogue | SHARE ROW EXCLUSIVE on `core.selector` | **Refuses** over a key nobody registered, naming the keys and the two remedies; it cannot fire on a database coming from Alpha 7a. 0.63 s |
+| 0171 | A claim is inserted live, as the bound user, at the database's clock, for the request role | SHARE ROW EXCLUSIVE on `core.assertion` | |
+| 0172 | The request role loses INSERT, UPDATE and DELETE on the ontology tables, `comms.platform` and `ingest.category_rule` | none beyond the revoke | a no-op for a role that does not exist; its downgrade grants the three back |
+| 0173 | Four indexes on `core.assertion`, so the invariant triggers, the canvas's evidence mark, the evidence register and the claim history find claims by index instead of scanning the table | SHARE on `core.assertion` while it builds, which blocks writers of claims | about 2 s on a case of 1,000,000 claims; the downgrade drops them |
+
+**7. Settings.** A stack needs none of the new ones to start, except the
+collector's key in production (step 4).
+
+| Setting | Where | Unset means |
+|---|---|---|
+| `NOCTORNAL_PERSONA_KEK`, `_ID`, `_RETIRED` | `collector.env` only | the collector refuses to start; the API must not hold the key and the register says so |
+| `NOCTORNAL_COLLECTOR_INLINE` | development | persona acts queue for the collector; `1` has the API run them itself, and production refuses it |
+| `NOCTORNAL_ACT_WAIT_SECONDS`, `NOCTORNAL_ACT_TTL_SECONDS` | API | a route waits 8 seconds (never more than 25) for an act it queued; an act that nobody claims lapses after 900 seconds (60 to 3600) |
+| `NOCTORNAL_ANALYSIS_SOCKET`, `_LOCAL`, `_WORKER_CONCURRENCY`, `_WORKER_MAX_BYTES` | API, the worker | production with no socket refuses to parse hostile bytes; `NOCTORNAL_ANALYSIS_LOCAL=1` parses in a local child on purpose; the worker runs 2 requests at once and reads at most 1 GiB |
+| `NOCTORNAL_ARCHIVE_MAX_MEMBERS`, `_MAX_TOTAL_BYTES`, `_MAX_MEMBER_BYTES`, `_MAX_RATIO`, `_MAX_DEPTH`, `_WALL_S`, `_MAX_TREE_MEMBERS` | Lab | 200 members, 256 MiB, 64 MiB for one member, a ratio of 100, two levels, 60 seconds, and 1,000 members in a whole tree |
+| `NOCTORNAL_WEBHOOK_SIGNATURE` | API, cron | `v1` signs as before; `v2` signs a timestamp with the body and needs `NOCTORNAL_WEBHOOK_SECRET`; an unknown value, or `v2` with no secret, holds webhook deliveries and refuses a production start |
+| `NOCTORNAL_RELAX_SEASONING_DAYS` | API | 7; `0` turns the rule off and nothing else does; a value that is not a whole number from 0 to 365 is held to 7 and refused at a production boot |
+| `NOCTORNAL_RETENTION_SWEEP_AUTHORITY`, `NOCTORNAL_RETENTION_SWEEP_ACTOR` | `scripts/retention_sweep.py` only, passed with `-e` | a real sweep refuses; never put them in `secrets.env` |
+| `NOCTORNAL_SETUP_TOKEN` | API, optional | in production the first-run route does not exist (404) and the first account is made from the server; set, it is 32 or more characters and is deleted once used |
+| `POSTGRES_PASSWORD`, `NOCTORNAL_MIGRATION_DATABASE_URL` | moved out of `secrets.env` | the API and every cron job refuse to run holding either |
+| `REDIS_URL` | changed | must sign in as `noctornal_limiter`; the `redis` service refuses to start otherwise |
+
+The Configuration table in `release/INSTALL.md` lists these and the other
+settings the code reads, with their defaults. Move a webhook receiver to v2
+before the sender: docs/07 gives the order, the replay window and a verifier.
+
+Database roles: no new role. `noctornal_app` and `noctornal_worker` lose
+privileges (0135, 0143, 0144, 0155, 0156, 0169 and 0172), and
+`noctornal_egress` is unchanged and holds nothing on the new tables. New
+services in the production stack: `collector` and `analysis-worker`. New env
+files beside the compose file: `migrate.env` (read by the migrate job alone),
+`collector.env` (the persona key) and `caddy.env` (`NOCTORNAL_HOSTNAME`,
+`NOCTORNAL_SAMPLE_HOSTNAME` and `NOCTORNAL_TLS_MODE`, read by Caddy alone).
+`postgres-init.env`, which Alpha 7a already had for the two runtime role
+passwords, now holds `POSTGRES_PASSWORD` too. The one dependency change is
+`psycopg[binary]` from `>=3.1` to `>=3.2`.
+
+**8. After the upgrade, verify both ledgers.** `python scripts/audit_verify.py
+--anchor-file <a file this host cannot write> --record`. Both chains must be
+INTACT. A fork written by Alpha 7a's concurrent writers is reported as legacy
+(below the 0149 boundary) and does not break `intact`; a fork above the
+boundary is a break. The boundaries on the first estate were 6153 and 1210.
+
+**9. Move the persona credentials sealed under the TOTP key**, in the
+collector: `scripts/rewrap_secrets.py --persona` to report, then `--apply`
+(`infra/production/README.md`, "Upgrading any existing deployment").
+
+**10. Read the readiness register.** `collector_split`,
+`retention_sweep_current` and `row_level_security_enforced` (82 tables) are
+the ones this release adds or widens.
+
+**11. Find the notification addresses 0148 will not deliver to**, and ask
+their owners to set a single address:
+
+```sql
+SELECT user_id, channel FROM notify.preference
+ WHERE address IS NOT NULL AND NOT (length(address) <= 254 AND address ~
+   '^[A-Za-z0-9_+''-]+(\.[A-Za-z0-9_+''-]+)*@[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$');
+```
+
+**12. Know what the credential scrub left.** A claim's rationale that copied a
+credential URL before this release keeps it (invariant 5), and so does an
+e-mail selector read out of a non-http link's userinfo
+(`ftp://user:pass@host` stored as `pass@host`). docs/17, "Known residuals at
+Beta 1", has the queries that find both.
+
+Nobody is signed out: sessions Alpha 7a minted work after the upgrade
+(verified: Alpha 7a's bearer tokens served each user's cases), and passwords
+and TOTP secrets sealed by Alpha 7a open unchanged (a password and TOTP
+sign-in on the upgraded, dumped and restored database).
+
+**What a downgrade cannot restore.** `alembic downgrade 0124` on the upgraded
+first estate ran with no refusal and left a schema identical to Alpha 7a's
+(comments and whitespace inside function bodies aside) and identical
+runtime-role privileges (11,300 grants compared); upgrading again reached the
+same schema and privileges. What is lost or not put back:
+
+- 0137 and 0138 have no-op downgrades: the removed credentials and the
+  released selector owners are kept nowhere. The audit rows 0137 and 0168
+  wrote stay, because the log is append-only.
+- 0131 drops `supersedes_id` (each replaced claim keeps `superseded_by`),
+  0136 drops `prior_value` (a later re-upgrade derives it again from the audit
+  rows, and 0137 scrubs it again, writing one more summary row), 0134 drops
+  the selector labels, and 0139 drops `storage_version_id`, so an exhibit
+  lodged after the upgrade reads the latest version of its key again.
+- 0149's fork boundary is recorded again on a re-upgrade, higher, so forks
+  written while it was absent count as legacy.
+- Over data only Beta 1 writes, a downgrade refuses and names the count: 0156
+  (persona acts pending or running), 0159 (ARCHIVE_MEMBER screening results),
+  0160 (ARCHIVE findings), 0162 (forum rows read as a member), 0163
+  (compartmented sources) and 0165 (sign-out acts pending or running). 0133,
+  0134, 0141 and 0147 stop on the unique index they rebuild when Beta 1 has
+  stored two rows that differ only by labels, with a raw PostgreSQL unique
+  violation whose DETAIL prints the duplicated key, which may be a selector
+  value; their docstrings say so. Below 0017 a live database refuses on
+  foreign keys by design (CONVENTIONS.md).
+
+**Backups and restore.** A `pg_dump -Fc` of the upgraded database, restored
+with `pg_restore` into a new database on the same cluster, gave identical row
+counts in every table, identical runtime-role privileges, row security on 82
+tables, both chains INTACT with the same tails and boundaries, and a password
+plus TOTP sign-in that served the right cases. Two things the operator does
+that the first documented backup did not say:
+
+- Create the roles `noctornal_app`, `noctornal_worker` and `noctornal_egress`
+  in the target cluster **before** `pg_restore`. Without them it reports the
+  failed GRANTs and carries on, which leaves the runtime roles with no
+  privileges. Then `pg_restore -d <database> <file>` as the owner, then
+  `scripts/audit_verify.py`.
+- From 0139, an exhibit lodged after the upgrade records the object-store
+  version it was put as, and every read asks for exactly that version. The
+  documented bucket backup (`mc mirror` to disk) keeps bytes and not version
+  ids, and a version id cannot be chosen on upload, so evidence restored into
+  a new MinIO from that mirror reads as missing and raises an integrity alarm
+  for each exhibit. The recovery after such a restore is an owner step that
+  keeps the hashes fixed and makes those exhibits read the latest version
+  again, each read still verifying its SHA-256:
+
+  ```sql
+  ALTER TABLE core.evidence DISABLE TRIGGER evidence_anchors_fixed;
+  UPDATE core.evidence SET storage_version_id = NULL WHERE storage_version_id IS NOT NULL;
+  ALTER TABLE core.evidence ENABLE TRIGGER evidence_anchors_fixed;
+  ```
+
+  Preserved samples have the same limit, which `infra/production/README.md`
+  already states, and the samples bucket stays out of the backup on purpose.
+  This was reasoned from S3 behaviour and the code and not reproduced against
+  a restored bucket.
+
+Two revisions were corrected by the upgrade review before release, so they
+differ from any earlier build: 0130's refusal now names the watches and says
+the upgrade stopped at 0129, and 0137 also redacts the credential-bearing
+pairs and a `//user:pass@` authority in a proposal rationale whose context
+window had cut the link before its scheme (on the first estate, three triage
+rationales kept `?token=`, `#access_token=` and `//admin:...@`). Claims are
+not touched.
+
+### Installing it, and the first sign-in
+
+`release/install.sh` and `release/install.ps1` are one wizard of eight
+numbered steps. Step 1 only looks at the machine, every step checks before it
+acts and is safe to repeat, the account is made (and its password and
+authenticator QR shown once) before the API starts, and a fictional demo case,
+Operation Latticework, is offered at the end (`--demo`, `--no-demo`,
+`--open`). `release/start.sh`, `release/start.ps1` and `start.cmd` start it
+again, and `release/START-HERE.md` is the one page to follow: what to have,
+three steps, the first sign-in, five things to try and a table of the
+commonest problems. The console's first sign-in shows a six-step tour of its
+own accord, and Help, Getting started, shows it again. The tour and the Help
+panel are built with `textContent` only, so a display name written as markup
+shows as text.
+
+### Row-level security on every case table (F51)
+
+The audit log is under a policy of its own: a case's members read its
+timeline, review history and triage state, its readers run on definer
+functions or named system purposes, and attaching a quarantined record to a
+case copies its triage state onto the case (0166 to 0168). The ingest record
+family, that is the records, the victims' credentials, the dead letters and
+the PII authorisations, is under policy too, and the request role writes only
+the columns a request writes (0152 to 0155). `collect.persona_act` is new and
+under policy. The registry holds 82 tables under policy and defers none:
+`rls_registry.DEFERRED` is empty, and a registry test names any table that
+carries labels and is in none of the three lists. Row security is enabled and
+never forced, so the schema owner is not bound, and a production boot refuses
+a request role that is the owner or a superuser.
+
+### The persona vault, the collector and the act queue (docs/00 decision 174)
+
+A collection persona's credential is sealed under a key of its own,
+`NOCTORNAL_PERSONA_KEK`, and the only production service that holds it is
+`collector`. It runs every persona act the console asks for (a Telegram chat
+looked up, joined, checked, marked as a member chat or rebound, a forum
+sign-out, and Poll now of a source a persona reads) and every scheduled poll,
+which the cron loop no longer does. The API queues an act in
+`collect.persona_act` (0156) and answers with its outcome, or "queued" while
+the collector has not finished it; the console follows it under Feeds,
+Persona acts. The collector's heartbeat (0157) feeds the readiness row
+`collector_split`, which is red when no collector has run, none has been seen
+for ten minutes, its key does not open the credentials it sampled, an act has
+waited more than two minutes, a credential is still sealed under the TOTP
+key, or the API holds the persona key. A step-up is read from the session's
+own time, which only a sign-in writes, and not from the act row's copy.
+
+### The isolated analysis worker (F42)
+
+Static triage, archive expansion, watch patterns and forum page parsing read
+bytes written by the people under investigation, each in a bounded child. In
+production no such child runs in `api`, `cron`, `collector` or `lab-triage`:
+they hand each read over a Unix socket to `analysis-worker`, a container with
+no secrets, no network, a read-only root, no capability but KILL, SETGID and
+SETUID, and a user of its own for each child, which the worker kills before it
+answers. It was run for real with the compose settings: a child could not
+reach the network, the socket, another process's environment or memory, `/tmp`
+or shared memory, and a crash, a hang, a spin and a flood each came back as a
+bounded outcome. Production with no worker configured refuses to parse
+hostile bytes unless `NOCTORNAL_ANALYSIS_LOCAL=1` says otherwise.
+
+### Secrets, Redis and the production stack (F52)
+
+`POSTGRES_PASSWORD` and the owner's connection string left `secrets.env`:
+`postgres-init.env` and `migrate.env` hold them, each read by one service, and
+the API and every cron job refuse to run holding either. Redis runs an ACL
+with its default user off, and the limiter signs in as `noctornal_limiter`,
+which can read and write `rl:*` keys and nothing else. Every job script makes
+the same refusal on a published credential, naming the variables and never the
+values, and exits 2 (`notify_drain --help` and `sandbox_dispatch --help` no
+longer run the job). The production stack builds its image once and the other
+services use it, `minio-init` names a service-account key MinIO would refuse
+before it tries, every container's log is bounded at five files of 10 MiB,
+every container drops its capabilities, the Postgres service has a 1 GB
+`shm_size` (Docker's 64 MB made parallel queries fail with DiskFull under
+load), Caddy sends Strict-Transport-Security
+and keeps the CSRF and setup tokens out of its log, and every image is pinned
+by digest. The documented backup writes outside the checkout, private from
+the first byte and encrypted in the pipe, and the cron loops stop on the
+stop signal after the pass in hand.
+
+### The ledgers: audit, custody and claims
+
+The audit and custody chains take their number inside the chain lock (0149),
+so concurrent writers no longer fork them, and the request role cannot name
+another user or date a row (0150, 0151) or draw the sequences itself (0169).
+`/audit/verify`, `/audit/custody/verify` and `scripts/audit_verify.py` return
+the tail they checked and say plainly that a verification cannot see the tail
+being cut off or the chain being rewritten and re-hashed; `audit_verify.py
+--anchor-file ... --record` keeps an anchor on a file the host cannot write
+and answers HELD, REWRITTEN or MISSING against it. A claim is never rewritten
+or deleted by a runtime role (0135), is inserted live, as the bound user, at
+the database's clock (0171), and a correction records the value it replaced so
+that retracting the correction puts the supported value back (0136).
+
+### Analysis: REGE
+
+The Analysis pane's Regular roles card and `GET /cases/{id}/analytics/rege`
+find entities that stand in the same kinds of ties to the same kinds of
+others, where CONCOR finds those in the same position, so a second launderer
+serving a different crew shares a role without sharing a contact. It is
+White's REGE over three rounds, cut by average linkage, with its caps set from
+the measured cost (docs/03).
+
+### The Lab: archive expansion
+
+After static triage, an archive of a kind the build reads (zip and OOXML, tar,
+and tar compressed with gzip, bzip2 or xz) is walked in a child and each
+accepted member becomes a sample of its own, screened before its row is
+written, carrying its archive's case, labels and submitter, never lower
+(0158 to 0160). A member that matches a prohibited-content list isolates the
+whole tree for good. Caps are named when they refuse: 200 members, 256 MiB, 64
+MiB for one member, a ratio of 100 and 60 seconds per archive, two levels, and
+1,000 members in a whole tree. RAR and 7-Zip are not expanded, and the
+sample's card says so.
+
+### Load and performance
+
+Four indexes on the claims table (0173) let the invariant triggers, the
+canvas's evidence mark, the evidence register and the claim history find
+claims by index, where the only indexes by entity, tie and exhibit covered
+live claims and a case of a million claims was scanned whole. Application
+connections open with JIT off, because row security inflates the planner's
+cost estimates and JIT then spent 1.5 to 2.4 seconds compiling a read. The
+numbers are in the review section below.
+
+### Collection: the forum member path, compartments and Telegram
+
+XenForo and MyBB boards are read as a signed-in persona under a collection
+authority whose scope is MEMBER_READ, which the database refuses to record
+without a member-access reference. The persona's session cookies are sealed
+beside its credential, one jar per board, and cleared by every stop; every
+post and profile read this way says MEMBER, names the persona and the
+authority (0161, 0162), and a board that reflects the password or a cookie
+into a page does not get it stored. A collection source can carry
+compartments, and every document it collects carries them (0163, 0164, F43).
+`scripts/telegram_live_check.py` is the owner's one run of the adapter
+against Telegram itself (F31, which only the owner can close), and the
+persona path through the real egress listener is tested.
+
+### What the review's fixes changed
+
+The 2026-10-03 review is described below. By area, in plain words:
+
+- **Merges, selectors and ties.** A merge, a reversal, the merge history and
+  the merge approvals are visible only where both entities are, and a
+  member below an entity cannot merge it away (0132). A selector and a live
+  tie are unique per labels, so recording one never tells a caller about a
+  hidden row (0133, 0134), and a merge over duplicate ties the merger cannot
+  read sets them aside, recorded, where it used to refuse and name them. A
+  hidden element answers as a missing one on every route that takes an id.
+- **Claims and URLs.** A correction can be retracted, a valid-to can be set
+  after creation, the selector index follows the graph, and a URL's userinfo
+  and credential-bearing query values are dropped on every path, including
+  `POST /selectors` (which refuses a link with a password) and the stealer
+  layout `url:login:password`. 0137 scrubbed what was already stored.
+- **Evidence, retention and reports.** An exhibit's identity is fixed when it
+  is lodged and it names the stored version it reads (0139 to 0142). Identical
+  bytes are one exhibit per labels, the second exhibit of the same bytes has a
+  key the store can list and so can be purged, a destroyed exhibit says so in
+  its own custody trail, and a purge records one tombstone per outcome and
+  marks each exhibit as soon as it is destroyed. A legal hold can be placed on
+  a case and on an exhibit through the API, only someone cleared for the
+  material can lift one, placing a hold no longer spends the destruction
+  meter, and a hold entered during a purge keeps every exhibit the purge has
+  not reached. A report counts the compartments of its entities and ties, and
+  states the number of exhibits it withheld only as the case's disclosure
+  setting allows.
+- **Notifications and egress.** A notification address is one plain address
+  (0148), a delivery is judged at the labels its case has now and not the
+  ones it had when it was raised, feeds above the egress floor are not polled,
+  and a lookup waiting for sign-off is cancelled when its provider's exposure
+  is raised.
+- **Sessions and HTTP.** A revoked session stays revoked, the request role
+  cannot read an account's credential columns or forge step-up (0143, 0144),
+  the first account on a production stack needs a setup token or the server
+  (`NOCTORNAL_SETUP_TOKEN`), a request body over 1 MiB is a 413, a request that
+  presents no credential is refused before an upload is read, a bad bearer
+  token writes no audit row, a failed sign-in records a typed value only when
+  it is shaped like an address, a lone surrogate in a body is a 422, and the
+  live socket drops a change hint for a reader below the labels of what
+  changed and closes a first frame over 8 KiB.
+- **Collection and the Lab.** A BOM-less UTF-16 feed is refused, watch
+  patterns run in the isolated worker, a hostile archive can no longer hide
+  members from expansion and screening (a zip appended to a zip, a bad tar
+  header after the first, a multi-stream compressed tar), and a poll reads at
+  most 500 items of a feed and warns about the rest.
+
+### Closed earlier, and first described in the Alpha 8 draft
+
+A persona is refused at creation on an egress profile that cannot carry persona
+traffic (F35). A run's warnings keep a typed Telegram id (F36). A fingerprint
+copied from gpg parses whole in a contact block, parser version cb-2 (F37).
+The webhook has an opt-in signature v2 with a timestamp (F28), and watches
+match forum signatures and Telegram chats (F47). The second person who turns
+off a case's merge switch must have held `case.update` on the case for seven
+days (F39, open question 12), and an undated legacy claim is dated by
+superseding it, never by writing onto it (open question 11, Alembic 0131).
+`scripts/retention_sweep.py` destroys collected documents past their clock,
+dry by default, under a declared authority and a named account, and is not
+scheduled: who runs it is for the owner and counsel (F30).
+
+### The review, the re-verification and the release reviews
+
+**The 2026-10-03 review.** An adversarial review of the build at commit
+718f92d, each area's findings put to a second reader who tried to refute
+them, kept 82 of 84 findings: 16 high, 25 medium and 41 low, none critical.
+Every one is now fixed or stated. Seventy-seven are fixed, one (rls-6) is
+fixed for account credentials and stated for the rest, and four are stated
+and not fixed: a forged `Authentication-Results` header on mail the border MTA
+never stamped (http_ui-007), the duplicate-sample refusal as a one-bit
+existence signal (lab-6), no sweep for dead letters and caseless ingest
+records (evidence-unswept-unattached-and-dead-letter), and an audit anchor
+that an operator has to record (evidence-chain-no-anchor). docs/17, "The
+2026-10-03 review at Beta 1", lists all 82 by area with each one's status.
+Reproduction steps are not published.
+
+**The re-verification.** Seven independent readers re-ran every reproduction
+against the merged code (each as the request role, with row security on) and
+tried to break each fix. They found each original finding closed or stated,
+and found new ones, most of them a sibling of a finding already fixed: a label correction
+that told a held selector from a free one, a merge that named ties the merger
+cannot read, flagging or minimising a conversation above the caller's labels,
+`POST /selectors` storing a password, the `url:login:password` stealer layout,
+INSERT into the claims table, a report that ignored the compartments of its
+entities, a BOM-less UTF-16 feed, the size of an archive tree, a board that
+echoes the persona's secrets, `launch.sh` evaluating `.env.local`, lone
+surrogates in a body and an upload read before its 401. Each was fixed with a
+regression test shown failing first, or recorded in docs/17 where the answer
+was a decision.
+
+**The nine release reviews.** Each ran against the merged build, exercised one
+area and fixed what it found with a test that failed before the fix:
+
+- **Install on a clean machine.** An Ubuntu 24.04 VM rebuilt from a base image.
+  On the release candidate, from the install command to a working console took
+  6 minutes 11 seconds on a machine with the prerequisites (most of it pulling
+  1.1 GB of images) and to a first sign-in 6 minutes 52 seconds; the earlier
+  run that found the installer's defects took 7 minutes 41 seconds, and
+  sign-in took 0.5 seconds. A stop and start took 21 seconds with
+  the data intact, a re-run 31 seconds with `.env.local` unchanged byte for
+  byte, and a reinstall with cached images 58 seconds. Everything listened on
+  127.0.0.1, and the install added 1.49 GB. Nine installer and document
+  defects were fixed, among them a packager that wrote backslash zip entries
+  under Windows PowerShell 5.1, and printed commands that failed on a
+  script with no execute bit. `install.ps1` was read and parsed and was never
+  run, because there was no clean Windows machine, nothing was tried on
+  macOS, and the authenticator codes were computed from the printed secret.
+- **Analyst workflows.** 11 accounts and 536 logged API calls over 146 route
+  shapes (among them 243 answered 200, 59 answered 201, 64 answered 403 and
+  62 answered 404; the one 500 was fixed), and every console pane for four roles in
+  headless Chromium with 156 screenshots. Hidden elements answered as missing
+  on every route probed. Four defects: an exhibit above the caller's labels
+  answered 403 where a missing one answered 404, an unknown platform on a new
+  conversation was a 500, flagging a handle nobody in the conversation has
+  changed nothing and said it had, and the console wrote a denied-access
+  audit row for every route a reader cannot use each time it opened a case.
+- **Load and performance.** Run against a database of 300 users and 60 cases,
+  one of them an AMBER case of 101,000 entities, 300,000 ties and 1,000,000
+  claims under RED, AMBER_STRICT and compartmented labels (1.25 million claims
+  and 20,200 exhibits in all), through uvicorn as the request role with row
+  security applied and the rate meter off, at 1, 10 and 50 concurrent users.
+  Before the fixes, past a few hundred thousand claims the graph view, the
+  trust projection, metrics, the report build, ego and the evidence register
+  never answered within 120 seconds, and every create paid a scan of the whole
+  claims table at commit (154 ms for an entity, 143 for a tie). Four claim
+  indexes (0173) and connections that open with JIT off fixed it. Median
+  latency at 1, 10 and 50 users, before then after: the graph view of 2,000
+  entities, over 120 s then 1.7, 2.2 and 8.1 s; the register of 15,000
+  exhibits, never finished then 2.4, 4.1 and 16.9 s; claim history, 0.8, 1.4
+  and 5.4 s then 58, 128 and 714 ms; search, 2.3, 3.4 and 14.9 s then 0.6, 1.0
+  and 4.2 s; the proposals queue, 2.8, 14.9 s (39 of 50 requests were 500s) and
+  13.3 s then 0.7, 1.2 and 4.6 s; creating an entity, 154 ms then 9 ms in the
+  service and 93, 207 and 1,044 ms then 55, 120 and 727 ms through the API. The
+  case list, a node, a selector lookup and the audit events cost 34 to 74 ms
+  for one user and 520 to 700 ms for 50, set by a fixed cost of about 45 to 55
+  ms a request, and one process topped out near 75 requests a second. Fifty
+  subscribers on the live socket each heard all 30 writes in about a second,
+  and the audit chain took about 700 appends a second and the custody chain
+  about 237, serialising on the lock as designed. The ceiling the review gives:
+  writes, entity and claim reads, selectors, search and audit hold at 100,000
+  entities and 1,000,000 claims per case, with single-user reads under a second
+  (the register 2.4 s, a report 2.7 s) and no errors at 10 users; the canvas,
+  the metrics, the report and ego are built for about 5,000 entities a case,
+  past which they answer truncated, and ego and path answer 404 for a centre
+  outside the first 5,000; at 50 users cheap reads reach about 3 seconds at
+  the 95th percentile, and heavy reads failed with 500s until the production
+  Postgres service was given `shm_size: 1gb` (it had Docker's 64 MB, and
+  parallel queries failed with DiskFull, 332 times in one run), which this
+  release does. Every number is from a Windows host talking to Postgres in
+  WSL2, where a statement costs about 1.2 ms of round trip and a connection
+  about 14 ms, so the fixed per-request cost and the throughput ceiling are
+  pessimistic for a Linux deployment, which was not measured. The before
+  figures for the projection paths are one request each that outlasted the
+  client's timeout, and the betweenness and Leiden analytics were not run on
+  the large case.
+- **Authorization.** A route inventory of 394 method and path rows (150 through
+  the case gate, 182 through the global gate, 28 gated in the handler, 24
+  that serve only the caller's own rows, 10 public or on their own
+  credential), 39 representative requests by 11 accounts with no wrong cell,
+  and 46 probes of hidden against missing and random ids over 12 element
+  families, which found 8 differences (7 exhibit routes and the capture
+  route) before the fix and no real one after. The
+  database had 124 tables, 82 under row security, and all 54 definer
+  functions pinned their search path. It found and fixed the exhibit existence
+  answer above, a liaison grant that could be made with no end, and a request
+  role that could write the ontology and reference vocabulary (0172).
+- **Evidence and egress.** Four serious defects, one an invariant 8 breach:
+  a notification e-mail and webhook were judged at the labels the notice had
+  when it was raised, so a case raised from AMBER to RED still sent its AMBER
+  summary; one purge that destroyed three exhibits and was refused on a
+  fourth recorded a single tombstone saying four were locked until retention; the second
+  exhibit of the same bytes sat at a key MinIO does not list and so could never
+  be purged; and placing a hold spent the destruction meter. A whole-chain
+  verify over 1.5 million audit rows fell from 34.7 to 23.0 seconds, and the
+  Python memory it held from 380 MB to almost none.
+- **Collection, personas, the Lab and the worker.** 18 defects, the worst a
+  hostile archive that hid members from expansion and screening three ways. The
+  isolated worker was run for real in WSL with the compose settings and 21
+  hostile archives, and a hostile child could reach nothing it should not.
+  YARA was not run in the worker (no Linux build with the engine was to
+  hand), Telegram only against its fake transport, and the console not at all.
+- **Upgrade from Alpha 7a.** The measurements and the steps are in the
+  upgrade section above. It stopped at 0130 on the hand-written watch and went
+  on once that row was corrected, kept every table's row count, left both
+  chains INTACT, served every user their own cases, and downgraded to Alpha 7a's
+  schema and back. It was not run through Docker Compose, and the version-id
+  hazard in a restored MinIO bucket was reasoned and not reproduced.
+- **Production deployment.** The production stack brought up from its README in
+  WSL on Docker 29.1.3 with Compose 2.40.3. Three high defects would have stopped
+  a fresh install, and all three are fixed: two services exporting one image
+  tag failed the first `up --build`, `minio-init` died on service-account keys
+  longer than MinIO's bounds with an error naming no variable, and turning
+  lookups or the sandbox on in `secrets.env` crash-looped the sample origin
+  and the Lab worker. All 13 long-running services came up healthy, TLS 1.2
+  was refused, only Caddy's two ports were published, and the image was 123 MB
+  compressed with no test suite, no key and no `.env` file in it. Not tried:
+  Let's Encrypt, a non-root operator, the secrets and egress upgrade paths, and
+  a restore of the backup.
+- **Code quality.** 99 test files run one at a time against a row count of all
+  125 tables after each: 69 of them (every eighth) gave 1,178 passed and 0
+  failed, and three suites that left queued triage runs behind, the cause of
+  five readiness failures in a full run, were fixed. The console has no
+  `innerHTML`, `insertAdjacentHTML` or `console.log`; `app.js` is 1.84 MiB and
+  the console 2.35 MiB uncompressed, about 0.66 MiB with gzip. The roughly 470
+  test files not sampled were not checked for leftovers.
+
+### Known and not fixed
+
+docs/17, "Known residuals at Beta 1", lists each with its area and what would
+close it; the material ones, in plain words:
+
+- **The request role is not a wall in every table.** A statement injected into
+  a request can still write the unpolicied configuration tables (egress
+  destinations, routes and profiles, collection sources, retention rules,
+  ingest keys, the Jira destination), set an exhibit's or a case's legal hold
+  to false or change its retention date by an UPDATE, and read every account's
+  case membership and every session's metadata. Sealed columns outside the
+  accounts table read as ciphertext or a keyed hash. No application route does
+  any of this, and each needs a migration to close.
+- **A hold has no console control.** An exhibit and a case are held and
+  released through the API (`POST /api/v1/retention/legal-hold` and
+  `POST /api/v1/retention/cases/{id}/legal-hold`); only the collected
+  document's hold has a button. A hold entered while a purge runs waits for the
+  exhibit in flight, and that exhibit is destroyed.
+- **Two outbound paths judge less than they should.** A sample download never
+  calls the egress gate, and a report released to e-mail, a webhook or Jira is
+  judged on the destination's typed ceiling and not on
+  `NOCTORNAL_SMTP_CEILING`, `NOCTORNAL_WEBHOOK_CEILING` or
+  `NOCTORNAL_JIRA_CEILING`. Collection's TLP checks pass no compartments,
+  while a compartmented source is polled on purpose: which is right needs a
+  decision.
+- **A body can be read before it is refused.** A request with a junk bearer
+  token or cookie is still read and spooled to disk up to the route's cap (256
+  MiB for an exhibit) before its 401, because telling a live session from a
+  junk one takes the database. A size-limited `/tmp` and a body limit in
+  Caddy close it.
+- **Any bound user can plant state in the audit log.** The audit log's insert
+  policy admits any row, so an analyst who is not on a case can append a
+  state-bearing row naming it (a triage verdict, a category correction), which
+  its readers then take as the newest. Attribution holds, because the row
+  names the planter.
+- **The backup does not carry exhibit version ids**, and a restore needs the
+  runtime roles first (above). The audit chain's tail anchor is the operator's
+  to record.
+- **Past the measured ceiling.** The canvas, the metrics, the report and ego
+  are built for about 5,000 entities a case. The ego and path views build
+  only the first 5,000 entities by creation time and answer 404 for a centre
+  outside them, and nothing sets a `statement_timeout` on request
+  connections, so an abandoned request keeps running (ten stacked register
+  queries were seen, the oldest ten minutes old).
+- **Credentials a pattern cannot find.** A secret in a URL path with no
+  separator, a `?l=` or `?hash=` value, and a bare `alice:pass@host` are not
+  recognised, and claim rationales written before 0137 keep a credential they
+  copied.
+- **Unfinished and unmeasured.** The Telegram adapter has still never met
+  Telegram (F31; only the owner can close it, by running
+  `scripts/telegram_live_check.py` against a real account); no lookup adapter
+  has met its live service (F27); load has not been measured on a Linux
+  deployment; the Windows installer has not been run on a
+  clean Windows machine; and no third party has audited any of it.
+- **Deliberate absences.** WebAuthn (password and TOTP today), a console form
+  that creates a watch (F53), the object stores reached outside the egress
+  routes (F41), and a sweep for dead letters (F55).
+
+Legal review is required before any active case load. docs/16 L1 to L5 are
+still open, and nothing in this release settles them.
+
 ## Alpha 7a: 2026-09-30
 
 A one-fix revision of Alpha 7. It comes from installing the published Alpha 7

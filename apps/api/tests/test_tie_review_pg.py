@@ -364,7 +364,9 @@ def test_a_tie_above_the_callers_clearance_is_refused_and_unreadable(
     w = world
     red = _tie(w, basis="AUTOMATED_INFERENCE", classification="RED")
     r = _review(client, conn, w, red, {"review": "ACCEPTED"}, who="reviewer")
-    assert r.status_code == 403, r.text
+    # The missing tie's own 404, not a 403 that confirms the id (beta review
+    # http_ui-016, 2026-10-03).
+    assert r.status_code == 404, r.text
     assert _review_col(conn, red) == "PROPOSED"
     got = client.get(f"/api/v1/cases/{w['case']}/graph/edges/{red}/review",
                      headers=_auth(conn, w["reviewer"]))

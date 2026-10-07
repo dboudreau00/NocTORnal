@@ -688,6 +688,19 @@ LIMITS: dict[str, Limit] = {
         "analytics.concor", quota=10, per_seconds=300, scope=Scope.USER,
         burst=4, on_backend_failure=OnBackendFailure.DENY,
     ),
+    # REGE, ROADMAP-REMAINING phase 3 (2026-10-02). Regular roles: about 2 s
+    # of CPU for the dearest view its caps admit (1,000 entities, 2,500 tied
+    # pairs, 5,000 tie directions) on the build host with every core busy, 0.3 to 1.5 s
+    # for a view counted as present (rege.py's REGE_MAX_PAIRS has the
+    # measurements; the first calibration said 2.1 s for a view that took 7.5
+    # to 8.3). At this quota one user can queue about 21 s
+    # of CPU on the one API process in five minutes, 8 s of it in a burst of
+    # four. CONCOR's numbers and its own bucket, so the second role card
+    # cannot spend the first's, and closed when the backend cannot count.
+    "analytics.rege": Limit(
+        "analytics.rege", quota=10, per_seconds=300, scope=Scope.USER,
+        burst=4, on_backend_failure=OnBackendFailure.DENY,
+    ),
     # F11 and F12, 2026-09-24. Running static triage on demand
     # decrypts a live sample and starts child processes, so it is a
     # deliberate act on one sample, not something to loop. Similarity

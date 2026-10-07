@@ -6,6 +6,7 @@ environment, never a default in code (repo convention).
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import weakref
 from collections.abc import Iterator
@@ -56,8 +57,29 @@ def connect() -> psycopg.Connection:
     # Found 2026-09-01 when the dev stack was down and a read-only audit
     # hung for five minutes with no message. A connect that cannot complete
     # in ten seconds is not going to; say so.
-    return psycopg.connect(dsn(), autocommit=True,
-                           connect_timeout=connect_timeout_seconds())
+    url = dsn()
+    return psycopg.connect(url, autocommit=True,
+                           connect_timeout=connect_timeout_seconds(),
+                           options=session_options(url))
+
+
+#: Server settings every application connection is opened with (2026-10-07). JIT compiles a query's expressions once the planner's
+#: cost estimate passes `jit_above_cost`, and row security's policies inflate
+#: that estimate on every case read: on a 1,000,000-claim database the search,
+#: the triage queue and the graph view each spent 1.5 to 2.4 s compiling for
+#: 0.1 to 0.5 s of work. JIT never changes an answer, only how it is
+#: computed, and nothing this process asks Postgres is an analytical scan
+#: that would repay it (the graph maths runs in igraph).
+SESSION_OPTIONS = "-c jit=off"
+
+
+def session_options(conninfo: str) -> str:
+    """The `options` a connection to `conninfo` is opened with: whatever the
+    DSN already names, then SESSION_OPTIONS, so an operator's own settings
+    in DATABASE_URL are kept rather than replaced."""
+    from psycopg.conninfo import conninfo_to_dict
+    named = conninfo_to_dict(conninfo).get("options")
+    return f"{named} {SESSION_OPTIONS}" if named else SESSION_OPTIONS
 
 
 def connect_timeout_seconds() -> int:
@@ -122,11 +144,20 @@ class SystemPurpose(StrEnum):
     READINESS = "readiness"
     AUDIT_VERIFY = "audit_verify"        # the audit and custody chain walks
     LAB_PROPOSE = "lab_propose"          # the Lab proposes into a case it is not on
-    NOTIFY = "notify"                    # the outbox drain
+    NOTIFY = "notify"                    # the outbox drain, cron or Drain now
+    # The delivery ledger, its requeue and the Jira destination's
+    # administration: an administrator's view across every recipient and
+    # case, which names no content (F51, 2026-10-02).
+    NOTIFY_ADMIN = "notify_admin"
     # The poll, a manual run and a pasted capture: each dedupes against every
     # stored document and matches every watch (S1, 2026-09-25).
     COLLECTION = "collection"
-    LOOKUPS = "lookups"                  # the lookup drain
+    # The lookup drain, and an interactive send, a sign-off and the
+    # provider test from the gates on: each stores an answer at the
+    # provider's label and counts every attempt on the provider; a
+    # provider's withdrawal and a batch's cancel, which reach every case's
+    # rows (F51, 2026-10-02).
+    LOOKUPS = "lookups"
     LAB_TRIAGE = "lab_triage"            # static triage and YARA
     # Prohibited-content screening: the worker, and the Security Officer's
     # label-free match list, its counts, a review and a console pass, which
@@ -135,12 +166,28 @@ class SystemPurpose(StrEnum):
     # A sample submission's duplicate check, which must refuse a duplicate
     # the submitter may not see, and say nothing about it (S1, 2026-09-25).
     SAMPLE_INTAKE = "sample_intake"
+    # An exhibit upload's duplicate check, which must see an exhibit above
+    # the uploader so their bytes never land on it, and say nothing about it
+    # (rls-4, evidence-ingest-dedup-oracle, 2026-10-03).
+    EVIDENCE_INTAKE = "evidence_intake"
+    # A Telegram chat's duplicate check, which must refuse a chat already
+    # added under a source the adder may not see, and say nothing about it
+    # (F51, 2026-10-02).
+    TELEGRAM_INTAKE = "telegram_intake"
+    # The persona act queue (A collector process, 2026-10-02): the
+    # collector's claims, its sweeps and every outcome, and the inline
+    # runner's; the request role may only enqueue and read its own acts.
+    PERSONA_ACTS = "persona_acts"
     # Comms minimisation (docs/16 L4) and the incidental-party flag it
     # relies on: an obligation done in full, never to the minimiser's
     # labels (S1, 2026-09-25).
     MINIMISATION = "minimisation"
     # Ingest scoring's watch list: a quarantined record scores against every
     # watch in the deployment (S1, 2026-09-25).
+    # And, since ingest.record is policied (0154), a batch's parse, a dead
+    # letter's replay, every scoring pass and the fingerprint correlation:
+    # each dedupes or answers across every record and writes rows at the
+    # feed key's label, which may sit above its caller (F51, 2026-10-02).
     INGEST = "ingest"
     SANDBOX = "sandbox"                  # detonation dispatch and polling
     # The embedding pass, and an index's registration, activation, recheck
@@ -153,6 +200,17 @@ class SystemContextUnavailable(RuntimeError):
     """A system connection could not be had, or would not be exempt. Never
     fall back to a row-filtered connection: a purge or a count that silently
     sees fewer rows reports health (http/errors.py answers 503)."""
+
+
+class SystemContextMisconfigured(SystemContextUnavailable):
+    """The deployment NAMED a system connection and it is the wrong one: not
+    exempt from row security, or in production a superuser or the schema
+    owner. Apart from `SystemContextUnavailable` for "none is configured" (the
+    sample origin holds none, on purpose) so a writer that falls back to a
+    weaker write can say so: a misconfigured deployment must be loud, not
+    quietly lose actor attribution (g49v-system-fallback-silent,
+    2026-10-03). Still a `SystemContextUnavailable`, so every handler that
+    answers 503 for the one answers for both."""
 
 
 @dataclass(frozen=True)
@@ -199,12 +257,63 @@ def is_exempt(conn) -> bool:
     return known
 
 
+#: The request DSNs (as a digest, never the text) whose role a production
+#: request connection has already been shown not to be privileged.
+_REQUEST_ROLE_PROVEN: set[str] = set()
+
+#: A superuser, a BYPASSRLS role, or a member of the schema owner. Unlike
+#: `_EXEMPT_SQL` it answers on a database with no schema yet (the owner is
+#: then NULL, which `refuse_privileged_request_role` treats as unproven),
+#: so the readiness register can still say "migrate" on a fresh one.
+_REQUEST_ROLE_SQL = """
+SELECT r.rolsuper, r.rolbypassrls,
+       coalesce(pg_has_role(r.oid, c.relowner, 'USAGE'), false),
+       c.oid IS NOT NULL
+  FROM pg_roles r LEFT JOIN pg_class c ON c.oid = to_regclass('core.node')
+ WHERE r.rolname = current_user
+"""
+
+
+def refuse_privileged_request_role(conn: psycopg.Connection) -> None:
+    """In production, refuse a request connection whose role is a
+    superuser, bypasses row security or is the schema owner (infra-4,
+    2026-10-03).
+
+    Row-level security does not bind such a role and it may ALTER TABLE ...
+    DISABLE TRIGGER on the audit and custody chains, so every analyst
+    request would run with the protection switched off while the register
+    showed a running deployment. `config.verify_environment` refuses the
+    names it can see in the DSN at boot; this reads the catalog, once per
+    process and DSN, for a role under another name or one that merely holds
+    the owner's membership. `connect_system` makes the same refusal for the
+    system role. Development and the suite connect as the owner on purpose
+    and are not asked."""
+    if not _production():
+        return
+    key = hashlib.sha256(dsn().encode()).hexdigest()
+    if key in _REQUEST_ROLE_PROVEN:
+        return
+    superuser, bypass, owner, known = conn.execute(_REQUEST_ROLE_SQL).fetchone()
+    if superuser or bypass or owner:
+        raise SystemContextUnavailable(
+            f"the request database connection is a superuser, bypasses "
+            f"row-level security or is the schema owner; DATABASE_URL must "
+            f"name {APP_ROLE}, which is none of those.")
+    if known:
+        _REQUEST_ROLE_PROVEN.add(key)
+
+
 def connect_request() -> psycopg.Connection:
     """A connection for one HTTP request (or one websocket): the request
     role in production, bound to its user by `bind_session`."""
     conn = connect()
-    if _assume_role():
-        conn.execute(f"SET ROLE {APP_ROLE}")
+    try:
+        if _assume_role():
+            conn.execute(f"SET ROLE {APP_ROLE}")
+        refuse_privileged_request_role(conn)
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
@@ -235,18 +344,19 @@ def connect_system(purpose: SystemPurpose) -> psycopg.Connection:
     else:
         conn = psycopg.connect(
             target, autocommit=True, connect_timeout=connect_timeout_seconds(),
-            application_name=f"noctornal:system:{purpose.value}")
+            application_name=f"noctornal:system:{purpose.value}",
+            options=session_options(target))
     try:
         if _assume_role():
             conn.execute(f"SET ROLE {WORKER_ROLE}")
         exempt, superuser, owner = conn.execute(_EXEMPT_SQL).fetchone()
         if not exempt:
-            raise SystemContextUnavailable(
+            raise SystemContextMisconfigured(
                 f"the system database connection for {purpose.value} is subject "
                 f"to row-level security, so it would silently see part of the "
                 f"data; {WORKER_DSN_ENV} must name {WORKER_ROLE}.")
         if _production() and (superuser or owner):
-            raise SystemContextUnavailable(
+            raise SystemContextMisconfigured(
                 f"{WORKER_DSN_ENV} names a superuser or the schema owner; it "
                 f"must name {WORKER_ROLE}, which owns nothing.")
     except BaseException:
@@ -295,3 +405,60 @@ def bind_ticket(conn: psycopg.Connection, raw_ticket: str) -> RlsBinding:
     binding = RlsBinding(row[0], bool(row[1]))
     _EXEMPT[conn] = binding.exempt
     return binding
+
+
+def connect_like(conn) -> psycopg.Connection:
+    """A NEW connection of the same kind as `conn` (0150,
+    evidence-ledger-actor-time-forgeable, 2026-10-03): a request connection
+    for a caller that row security filters, a system connection for one it
+    does not.
+
+    A refusal that a rollback must not take is written on a second
+    connection. The request role cannot attribute a row to a user it is not
+    bound to, so a caller that is itself the system role (a merge, a purge, an
+    administrator's two-person change) needs a second system connection to
+    keep naming the person. Its purpose is the caller's own, read back from the
+    application name `connect_system` sets; with none (development, the suite)
+    it is the administration of accounts and policy, which is where most of
+    these refusals come from."""
+    if not is_exempt(conn):
+        return connect_request()
+    purpose = SystemPurpose.IAM_ADMIN
+    if isinstance(conn, psycopg.Connection):
+        name = conn.info.get_parameters().get("application_name", "")
+        prefix = "noctornal:system:"
+        if name.startswith(prefix):
+            try:
+                purpose = SystemPurpose(name[len(prefix):])
+            except ValueError:
+                pass
+    return connect_system(purpose)
+
+
+def bind_like(target: psycopg.Connection, source: psycopg.Connection) -> None:
+    """Bind `target` to whoever `source` is bound to, if anyone (0150,
+    evidence-ledger-actor-time-forgeable, 2026-10-03).
+
+    A side connection that writes a row for the person the request belongs to
+    (a refusal that a rollback must not take) is otherwise bound to nobody,
+    and the audit trigger demotes an actor the database cannot verify.
+    Binding it to the same session or ticket lets the database verify the
+    actor, so the row keeps its name. It copies the caller's own binding and
+    nothing else: a `source` bound to nobody leaves `target` bound to nobody.
+    """
+    if not isinstance(source, psycopg.Connection):
+        return
+    try:
+        proof, ticket = source.execute(
+            "SELECT nullif(current_setting('noctornal.rls_proof', true), ''), "
+            "nullif(current_setting('noctornal.rls_ticket', true), '')"
+        ).fetchone()
+    except psycopg.Error:
+        # A source in a failed transaction cannot be asked. The row is still
+        # written, bound to nobody, and the trigger demotes its actor.
+        return
+    if proof:
+        target.execute("SELECT actor, exempt FROM iam.rls_bind(%s)", (proof,))
+    if ticket:
+        target.execute("SELECT actor, exempt FROM iam.rls_bind_ticket(%s)",
+                       (ticket,))

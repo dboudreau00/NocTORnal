@@ -26,7 +26,10 @@ Cron, every five minutes, from the install directory:
 
 Prints the counters on one line and exits 1 while matched samples still
 wait for their bytes to move or samples are behind the newest list (the
-readiness row fails on the same facts).
+readiness row fails on the same facts). Under NOCTORNAL_ENV=production an
+environment this job will not run on exits 2, one line per problem on stderr
+led by `sample_screen: refusing to run:`, naming variables and never a value
+(`config.JOB_REFUSAL_EXIT`, the code every job gives that refusal).
 
 ## The import's authority is the host operator
 
@@ -116,8 +119,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--as", dest="as_email")
     args = parser.parse_args(argv)
 
-    from noctornal_api.config import enforce_environment
-    enforce_environment()
+    # First, before anything is connected to: the API's whole production list,
+    # through the one helper every job calls (config.py), exit 2 and no
+    # traceback (2026-10-07; it was `enforce_environment()`
+    # and exit 1).
+    from noctornal_api.config import JOB_REFUSAL_EXIT, refuse_unsafe_job_environment
+    refusals = refuse_unsafe_job_environment("sample_screen", whole_environment=True)
+    if refusals:
+        print("\n".join(refusals), file=sys.stderr)
+        return JOB_REFUSAL_EXIT
     from noctornal_api import screening
     from noctornal_api.db import SystemPurpose, connect_system
     from noctornal_api.samples import SampleService
@@ -175,7 +185,10 @@ def main(argv: list[str] | None = None) -> int:
     print(line)
     if "skipped" in counters:
         return 0
-    return 1 if counters.get("pending", 0) or counters.get("behind", 0) else 0
+    # An archive tree left half isolated is as unfinished as a behind pass
+    # (2026-10-03).
+    return 1 if (counters.get("pending", 0) or counters.get("behind", 0)
+                 or counters.get("trees_open", 0)) else 0
 
 
 if __name__ == "__main__":

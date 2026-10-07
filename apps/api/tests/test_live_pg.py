@@ -104,6 +104,45 @@ def _node(conn, case_id, owner, label):
             rationale="live socket test"))
 
 
+def _listener() -> list[dict]:
+    """LISTEN on the change channel in a thread of its own, returning the
+    list it fills once the LISTEN is registered. It used to be a 0.8 second
+    sleep, which a loaded machine could outrun and so miss the write (beta
+    gate, 2026-10-07)."""
+    from noctornal_api.db import connect
+    from noctornal_api.http.routers.live import CHANNEL
+
+    heard: list[dict] = []
+    ready = threading.Event()
+
+    def listen():
+        c = connect()
+        c.execute(f"LISTEN {CHANNEL}")
+        ready.set()
+        for note in c.notifies(timeout=6):
+            heard.append(json.loads(note.payload))
+        c.close()
+
+    threading.Thread(target=listen, daemon=True).start()
+    assert ready.wait(30), "the listener never registered"
+    return heard
+
+
+def _case_events(heard: list[dict], kind: str, case_id, *, settle: float) -> list[dict]:
+    """This case's events of `kind`, once the first has arrived (within six
+    seconds) and `settle` more seconds have passed for any that follow it.
+    The channel carries every case's events (the socket filters by case),
+    and a neighbouring test's write is not this one's."""
+    def mine():
+        return [h for h in heard if h.get("kind") == kind
+                and h.get("case_id") == str(case_id)]
+    deadline = time.monotonic() + 6
+    while not mine() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    time.sleep(settle)
+    return mine()
+
+
 # --- the payload says nothing -------------------------------------------
 
 def test_a_change_event_carries_no_case_content(conn):
@@ -111,67 +150,45 @@ def test_a_change_event_carries_no_case_content(conn):
     event ever carries a label, an id or a value, this layer acquires a
     filtering responsibility — and that is the responsibility this
     codebase has repeatedly failed to discharge correctly."""
-    from noctornal_api.db import connect
-    from noctornal_api.http.routers.live import CHANNEL
-
     owner = _user(conn)
     case_id = _case(conn, owner)
 
-    heard: list[dict] = []
-
-    def listen():
-        c = connect()
-        c.execute(f"LISTEN {CHANNEL}")
-        for note in c.notifies(timeout=6):
-            heard.append(json.loads(note.payload))
-        c.close()
-
-    thread = threading.Thread(target=listen, daemon=True)
-    thread.start()
-    time.sleep(0.8)          # let LISTEN register before the write
-
+    heard = _listener()
     _node(conn, case_id, owner, "a handle")
-    time.sleep(2.0)
-
-    events = [h for h in heard if h.get("kind") == "node"]
+    events = _case_events(heard, "node", case_id, settle=0)
     assert events, "no change event was published for a node write"
-    assert set(events[0]) == {"case_id", "kind", "op"}, (
-        f"the event carries more than an id, a kind and an operation: "
-        f"{events[0]}")
+    # Since 0146 (http_ui-012, 2026-10-03) the NOTIFY payload also names the
+    # labels of what was written, FOR THE SERVER: the socket decides per
+    # subscriber whether the hint is about anything they may read, and what
+    # it forwards is still only the kind and the operation. The safety
+    # argument above moved from "the payload says nothing" to "the message
+    # a client receives says nothing", and that half is asserted here.
+    assert set(events[0]) == {"case_id", "kind", "op", "labels"}, (
+        f"the event carries more than an id, a kind, an operation and the "
+        f"labels the server filters on: {events[0]}")
+    from noctornal_api.http.routers.live import _relevant
+    forwarded = _relevant(events[0], owner, case_id)
+    assert forwarded == {"type": "change", "kind": "node", "op": "INSERT"}, (
+        f"what a client receives carries more than a kind and an operation: "
+        f"{forwarded}")
 
 
 def test_one_event_per_statement_not_per_row(conn):
     """A bulk write of four hundred edges should wake a client once. The
     triggers are FOR EACH STATEMENT for this reason, and the client
     refetches the whole projection anyway."""
-    from noctornal_api.db import connect
-    from noctornal_api.http.routers.live import CHANNEL
-
     owner = _user(conn)
     case_id = _case(conn, owner)
     for i in range(3):
         _node(conn, case_id, owner, f"handle-{i}")
 
-    heard: list[dict] = []
-
-    def listen():
-        c = connect()
-        c.execute(f"LISTEN {CHANNEL}")
-        for note in c.notifies(timeout=6):
-            heard.append(json.loads(note.payload))
-        c.close()
-
-    thread = threading.Thread(target=listen, daemon=True)
-    thread.start()
-    time.sleep(0.8)
+    heard = _listener()
     # ONE statement touching all three.
     conn.execute("UPDATE core.node SET updated_at = now() WHERE case_id = %s",
                  (case_id,))
-    time.sleep(2.0)
-
-    node_events = [h for h in heard
-                   if h.get("kind") == "node"
-                   and h.get("case_id") == str(case_id)]
+    # A row-level trigger's other two would arrive with the first, at the
+    # same commit; a second of grace is ample.
+    node_events = _case_events(heard, "node", case_id, settle=1.0)
     assert len(node_events) == 1, (
         f"a 3-row statement produced {len(node_events)} events; the trigger "
         f"is row-level rather than statement-level")

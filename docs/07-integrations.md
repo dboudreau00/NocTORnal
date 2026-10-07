@@ -69,7 +69,10 @@ channel, outcome, cause, recipient and time. Every delivery records a
 cause, a fixed code with a fixed sentence that never names a marking above
 the reader's (egress refused, transport error, rate limited, gave up,
 revoked, withdrawn, case not routed, already on the issue and the rest),
-and what left: STUB, SUBJECT or SUMMARY.
+and what left: STUB, SUBJECT or SUMMARY. The gate judges a delivery at
+its notification's labels composed with its case's labels as they stand
+when it is sent, so a case raised or given a compartment while a delivery
+waits (a digest, quiet hours, a retry) is gated at its new labels.
 
 **Held against failed.** A delivery that cannot be attempted because
 something is not configured (no `SMTP_HOST`, no `smtp` or `webhook` route,
@@ -226,9 +229,9 @@ more exposure, more kinds) must be confirmed with an echo of what widens.
   or with `NOCTORNAL_WEBHOOK_ALLOW_HTTP` set, and the sender refuses at send
   time as well, because the cron that drains never runs the start check.
 - Signature: `X-NocTORnal-Signature: sha256=<hex>`, an HMAC-SHA256 with
-  `NOCTORNAL_WEBHOOK_SECRET` over the exact bytes sent. There is no
-  timestamp in the signed string and no replay window yet (docs/17): a
-  receiver should de-duplicate on `notification_id`.
+  `NOCTORNAL_WEBHOOK_SECRET` over the exact bytes sent. This is v1, the
+  default, and it carries no time: unless the destination opts into v2 (next
+  section) a receiver should de-duplicate on `notification_id`.
 - Same classification gate. Content above the ceiling goes as a redacted
   stub ("content classified above the destination ceiling") and is
   recorded REFUSED, not SENT. A webhook is an email with fewer manners.
@@ -237,6 +240,114 @@ more exposure, more kinds) must be confirmed with an echo of what widens.
 - The ledger keeps the address with its path withheld, beside a
   fingerprint of the whole: a path commonly carries the hook's bearer
   secret.
+
+### Webhook signatures: v1 and v2 (F28)
+
+`NOCTORNAL_WEBHOOK_SIGNATURE` picks the scheme, and it is read each time a
+delivery is sent. Unset, or `v1`, is the signature described above, and it
+has not changed by a byte: a receiver that verifies it needs no change at
+all. `v2` is opt-in, and adds a time to what is signed.
+
+| | v1 (the default) | v2 (opt-in) |
+|---|---|---|
+| Header | `X-NocTORnal-Signature` | `X-NocTORnal-Signature-V2` |
+| Value | `sha256=<hex>` | `t=<unix seconds>,v2=<hex>` |
+| What is signed | the body | `<t>`, a full stop, the body |
+| Key | the secret's UTF-8 bytes | the same |
+| Time in it | none | `t`, the time of this attempt |
+
+What a verifier relies on:
+
+- `<hex>` is 64 lowercase hex digits, an HMAC-SHA256.
+- `<t>` is whole seconds since the Unix epoch, written as plain ASCII
+  decimal digits. The signed string is those digits, one full stop (byte
+  0x2E), and then the request body exactly as it arrived, before it is
+  parsed. Verify over the raw bytes, never over a parsed and re-encoded
+  body.
+- Each attempt is signed again. A retry carries a new `t`, so the window
+  below judges how fresh the post is and never how old the notification
+  is. A requeue by an administrator is a new attempt too.
+- A v2 delivery carries no `X-NocTORnal-Signature` header. See below for
+  why.
+- v2 needs `NOCTORNAL_WEBHOOK_SECRET`. A value other than `v1` or `v2`, or v2
+  with no secret, stops the API starting in production, and holds the
+  channel (nothing is sent, and the outbox says why) rather than sending a
+  delivery that looks signed and is not.
+
+**Why a v2 delivery carries no v1 header.** A v1 signature covers the body
+alone, so it never expires. If a v2 delivery also carried one, anyone who
+captured it could post the body again at any time with the v2 header cut off
+and the v1 header kept, and every receiver that accepts v1 would take it as
+genuine. The v2 header would protect no one who still accepts v1. With one
+header there is nothing to cut down to: a receiver that requires v2 and
+ignores `X-NocTORnal-Signature` cannot be downgraded, because the sender
+never produces a v1 signature in v2 mode, and a captured v2 delivery holds
+no valid v1 proof to extract. The cost is that the receiver moves first.
+
+**Moving a receiver to v2, in this order.**
+
+1. Change the receiver to accept either header: verify v2 when
+   `X-NocTORnal-Signature-V2` is present, and v1 when only the v1 header is.
+   Nothing the sender does changes yet.
+2. Set `NOCTORNAL_WEBHOOK_SIGNATURE=v2` on the sender. Deliveries now carry
+   only v2.
+3. Change the receiver to require v2 and to ignore the v1 header. Until then
+   a v1 delivery captured before the switch can still be replayed. Do not
+   leave step 1 in place.
+
+**What a receiver should do with a v2 delivery.**
+
+- Refuse it if the header is missing, malformed, or if `t` is not plain
+  digits.
+- Refuse it if `t` is more than 300 seconds (five minutes) from the
+  receiver's own clock, either way. Keep both clocks synchronised: the
+  comparison is between the sender's clock and the receiver's, and a clock
+  that is minutes out refuses real deliveries.
+- Compare the signature in constant time.
+- Then de-duplicate on `notification_id` in the body. The window shortens
+  how long a captured delivery stays usable but does not end it: a capture
+  posted again inside the window is genuine as far as the signature goes.
+  The record of ids must outlive the retry schedule, not the window,
+  because a retry of a notification the receiver already acted on carries a
+  fresh and valid signature. A delivery is attempted up to five times, at
+  least thirty minutes from the first to the last, and up to an hour
+  between attempts when the receiver answers 429 with `Retry-After`; an
+  administrator can also requeue one at any time. Keep ids for at least 24
+  hours.
+
+A verifier, in Python, standard library only. It returns the notification or
+raises `ValueError`, and `seen_ids` stands for whatever store the receiver
+keeps its handled ids in:
+
+```python
+import hashlib
+import hmac
+import json
+import time
+
+TOLERANCE_S = 300  # five minutes either side of the receiver's own clock
+
+
+def verify_noctornal_v2(secret: bytes, header: str, body: bytes, seen_ids: set) -> dict:
+    """`header` is X-NocTORnal-Signature-V2 and `body` the raw request body."""
+    try:
+        fields = dict(part.split("=", 1) for part in header.split(","))
+        stamp, theirs = fields["t"], fields["v2"]
+    except (KeyError, ValueError):
+        raise ValueError("malformed signature header") from None
+    if not (stamp.isascii() and stamp.isdigit()):
+        raise ValueError("malformed timestamp")
+    if abs(time.time() - int(stamp)) > TOLERANCE_S:
+        raise ValueError("outside the replay window")
+    ours = hmac.new(secret, stamp.encode() + b"." + body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(ours.encode(), theirs.encode()):
+        raise ValueError("signature does not match")
+    note = json.loads(body)
+    if note["notification_id"] in seen_ids:
+        raise ValueError("already handled")
+    seen_ids.add(note["notification_id"])
+    return note
+```
 
 ## Sandbox (CAPEv2, self-hosted)
 

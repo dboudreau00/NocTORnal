@@ -122,7 +122,7 @@ class AuthService:
         """`spend_recovery=False` verifies a recovery code and leaves it
         unspent, returning its hash for `spend` to use.
 
-        Sign-in passes False (final review u4, 2026-09-24): its must-change
+        Sign-in passes False (2026-09-24): its must-change
         and no-change-pending refusals come AFTER this, and a recovery code
         spent on a refusal is gone for good. Finishing one reset cost two
         codes, and a person down to their last code could never finish it.

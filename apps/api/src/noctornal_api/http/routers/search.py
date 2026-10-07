@@ -41,6 +41,8 @@ from noctornal_api.http.deps import (
     require,
     user_ceiling,
 )
+from noctornal_api.http.element_gate import gate_element
+from noctornal_api.http.errors import Problem
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.security.access import AccessResolutionError, evaluate
 from noctornal_api.selectors import SelectorStore
@@ -63,7 +65,7 @@ class SelectorViaOut(BaseModel):
 class HitOut(BaseModel):
     """`merged_name` is the label of a record merged into this entity
     whose name matched when the entity's own did not, or matched less well
-    (final review U10, 2026-09-23), so the pane can say why a name it does
+    (2026-09-23), so the pane can say why a name it does
     not show is here. Null otherwise.
 
     `attribute` is the key of the entity's own attribute that matched,
@@ -152,7 +154,7 @@ def _allowed_on_case(conn, user: CurrentUser, case_id: UUID,
             object_classification=eff_cls, object_compartments=eff_comp,
             mfa_satisfied_at=user.session_mfa_at,
             # A question, not an access: the request it serves was counted
-            # at its own gate (final review U19, 2026-09-23, g02).
+            # at its own gate (2026-09-23).
             count_use=False)
     except AccessResolutionError:
         return False
@@ -479,23 +481,17 @@ def find_selector(
 ) -> SelectorOut | None:
     """Exact-match selector lookup. The query value is normalised the same
     way it was stored, so callers need not know the canonical form. A
-    selector attributed to a node the caller cannot see is withheld — the
-    selector is an observable ABOUT that node."""
-    row = SelectorStore(conn).find(case_id=case_id, selector_type=selector_type,
-                                   raw_value=value)
-    if row is None:
-        return None
-    if row.node_id is not None:
-        clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
-        visible = conn.execute(
-            """SELECT 1 FROM core.node
-                WHERE id = %s AND classification <= %s::core.tlp
-                  AND compartments <@ %s""",
-            (row.node_id, clearance.name, list(compartments)),
-        ).fetchone()
-        if visible is None:
-            return None
-    return _sel_out(row)
+    selector row above the caller, or attributed to a node the caller cannot
+    see, is withheld: the selector is an observable ABOUT that node. What is
+    answered is the strictest row the caller may read, so a value held only
+    above them reads as none, exactly as `POST /selectors` leaves it
+    (graph-selector-record-oracle, 2026-10-03: their own sighting is a row
+    of their own, so a read after a post finds it either way)."""
+    clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
+    row = SelectorStore(conn).find_for_reader(
+        case_id=case_id, selector_type=selector_type, raw_value=value,
+        clearance=clearance.name, compartments=compartments)
+    return _sel_out(row) if row is not None else None
 
 
 class RecordSelectorBody(BaseModel):
@@ -507,11 +503,40 @@ class RecordSelectorBody(BaseModel):
 @router.post("/selectors", response_model=SelectorOut, status_code=201)
 def record_selector(
     case_id: UUID, body: RecordSelectorBody,
-    _: CurrentUser = Depends(require("graph.node.update")),
+    user: CurrentUser = Depends(require("graph.node.update")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> SelectorOut:
-    row = SelectorStore(conn).record(
+    """Record one observation of a selector.
+
+    graph-selector-record-oracle, http_ui-002, rls-2 (2026-10-03, both
+    rounds): the upsert used to hand back the entity that held the value, the
+    stored spelling and the count, and bump the count of a row the caller
+    could not read, which made this route the membership oracle
+    `find_selector` refuses to be. The index is keyed by labels now (0134),
+    so a value held only above the caller is not among the rows they can read
+    and their sighting is a row of their own: a repeat post counts on the same
+    id, a read finds it, a second entity of the value is told of the first,
+    and the id is a real row a merge may cite, exactly as for a value held
+    nowhere. A named entity is gated at its own labels first, the same 400 for
+    one that is missing, in another case or above the caller."""
+    if body.node_id is not None:
+        # The refusal this route has always given for a node that is not this
+        # case's to name, one sentence for missing, another case's and above
+        # the caller (the 400 `SelectorStore` raises, which row security made
+        # the answer for a hidden node already).
+        try:
+            gate_element(conn, user, case_id=case_id, kind="node",
+                         element_id=body.node_id,
+                         permission_key="graph.node.update",
+                         missing_detail="node_id does not belong to this case")
+        except Problem as exc:
+            if exc.status != 404:
+                raise
+            raise Problem(400, "Invalid request", exc.detail) from None
+    clearance, held = user_ceiling(conn, user.user_id, case_id=case_id)
+    row, _norm = SelectorStore(conn).record_for_reader(
         case_id=case_id, selector_type=body.selector_type,
         raw_value=body.raw_value, node_id=body.node_id,
+        clearance=clearance.name, compartments=held,
     )
     return _sel_out(row)

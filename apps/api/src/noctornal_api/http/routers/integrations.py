@@ -10,6 +10,13 @@ verdicts, which the register and this page share through readiness.check
 
 The case router carries the one case-scoped piece: a case owner (case.update)
 keeping a case out of Jira, readable by anyone who reads the case.
+
+Jira's administration runs on a system connection (F51, 2026-10-02): the
+links it lists, closes and counts and the deliveries it counts are every
+case's and every recipient's, which row-level security shows the
+administrator's request role only for their own cases and inbox. A retire
+that closed only those links would leave the rest open for the next
+event to comment on. Nothing it returns names a case or carries content.
 """
 from __future__ import annotations
 
@@ -21,7 +28,15 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
 from noctornal_api import jira, readiness, transports
-from noctornal_api.http.deps import CurrentUser, get_conn, require, require_global, user_ceiling
+from noctornal_api.db import SystemPurpose
+from noctornal_api.http.deps import (
+    CurrentUser,
+    get_conn,
+    require,
+    require_global,
+    system_conn,
+    user_ceiling,
+)
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 
@@ -29,6 +44,8 @@ router = APIRouter(prefix="/integrations", tags=["integrations"])
 case_router = APIRouter(tags=["integrations"])
 
 _MANAGE = require_global("integration.manage")
+#: Jira's administration, across every case and recipient (F51, 2026-10-02).
+_ADMIN_CONN = system_conn(SystemPurpose.NOTIFY_ADMIN)
 
 
 def _problem(exc: jira.JiraError) -> Problem:
@@ -41,6 +58,7 @@ def _problem(exc: jira.JiraError) -> Problem:
 def overview(
     _: CurrentUser = Depends(_MANAGE),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_ADMIN_CONN),
 ) -> dict:
     """The channels, their routes, and the outbox row, in one read."""
     host, port, _problem_text = transports.smtp_endpoint()
@@ -65,11 +83,13 @@ def overview(
             "configured": url is not None,
             "endpoint": transports.redact_endpoint(url) if url else None,
             "signed": bool(os.environ.get("NOCTORNAL_WEBHOOK_SECRET")),
+            # v1 or v2, null when the setting is neither (the route says why).
+            "signature": transports.webhook_signature_version()[0],
             "ceiling": os.environ.get("NOCTORNAL_WEBHOOK_CEILING") or None,
             "route": hook_state.as_dict(),
             "route_words": transports.route_line(hook_state) if url else None,
         },
-        "jira": jira.JiraAdmin(conn).view(),
+        "jira": jira.JiraAdmin(sconn).view(),
         "drain": {"check": readiness.check("notify_outbox_draining", conn).as_dict(),
                   "cron": "scripts/notify_drain.py"},
     }
@@ -118,7 +138,7 @@ class JiraCredential(BaseModel):
 @router.get("/jira", response_model=dict, dependencies=[Depends(rate_limit("request"))])
 def get_jira(
     _: CurrentUser = Depends(_MANAGE),
-    conn: psycopg.Connection = Depends(get_conn),
+    conn: psycopg.Connection = Depends(_ADMIN_CONN),
 ) -> dict:
     return jira.JiraAdmin(conn).view()
 
@@ -128,7 +148,7 @@ def get_jira(
 def create_jira(
     body: JiraCreate,
     user: CurrentUser = Depends(_MANAGE),
-    conn: psycopg.Connection = Depends(get_conn),
+    conn: psycopg.Connection = Depends(_ADMIN_CONN),
 ) -> dict:
     admin = jira.JiraAdmin(conn)
     try:
@@ -143,7 +163,7 @@ def create_jira(
 def patch_jira(
     body: JiraPatch,
     user: CurrentUser = Depends(_MANAGE),
-    conn: psycopg.Connection = Depends(get_conn),
+    conn: psycopg.Connection = Depends(_ADMIN_CONN),
 ) -> dict:
     admin = jira.JiraAdmin(conn)
     payload = body.model_dump(exclude_unset=True)
@@ -161,7 +181,7 @@ def patch_jira(
 def put_jira_credential(
     body: JiraCredential,
     user: CurrentUser = Depends(_MANAGE),
-    conn: psycopg.Connection = Depends(get_conn),
+    conn: psycopg.Connection = Depends(_ADMIN_CONN),
 ) -> dict:
     admin = jira.JiraAdmin(conn)
     try:
@@ -175,7 +195,7 @@ def put_jira_credential(
              dependencies=[Depends(rate_limit("integration.test"))])
 def test_jira(
     user: CurrentUser = Depends(_MANAGE),
-    conn: psycopg.Connection = Depends(get_conn),
+    conn: psycopg.Connection = Depends(_ADMIN_CONN),
 ) -> dict:
     try:
         return jira.JiraAdmin(conn).test(actor_id=user.user_id)
@@ -188,7 +208,7 @@ def test_jira(
 def activate_jira(
     body: JiraConfirm,
     user: CurrentUser = Depends(_MANAGE),
-    conn: psycopg.Connection = Depends(get_conn),
+    conn: psycopg.Connection = Depends(_ADMIN_CONN),
 ) -> dict:
     admin = jira.JiraAdmin(conn)
     try:
@@ -202,7 +222,7 @@ def activate_jira(
              dependencies=[Depends(rate_limit("integration.write"))])
 def pause_jira(
     user: CurrentUser = Depends(_MANAGE),
-    conn: psycopg.Connection = Depends(get_conn),
+    conn: psycopg.Connection = Depends(_ADMIN_CONN),
 ) -> dict:
     admin = jira.JiraAdmin(conn)
     try:
@@ -215,7 +235,7 @@ def pause_jira(
              dependencies=[Depends(rate_limit("integration.write"))])
 def resume_jira(
     user: CurrentUser = Depends(_MANAGE),
-    conn: psycopg.Connection = Depends(get_conn),
+    conn: psycopg.Connection = Depends(_ADMIN_CONN),
 ) -> dict:
     admin = jira.JiraAdmin(conn)
     try:
@@ -228,7 +248,7 @@ def resume_jira(
              dependencies=[Depends(rate_limit("integration.write"))])
 def retire_jira(
     user: CurrentUser = Depends(_MANAGE),
-    conn: psycopg.Connection = Depends(get_conn),
+    conn: psycopg.Connection = Depends(_ADMIN_CONN),
 ) -> dict:
     try:
         return jira.JiraAdmin(conn).retire(actor_id=user.user_id)
@@ -244,7 +264,7 @@ def jira_links(
     limit: int = Query(100, ge=1, le=500),
     before: str | None = Query(None, max_length=200),
     user: CurrentUser = Depends(_MANAGE),
-    conn: psycopg.Connection = Depends(get_conn),
+    conn: psycopg.Connection = Depends(_ADMIN_CONN),
 ) -> dict:
     try:
         return jira.JiraAdmin(conn).links(case_id=case_id, state=state, limit=limit,

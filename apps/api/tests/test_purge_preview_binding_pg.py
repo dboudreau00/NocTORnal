@@ -1,6 +1,6 @@
 """A real purge destroys what its dry run counted, or nothing (over HTTP).
 
-Final review U20, 2026-09-23. `POST /retention/purge` with `dry_run` false
+2026-09-23. `POST /retention/purge` with `dry_run` false
 took only a case and an authority and read what was due afresh, while the
 console's confirmation repeated the counts of a dry run of any age. At
 09:00 a dry run counts 3 exhibits and 11 held; at 11:00 a colleague lifts

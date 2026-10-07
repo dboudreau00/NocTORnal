@@ -25,6 +25,7 @@ Pure: no database, no object store, no imports of the scripts themselves
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -394,3 +395,43 @@ def test_the_dev_addresses_name_127_0_0_1_not_localhost(path: Path):
         f"{path.name} still writes or prints localhost; nothing listens on "
         f"::1, so a client that tries it first waits for the refusal: "
         f"{offenders}")
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-07: a transport bound on the live socket's first frame
+# ---------------------------------------------------------------------------
+
+def _api_start_commands() -> list[tuple[Path, str]]:
+    """Every command in the tree that starts the API under uvicorn, with its
+    continuation lines: found by the application path they all name, so a new
+    launcher is held to the rule without anyone remembering to list it."""
+    files = [p for base in ("scripts", "release", "infra", ".github")
+             for p in (REPO / base).rglob("*")
+             if p.is_file() and p.suffix in {".sh", ".ps1", ".yml", ".yaml", ".cmd", ""}]
+    files += [p for p in REPO.glob("Dockerfile*") if p.is_file()]
+    found = []
+    for path in sorted(files):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for i, line in enumerate(lines):
+            if "noctornal_api.http.app:app" not in line or "uvicorn" not in line:
+                continue
+            command = [line]
+            while command[-1].rstrip().endswith("\\") and i + len(command) < len(lines):
+                command.append(lines[i + len(command)])
+            found.append((path, "\n".join(command)))
+    return found
+
+
+def test_ws_max_size_is_on_every_launch_line():
+    """The live socket's first frame is read whole before the hello's own
+    length check runs, and uvicorn's default frame limit is 16 MiB, so a peer
+    with no session made the process buffer that much per socket. The channel
+    is one-way after the hello and a real hello is about a hundred bytes."""
+    from noctornal_api.http.routers.live import WS_MAX_SIZE
+    commands = _api_start_commands()
+    assert {"launch.sh", "launch.ps1", "install.sh", "install.ps1", "Dockerfile",
+            "compose.yml"} <= {p.name for p, _ in commands}, [p.name for p, _ in commands]
+    assert len(commands) >= 7, "the compose file starts two (the API and the sample origin)"
+    flag = re.compile(rf"--ws-max-size[\"',\s]+{WS_MAX_SIZE}(?!\d)")
+    missing = [p.relative_to(REPO).as_posix() for p, c in commands if not flag.search(c)]
+    assert not missing, f"no --ws-max-size {WS_MAX_SIZE} on the uvicorn line in {missing}"

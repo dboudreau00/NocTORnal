@@ -479,6 +479,11 @@ def _assignees_below(conn: psycopg.Connection, case_id: UUID,
 # Case access: who is on this case
 # ---------------------------------------------------------------------
 
+#: Roles whose case grant must carry an end (docs/05: LIAISON is time-boxed,
+#: `expires_at` required).
+TIME_BOXED_ROLES = frozenset({"LIAISON"})
+
+
 class AssignUserBody(BaseModel):
     #: The durable identifier (invariant 9): `app_user.email` is
     #: citext-unique but a person's address changes and can be reassigned
@@ -498,7 +503,8 @@ class AssignUserBody(BaseModel):
     role_key: str
     #: docs/05 wants case access time-boxed by default. Not forced here —
     #: a case owner with an expiring grant is its own failure mode — but
-    #: validated so a grant cannot be born already dead.
+    #: validated so a grant cannot be born already dead. Required for a
+    #: role in `TIME_BOXED_ROLES` (the external liaison).
     expires_at: datetime | None = None
 
 
@@ -609,6 +615,13 @@ def assign_case_user(case_id: UUID, body: AssignUserBody,
         raise Problem(400, "Invalid request",
                       f"role {body.role_key!r} grants no permissions, so that "
                       "assignment would confer nothing")
+    # docs/05: an external liaison's access is time-boxed, `expires_at`
+    # required. Nothing held it until 2026-10-07
+    # (2026-10-07), so a LIAISON grant with no end date read a case for good.
+    if body.role_key in TIME_BOXED_ROLES and body.expires_at is None:
+        raise Problem(400, "Invalid request",
+                      f"a {role[2] or body.role_key} grant must end: give an "
+                      "end time (expires_at). External access is time-boxed.")
 
     # The address is resolved only AFTER everything about the request
     # itself has been validated. Resolved first, a request with a bad
@@ -697,8 +710,7 @@ def assign_case_user(case_id: UUID, body: AssignUserBody,
         # The names a person reads, beside the keys. The owner decided
         # CASE_OWNER is shown as Lead investigator (migration 0062), and
         # the Share panel printed the key because nothing it could read
-        # carried the name: `/admin/roles` needs user.manage (final review
-        # U21, 2026-09-23).
+        # carried the name: `/admin/roles` needs user.manage (2026-09-23).
         "role_name": role[2] or body.role_key,
         "replaced_role_name": ((existing[1] or existing[0])
                                if existing else None),
@@ -731,8 +743,8 @@ def list_case_users(case_id: UUID,
     grant, on this case or global, at its level; this compared
     `u.tlp_clearance` alone, so an analyst working in the case under an
     emergency grant was shown to its owner as "cannot open the case",
-    "clearance below the case's classification" (final review U22,
-    2026-09-23). Such a colleague is now `effective`, and a caller who can
+    "clearance below the case's classification" (2026-09-23). Such a colleague is now
+    `effective`, and a caller who can
     manage the roster (`you_can_grant`) is also told when that access
     lapses, in `emergency_access_until`, because on that instant they
     drop back to "cannot open" and a clearance change, not a re-share, is
@@ -799,7 +811,7 @@ def list_case_users(case_id: UUID,
     # The name a person reads for each grade on the roster, looked up like
     # the granters' names: the owner decided CASE_OWNER is shown as Lead
     # investigator (0062), every case worker opens this roster, and none
-    # of them can read `/admin/roles` (final review U21, 2026-09-23).
+    # of them can read `/admin/roles` (2026-09-23).
     role_names = {g[0]: g[1] for g in conn.execute(
         "SELECT key, display_name FROM iam.role WHERE key = ANY(%s)",
         (list({r[2] for r in rows}),)).fetchall()} if rows else {}
@@ -896,7 +908,7 @@ def revoke_case_user(case_id: UUID, user_id: UUID,
     with system_connection(SystemPurpose.CASE_MEMBERSHIP, reuse=conn) as sconn:
         CaseService(sconn).revoke_user(case_id, user_id, revoked_by=user.user_id)
     # `revoked_role_name` for the same reason as the roster's `role_name`
-    # (final review U21, 2026-09-23).
+    # (2026-09-23).
     return {"case_id": str(case_id), "user_id": str(user_id),
             "display_name": row[1], "revoked_role": row[0],
             "revoked_role_name": row[2] or row[0]}

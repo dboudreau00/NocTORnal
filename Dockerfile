@@ -10,8 +10,15 @@
 # images would be two dependency sets that can drift, and the first
 # symptom of that drift would be a notification drain that imports a
 # module the API has moved.
-FROM python:3.13-slim
+FROM python:3.13-slim@sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285
 
+# Pinned by digest (infra-7, 2026-10-03): a tag is whatever its registry says
+# it is at pull time, so two builds of one commit could start from two
+# different bases. The tag stays for the reader. The cost is that this base
+# no longer picks up Debian security updates by itself: move the digest when
+# you take a release (docker buildx imagetools inspect python:3.13-slim) and
+# build with --pull. infra/production/README.md, Hardening, says how.
+#
 # 3.13 because CI pins PYTHON_VERSION 3.13 and the suite is proven there.
 #
 # `slim` and NOT `alpine`. Every compiled dependency here (psycopg[binary],
@@ -31,7 +38,8 @@ FROM python:3.13-slim
 # Two known cases, both in opt-in extras (2026-09-24): pyaes, which
 # the telegram extra's Telethon needs, is published only as a pure-Python
 # sdist, so pip builds its wheel with setuptools and no compiler; and
-# yara-x needs glibc 2.28, which this bookworm base (glibc 2.36) has.
+# yara-x needs glibc 2.28, which this Debian 13 (trixie) base (glibc 2.41,
+# measured in the pinned digest on 2026-10-07) has.
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -112,13 +120,22 @@ COPY . /app
 # other value is refused before pip runs: a typo such as "socks" would
 # otherwise build an image without the extra and say nothing, and a value
 # is interpolated into a pip argument, which only a closed list may be.
+#
+# The final `find` (2026-10-03, g48 verification, the umask 077 finding): COPY keeps the file modes
+# of the build context, and a checkout made under a restrictive umask (a
+# non-root operator on a host that defaults to 077, or a `git pull` in a shell
+# that set it) holds 0600 files and 0700 directories. This image runs as uid
+# 10001 and /app is root's, so it could not read its own source: every
+# service failed at import with a permission error. It chmods only what is
+# NOT already world-readable, so a normal context adds no layer weight.
 ARG NOCTORNAL_EXTRAS=""
 RUN case "$NOCTORNAL_EXTRAS" in \
       ""|telegram|yara|telegram,yara|yara,telegram) ;; \
       *) echo "NOCTORNAL_EXTRAS may name telegram and yara only" >&2; exit 1 ;; \
     esac \
     && pip install --no-cache-dir -c constraints.txt -e packages/ontology \
-       -e "apps/api${NOCTORNAL_EXTRAS:+[$NOCTORNAL_EXTRAS]}"
+       -e "apps/api${NOCTORNAL_EXTRAS:+[$NOCTORNAL_EXTRAS]}" \
+    && find /app \( -type f ! -perm -o=r -o -type d ! -perm -o=rx \) -exec chmod go+rX {} +
 
 # An unprivileged account: no login shell, and no home directory of its own
 # to write to.
@@ -167,4 +184,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
 # production command adds workers and the proxy-header settings; this
 # default exists so `docker run` on the image alone does something
 # sensible and single-process.
-CMD ["uvicorn", "noctornal_api.http.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "noctornal_api.http.app:app", "--host", "0.0.0.0", "--port", "8000", "--ws-max-size", "8192"]

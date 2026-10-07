@@ -123,7 +123,7 @@ def test_a_pass_names_the_exact_hash_limit(conn):
     if not check.ok:
         pytest.skip("this database holds samples the pass has not reached")
     assert EXACT_HASH_SENTENCE in check.evidence and "Readiness list" in check.evidence
-    assert "Archive members are not screened" in check.evidence
+    assert "Archive members are screened only where the Lab expands" in check.evidence
 
 
 def test_the_policy_row_carries_the_screening_clause(conn):

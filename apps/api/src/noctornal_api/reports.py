@@ -99,7 +99,15 @@ import psycopg
 from noctornal_api.assumptions import AssumptionService
 from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.egress import Destination, can_egress
-from noctornal_api.projections import DISCLOSURE_NONE, GraphService, Projection
+from noctornal_api.projections import (
+    DISCLOSURE_COUNT,
+    DISCLOSURE_NONE,
+    DISCLOSURE_PRESENCE,
+    GraphService,
+    Projection,
+    Subgraph,
+    Withheld,
+)
 from noctornal_api.security.access import Tlp, tlp_from_name
 
 
@@ -166,11 +174,19 @@ class Redaction:
     #: Like those counts it follows the case's withheld-disclosure setting,
     #: and is 0 under NONE.
     hypothesis_evidence_withheld: int = 0
+    #: Exhibits above the ceiling exist, said without a number. The case's
+    #: withheld-disclosure setting (0030) decides what the document may say
+    #: about them: nothing under NONE, that there are some under PRESENCE
+    #: (this flag, with `evidence_withheld` left at 0), the figure only under
+    #: COUNT (2026-10-07: the figure used to be stated
+    #: whatever the setting).
+    evidence_some_withheld: bool = False
 
     @property
     def anything_withheld(self) -> bool:
         return bool(self.nodes_withheld or self.edges_withheld
-                    or self.evidence_withheld or self.header_withheld
+                    or self.evidence_withheld or self.evidence_some_withheld
+                    or self.header_withheld
                     or self.assumptions_withheld or self.hypotheses_withheld
                     or self.hypothesis_evidence_withheld)
 
@@ -216,9 +232,11 @@ class Redaction:
                 f"matrix {'rests' if n == 1 else 'rest'} on that material, so "
                 f"the hypothesis scores below leave "
                 f"{'it' if n == 1 else 'them'} out.")
+        exhibits = ("some exhibits" if self.evidence_some_withheld
+                    else _count(self.evidence_withheld, 'exhibit', 'exhibits'))
         withheld = (f"{_count(self.nodes_withheld, 'entity', 'entities')}, "
                     f"{_count(self.edges_withheld, 'relationship', 'relationships')} "
-                    f"and {_count(self.evidence_withheld, 'exhibit', 'exhibits')}")
+                    f"and {exhibits}")
         return (
             f"This document is marked TLP:{self.built_at_tlp} and was prepared "
             f"to include material up to TLP:{self.ceiling_tlp}, from a case "
@@ -262,6 +280,7 @@ class Report:
                 "nodes_withheld": self.redaction.nodes_withheld,
                 "edges_withheld": self.redaction.edges_withheld,
                 "evidence_withheld": self.redaction.evidence_withheld,
+                "evidence_some_withheld": self.redaction.evidence_some_withheld,
                 "statement": self.redaction.statement(),
                 "header_withheld": self.redaction.header_withheld,
                 "assumptions_withheld": self.redaction.assumptions_withheld,
@@ -329,6 +348,21 @@ class ReportBuilder:
         # everybody is its own defect.
         header_ok = (tlp_from_name(case_tlp) <= target
                      and case_compartments <= compartments)
+        # Every element reads at the STRICTER of its own label and its
+        # case's, and the union of their compartments, as the access gate
+        # and exhibit export compose them (`deps.effective_labels`, F19).
+        # evidence-report-case-raise-leak (2026-10-03): this builder chose
+        # by the element's own label, so after an AMBER case was raised to
+        # RED, everything created before the raise kept AMBER and went out
+        # in a TLP:AMBER release (exhibit titles, hashes, node labels) while
+        # exporting the same exhibit was refused as RED. `enforce_tlp_floor`
+        # keeps a new element at or above its case, and lowering a case is
+        # refused, so an element below its case's label predates a raise.
+        # Composed, every element of a case above the ceiling is above it
+        # too, which is exactly the header's condition: when the header is
+        # withheld, so is every element, and the mark below is taken from
+        # what is left.
+        elements_ok = header_ok
 
         # `target_tlp` is a CEILING on what may be included, not the mark the
         # document gets. The mark is derived below from what actually went
@@ -348,6 +382,19 @@ class ReportBuilder:
                                 as_of=None)
         sub = redacted.project(projection, limit=5000)
         withheld = redacted.withheld(projection)
+        if not elements_ok:
+            # Composed with the case, nothing in the projection is within
+            # the ceiling: what it returned joins what it already withheld,
+            # counted only where the case's setting counts (0030).
+            withheld = Withheld(
+                withheld.mode,
+                any_withheld=withheld.any_withheld or bool(sub.nodes or sub.edges),
+                nodes=(None if withheld.nodes is None
+                       else withheld.nodes + len(sub.nodes)),
+                edges=(None if withheld.edges is None
+                       else withheld.edges + len(sub.edges)))
+            sub = Subgraph(nodes=[], edges=[], projection=sub.projection,
+                           truncated=False)
 
         # The compartment filter mirrors the projection, which is built at
         # the requester's read-in. Without it the exhibit register was the
@@ -368,7 +415,8 @@ class ReportBuilder:
                 WHERE case_id = %s AND classification <= %s::core.tlp
                   AND compartments <@ %s
                 ORDER BY acquired_at, id""",
-            (case_id, target.name, sorted(compartments))).fetchall()
+            (case_id, target.name, sorted(compartments))).fetchall() \
+            if elements_ok else []
         # EVERY exhibit in the case, on a system connection, because the
         # difference from what was included is the withheld count the report
         # states; under row-level security the request connection counts only
@@ -426,20 +474,29 @@ class ReportBuilder:
         assumptions = register.for_report(case_id) if header_ok else []
         assumptions_withheld = 0 if header_ok else register.count_reportable(case_id)
 
+        # The exhibit figure follows the case's withheld-disclosure setting
+        # (0030): NONE says nothing, PRESENCE that some are above the
+        # ceiling, and only COUNT the number. It was stated exactly under
+        # all three (2026-10-07), so a case set to NONE
+        # had a register showing 0 beside a document saying "2 exhibits".
+        hidden_exhibits = evidence_total - len(evidence_rows)
         redaction = Redaction(
             built_at_tlp=marking.name, ceiling_tlp=target.name,
             case_tlp=case_tlp,
             nodes_withheld=withheld.nodes or 0,
             edges_withheld=withheld.edges or 0,
-            evidence_withheld=evidence_total - len(evidence_rows),
+            evidence_withheld=(hidden_exhibits
+                               if withheld.mode == DISCLOSURE_COUNT else 0),
+            evidence_some_withheld=(withheld.mode == DISCLOSURE_PRESENCE
+                                    and hidden_exhibits > 0),
             header_withheld=not header_ok,
             assumptions_withheld=assumptions_withheld,
             hypotheses_withheld=hypotheses_withheld,
             hypothesis_evidence_withheld=matrix.withheld,
         )
 
-        metrics = redacted.metrics(projection) if hasattr(
-            redacted, "metrics") else {}
+        metrics = redacted.metrics(projection) if (
+            elements_ok and hasattr(redacted, "metrics")) else {}
 
         actors = sorted(
             ({"id": str(n["id"]), "type": n["node_type"], "label": n["label"],
@@ -495,14 +552,18 @@ class ReportBuilder:
                 if header_ok and case[9] else None,
             },
             # The union of what actually went in: the case header when it
-            # is included, plus every exhibit's own. The projection's nodes
-            # and edges cannot contribute beyond the requester's read-in
-            # because `GraphService` filtered on it, and an exhibit is in
-            # the register for the same reason — so this is bounded by
+            # is included, plus every exhibit's, entity's and tie's own
+            # (2026-10-07: the last two were left out,
+            # so a compartmented entity left through `export` and `smtp`
+            # with its label in the document). The projection's nodes and
+            # edges cannot contribute beyond the requester's read-in because
+            # `GraphService` filtered on it, and an exhibit is in the
+            # register for the same reason, so this is bounded by
             # `compartments` and is the honest subset of it, not the whole.
             compartments=frozenset(
                 (case_compartments if header_ok else frozenset())
                 | {c for r in evidence_rows for c in (r[9] or [])}
+                | sub.compartments
                 | matrix.compartments),
             redaction=redaction,
             summary={
@@ -1004,7 +1065,10 @@ def render_markdown(report: Report) -> str:
         purged = e.get("purged_at")
         title = (f"{e['title']} **(PURGED {purged}: does not count as "
                  f"evidence)**" if purged else e["title"])
-        lines.append(f"| {title} | `{(e['sha256'] or '')[:32]}…` | "
+        # The whole digest: half of one cannot be checked against a digest
+        # recomputed from the exhibit, which is what the column is for
+        # (2026-10-07).
+        lines.append(f"| {title} | `{e['sha256'] or ''}` | "
                      f"{e['acquired_at']} | {e['acquisition_method']} |")
     if not d["evidence"]:
         lines.append("| _none at this classification_ | | | |")

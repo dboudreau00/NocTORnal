@@ -14,11 +14,14 @@
 # infra/docker-compose.yml: `docker compose down -v`).
 #
 # A shell script rather than .sql because the password arrives as an
-# environment variable and psql -f cannot read the environment. It is passed as
-# a psql VARIABLE (`--set` + `:'apppw'`), never pasted into SQL text assembled
-# here: psql renders the variable as a correctly escaped literal, so a password
-# containing a quote or a backslash is a password, not a syntax error or an
-# injection.
+# environment variable and psql -f cannot read the environment. It is read by
+# psql ITSELF into a psql VARIABLE (`\getenv` + `:'apppw'`), never pasted into
+# SQL text assembled here: psql renders the variable as a correctly escaped
+# literal, so a password containing a quote or a backslash is a password, not
+# a syntax error or an injection. And it is not passed with `--set` (infra-10,
+# 2026-10-03): that put every role password on psql's command line, where any
+# local user on the Docker host reads it from the process list for as long as
+# the process runs. `\getenv` needs psql 15 or later; the image is 16.
 #
 # NOT executable, deliberately. The postgres entrypoint runs an executable
 # `*.sh` and SOURCES a non-executable one, and this repository is authored on
@@ -34,11 +37,17 @@
 # so errexit is already on and re-stating it changes nothing there while
 # keeping this file honest if somebody runs it by hand.
 #
-# Doing nothing is a supported outcome. Without NOCTORNAL_APP_DB_PASSWORD there
-# is no app role, the deployment connects as the owner, and every existing dev
-# stack behaves exactly as it did before this file existed. That is the case on
-# every developer machine and in CI, and it must stay silent-but-stated rather
-# than fatal.
+# Doing nothing is a supported outcome for DEVELOPMENT. Without
+# NOCTORNAL_APP_DB_PASSWORD there is no app role, a development stack connects
+# as the owner, and every existing dev stack behaves exactly as it did before
+# this file existed. That is the case on every developer machine and in CI, and
+# it must stay stated rather than fatal, because this script cannot tell a
+# development volume from a production one. PRODUCTION is not that: since
+# 2026-10-03 (infra-4) a production process whose DATABASE_URL names the owner
+# or a superuser refuses to start, so a production volume initialised without
+# the password has no usable runtime role until one is made (2026-10-03: this text and the
+# message below used to call connecting as the
+# owner a silent, supported state).
 
 set -e
 
@@ -47,18 +56,21 @@ _NOC_SUPERUSER="${POSTGRES_USER:-postgres}"
 
 if [ -z "${NOCTORNAL_APP_DB_PASSWORD:-}" ]; then
 	echo "10-app-role: NOCTORNAL_APP_DB_PASSWORD is not set, so no least-privilege"
-	echo "10-app-role: role was created. This deployment will connect as the owner"
-	echo "10-app-role: ${_NOC_SUPERUSER}, which is what a development stack does."
-	echo "10-app-role: Set the variable (infra/production/secrets.env) and initialise"
-	echo "10-app-role: a FRESH volume to get one -- initdb scripts never re-run."
+	echo "10-app-role: role was created. A development stack connects as the owner"
+	echo "10-app-role: ${_NOC_SUPERUSER} and needs none. A production deployment refuses to"
+	echo "10-app-role: start on the owner. Set the variable (infra/production/secrets.env)"
+	echo "10-app-role: and initialise a FRESH volume, or on this one run"
+	echo "10-app-role: python scripts/runtime_roles.py ensure --production and give the"
+	echo "10-app-role: role a password (infra/production/README.md, step 2). initdb"
+	echo "10-app-role: scripts never re-run."
 else
 	echo "10-app-role: creating the least-privilege role noctornal_app."
 
 	psql -v ON_ERROR_STOP=1 --no-psqlrc \
 		--username "${_NOC_SUPERUSER}" \
 		--dbname "${_NOC_DB}" \
-		--set=dbname="${_NOC_DB}" \
-		--set=apppw="${NOCTORNAL_APP_DB_PASSWORD}" <<-'EOSQL'
+		--set=dbname="${_NOC_DB}" <<-'EOSQL'
+		\getenv apppw NOCTORNAL_APP_DB_PASSWORD
 		-- The password is about to travel through a statement. Postgres logs
 		-- statement text when log_statement is ddl/all, and logs it anyway if
 		-- the statement outruns log_min_duration_statement (the dev stack sets
@@ -143,8 +155,8 @@ else
 	psql -v ON_ERROR_STOP=1 --no-psqlrc \
 		--username "${_NOC_SUPERUSER}" \
 		--dbname "${_NOC_DB}" \
-		--set=dbname="${_NOC_DB}" \
-		--set=workerpw="${NOCTORNAL_WORKER_DB_PASSWORD}" <<-'EOSQL'
+		--set=dbname="${_NOC_DB}" <<-'EOSQL'
+		\getenv workerpw NOCTORNAL_WORKER_DB_PASSWORD
 		SET log_statement = 'none';
 		SET log_min_duration_statement = -1;
 

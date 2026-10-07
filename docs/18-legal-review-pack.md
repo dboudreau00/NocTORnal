@@ -9,6 +9,14 @@ consequence of each, and a place to write the answer.
 Nothing here is legal advice. It is the list of questions, the facts each
 one turns on, and what the software currently does while it waits.
 
+**Legal review is required before any active case load**, and the material
+this platform holds is dangerous to hold: possession can be an offence, the
+victims in stealer and breach data are people who are not suspects, and the
+store is itself a target. The reasons are listed at the top of
+[docs/16](16-legal-and-external.md#read-this-before-you-hold-anything).
+Until Section A is answered in writing, load synthetic data or published
+reporting with no personal data only.
+
 ## How to use it
 
 1. **Section A** must be answered before the platform processes real
@@ -54,7 +62,7 @@ pressure.
 | | |
 |---|---|
 | **Capability blocked** | Nothing. The collector will drive an account into a forum on request. |
-| **What the software does** | Encrypts persona credentials so they are decrypted only inside `PersonaVault.use()` in the API process, as there is no separate collector (invariant 7), refuses every forum and Telegram read that no collection authority covers, recorded by one person and confirmed by another (a PUBLIC_READ or MEMBER_READ scope, and no active scope because nothing in it posts, messages or purchases; an earlier copy of this pack said it distinguished passive from active engagement through a flag that never existed, corrected 2026-09-24), jitters polling and rate-limits per source so a persona is not trivially identifiable in an access log. In production every persona connection leaves through the egress proxy, on the exit the persona's profile names, only for a live run, act or logout and only to the site of a source the authority covers, and every connection is recorded (docs/20; the exit providers are B12). It asserts nothing about authority. |
+| **What the software does** | Encrypts persona credentials so they are decrypted only inside `PersonaVault.use()`, in production in the collector process alone, the one service that holds the persona key (invariant 7, 2026-10-02), refuses every forum and Telegram read that no collection authority covers, recorded by one person and confirmed by another (a PUBLIC_READ or MEMBER_READ scope, and no active scope because nothing in it posts, messages or purchases; an earlier copy of this pack said it distinguished passive from active engagement through a flag that never existed, corrected 2026-09-24), jitters polling and rate-limits per source so a persona is not trivially identifiable in an access log. In production every persona connection leaves through the egress proxy, on the exit the persona's profile names, only for a live run, act or logout and only to the site of a source the authority covers, and every connection is recorded (docs/20; the exit providers are B12). It asserts nothing about authority. |
 | **Decide** | (1) Authority to operate a covert persona against each target, per jurisdiction, in several, using credentials registered under a false identity engages computer-misuse law regardless of intent. (2) Whether passive and active collection are separately authorised. (3) Entrapment / agent-provocateur exposure for active engagement. (4) Terms-of-service breach as a risk independent of criminal exposure. (5) Whether the collector may present a browser user-agent; it currently identifies itself honestly as `NocTORnal-collector/1`, which is a choice with a legal dimension either way. |
 | **If unanswered** | Every poll is an unreviewed act. |
 | **Determination** | |

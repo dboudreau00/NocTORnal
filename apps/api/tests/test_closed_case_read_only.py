@@ -51,6 +51,8 @@ CONTENT = {
     ("POST", "/cases/{case_id}/nodes/{node_id}/assertions"),
     ("POST", "/cases/{case_id}/edges/{edge_id}/assertions"),
     ("POST", "/cases/{case_id}/assertions/{assertion_id}/retract"),
+    # Dating a claim that never had a date, by supersession (2026-10-02).
+    ("POST", "/cases/{case_id}/assertions/{assertion_id}/supersede"),
     ("PATCH", "/cases/{case_id}/graph/nodes/{node_id}"),
     ("PATCH", "/cases/{case_id}/graph/edges/{edge_id}"),
     ("DELETE", "/cases/{case_id}/graph/nodes/{node_id}"),
@@ -185,6 +187,10 @@ NOT_CONTENT = {
         "cancelling queued sends sends nothing",
     ("PUT", "/cases/{case_id}/notify-routing"):
         "keeping a case out of Jira: governance, and wanted most on a closed case",
+    # evidence-case-hold-unreachable (2026-10-03).
+    ("POST", "/retention/cases/{case_id}/legal-hold"):
+        "a hold on everything a case governs: preservation does not wait for "
+        "a reopening, and is wanted most on a closed case",
 }
 
 #: Gated on the REQUESTED operation's own verb (`approvals.OPERATIONS`): a
@@ -569,7 +575,7 @@ CONSOLE_CONTENT = {
     # Its one caller drops a read-only case's placements first.
     "saveLayoutOnLeave": [("guard", "leaveLayout")],
     # Unsaved placements, stored before a status change shuts the case
-    # (u10, 2026-09-24); it asks whether the case is still open first.
+    # (2026-09-24); it asks whether the case is still open first.
     "saveLayoutBeforeShut": [("guard", "saveLayoutBeforeShut")],
     "uploadEvidence": [("id", "ev-form", "ev-form")],
     "renderTags": [("drawn", ".tag-x", "renderTags", "'tag-x'"),
@@ -578,6 +584,10 @@ CONSOLE_CONTENT = {
                            ("id", "insp-actions", "btn-retire-element")],
     "retractAssertion": [("drawn", ".assert-actions", "renderAssertions",
                           "'assert-actions'")],
+    # Date this claim sits beside Retract in the same actions row and is
+    # turned off with it (2026-10-02).
+    "openDateClaimForm": [("drawn", ".assert-actions", "renderAssertions",
+                           "'assert-actions'")],
     "addTieClaim": [("id", "insp-claim", "claim-form")],
     # Correct... opens this form from #insp-actions; the form itself is
     # listed too, so one left open when the case closes is turned off.
@@ -621,7 +631,7 @@ CONSOLE_CONTENT = {
     "saveStance": [("drawn", ".ach-cell-btn", "renderAchMatrix", "'ach-cell-btn'"),
                    ("id", "ach-score-card", "ach-evidence-add"),
                    # The next-test line's shortcut to the first blank cell
-                   # (u15, 2026-09-24: live beside cells that were off).
+                   # (2026-09-24: live beside cells that were off).
                    ("drawn", ".case-write", "renderAchRanking",
                     "el('button', 'btn small ach-next-go case-write', "
                     "'Score it now')")],
@@ -662,7 +672,7 @@ CONSOLE_CONTENT = {
     "dcpProposeBar": [("drawn", ".case-write", "dcpProposeBar",
                        "el('button', 'btn small case-write', 'Propose')")],
     # The Feeds queue's triage verbs on a record in the case's own queue
-    # (u3, 2026-09-24): live under the strip, refused with the 409. A
+    # (2026-09-24): live under the strip, refused with the 409. A
     # quarantined record belongs to no case and its row stays live.
     "applyTriage": [
         ("drawn", ".case-write", "ingestRow",
@@ -706,7 +716,7 @@ CONSOLE_GOVERNANCE = {
     "submitShare": "sharing",
     "runNodeCheck": "a read sent as POST so the label stays out of the URL",
     # A record's score is derived from the case's watches, not content, and
-    # the server recomputes it on a closed case too (u3, 2026-09-24).
+    # the server recomputes it on a closed case too (2026-09-24).
     "rescoreRecord": "a derived score, recomputed on a closed case too",
     "rescoreAll": "the same, for every record in the case's queue",
     # F9b (2026-09-24): the case's merge switch is the approval
@@ -731,8 +741,7 @@ def _console_case_writes() -> dict[str, set[int]]:
     with an unsafe method whose path is one case's (`cpath(` or
     '/cases/' + ...), or a Feeds record's, which belongs to one case
     ('/ingest/records/...'). The record writers were never scanned, so the
-    triage and category verbs stayed live on a closed case (u3,
-    2026-09-24)."""
+    triage and category verbs stayed live on a closed case (2026-09-24)."""
     js = _js()
     starts = [(m.start(), m.group(1)) for m in
               re.finditer(r"(?m)^(?:async )?function (\w+)\(", js)]
@@ -1133,7 +1142,7 @@ console.log(JSON.stringify({ closed: closed, open: { offered: offered, value: bo
 
 @needs_node
 def test_attach_offers_no_read_only_case(tmp_path):
-    """u3 (2026-09-24): the picker compared the status with CLOSED and
+    """2026-09-24: the picker compared the status with CLOSED and
     ARCHIVED, so a PURGED case was offered and then refused. It reads each
     case's own `read_only` now, and the status only for a record without
     it."""

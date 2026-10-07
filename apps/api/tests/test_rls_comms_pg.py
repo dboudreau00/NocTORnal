@@ -10,8 +10,9 @@ by a real session's proof, with the fixtures seeded as the owner:
 - minimisation drops EVERY body of the conversation, a message above the
   minimiser included, and reports that count (docs/16 L4); as the request
   role it dropped the bodies the minimiser could read and called it done;
-- the incidental flag lands on a conversation above the flagger, which the
-  case gate allowed and the request role could not even find;
+- the incidental flag is refused, as a missing conversation is, on a
+  conversation above the flagger (it landed there until 2026-10-07, when
+  the route gained the conversation's own label gate, A3);
 - Triage reads a proposal parsed from a RED contact block as RED to an
   AMBER reader, through the fact, never as the case's label;
 - nothing calls a row-security helper per row.
@@ -127,19 +128,29 @@ def test_minimisation_drops_every_body_the_minimiser_could_not_read_too(owner, c
                           "WHERE conversation_id = %s AND body IS NOT NULL", (conv,)) == 0
 
 
-def test_the_incidental_flag_lands_on_a_conversation_above_the_flagger(owner, client):
+def test_the_incidental_flag_does_not_land_on_a_conversation_above_the_flagger(owner, client):
+    """This asserted the flag LANDING (200) on a RED conversation for an AMBER
+    analyst, which told a flagger of a conversation they cannot read from one
+    that does not exist (a random id answered 404) and let them write to it
+    (verification round three, A3, 2026-10-07). It is now the missing
+    conversation's 404 and nothing is written; a reader of the conversation
+    still flags it."""
     analyst = s.user(owner, "AMBER", prefix=PREFIX)
     boss = s.user(owner, "RED", prefix=PREFIX)
     case_id = s.case(owner, boss)
     s.assign(owner, case_id, analyst)
+    s.assign(owner, case_id, boss, "CASE_OWNER")
     conv = _conversation(owner, case_id, "RED")
-    r = client.post(f"/api/v1/cases/{case_id}/comms/conversations/{conv}/incidental",
-                    headers=_auth(owner, analyst), json={"handle": "@member1"})
+    url = f"/api/v1/cases/{case_id}/comms/conversations/{conv}/incidental"
+    r = client.post(url, headers=_auth(owner, analyst), json={"handle": "@member1"})
+    assert r.status_code == 404, r.text
+    assert r.json()["detail"] == "no such conversation in this case"
+    flag = ("SELECT is_incidental FROM comms.participant WHERE conversation_id = %s "
+            "AND observed_handle = '@member1'")
+    assert owner.execute(flag, (conv,)).fetchone()[0] is False
+    r = client.post(url, headers=_auth(owner, boss), json={"handle": "@member1"})
     assert r.status_code == 200, r.text
-    flagged = owner.execute(
-        "SELECT is_incidental FROM comms.participant WHERE conversation_id = %s "
-        "AND observed_handle = '@member1'", (conv,)).fetchone()[0]
-    assert flagged is True
+    assert owner.execute(flag, (conv,)).fetchone()[0] is True
 
 
 def test_a_proposal_from_a_red_contact_block_reads_red(owner):

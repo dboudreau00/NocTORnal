@@ -1,6 +1,6 @@
 """A real purge destroys what its dry run counted, or nothing (pure half).
 
-Final review U20, 2026-09-23. The HTTP half, with a real database and a
+2026-09-23. The HTTP half, with a real database and a
 hold lifted between the count and the confirmation, is
 `test_purge_preview_binding_pg.py`. These need no database: the digest
 itself, and the route handler driven with a stand-in purger, so they run
@@ -72,6 +72,11 @@ def route(monkeypatch):
     # 2026-09-23 (ux15-report:due-list-no-forward-view-no-names); this half
     # has none, and the list is proven in test_retention_due_named_pg.py.
     monkeypatch.setattr(governance, "_due_rows", lambda conn, user, items: [])
+    # And leaves out exhibits above the caller since 2026-10-03
+    # (evidence-due-leaks-hold-reason): a database read as well, proven in
+    # test_g44_http_pg.py.
+    monkeypatch.setattr(governance, "_visible_due",
+                        lambda conn, user, items, scope: (list(items), []))
     user = governance.CurrentUser(user_id=UUID(int=7), session_id=UUID(int=8),
                                   session_mfa_at=AT)
 

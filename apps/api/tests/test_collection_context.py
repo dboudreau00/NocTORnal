@@ -540,3 +540,24 @@ def test_item_validation():
     assert naive and clean.posted_at is None, "a naive time is never guessed"
     rss_like = Adapter(requires_authority=False)
     assert _validate(Item(external_id="123"), rss_like)[0].external_id == "123"
+
+
+@pytest.mark.parametrize("method", ["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "get", ""])
+def test_a_method_the_seam_does_not_allow_is_refused_before_anything_is_sent(method):
+    """2026-10-03: the seam took any pinned_http method for
+    every adapter, so only a regex over one module held "nothing posts,
+    replies, reacts, messages or buys"."""
+    fetcher = Fetcher()
+    ctx = _context(fetcher)
+    with ctx, pytest.raises(ValueError, match="GET or a POST"):
+        ctx.fetch("/threads/1/", method=method)
+    assert fetcher.calls == []
+
+
+def test_a_get_and_a_post_still_go_through_the_seam():
+    fetcher = Fetcher()
+    ctx = _context(fetcher)
+    with ctx:
+        ctx.fetch("/threads/1/")
+        ctx.fetch("/login/login", method="POST", body=b"a=b")
+    assert [c[1].get("method", "GET") for c in fetcher.calls] == ["GET", "POST"]

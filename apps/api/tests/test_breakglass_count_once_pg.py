@@ -255,9 +255,15 @@ def test_on_a_case_above_clearance_each_request_is_one_use(conn, client):
                  f"{case}/curation/tags/{tag.json()['id']}/nodes", auth, 201,
                  json={"node_id": str(node)}) == 1
 
+    # A merge request names two real entities of the case the requester may
+    # merge (beta review http_ui-011, 2026-10-03); the case's gate counted the
+    # use and the entities' gates, which follow it, count none more.
+    other = _node(conn, case_id, owner, "bco_red_other", "RED")
     assert _uses(conn, client, gid, "POST", f"{case}/approvals", auth, 201,
                  json={"operation": "node.merge",
-                       "payload": {"survivor": str(node), "loser": str(uuid4())},
+                       "payload": {"source_node_id": str(node),
+                                   "target_node_id": str(other),
+                                   "reason": "same handle", "basis_selector_id": None},
                        "justification": "the same actor under two handles"}) == 1
     # The one use row names the case gate's verb (case.read); the operation
     # is the request's own audit event, by the same actor on the same case
@@ -321,16 +327,18 @@ def test_a_second_gate_refusal_keeps_the_case_gates_use(conn, client):
     """The one request `counted_at_case_gate` leaves counted although it
     was refused, pinned so it is a decision and not a surprise. A GREEN
     analyst on an AMBER case under an AMBER grant asks for a RED exhibit:
-    the grant let the request past the case's gate (and so tells an
-    exhibit that exists from one that does not), and the exhibit's gate
-    refuses. One use, not two, and not none."""
+    the grant let the request past the case's gate, and the exhibit's gate
+    refuses. One use, not two, and not none. The refusal answers as a
+    missing exhibit does, so the
+    status no longer tells the two apart; the count still does, to the
+    officer reviewing the grant, which is what it is for."""
     owner, case_id, auth, _officer = _setting(
         conn, client, clearance="GREEN", case_level="AMBER")
     stricter = _exhibit(conn, case_id, owner, "RED")
     gid = _grant(client, auth, case_id, "AMBER")
     case = f"/api/v1/cases/{case_id}"
     assert _uses(conn, client, gid, "GET",
-                 f"{case}/evidence/{stricter}/custody", auth, 403) == 1
+                 f"{case}/evidence/{stricter}/custody", auth, 404) == 1
     assert _uses(conn, client, gid, "GET",
                  f"{case}/evidence/{uuid4()}/custody", auth, 404) == 1
 

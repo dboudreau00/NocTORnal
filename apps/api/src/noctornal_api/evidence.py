@@ -4,7 +4,13 @@ Prosecution-grade (decision 13, US + Canada). The load-bearing properties:
 
 - The SHA-256 is computed from the ORIGINAL bytes at ingest and stored;
   integrity verification re-reads from the object store and recomputes,
-  never trusting a mutated copy.
+  never trusting a mutated copy. The row's hashes, size, case and stored
+  object cannot be rewritten by any role once lodged (0140), the exhibit
+  names the object VERSION it was lodged as (0139) and is read at exactly
+  that version, and verification also compares the hash-chained ACQUIRED
+  custody row, so substituting an object and rewriting the row to match
+  is detected (review finding evidence-integrity-anchors-mutable,
+  2026-10-03).
 - Bytes land in a MinIO bucket with object-lock retention (WORM), so the
   exhibit cannot be altered or deleted before its retention expires — the
   API process included.
@@ -38,7 +44,7 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import blake3 as _blake3
 import psycopg
@@ -141,6 +147,20 @@ def lock_short_before(case_retention: date | None,
 # of the rule is how the copies drift, and the one that drifts is the leak.
 # Kept as a name here only so existing importers keep working.
 _NO_EGRESS = frozenset(t.name for t in NEVER_EGRESS)
+
+
+def own_key(plain: str, evidence_id: UUID) -> str:
+    """The storage key of an exhibit whose bytes another exhibit already
+    holds under `plain`: beside it, never under it.
+
+    2026-10-07. It was `plain/evidence_id`, and MinIO does not list an
+    object whose name continues another object's name past a "/": measured
+    against the dev store, a versioned listing of that key returns nothing
+    while the object is served by version id. Both `delete_all_versions` and
+    `extend_lock` find versions by listing, so every such exhibit was
+    reported by the purge as having no object, stayed due for ever with its
+    bytes kept, and could not have its lock lengthened."""
+    return f"{plain}.{evidence_id}"
 
 
 def _sha256(data: bytes) -> bytes:
@@ -284,16 +304,21 @@ class EvidenceStorage:
     def bucket(self) -> str:
         return self._bucket
 
-    def put(self, key: str, data: bytes, *, media_type: str, retain_until: datetime) -> None:
+    def put(self, key: str, data: bytes, *, media_type: str,
+            retain_until: datetime) -> str | None:
         # COMPLIANCE (not GOVERNANCE) object lock: not even a root MinIO
         # principal can delete or overwrite the exhibit before retain_until,
         # so the WORM guarantee holds against the API's own credentials.
         # (GOVERNANCE is bypassable by anyone with BypassGovernanceRetention.)
-        self._client.put_object(
+        result = self._client.put_object(
             self._bucket, key, io.BytesIO(data), length=len(data),
             content_type=media_type,
             retention=Retention(COMPLIANCE, retain_until),
         )
+        # The version the store kept, so reads ask for exactly it: a locked
+        # key still accepts a newer version, and the latest is whatever was
+        # written last (evidence-integrity-anchors-mutable, 2026-10-03).
+        return getattr(result, "version_id", None)
 
     def delete(self, key: str) -> None:
         """Keyless delete. On this bucket it destroys NOTHING — read on.
@@ -465,8 +490,8 @@ class EvidenceStorage:
             key=key, versions_seen=len(versions),
             versions_removed=removed, versions_locked=locked)
 
-    def get(self, key: str) -> bytes:
-        resp = self._client.get_object(self._bucket, key)
+    def get(self, key: str, version_id: str | None = None) -> bytes:
+        resp = self._client.get_object(self._bucket, key, version_id=version_id)
         try:
             return resp.read()
         finally:
@@ -550,7 +575,44 @@ class IntegrityError(EvidenceError):
     paths fail closed on this rather than serving the mismatched bytes."""
 
 
+class ExhibitUnavailable(EvidenceError):
+    """The exhibit's bytes cannot be read, and it is not tampering:
+    retention destroyed them, or a purge is destroying them now. Raised
+    before anything is recorded against the exhibit, because a destroyed
+    exhibit has no integrity to fail and the custody and audit ledgers are
+    court-facing and append-only (verify-destroyed-exhibit, 2026-10-03).
+    The router answers 409 with the sentence."""
+
+
 log = logging.getLogger("noctornal.evidence")
+
+#: What an object store answers when nothing is at the key or the version.
+_MISSING_CODES = frozenset({"NoSuchKey", "NoSuchVersion", "NoSuchObject"})
+
+
+def _object_missing(exc: BaseException) -> bool:
+    """The store holds nothing at an exhibit's key or version: a concealed or
+    destroyed object, which is a tamper alarm and not a 500
+    (evidence-integrity-anchors-mutable, 2026-10-03). A store that did not
+    answer at all is not this, and is raised as it was. The test doubles
+    raise KeyError for a key they never held."""
+    if getattr(exc, "code", None) in _MISSING_CODES:
+        return True
+    return isinstance(exc, (KeyError, FileNotFoundError))
+
+
+def _refuse_unstorable(**fields: str | None) -> None:
+    """Refuse text the exhibit's row cannot hold, before a byte is locked.
+
+    A NUL character is refused by every text column, and the refusal used to
+    arrive at the INSERT, after the object was already in the bucket under a
+    COMPLIANCE lock nobody can shorten: a 500 and a permanent object no row
+    names (http_ui-003, evidence-orphan-locked-object, 2026-10-03)."""
+    for name, value in fields.items():
+        if value is not None and "\x00" in value:
+            raise EvidenceError(
+                f"the {name.replace('_', ' ')} contains a NUL character, which "
+                f"cannot be recorded. Nothing was stored.")
 
 #: The purpose a ticket naming an exhibit carries (0068). The Lab's two are
 #: `samples.TICKET_DOWNLOAD` and `samples.TICKET_RETRIEVAL`; the table
@@ -588,6 +650,16 @@ NOT_HOSTILE_DETAIL = (
 PURGED_DETAIL = (
     "this exhibit was purged under the case's retention: its bytes are gone, "
     "and its record, digest and custody are all that remain.")
+
+#: Why an exhibit whose object is missing is not called tampered with yet: a
+#: purge holds its row while it deletes the object, and the row says so only
+#: when the purge commits. Said instead of an alarm, and instead of a wait.
+BEING_DESTROYED_DETAIL = (
+    "this exhibit's object cannot be read just now and its record is being "
+    "changed by another operation, most likely a retention purge destroying "
+    "it. Nothing was recorded against it. Ask again in a moment: if it was "
+    "destroyed this will say so, and an object that is still missing then is "
+    "raised as an integrity alarm.")
 
 _PRODUCTION_REFUSED = (
     "this production ticket is not valid: it has been used, it has expired, "
@@ -660,8 +732,14 @@ class EvidenceService:
         retain_until: datetime | None = None,
         is_hostile_markup: bool | None = None,
         authority_ref: str | None = None,
+        reader_ceiling: tuple | None = None,
     ) -> IngestResult:
         """Store bytes as an exhibit.
+
+        `reader_ceiling` is the uploader's (clearance, compartments) on this
+        case (2026-10-03, rls-4): an existing exhibit of the same bytes is
+        reused only when it is within it. Left out, the connection's own view
+        decides, which on a request connection is row security's answer.
 
         `is_hostile_markup` (migration 0046, docs/19) marks attacker-authored
         markup — a captured phishing DOM, a HAR, a `.eml`. Left as None it
@@ -681,6 +759,16 @@ class EvidenceService:
         """
         from noctornal_api.deception import is_hostile_media_type
 
+        # Everything the row would refuse is refused before anything is
+        # stored (http_ui-003, evidence-orphan-locked-object, 2026-10-03).
+        _refuse_unstorable(title=title, description=description,
+                           source_url=source_url, authority_ref=authority_ref,
+                           acquisition_method=acquisition_method,
+                           media_type=media_type)
+        self._refuse_below_case_floor(case_id, classification)
+        # One spelling per set, so the per-labels unique key (0141) treats a
+        # set as a set.
+        compartments = sorted(set(compartments or []))
         if is_hostile_markup is None:
             is_hostile_markup = is_hostile_media_type(media_type)
         digest = _sha256(data)
@@ -689,8 +777,10 @@ class EvidenceService:
         # acquired_at, when the caller gives none, is stamped by the
         # DATABASE inside the INSERT below: COALESCE(..., now()) in the same
         # transaction as the ACQUIRED custody row, whose occurred_at the
-        # custody trigger pins to now() (migration 0024). Both are then the
-        # one transaction timestamp. Until 2026-09-23 it was self._now(),
+        # custody trigger pins to the clock at its append (migration 0149,
+        # 2026-10-03; it was now(), 0024). So acquired_at is the start of
+        # the transaction and the ACQUIRED row a few milliseconds later,
+        # never earlier. Until 2026-09-23 it was self._now(),
         # the API host's clock, read before the object store put: a
         # database clock behind the host showed an exhibit "acquired" a
         # minute AFTER its own ACQUIRED, VIEWED and HASH_VERIFIED rows
@@ -709,80 +799,290 @@ class EvidenceService:
         if authority_ref:
             provenance["authority_ref"] = authority_ref
 
-        # Dedup within the case (UNIQUE(case_id, sha256)): identical bytes
-        # are one exhibit. Every ingest attempt — including a deduplicated
-        # re-acquisition — leaves a custody trail; the caller's authority to
-        # SEE the existing exhibit is the endpoint's access-gate decision
-        # (this layer is below it).
-        existing = self._c.execute(
-            "SELECT id FROM core.evidence WHERE case_id = %s AND sha256 = %s",
-            (case_id, digest),
-        ).fetchone()
+        # Dedup within the case: identical bytes are one exhibit, among the
+        # exhibits THIS uploader may see. Every ingest attempt, a
+        # deduplicated re-acquisition included, leaves a custody trail.
+        #
+        # rls-4 and evidence-ingest-dedup-oracle (2026-10-03): the lookup
+        # ran on the uploader's own connection, so under row security an
+        # exhibit above them was invisible to it; the bytes were then put as
+        # a new locked version under THAT exhibit's key, the INSERT hit the
+        # old UNIQUE (case_id, sha256), and the retry indexed a None row: a
+        # 500 against a 201, a one-bit oracle on the content of a hidden
+        # exhibit and an undeletable version on its object per probe. Now
+        # every exhibit of these bytes is read on a system connection, one
+        # the uploader may see is reused, and otherwise the upload is a new
+        # exhibit at the uploader's labels with an object of its own (0141),
+        # indistinguishable from novel bytes. A purged exhibit is never
+        # reused (evidence-reingest-after-purge-dropped, same date): its
+        # bytes are gone, so lodging them again stores them again.
+        # Nor is one at other labels than the ones asked for (2026-10-07): AMBER bytes and
+        # then the same bytes as
+        # RED used to answer `deduplicated` with the AMBER exhibit, and the
+        # RED request was dropped without a word. One live exhibit per
+        # labels is what 0141 keeps.
+        existing, keys_taken = self._existing_for(
+            case_id, digest, reader_ceiling, classification, compartments)
         if existing is not None:
-            with self._c.transaction():
-                self._custody(existing[0], "ACQUIRED", acquired_by,
-                              detail={"sha256": shahex, "deduplicated": True,
-                                      **provenance})
-                self._audit("EVIDENCE_REACQUIRED", acquired_by, existing[0], case_id,
-                            {"sha256": shahex})
-            return IngestResult(existing[0], shahex, deduplicated=True)
+            return self._reacquired(existing, case_id, shahex, acquired_by,
+                                    provenance)
 
+        evidence_id = uuid4()
         storage_key = f"{case_id}/{shahex}"
-        self._s.put(storage_key, data, media_type=media_type, retain_until=retain)
-        # Read-back verify: confirm the object landed byte-exact before we
-        # commit a row that claims it did (catches a store-side short-write).
-        if _sha256(self._s.get(storage_key)) != digest:
-            raise IntegrityError(f"stored object {storage_key} does not match its hash")
+        if storage_key in keys_taken:
+            # Another exhibit of these bytes (above this uploader, or
+            # destroyed) owns the plain key; this one gets its own, so no
+            # upload ever adds a version to another exhibit's object.
+            storage_key = own_key(storage_key, evidence_id)
 
+        # The ROW first, the object second, one transaction (http_ui-003,
+        # evidence-orphan-locked-object, 2026-10-03). The object used to be
+        # put before the INSERT, so anything the INSERT refused (a floor
+        # trigger, row security, a NUL) left a COMPLIANCE-locked object no
+        # row, custody entry or audit row names, that nobody can delete. Now
+        # the INSERT runs its triggers and checks first and a failed put
+        # rolls it back. The custody and audit rows come AFTER the put: each
+        # takes its chain's global lock to COMMIT, and a slow put must not
+        # hold every audited write in the deployment behind it.
+        # Two attempts at most: the second only after the first lost a race
+        # for the plain key to a concurrent upload of the same bytes at
+        # labels this uploader cannot see, and it takes a key of its own.
+        for attempt in (1, 2):
+            put_sent = False
+            try:
+                with self._c.transaction():
+                    self._c.execute(
+                        """INSERT INTO core.evidence
+                               (id, case_id, title, description, media_type, byte_size,
+                                sha256, blake3, storage_key, storage_bucket, is_worm_locked,
+                                acquired_at, acquired_by, acquisition_method, source_url,
+                                classification, compartments, retention_until,
+                                is_hostile_markup)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,true,
+                                   COALESCE(%s::timestamptz, now()),
+                                   %s,%s,%s,%s,%s,%s,%s)""",
+                        (evidence_id, case_id, title, description, media_type,
+                         len(data), digest, blake, storage_key, self._s.bucket,
+                         acquired, acquired_by, acquisition_method, source_url,
+                         classification, compartments, retain.date(),
+                         is_hostile_markup),
+                    )
+                    put_sent = True
+                    version = self._s.put(storage_key, data, media_type=media_type,
+                                          retain_until=retain)
+                    # Read-back verify, of the version just written: confirm the
+                    # object landed byte-exact before committing a row that says
+                    # it did (catches a store-side short-write).
+                    if _sha256(self._read(storage_key, version)) != digest:
+                        raise IntegrityError(
+                            f"stored object {storage_key} does not match its hash")
+                    if version:
+                        self._c.execute(
+                            "UPDATE core.evidence SET storage_version_id = %s "
+                            "WHERE id = %s", (version, evidence_id))
+                    # hash_verified=True because the read-back above has just
+                    # confirmed the STORED object hashes to the digest recorded
+                    # here. Until 2026-09-22 this row said NULL, which the
+                    # custody view rendered as "hash not checked" on every clean
+                    # acquisition: a lapse in custody that never happened, on
+                    # the record that goes to court (ux07 custody-failed-hash-
+                    # shown-as-not-checked). The deduplicated branch above stays
+                    # NULL: it stored nothing and read nothing back.
+                    # The lock's exact end, which `retention_until` (a date)
+                    # cannot carry: the store's COMPLIANCE lock ends at this
+                    # instant, part way through that day, and a register that
+                    # counted the whole day overstated the storage guarantee by
+                    # up to 24 hours (ux07-evidence:worm-chip-outlives-lock,
+                    # verifier, 2026-09-23). Only on the original row: a
+                    # deduplicated re-acquisition stores nothing and locks
+                    # nothing.
+                    detail = {"sha256": shahex, "bytes": len(data),
+                              "lock_ends_at": retain.isoformat(), **provenance}
+                    if version:
+                        detail["storage_version_id"] = version
+                    self._custody(evidence_id, "ACQUIRED", acquired_by,
+                                  detail=detail, hash_verified=True)
+                    self._audit("EVIDENCE_ACQUIRED", acquired_by, evidence_id, case_id,
+                                {"sha256": shahex})
+                return IngestResult(evidence_id, shahex, deduplicated=False)
+            except psycopg.errors.UniqueViolation as exc:
+                # Raised by the INSERT, so nothing was put. A concurrent upload
+                # of the same bytes at the same labels won the race; that
+                # exhibit is at this uploader's labels, so it is theirs to
+                # reuse. Never an index into a row this connection cannot see
+                # (rls-4, 2026-10-03): one that cannot be found is a lost
+                # race for the plain key to an upload this uploader may not
+                # see, so the second attempt takes a key of its own and
+                # answers exactly as a novel upload does.
+                if put_sent:
+                    # A unique index refused something AFTER the put (the
+                    # custody or audit append, the version update, the commit):
+                    # raised from inside this handler, so the sibling below
+                    # never sees it, and the locked object would be named by
+                    # nothing (unique-after-put, 2026-10-03).
+                    self._record_orphan(evidence_id, case_id, storage_key,
+                                        shahex, acquired_by, exc)
+                    raise
+                existing, _keys = self._existing_for(
+                    case_id, digest, reader_ceiling, classification, compartments)
+                if existing is not None:
+                    return self._reacquired(existing, case_id, shahex, acquired_by,
+                                            provenance)
+                if attempt == 1:
+                    storage_key = own_key(f"{case_id}/{shahex}", evidence_id)
+                    continue
+                raise EvidenceError(
+                    "this exhibit could not be lodged because another upload "
+                    "of the same file was being lodged at the same moment. "
+                    "Nothing was stored; try again.") from None
+            except Exception as exc:
+                if put_sent:
+                    self._record_orphan(evidence_id, case_id, storage_key, shahex,
+                                        acquired_by, exc)
+                raise
+
+    def _existing_for(self, case_id: UUID, digest: bytes,
+                      reader_ceiling: tuple | None, classification: str,
+                      compartments: list[str]) -> tuple[UUID | None, set[str]]:
+        """(the live exhibit of these bytes this uploader may see AT THE
+        LABELS ASKED FOR, or None; every storage key any exhibit of these
+        bytes holds). Read on a system connection, so an exhibit above the
+        uploader is seen here and never written on, and is never named to
+        them (rls-4, 2026-10-03). `compartments` is the sorted set `ingest`
+        writes."""
+        from noctornal_api.db import SystemPurpose, system_connection
+        from noctornal_api.security.access import tlp_from_name
+
+        with system_connection(SystemPurpose.EVIDENCE_INTAKE,
+                               reuse=self._c) as sconn:
+            rows = sconn.execute(
+                """SELECT id, classification::text, compartments, purged_at,
+                          storage_key
+                     FROM core.evidence WHERE case_id = %s AND sha256 = %s
+                    ORDER BY created_at, storage_key""",
+                (case_id, digest)).fetchall()
+        keys = {r[4] for r in rows}
+        wanted = frozenset(compartments)
+        live = [r for r in rows if r[3] is None
+                and r[1] == classification and frozenset(r[2] or ()) == wanted]
+        if reader_ceiling is None:
+            seen = {r[0] for r in self._c.execute(
+                """SELECT id FROM core.evidence
+                    WHERE case_id = %s AND sha256 = %s AND purged_at IS NULL""",
+                (case_id, digest)).fetchall()}
+            visible = [r for r in live if r[0] in seen]
+        else:
+            clearance, held = reader_ceiling
+            if isinstance(clearance, str):
+                clearance = tlp_from_name(clearance)
+            held = frozenset(held or ())
+            visible = [r for r in live
+                       if tlp_from_name(r[1]) <= clearance
+                       and frozenset(r[2] or ()) <= held]
+        return (visible[0][0] if visible else None), keys
+
+    def _reacquired(self, evidence_id: UUID, case_id: UUID, shahex: str,
+                    acquired_by: UUID, provenance: dict) -> IngestResult:
+        """The custody and audit trail of bytes this case already holds."""
+        with self._c.transaction():
+            self._custody(evidence_id, "ACQUIRED", acquired_by,
+                          detail={"sha256": shahex, "deduplicated": True,
+                                  **provenance})
+            self._audit("EVIDENCE_REACQUIRED", acquired_by, evidence_id, case_id,
+                        {"sha256": shahex})
+        return IngestResult(evidence_id, shahex, deduplicated=True)
+
+    def _refuse_below_case_floor(self, case_id: UUID, classification: str) -> None:
+        """An exhibit is never labelled below its case. `core.enforce_tlp_floor`
+        refuses it at the INSERT; asked here as well, so the answer is a 400
+        that says why rather than a raw trigger error, and before anything is
+        stored (http_ui-003, 2026-10-03). The case's label is a lock fact."""
+        from noctornal_api.security.access import AccessResolutionError, tlp_from_name
+
+        row = self._c.execute(
+            "SELECT classification::text FROM iam.case_facts(%s)",
+            (case_id,)).fetchone()
+        if row is None:
+            raise EvidenceError("no such case")
         try:
-            with self._c.transaction():
-                evidence_id = self._c.execute(
-                    """INSERT INTO core.evidence
-                           (case_id, title, description, media_type, byte_size,
-                            sha256, blake3, storage_key, storage_bucket, is_worm_locked,
-                            acquired_at, acquired_by, acquisition_method, source_url,
-                            classification, compartments, retention_until,
-                            is_hostile_markup)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,true,
-                               COALESCE(%s::timestamptz, now()),
-                               %s,%s,%s,%s,%s,%s,%s)
-                       RETURNING id""",
-                    (case_id, title, description, media_type, len(data), digest, blake,
-                     storage_key, self._s.bucket, acquired, acquired_by,
-                     acquisition_method, source_url, classification,
-                     compartments or [], retain.date(), is_hostile_markup),
-                ).fetchone()[0]
-                # hash_verified=True because the read-back above has just
-                # confirmed the STORED object hashes to the digest recorded
-                # here. Until 2026-09-22 this row said NULL, which the
-                # custody view rendered as "hash not checked" on every clean
-                # acquisition: a lapse in custody that never happened, on
-                # the record that goes to court (ux07 custody-failed-hash-
-                # shown-as-not-checked). The deduplicated branch above stays
-                # NULL: it stored nothing and read nothing back.
-                # The lock's exact end, which `retention_until` (a date)
-                # cannot carry: the store's COMPLIANCE lock ends at this
-                # instant, part way through that day, and a register that
-                # counted the whole day overstated the storage guarantee by
-                # up to 24 hours (ux07-evidence:worm-chip-outlives-lock,
-                # verifier, 2026-09-23). Only on the original row: a
-                # deduplicated re-acquisition stores nothing and locks
-                # nothing.
-                self._custody(evidence_id, "ACQUIRED", acquired_by,
-                              detail={"sha256": shahex, "bytes": len(data),
-                                      "lock_ends_at": retain.isoformat(),
-                                      **provenance},
-                              hash_verified=True)
-                self._audit("EVIDENCE_ACQUIRED", acquired_by, evidence_id, case_id,
-                            {"sha256": shahex})
-            return IngestResult(evidence_id, shahex, deduplicated=False)
-        except psycopg.errors.UniqueViolation:
-            # A concurrent ingest of identical bytes won the race.
-            row = self._c.execute(
-                "SELECT id FROM core.evidence WHERE case_id = %s AND sha256 = %s",
-                (case_id, digest),
-            ).fetchone()
-            return IngestResult(row[0], shahex, deduplicated=True)
+            below = tlp_from_name(classification) < tlp_from_name(row[0])
+        except AccessResolutionError as exc:
+            raise EvidenceError(f"unknown classification {classification!r}") from exc
+        if below:
+            raise EvidenceError(
+                f"an exhibit in this case cannot be classified below "
+                f"{row[0]}, the case's own classification. Nothing was stored.")
+
+    def _record_orphan(self, evidence_id: UUID, case_id: UUID, storage_key: str,
+                       shahex: str, actor_id: UUID, exc: BaseException) -> None:
+        """A put was sent and the row that would own it did not commit: the
+        object may now sit under a lock with nothing naming it. Said in the
+        audit log, on the connection's own next statement after the rollback,
+        and in the server log if even that fails, so a sweep can find it
+        (evidence-orphan-locked-object, 2026-10-03)."""
+        detail = {"storage_key": storage_key, "sha256": shahex,
+                  "bucket": getattr(self._s, "bucket", None),
+                  "reason": type(exc).__name__}
+        try:
+            self._audit("EVIDENCE_OBJECT_ORPHANED", actor_id, evidence_id,
+                        case_id, detail, outcome="FAILED")
+        except Exception:  # noqa: BLE001 - logged below, the original error stands
+            log.error("an exhibit object may be stored with no row naming it: "
+                      "bucket %s key %s sha256 %s (%s)", detail["bucket"],
+                      storage_key, shahex, detail["reason"])
+
+    def _read(self, key: str, version: str | None) -> bytes:
+        """The exhibit's bytes: the version it was lodged as when the store
+        returned one, the latest otherwise (legacy rows and the doubles)."""
+        if version:
+            return self._s.get(key, version_id=version)
+        return self._s.get(key)
+
+    def _refuse_if_retention_has_it(self, evidence_id: UUID) -> None:
+        """Called when the store holds nothing at a live exhibit's key.
+        Raises `ExhibitUnavailable` when that is retention's doing and
+        returns when it is not, so the caller raises the alarm.
+
+        verify-destroyed-exhibit (2026-10-03): the first read of the row
+        said live, and a purge may have committed since (the row is then
+        destroyed), or be part way through (it deleted the object and holds
+        the row until it commits, which can be minutes on a large batch). Both
+        used to be written as a tamper alarm, an URGENT notification and a
+        failed HASH_VERIFIED custody row. The row is asked again under a
+        share lock that does not wait: a row a purge holds answers "being
+        destroyed" at once rather than stalling a request for the length of
+        the sweep. A live row nobody is changing whose object is gone is a
+        concealment, and stays an alarm. Read on a system connection, as the
+        purge and the holds are, so the answer is the row's own whatever the
+        reader's labels."""
+        from noctornal_api.db import SystemPurpose, system_connection
+
+        with system_connection(SystemPurpose.RETENTION, reuse=self._c) as sconn:
+            try:
+                with sconn.transaction():
+                    row = sconn.execute(
+                        "SELECT purged_at FROM core.evidence WHERE id = %s "
+                        "FOR SHARE NOWAIT", (evidence_id,)).fetchone()
+            except psycopg.errors.LockNotAvailable:
+                raise ExhibitUnavailable(BEING_DESTROYED_DETAIL) from None
+        if row is not None and row[0] is not None:
+            raise ExhibitUnavailable(PURGED_DETAIL)
+
+    def _acquired_anchor_ok(self, evidence_id: UUID, stored_sha) -> bool | None:
+        """Whether the row's SHA-256 is the one the ORIGINAL ACQUIRED custody
+        row recorded at lodging, which is hash-chained and append-only. None
+        when there is no such row to compare (a row written by hand).
+        Nothing compared the two before 2026-10-03, so a rewritten row
+        verified clean (evidence-integrity-anchors-mutable)."""
+        row = self._c.execute(
+            """SELECT detail->>'sha256' FROM core.evidence_custody
+                WHERE evidence_id = %s AND action = 'ACQUIRED'
+                  AND coalesce(detail->>'deduplicated', 'false') <> 'true'
+                ORDER BY occurred_at, id LIMIT 1""",
+            (evidence_id,)).fetchone()
+        if row is None or not row[0]:
+            return None
+        return row[0] == bytes(stored_sha).hex()
 
     def view(self, evidence_id: UUID, actor_id: UUID) -> bytes:
         # Every read re-verifies the fetched bytes against the stored hash
@@ -796,22 +1096,48 @@ class EvidenceService:
 
     def verify_integrity(self, evidence_id: UUID, actor_id: UUID) -> bool:
         row = self._c.execute(
-            "SELECT storage_key, sha256, blake3, case_id FROM core.evidence WHERE id = %s",
+            """SELECT storage_key, sha256, blake3, case_id, storage_version_id,
+                      purged_at
+                 FROM core.evidence WHERE id = %s""",
             (evidence_id,),
         ).fetchone()
         if row is None:
             raise EvidenceError(f"evidence {evidence_id} not found")
-        key, stored_sha, stored_blake, case_id = row
-        data = self._s.get(key)
-        sha_ok = _sha256(data) == bytes(stored_sha)
+        key, stored_sha, stored_blake, case_id, version, purged_at = row
+        # verify-destroyed-exhibit (2026-10-03): retention destroyed the
+        # bytes of a purged exhibit on purpose, so there is nothing to
+        # verify and nothing to alarm about. Said before any read.
+        if purged_at is not None:
+            raise ExhibitUnavailable(PURGED_DETAIL)
+        # The anchors (evidence-integrity-anchors-mutable, 2026-10-03): the
+        # row's hashes, which the request role can no longer rewrite (0140),
+        # AND the hash-chained ACQUIRED row, which nothing compared before;
+        # the version the exhibit was lodged as, not whatever was put on
+        # the key since; and an object that is not there at all, a
+        # concealment, is an alarm rather than a 500 with no record.
+        missing = False
+        try:
+            data = self._read(key, version)
+        except Exception as exc:
+            if not _object_missing(exc):
+                raise
+            self._refuse_if_retention_has_it(evidence_id)
+            data, missing = None, True
+        sha_ok = data is not None and _sha256(data) == bytes(stored_sha)
         # blake3 is a second independent anchor: if sha256 is ever weakened,
         # or a hash column is doctored, the two must still agree.
-        blake_ok = stored_blake is None or _blake3d(data) == bytes(stored_blake)
-        ok = sha_ok and blake_ok
+        blake_ok = data is not None and (
+            stored_blake is None or _blake3d(data) == bytes(stored_blake))
+        anchor_ok = self._acquired_anchor_ok(evidence_id, stored_sha)
+        ok = sha_ok and blake_ok and anchor_ok is not False
+        detail = {"sha256_ok": sha_ok, "blake3_ok": blake_ok}
+        if anchor_ok is not None:
+            detail["acquired_anchor_ok"] = anchor_ok
+        if missing:
+            detail["object_missing"] = True
         with self._c.transaction():
             self._custody(evidence_id, "HASH_VERIFIED", actor_id,
-                          detail={"sha256_ok": sha_ok, "blake3_ok": blake_ok},
-                          hash_verified=ok)
+                          detail=detail, hash_verified=ok)
             self._audit("EVIDENCE_HASH_VERIFIED", actor_id, evidence_id, case_id,
                         {"ok": ok})
             if not ok:
@@ -821,8 +1147,7 @@ class EvidenceService:
                 # the one an auditor greps for was missing from the path an
                 # auditor would use.
                 self._audit("EVIDENCE_INTEGRITY_ALARM", actor_id, evidence_id,
-                            case_id, {"sha256_ok": sha_ok, "blake3_ok": blake_ok,
-                                      "on_read": False})
+                            case_id, {**detail, "on_read": False})
         if not ok:
             # After the transaction, not inside it: the custody and audit
             # rows are the record, and a failed notify write must neither
@@ -911,19 +1236,42 @@ class EvidenceService:
         recording a failed HASH_VERIFIED and raising IntegrityError on
         mismatch — so a tampered/ swapped object is never served."""
         row = self._c.execute(
-            "SELECT storage_key, sha256, case_id FROM core.evidence WHERE id = %s",
+            """SELECT storage_key, sha256, case_id, blake3, storage_version_id,
+                      purged_at
+                 FROM core.evidence WHERE id = %s""",
             (evidence_id,),
         ).fetchone()
         if row is None:
             raise EvidenceError(f"evidence {evidence_id} not found")
-        key, stored_sha, case_id = row
-        data = self._s.get(key)
-        if _sha256(data) != bytes(stored_sha):
+        key, stored_sha, case_id, stored_blake, version, purged_at = row
+        # verify-destroyed-exhibit (2026-10-03): see `verify_integrity`.
+        if purged_at is not None:
+            raise ExhibitUnavailable(PURGED_DETAIL)
+        # evidence-integrity-anchors-mutable (2026-10-03): the version it was
+        # lodged as, a missing object alarmed instead of a 500, BLAKE3 as
+        # well as SHA-256 on every read, and the hash-chained ACQUIRED row.
+        found: dict | None = None
+        try:
+            data = self._read(key, version)
+        except Exception as exc:
+            if not _object_missing(exc):
+                raise
+            self._refuse_if_retention_has_it(evidence_id)
+            data, found = b"", {"object_missing": True}
+        if found is None:
+            if _sha256(data) != bytes(stored_sha):
+                found = {"sha256_ok": False}
+            elif stored_blake is not None and _blake3d(data) != bytes(stored_blake):
+                found = {"blake3_ok": False}
+            elif self._acquired_anchor_ok(evidence_id, stored_sha) is False:
+                found = {"acquired_anchor_ok": False}
+        if found is not None:
             with self._c.transaction():
                 self._custody(evidence_id, "HASH_VERIFIED", actor_id,
-                              detail={"on_read": True}, hash_verified=False)
+                              detail={"on_read": True, **found},
+                              hash_verified=False)
                 self._audit("EVIDENCE_INTEGRITY_ALARM", actor_id, evidence_id,
-                            case_id, {"on_read": True})
+                            case_id, {"on_read": True, **found})
             # N2 (2026-09-02): this path wrote the AUDIT row and never raised
             # the URGENT notification the kind promises. After the
             # transaction and before the raise, for the reasons given in
@@ -1206,6 +1554,15 @@ class EvidenceService:
             failed = list(decision.failed_checks)
         except AccessResolutionError:
             failed = ["account_inactive"]
+        # The decision is made on a connection that is not bound yet, as
+        # above. The ticket is spent, so bind it to its holder now and the
+        # rows below keep the holder as their actor: the database attributes
+        # a request-role row only to the user its connection is bound to
+        # (0150, evidence-ledger-actor-time-forgeable, 2026-10-03). A holder
+        # whose account is no longer active binds to nobody, and that row is
+        # demoted to an unverified claim in its detail.
+        from noctornal_api.db import bind_ticket
+        bind_ticket(self._c, presented)
         if failed:
             self._audit("EVIDENCE_PRODUCTION_TICKET_REFUSED", holder,
                         evidence_id, case_id,

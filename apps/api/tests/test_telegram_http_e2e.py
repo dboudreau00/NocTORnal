@@ -529,7 +529,7 @@ def test_the_chat_listing_says_whether_telegram_collection_is_on(conn, api, worl
 def test_a_telegram_persona_is_created_through_the_collection_route_with_its_device(
         conn, api, world):
     api.telegram(tp.fixture_for(_chat_spec(), world["uid"]))
-    egress = h.egress_profile(conn, P)
+    egress = h.egress_profile(conn, P, persona_capable=True)
     body = {"handle": f"{P}ghost", "platform": "TELEGRAM",
             "egress_profile_id": str(egress), "fingerprint": dict(tf.DEVICE)}
     _u, stale = _caller(conn, fresh=False)
@@ -583,3 +583,49 @@ def test_marking_a_member_chat_needs_a_fresh_second_factor(conn, api, world):
     assert r.status_code == 403 and "re-authentication" in r.json()["detail"]
     assert conn.execute("SELECT access_mode FROM collect.telegram_chat WHERE source_id = %s",
                         (ch["source"],)).fetchone()[0] == "PUBLIC_READ"
+
+
+# --- F43: a chat filed under a compartment (2026-10-03) ----
+
+def test_a_chat_filed_under_a_compartment_is_its_holders_to_create_act_on_and_stop(
+        conn, api, world):
+    """The Telegram create route could not set compartments and every chat
+    act read with the legacy predicate, so a key's holder met a 404 on their
+    own chat while the policy of 0164 was reachable only by hand. A reader
+    without the key meets the same 404 and never sees the persona."""
+    key = f"TGHTTP-{uuid.uuid4().hex[:6].upper()}"
+    conn.execute("INSERT INTO iam.compartment (key, label) VALUES (%s, 'tg test')", (key,))
+    conn.execute("UPDATE iam.app_user SET compartments = %s WHERE id = %s",
+                 ([key], world["caller"]))
+    _stranger, theirs = _caller(conn)
+    try:
+        made, spec = _create(api, world, compartments=[key])
+        assert made.status_code == 201, made.text
+        source = made.json()["source"]["id"]
+        assert made.json()["source"]["compartments"] == [key]
+        assert made.json()["chat"]["source_id"] == source
+        mine = api.client.get(f"{TG}/chats", headers=world["hdr"]).json()["chats"]
+        assert source in {c["source_id"] for c in mine}
+        # The holder acts on it: stop, resume (no persona act, no transport).
+        why = {"reason": "stopping the collection"}
+        assert api.client.post(f"{TG}/chats/{source}/deactivate",
+                               headers=world["hdr"], json=why).status_code == 200
+        assert api.client.post(f"{TG}/chats/{source}/resume",
+                               headers=world["hdr"], json=why).status_code == 200
+        # A reader cleared to the label but without the key: absent everywhere.
+        listed = api.client.get(f"{TG}/chats", headers=theirs).json()["chats"]
+        assert source not in {c["source_id"] for c in listed}
+        for verb in ("deactivate", "resume"):
+            assert api.client.post(f"{TG}/chats/{source}/{verb}", headers=theirs,
+                                   json=why).status_code == 404
+        assert api.client.post(f"{TG}/chats/{source}/membership",
+                               headers=theirs).status_code == 404
+        personas = api.client.get(f"{API}/personas", headers=theirs).json()["personas"]
+        assert str(world["persona"]) not in {p["id"] for p in personas}
+        # A creator who does not hold the key cannot file a chat under it.
+        refused, _spec = _create(api, dict(world, hdr=theirs), compartments=[key])
+        assert refused.status_code in (400, 404), refused.text
+        assert key not in str(refused.json()) or refused.status_code == 400
+    finally:
+        conn.execute("UPDATE collect.source SET compartments = '{}' WHERE name LIKE %s",
+                     (f"{P}%",))

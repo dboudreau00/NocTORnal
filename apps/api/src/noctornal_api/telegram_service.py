@@ -33,6 +33,15 @@ one predicate (`collection._SOURCE_VISIBLE`), so every chat route answers a
 hidden source exactly like a missing one. A persona is seen only under
 PERSONA_VISIBLE_SQL. Counts a caller may read (chats bound, deleted
 upstream) count only what the caller's labels reach.
+
+## Row security
+
+`collect.telegram_chat` is under a policy (0129, F51, 2026-10-02): the
+request role sees a chat only where its source is within the caller's
+case-less ceiling, the same reading as `_SOURCE_VISIBLE`. So the duplicate
+check of a new chat, which must see a chat added under a source above the
+adder, runs as the TELEGRAM_INTAKE purpose, and every act that writes a
+chat refuses a write that changed no row.
 """
 from __future__ import annotations
 
@@ -47,7 +56,8 @@ from psycopg.types.json import Json
 
 from noctornal_api import telegram, telegram_wire
 from noctornal_api.collection import (
-    _SOURCE_VISIBLE,
+    _SOURCE_VISIBLE_HELD,
+    _held,
     PERSONA_USABLE_SQL,
     PERSONA_VISIBLE_SQL,
     CollectionError,
@@ -66,6 +76,7 @@ from noctornal_api.collection import (
     record_outcome,
     secret_in_scope,
 )
+from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.telegram import (
     PERSONA_MIN_GAP_S,
     TELEGRAM_ACT_SECONDS,
@@ -103,6 +114,9 @@ JOIN_NOTICE = (
 CREATE_NEXT = ("A security officer confirms this chat under the persona's "
                "authority before it is read.")
 
+#: How a chat the caller may not see answers, exactly as a missing one.
+CHAT_NOT_FOUND = "no such Telegram chat, or it is above your clearance"
+
 
 class TelegramActError(CollectionError):
     """An act refused with a status and a sentence the route answers as-is."""
@@ -132,7 +146,8 @@ class EnrolmentGate(PersonaGate):
                            {USABLE_IGNORING_LOCK_SQL}
                       FROM collect.collection_account a
                      WHERE a.id = %(id)s AND {PERSONA_VISIBLE_SQL}""",
-                {"id": self.persona_id, "clearance": self.clearance}).fetchone()
+                {"id": self.persona_id, "clearance": self.clearance,
+                 "held": _held(self.compartments)}).fetchone()
             if row is None or not (row[0] and row[1] and row[2]):
                 raise
         persona = self._c.execute(
@@ -156,7 +171,7 @@ class EnrolmentGate(PersonaGate):
 def enrolment_session(conn: psycopg.Connection, persona_id: UUID, *,
                       actor_id: UUID | None, clearance: str | None,
                       purpose: str, need: str = "PUBLIC_READ",
-                      sleep=time.sleep):
+                      sleep=time.sleep, compartments=None):
     """persona_session for an enrolment or an import, through EnrolmentGate:
     the same six steps in the same order, the same record_outcome before the
     unlock, no credential leased."""
@@ -165,7 +180,7 @@ def enrolment_session(conn: psycopg.Connection, persona_id: UUID, *,
                          clearance=clearance, purpose=purpose, source_id=None,
                          need=need, platform="TELEGRAM", needs_secret=False,
                          min_gap_s=PERSONA_MIN_GAP_S, sleep=sleep,
-                         adapter=adapter)
+                         adapter=adapter, compartments=compartments)
     row = gate.check()
     gate.lock()
     try:
@@ -203,7 +218,7 @@ def _transport(factory, secret: TelegramSecret, route, fingerprint: dict):
 def run_act(conn: psycopg.Connection, persona_id: UUID, *, actor_id: UUID,
             clearance: str, purpose: str, source_id: UUID | None, need: str,
             work, transport_factory=None, stopping: bool = False,
-            sleep=time.sleep):
+            sleep=time.sleep, compartments=None):
     """`await work(transport, context)` as one attended act of the persona,
     through the foundation's persona_session with the caller's clearance.
     Returns what work returned. A session Telegram moved is resealed by the
@@ -214,7 +229,7 @@ def run_act(conn: psycopg.Connection, persona_id: UUID, *, actor_id: UUID,
                          source_id=source_id, need=need, platform="TELEGRAM",
                          stopping=stopping, needs_secret=True,
                          min_gap_s=PERSONA_MIN_GAP_S, adapter=adapter,
-                         sleep=sleep) as ctx:
+                         sleep=sleep, compartments=compartments) as ctx:
         secret = TelegramSecret.parse(ctx.lease.value)
         transport = _transport(transport_factory, secret, ctx.route, ctx.fingerprint)
 
@@ -270,7 +285,7 @@ def hold_facts(row: dict, now: datetime) -> dict | None:
 
 
 def attach_persona_facts(conn: psycopg.Connection, personas: list[dict],
-                         clearance: str | None) -> list[dict]:
+                         clearance: str | None, compartments=None) -> list[dict]:
     """Each Telegram persona row gains a `telegram` object: its account
     id, when its session was enrolled, its egress profile's name, its active
     hours, its hold in words and how many active chats it reads within the
@@ -284,10 +299,12 @@ def attach_persona_facts(conn: psycopg.Connection, personas: list[dict],
                     WHERE s.collection_account_id = a.id AND s.is_active
                       AND s.kind = 'TELEGRAM'
                       AND (%(clearance)s::core.tlp IS NULL
-                           OR s.classification <= %(clearance)s::core.tlp))
+                           OR (s.classification <= %(clearance)s::core.tlp
+                               AND s.compartments <@ %(held)s::text[])))
              FROM collect.collection_account a
             WHERE a.id = ANY(%(ids)s::uuid[])""",
-        {"ids": ids, "clearance": clearance}).fetchall()}
+        {"ids": ids, "clearance": clearance,
+         "held": _held(compartments)}).fetchall()}
     now = datetime.now(timezone.utc)
     for p in personas:
         row = rows.get(p.get("id"))
@@ -305,13 +322,14 @@ def attach_persona_facts(conn: psycopg.Connection, personas: list[dict],
 
 
 def set_window(conn: psycopg.Connection, persona_id: UUID, window: str | None, *,
-               actor_id: UUID, clearance: str) -> dict:
+               actor_id: UUID, clearance: str, compartments=None) -> dict:
     """A Telegram persona's active hours in UTC, or none. 404 for a persona
     the caller may not see, indistinguishable from a missing one."""
     row = conn.execute(
         f"""SELECT a.platform::text FROM collect.collection_account a
              WHERE a.id = %(id)s AND {PERSONA_VISIBLE_SQL}""",
-        {"id": persona_id, "clearance": clearance}).fetchone()
+        {"id": persona_id, "clearance": clearance,
+         "held": _held(compartments)}).fetchone()
     if row is None:
         raise CollectionNotFound("no such persona, or it is above your clearance")
     if row[0] != "TELEGRAM":
@@ -344,7 +362,9 @@ def attach_due_facts(conn: psycopg.Connection, rows: list[dict]) -> list[dict]:
     """Each due Telegram source gains `telegram` {chat, access_mode,
     egress}: the chat's durable id and how it is read, and the reading
     persona's egress profile name when the persona is visible (the row
-    already carries the persona, or HIDDEN_PERSONA)."""
+    already carries the persona, or HIDDEN_PERSONA). The rows are the
+    caller's due list, filtered at the ceiling the chat's policy holds
+    them to, so it reads on the request connection (F51, 2026-10-02)."""
     ids = [str(r["id"]) for r in rows if r.get("kind") == "TELEGRAM"]
     if not ids:
         return rows
@@ -399,7 +419,14 @@ def attach_target_chats(conn: psycopg.Connection,
     id, peer type, access mode, name and title at lookup}, read under the
     target's already-filtered source: a Telegram source has no address, so
     without this the confirmer saw only a name the recorder typed
-    (2026-09-24)."""
+    (2026-09-24).
+
+    On the request connection (F51, 2026-10-02): an authority is never
+    labelled below a source it covers (`_target_sources` refuses one, and
+    `collect.raise_authority_labels` raises it with a reclassified source),
+    so an officer who may see the authority may read every target's
+    source, and `CollectionAuthorityService._targets` withholds any other
+    before this runs, at the case-less ceiling the chat's policy applies."""
     wanted = [t for rows in targets.values() for t in rows
               if t.get("source_kind") == "TELEGRAM"]
     if not wanted:
@@ -491,19 +518,23 @@ _CHAT_COLUMNS = (
     "c.noforwards, c.migrated_to")
 
 
-def _chat_row(conn, source_id: UUID, clearance: str) -> dict:
+def _chat_row(conn, source_id: UUID, clearance: str,
+              compartments=None) -> dict:
     """A Telegram source and its chat, or CollectionNotFound: a source the
-    caller may not see under the foundation's one predicate answers exactly
-    like a missing one."""
+    caller may not see under the foundation's one predicate (its label AND,
+    since F43, its compartments: a holder of the key acts on the chat, a
+    reader without it meets a missing one; 2026-10-03)
+    answers exactly like a missing one."""
     row = conn.execute(
         f"""SELECT {_CHAT_COLUMNS}, s.name, s.classification::text,
                    s.collection_account_id, s.is_active, s.parser_config
               FROM collect.telegram_chat c
               JOIN collect.source s ON s.id = c.source_id
-             WHERE c.source_id = %(id)s AND {_SOURCE_VISIBLE}""",
-        {"id": source_id, "clearance": clearance}).fetchone()
+             WHERE c.source_id = %(id)s AND {_SOURCE_VISIBLE_HELD}""",
+        {"id": source_id, "clearance": clearance,
+         "held": _held(compartments)}).fetchone()
     if row is None:
-        raise CollectionNotFound("no such Telegram chat, or it is above your clearance")
+        raise CollectionNotFound(CHAT_NOT_FOUND)
     keys = ("source_id", "peer_type", "peer_id", "durable_id", "access_mode",
             "provenance_class", "username_at_resolve", "title_at_resolve",
             "resolved_at", "access_hash", "access_hash_account_id",
@@ -511,6 +542,36 @@ def _chat_row(conn, source_id: UUID, clearance: str) -> dict:
             "noforwards", "migrated_to", "name", "classification",
             "persona_id", "is_active", "parser_config")
     return dict(zip(keys, row, strict=True))
+
+
+def _changed_the_chat(cursor) -> None:
+    """An act's write changed its one chat, or the act is refused as for a
+    missing chat (F51, 2026-10-02). The persona act runs between
+    `_chat_row` and the write, and a source raised above the caller in
+    between leaves the write matching no row the policy shows: silent,
+    while the act's audit row and the source's own change in the same
+    transaction recorded a change that never happened."""
+    if cursor.rowcount != 1:
+        raise CollectionNotFound(CHAT_NOT_FOUND)
+
+
+def _existing_chat(conn, durable_id: str, clearance: str,
+                   compartments=None) -> tuple | None:
+    """(source id, source name, visible to the caller) of the chat already
+    added as `durable_id`, or None. As the TELEGRAM_INTAKE purpose (F51,
+    2026-10-02): the request role sees no chat under a source above the
+    caller, so the check would find nothing there and the INSERT would
+    meet the unique durable id instead, a duplicate-key error about a chat
+    the caller may not know exists. The caller's own clearance still
+    decides which answer it gets."""
+    with system_connection(SystemPurpose.TELEGRAM_INTAKE, reuse=conn) as sconn:
+        return sconn.execute(
+            f"""SELECT s.id, s.name, ({_SOURCE_VISIBLE_HELD})
+                  FROM collect.telegram_chat c
+                  JOIN collect.source s ON s.id = c.source_id
+                 WHERE c.durable_id = %(durable)s""",
+            {"durable": durable_id, "clearance": clearance,
+             "held": _held(compartments)}).fetchone()
 
 
 def _chat_info(chat: dict) -> ChatInfo:
@@ -540,6 +601,47 @@ def _refuse_offline_problems(*, classification: str | None) -> None:
             raise TelegramActError(409, refusal)
     if not egress.boundary().in_force:
         raise TelegramActError(409, telegram.NO_PROXY_SENTENCE)
+
+
+def check_create_request(ref, access_mode: str,
+                         classification: str | None, *, compartments=(),
+                         held_compartments=None) -> telegram.ChatRef:
+    """What `TelegramChats.create` refuses before it reaches the persona,
+    needing no key and no network: a reference that is not a public chat
+    (a private invite link above all: a bearer join credential the product
+    refuses to take), an access mode, a basic group asked for as public,
+    and the offline sentences. One function, so the route that queues the
+    act (it refuses at the door, before anything is stored) and the
+    collector that runs it cannot disagree (2026-10-03: a
+    pasted invite link was queued first, and kept for ever in a table whose
+    rows are never deleted)."""
+    try:
+        parsed = telegram.parse_chat_reference(ref)
+    except ReferenceRefused as exc:
+        raise TelegramActError(400, str(exc)) from None
+    if access_mode not in ("PUBLIC_READ", "MEMBER"):
+        raise TelegramActError(400, "The access mode is PUBLIC_READ or MEMBER.")
+    if (parsed.durable_id or "").startswith("g:") and access_mode == "PUBLIC_READ":
+        raise TelegramActError(400, "Basic groups are never public. Add it "
+                                    "as a member chat.")
+    _refuse_offline_problems(classification=classification)
+    # F43 (2026-10-03): a chat is filed only under keys its creator holds,
+    # the sentence `create_source` gives, said here so a request that would
+    # be refused there is refused before it is queued and before the persona
+    # looks anything up.
+    keys = frozenset(str(k) for k in (compartments or ()))
+    if keys and not keys <= frozenset(held_compartments or ()):
+        raise TelegramActError(
+            400, "You cannot file a source under a compartment you do not hold.")
+    return parsed
+
+
+def normal_reference(parsed: telegram.ChatRef) -> str:
+    """The reference a validated chat is queued under: its public name or
+    its typed id, as `parse_chat_reference` reads it back to the same chat.
+    Never the text the person typed, so what is stored is what was
+    understood and nothing else."""
+    return f"@{parsed.username}" if parsed.by_username else str(parsed.durable_id)
 
 
 async def _reach(transport, chat: dict, persona_id: UUID) -> ChatInfo:
@@ -583,19 +685,19 @@ class TelegramChats:
     def create(self, *, persona_id: UUID, ref: str, name: str,
                classification: str, default_reliability: str,
                access_mode: str, poll_interval_s: int, jitter_pct: int,
-               max_rps: float, actor_id: UUID, clearance: str) -> dict:
+               max_rps: float, actor_id: UUID, clearance: str,
+               compartments=(), held_compartments=None) -> dict:
         """Look the chat up as the persona, then create the source and its
-        chat row in one transaction."""
-        try:
-            parsed = telegram.parse_chat_reference(ref)
-        except ReferenceRefused as exc:
-            raise TelegramActError(400, str(exc)) from None
-        if access_mode not in ("PUBLIC_READ", "MEMBER"):
-            raise TelegramActError(400, "The access mode is PUBLIC_READ or MEMBER.")
-        if (parsed.durable_id or "").startswith("g:") and access_mode == "PUBLIC_READ":
-            raise TelegramActError(400, "Basic groups are never public. Add it "
-                                        "as a member chat.")
-        _refuse_offline_problems(classification=classification)
+        chat row in one transaction. `compartments` file the source (and so
+        its chat, under 0164's policy and everything it collects) under keys
+        the creator holds (`held_compartments`); until 2026-10-03 this route
+        could not set them, so the chat policy was reachable only by editing
+        a row by hand (2026-10-03). A key the creator does not hold
+        is refused with the other offline refusals, before the persona is
+        asked anything."""
+        parsed = check_create_request(ref, access_mode, classification,
+                                      compartments=compartments,
+                                      held_compartments=held_compartments)
         need = "PUBLIC_READ" if parsed.by_username else "MEMBER_READ"
 
         async def work(transport, ctx):
@@ -608,25 +710,15 @@ class TelegramChats:
             found, via = run_act(
                 self._c, persona_id, actor_id=actor_id, clearance=clearance,
                 purpose="resolve a Telegram chat", source_id=None, need=need,
-                work=work, transport_factory=self._factory, sleep=self._sleep)
+                work=work, transport_factory=self._factory, sleep=self._sleep,
+                compartments=held_compartments)
         except (TelegramChatUnreachable, TelegramNameMoved):
             raise TelegramActError(422, GENERIC_UNRESOLVED) from None
         if found is None:
             raise TelegramActError(422, GENERIC_UNRESOLVED)
-        existing = self._c.execute(
-            f"""SELECT s.id, s.name, ({_SOURCE_VISIBLE})
-                  FROM collect.telegram_chat c
-                  JOIN collect.source s ON s.id = c.source_id
-                 WHERE c.durable_id = %(durable)s""",
-            {"durable": found.durable_id, "clearance": clearance}).fetchone()
-        if existing is not None and not existing[2]:
-            _audit(self._c, actor_id, "TELEGRAM_CHAT_DUPLICATE_HIDDEN", "source",
-                   existing[0], {"existing_source_id": str(existing[0])})
-            raise TelegramActError(422, GENERIC_UNRESOLVED)
-        if existing is not None:
-            raise TelegramActError(
-                409, f"This chat is already a source: {existing[1]}. Resume it "
-                     f"there rather than adding it twice.")
+        self._refuse_existing(found.durable_id, actor_id=actor_id,
+                              clearance=clearance,
+                              compartments=held_compartments)
         mode = access_mode
         notice = None
         if found.is_member and mode == "PUBLIC_READ":
@@ -636,42 +728,74 @@ class TelegramChats:
         if found.peer_type == "CHAT" and mode == "PUBLIC_READ":
             raise TelegramActError(400, "Basic groups are never public. Add it "
                                         "as a member chat.")
-        with self._c.transaction():
-            source = self._service().create_source(
-                kind="TELEGRAM", name=name, base_url=None, parser_key="telegram",
-                classification=classification,
-                default_reliability=default_reliability,
-                poll_interval_s=poll_interval_s, jitter_pct=jitter_pct,
-                max_rps=max_rps, parser_config={"access_mode": mode},
-                collection_account_id=persona_id, egress_profile_id=None,
-                actor_id=actor_id, clearance=clearance)
-            has_hash = found.access_hash is not None and found.peer_type != "CHAT"
-            self._c.execute(
-                """INSERT INTO collect.telegram_chat
-                       (source_id, peer_type, peer_id, durable_id, access_mode,
-                        provenance_class, username_at_resolve, title_at_resolve,
-                        resolved_by, access_hash, access_hash_account_id,
-                        member_since_observed, is_forum, noforwards)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                           CASE WHEN %s THEN now() END, %s, %s)""",
-                (source["id"], found.peer_type, found.peer_id, found.durable_id,
-                 mode, "PERSONA_PARTY" if mode == "MEMBER" else "OPEN_GROUP",
-                 parsed.username if parsed.by_username else None,
-                 telegram.clean_name(found.title),
-                 actor_id, found.access_hash if has_hash else None,
-                 persona_id if has_hash else None,
-                 bool(mode == "MEMBER" and found.is_member),
-                 bool(found.is_forum), bool(found.noforwards)))
-            _audit(self._c, actor_id, "TELEGRAM_CHAT_RESOLVED", "source",
-                   source["id"], {"durable_id": found.durable_id, "via": via})
-        return {"source": source, "chat": self.view(UUID(source["id"]), clearance),
+        try:
+            with self._c.transaction():
+                source = self._service().create_source(
+                    kind="TELEGRAM", name=name, base_url=None, parser_key="telegram",
+                    classification=classification,
+                    default_reliability=default_reliability,
+                    poll_interval_s=poll_interval_s, jitter_pct=jitter_pct,
+                    max_rps=max_rps, parser_config={"access_mode": mode},
+                    collection_account_id=persona_id, egress_profile_id=None,
+                    actor_id=actor_id, clearance=clearance,
+                    compartments=compartments,
+                    held_compartments=held_compartments)
+                has_hash = found.access_hash is not None and found.peer_type != "CHAT"
+                self._c.execute(
+                    """INSERT INTO collect.telegram_chat
+                           (source_id, peer_type, peer_id, durable_id, access_mode,
+                            provenance_class, username_at_resolve, title_at_resolve,
+                            resolved_by, access_hash, access_hash_account_id,
+                            member_since_observed, is_forum, noforwards)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                               CASE WHEN %s THEN now() END, %s, %s)""",
+                    (source["id"], found.peer_type, found.peer_id, found.durable_id,
+                     mode, "PERSONA_PARTY" if mode == "MEMBER" else "OPEN_GROUP",
+                     parsed.username if parsed.by_username else None,
+                     telegram.clean_name(found.title),
+                     actor_id, found.access_hash if has_hash else None,
+                     persona_id if has_hash else None,
+                     bool(mode == "MEMBER" and found.is_member),
+                     bool(found.is_forum), bool(found.noforwards)))
+                _audit(self._c, actor_id, "TELEGRAM_CHAT_RESOLVED", "source",
+                       source["id"], {"durable_id": found.durable_id, "via": via})
+        except psycopg.errors.UniqueViolation as exc:
+            if exc.diag.constraint_name != "telegram_chat_one_source":
+                raise
+            # F51 (2026-10-02): the same chat was added between the check
+            # and this insert, and the transaction is rolled back. The same
+            # check answers it, so a caller below that chat's source is told
+            # what an unresolvable reference tells them, never a
+            # duplicate-key error.
+            self._refuse_existing(found.durable_id, actor_id=actor_id,
+                                  clearance=clearance,
+                                  compartments=held_compartments)
+            raise TelegramActError(422, GENERIC_UNRESOLVED) from None
+        return {"source": source,
+                "chat": self.view(UUID(source["id"]), clearance,
+                                  held_compartments),
                 "notice": notice, "next": CREATE_NEXT}
+
+    def _refuse_existing(self, durable_id: str, *, actor_id: UUID,
+                         clearance: str, compartments=None) -> None:
+        """A chat already added answers 409 with its source's name when the
+        caller may see that source, and otherwise exactly as an unresolvable
+        reference, audited as TELEGRAM_CHAT_DUPLICATE_HIDDEN."""
+        existing = _existing_chat(self._c, durable_id, clearance, compartments)
+        if existing is not None and not existing[2]:
+            _audit(self._c, actor_id, "TELEGRAM_CHAT_DUPLICATE_HIDDEN", "source",
+                   existing[0], {"existing_source_id": str(existing[0])})
+            raise TelegramActError(422, GENERIC_UNRESOLVED)
+        if existing is not None:
+            raise TelegramActError(
+                409, f"This chat is already a source: {existing[1]}. Resume it "
+                     f"there rather than adding it twice.")
 
     # -- the membership acts --------------------------------------------------
 
     def join(self, source_id: UUID, *, note: str, actor_id: UUID,
-             clearance: str) -> dict:
-        chat = _chat_row(self._c, source_id, clearance)
+             clearance: str, compartments=None) -> dict:
+        chat = _chat_row(self._c, source_id, clearance, compartments)
         if chat["access_mode"] != "MEMBER" or chat["peer_type"] == "CHAT" \
                 or not chat["username_at_resolve"]:
             raise TelegramActError(
@@ -691,10 +815,11 @@ class TelegramChats:
         joined = run_act(self._c, persona_id, actor_id=actor_id,
                          clearance=clearance, purpose="join a Telegram chat",
                          source_id=source_id, need="MEMBER_READ", work=work,
-                         transport_factory=self._factory, sleep=self._sleep)
+                         transport_factory=self._factory, sleep=self._sleep,
+                         compartments=compartments)
         with self._c.transaction():
             has_hash = joined.access_hash is not None
-            self._c.execute(
+            _changed_the_chat(self._c.execute(
                 """UPDATE collect.telegram_chat
                       SET member_since_observed = now(), joined_by = %s,
                           joined_at = now(),
@@ -703,15 +828,16 @@ class TelegramChats:
                               ELSE access_hash_account_id END
                     WHERE source_id = %s""",
                 (actor_id, joined.access_hash if has_hash else None, has_hash,
-                 persona_id, source_id))
+                 persona_id, source_id)))
             _audit(self._c, actor_id, "TELEGRAM_CHAT_JOINED", "source", source_id,
                    {"durable_id": chat["durable_id"], "note": note.strip()})
-        return {"chat": self.view(source_id, clearance), "notice": JOIN_NOTICE}
+        return {"chat": self.view(source_id, clearance, compartments),
+                "notice": JOIN_NOTICE}
 
     def check_membership(self, source_id: UUID, *, actor_id: UUID,
-                         clearance: str) -> dict:
+                         clearance: str, compartments=None) -> dict:
         """Reads the persona's own view of a member chat and never joins."""
-        chat = _chat_row(self._c, source_id, clearance)
+        chat = _chat_row(self._c, source_id, clearance, compartments)
         if chat["access_mode"] != "MEMBER":
             raise TelegramActError(409, "Membership is checked for a member chat.")
         _refuse_offline_problems(classification=chat["classification"])
@@ -725,23 +851,25 @@ class TelegramChats:
                        clearance=clearance,
                        purpose="check a Telegram chat's membership",
                        source_id=source_id, need="MEMBER_READ", work=work,
-                       transport_factory=self._factory, sleep=self._sleep)
+                       transport_factory=self._factory, sleep=self._sleep,
+                       compartments=compartments)
         member = bool(seen.is_member)
         with self._c.transaction():
             if member:
-                self._c.execute(
+                _changed_the_chat(self._c.execute(
                     """UPDATE collect.telegram_chat
                           SET member_since_observed = coalesce(member_since_observed, now())
-                        WHERE source_id = %s""", (source_id,))
+                        WHERE source_id = %s""", (source_id,)))
             else:
-                self._c.execute(
+                _changed_the_chat(self._c.execute(
                     """UPDATE collect.telegram_chat
                           SET member_since_observed = NULL, joined_by = NULL,
                               joined_at = NULL
-                        WHERE source_id = %s""", (source_id,))
+                        WHERE source_id = %s""", (source_id,)))
             _audit(self._c, actor_id, "TELEGRAM_CHAT_MEMBERSHIP_SEEN", "source",
                    source_id, {"durable_id": chat["durable_id"], "member": member})
-        return {"chat": self.view(source_id, clearance), "member": member,
+        return {"chat": self.view(source_id, clearance, compartments),
+                "member": member,
                 "notice": ("Telegram reports the persona a member, so the chat is "
                            "read as one once its member authority is confirmed."
                            if member else
@@ -749,19 +877,21 @@ class TelegramChats:
                            "the chat first; nothing was joined from here.")}
 
     def mark_member(self, source_id: UUID, *, reason: str, actor_id: UUID,
-                    clearance: str) -> dict:
+                    clearance: str, compartments=None) -> dict:
         """PUBLIC_READ to MEMBER, the one identity change the chat's guard
         permits and only in this direction; then the membership check. When
         no member authority covers the chat yet, the mark stands and the
         check's refusal is the answer."""
-        chat = _chat_row(self._c, source_id, clearance)
+        chat = _chat_row(self._c, source_id, clearance, compartments)
         if chat["access_mode"] != "PUBLIC_READ":
             raise TelegramActError(409, "This chat is already read as a member.")
         with self._c.transaction():
-            self._c.execute(
+            # The chat first: a mark that changed no chat must not leave the
+            # source alone read as a member chat (F51, 2026-10-02).
+            _changed_the_chat(self._c.execute(
                 """UPDATE collect.telegram_chat
                       SET access_mode = 'MEMBER', provenance_class = 'PERSONA_PARTY'
-                    WHERE source_id = %s""", (source_id,))
+                    WHERE source_id = %s""", (source_id,)))
             self._c.execute(
                 """UPDATE collect.source
                       SET parser_config = parser_config
@@ -771,16 +901,17 @@ class TelegramChats:
                    source_id, {"from": "PUBLIC_READ", "to": "MEMBER",
                                "reason": reason.strip()})
         answer = self.check_membership(source_id, actor_id=actor_id,
-                                       clearance=clearance)
+                                       clearance=clearance,
+                                       compartments=compartments)
         answer["marked"] = True
         return answer
 
     def rebind(self, source_id: UUID, *, persona_id: UUID, reason: str,
-               actor_id: UUID, clearance: str) -> dict:
+               actor_id: UUID, clearance: str, compartments=None) -> dict:
         """Read the chat through another Telegram persona. The resolution
         through the new persona also reads its membership, so a member chat
         the new persona is already in is readable again at once."""
-        chat = _chat_row(self._c, source_id, clearance)
+        chat = _chat_row(self._c, source_id, clearance, compartments)
         if chat["migrated_to"]:
             raise TelegramActError(409, "This group became a supergroup; add the "
                                         "supergroup as a new chat instead.")
@@ -790,7 +921,8 @@ class TelegramChats:
             f"""SELECT a.platform::text, a.session_enrolled_at, a.status
                   FROM collect.collection_account a
                  WHERE a.id = %(id)s AND {PERSONA_VISIBLE_SQL}""",
-            {"id": persona_id, "clearance": clearance}).fetchone()
+            {"id": persona_id, "clearance": clearance,
+             "held": _held(compartments)}).fetchone()
         if row is None:
             raise CollectionNotFound("no such persona, or it is above your clearance")
         if row[0] != "TELEGRAM" or row[1] is None or row[2] == "BURNED":
@@ -818,22 +950,23 @@ class TelegramChats:
                         clearance=clearance, purpose="rebind a Telegram chat",
                         source_id=None, need=scope_for(chat["access_mode"]),
                         work=work, transport_factory=self._factory,
-                        sleep=self._sleep)
+                        sleep=self._sleep, compartments=compartments)
         member = bool(chat["access_mode"] == "MEMBER" and found.is_member)
         has_hash = found.access_hash is not None and found.peer_type != "CHAT"
         with self._c.transaction():
             bound = self._service().bind_source(
                 source_id, persona_id=persona_id, egress_profile_id=None,
                 reason=reason, reset_cursor=chat["peer_type"] == "CHAT",
-                actor_id=actor_id, clearance=clearance)
-            self._c.execute(
+                actor_id=actor_id, clearance=clearance,
+                compartments=compartments)
+            _changed_the_chat(self._c.execute(
                 """UPDATE collect.telegram_chat
                       SET access_hash = %s, access_hash_account_id = %s,
                           joined_by = NULL, joined_at = NULL,
                           member_since_observed = CASE WHEN %s THEN now() END
                     WHERE source_id = %s""",
                 (found.access_hash if has_hash else None,
-                 persona_id if has_hash else None, member, source_id))
+                 persona_id if has_hash else None, member, source_id)))
             _audit(self._c, actor_id, "SOURCE_PERSONA_CHANGED", "source", source_id,
                    {"from": str(chat["persona_id"]) if chat["persona_id"] else None,
                     "to": str(persona_id), "reason": reason.strip()})
@@ -844,28 +977,29 @@ class TelegramChats:
         if chat["peer_type"] == "CHAT":
             notice += (" Message ids in a basic group are per account, so reading "
                        "restarts from the new account's newest messages.")
-        return {"chat": self.view(source_id, clearance), "binding": bound,
-                "notice": notice}
+        return {"chat": self.view(source_id, clearance, compartments),
+                "binding": bound, "notice": notice}
 
     # -- stop and resume --------------------------------------------------------
 
     def set_active(self, source_id: UUID, *, active: bool, reason: str,
-                   actor_id: UUID, clearance: str) -> dict:
-        chat = _chat_row(self._c, source_id, clearance)
+                   actor_id: UUID, clearance: str, compartments=None) -> dict:
+        chat = _chat_row(self._c, source_id, clearance, compartments)
         if active and chat["migrated_to"]:
             raise TelegramActError(409, "This group became a supergroup; add the "
                                         "supergroup as a new chat instead.")
         self._service().set_source_active(source_id, active=active, reason=reason,
-                                          actor_id=actor_id, clearance=clearance)
-        return {"chat": self.view(source_id, clearance)}
+                                          actor_id=actor_id, clearance=clearance,
+                                          compartments=compartments)
+        return {"chat": self.view(source_id, clearance, compartments)}
 
     # -- reading --------------------------------------------------------------
 
-    def view(self, source_id: UUID, clearance: str) -> dict:
-        rows = self.listing(clearance=clearance, compartments=None,
+    def view(self, source_id: UUID, clearance: str, compartments=None) -> dict:
+        rows = self.listing(clearance=clearance, compartments=compartments,
                             only=source_id)["chats"]
         if not rows:
-            raise CollectionNotFound("no such Telegram chat, or it is above your clearance")
+            raise CollectionNotFound(CHAT_NOT_FOUND)
         return rows[0]
 
     def listing(self, *, clearance: str, compartments: frozenset[str] | None,
@@ -903,7 +1037,7 @@ class TelegramChats:
                   LEFT JOIN collect.collection_account a
                          ON a.id = s.collection_account_id
                   LEFT JOIN collect.egress_profile e ON e.id = a.egress_profile_id
-                 WHERE {_SOURCE_VISIBLE}
+                 WHERE {_SOURCE_VISIBLE_HELD}
                    AND (%(only)s::uuid IS NULL OR s.id = %(only)s)
                  ORDER BY s.is_active DESC, s.name""",
             {"clearance": clearance, "held": held, "only": only}).fetchall()
