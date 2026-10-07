@@ -108,7 +108,10 @@ _NOT_GRANTABLE = frozenset({"SERVICE"})
 #: Roles whose LAST active holder may not be removed. See module docstring.
 _LOAD_BEARING = ("SYS_ADMIN", "SECURITY_OFFICER")
 
-_TLP = ("CLEAR", "GREEN", "AMBER", "RED")
+#: Every clearance `core.tlp` holds. AMBER_STRICT was missing, so an
+#: AMBER_STRICT account (bootstrap and break-glass grant it) could not be
+#: set from the panel, and the panel's select could not show it.
+_TLP = ("CLEAR", "GREEN", "AMBER", "AMBER_STRICT", "RED")
 
 #: The key format, identical to 0057's CHECK constraint. Checked here too
 #: so the refusal is an authored message naming the rule, not a

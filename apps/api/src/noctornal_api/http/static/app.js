@@ -32184,7 +32184,7 @@ function clearancePair(u, you) {
   lab.appendChild(el('span', 'label', 'Clearance'));
   const clr = el('select', 'select');
   clr.setAttribute('aria-label', 'New clearance for ' + visibleText(u.display_name));
-  for (const c of ['CLEAR', 'GREEN', 'AMBER', 'RED']) {
+  for (const c of TLP) {
     const o = el('option', null, c); o.value = c;
     if (c === u.tlp_clearance) o.selected = true;
     clr.appendChild(o);
