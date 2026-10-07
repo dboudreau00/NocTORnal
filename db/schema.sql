@@ -1,7 +1,7 @@
 -- =====================================================================
 -- NocTORnal -- db/schema.sql
 --
--- GENERATED MIRROR of the schema at Alembic revision 0131.
+-- GENERATED MIRROR of the schema at Alembic revision 0170.
 -- Produced by scripts/dump_schema.py from
 --   pg_dump --schema-only --no-owner --no-privileges
 -- with session SET lines, version comments and pg_dump's per-run
@@ -26,7 +26,7 @@
 -- superseded, never overwritten; edges are signed and time-bounded;
 -- the ontology lives in reference tables, not enums.
 --
--- Alembic revision: 0131
+-- Alembic revision: 0170
 -- =====================================================================
 
 --
@@ -300,22 +300,18 @@ END $$;
 --
 
 CREATE FUNCTION audit.chain_hash() RETURNS trigger
-    LANGUAGE plpgsql
-    SET search_path TO 'public', 'pg_catalog'
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
     AS $$
 DECLARE prev bytea;
 BEGIN
-  -- Serialise chain extension. Without this, two concurrent writers read
-  -- the same tail and fork the chain — honest history then replays as
-  -- tampering, the worst failure mode a tamper-evidence mechanism has.
+  IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION 'audit.event is chained under READ COMMITTED only: a snapshot taken before the last append cannot see the tail';
+  END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended('audit.event.chain', 0));
+  NEW.seq := nextval('audit.event_seq_seq');
   SELECT row_hash INTO prev FROM audit.event ORDER BY seq DESC LIMIT 1;
   NEW.prev_hash := prev;
-  -- Canonical hash input: UTC-fixed timestamp rendering (timestamptz::text
-  -- follows the session TimeZone GUC and would make the chain unverifiable
-  -- from any other session), EVERY payload column (an unhashed column is
-  -- an editable column), and an explicit field separator (unseparated
-  -- concatenation lets boundary shifts collide).
   NEW.row_hash := public.digest(
     convert_to(concat_ws(chr(31),
       coalesce(encode(prev,'hex'),'GENESIS'),
@@ -334,6 +330,85 @@ BEGIN
     'sha256');
   RETURN NEW;
 END $$;
+
+--
+-- Name: chain_ordered_after(); Type: FUNCTION; Schema: audit; Owner: -
+--
+
+CREATE FUNCTION audit.chain_ordered_after() RETURNS bigint
+    LANGUAGE sql IMMUTABLE
+    AS $$SELECT 5109::bigint$$;
+
+--
+-- Name: FUNCTION chain_ordered_after(); Type: COMMENT; Schema: audit; Owner: -
+--
+
+COMMENT ON FUNCTION audit.chain_ordered_after() IS 'The largest audit.event.seq that existed when 0149 ran. A fork whose claimants are all above it cannot come from ordinary traffic.';
+
+--
+-- Name: last_screening_pass(interval); Type: FUNCTION; Schema: audit; Owner: -
+--
+
+CREATE FUNCTION audit.last_screening_pass(p_within interval) RETURNS timestamp with time zone
+    LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  SELECT max(e.occurred_at)
+    FROM audit.event e
+   WHERE e.action = 'SCREENING_RESCAN'
+     AND e.occurred_at > pg_catalog.now() - p_within
+$$;
+
+--
+-- Name: pin_attribution(); Type: FUNCTION; Schema: audit; Owner: -
+--
+
+CREATE FUNCTION audit.pin_attribution() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+DECLARE who uuid; holder uuid;
+BEGIN
+  IF iam.rls_caller_exempt() THEN
+    RETURN NEW;
+  END IF;
+  NEW.occurred_at := pg_catalog.now();
+  IF NEW.actor_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+  who := iam.rls_actor();
+  IF who IS NOT DISTINCT FROM NEW.actor_id THEN
+    RETURN NEW;
+  END IF;
+  IF who IS NOT NULL THEN
+    RAISE EXCEPTION 'audit.event: a connection bound to one user may not attribute a row to another'
+      USING ERRCODE = '42501';
+  END IF;
+  SELECT t.user_id INTO holder
+    FROM lab.download_ticket t
+   WHERE t.token_hash = pg_catalog.sha256(pg_catalog.convert_to(
+           nullif(pg_catalog.current_setting('noctornal.rls_ticket', true), ''), 'UTF8'))
+     AND t.redeemed_at IS NOT NULL
+     AND t.redeemed_at > pg_catalog.now() - interval '5 minutes';
+  IF holder IS NOT DISTINCT FROM NEW.actor_id THEN
+    RETURN NEW;
+  END IF;
+  IF pg_catalog.jsonb_typeof(NEW.detail) = 'object' THEN
+    NEW.detail := NEW.detail || pg_catalog.jsonb_build_object(
+      'unverified_actor_id', NEW.actor_id::text);
+  ELSE
+    NEW.detail := pg_catalog.jsonb_build_object(
+      'unverified_actor_id', NEW.actor_id::text, 'detail', NEW.detail);
+  END IF;
+  NEW.actor_id := NULL;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: FUNCTION pin_attribution(); Type: COMMENT; Schema: audit; Owner: -
+--
+
+COMMENT ON FUNCTION audit.pin_attribution() IS 'The request role may not date an audit row. A claimed actor must be the user its connection is bound to, or the holder of a ticket it spent: another user is refused, and a claim from a connection bound to nobody is kept in detail as unverified_actor_id with actor_id NULL (0150). Fires before audit_chain.';
 
 --
 -- Name: authority_target_fits(); Type: FUNCTION; Schema: collect; Owner: -
@@ -678,6 +753,44 @@ BEGIN
           OR NEW.revoke_reason IS DISTINCT FROM OLD.revoke_reason) THEN
     RAISE EXCEPTION USING MESSAGE =
       'a revoked source under a collection authority stays revoked';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+--
+-- Name: guard_persona_act(); Type: FUNCTION; Schema: collect; Owner: -
+--
+
+CREATE FUNCTION collect.guard_persona_act() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'a persona act is a record of who asked for what, and is never deleted',
+      ERRCODE = '42501';
+  END IF;
+  IF OLD.status NOT IN ('PENDING', 'RUNNING') THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'a finished persona act is a record and never changes', ERRCODE = '42501';
+  END IF;
+  IF NEW.id <> OLD.id OR NEW.kind <> OLD.kind
+     OR NEW.source_id IS DISTINCT FROM OLD.source_id
+     OR NEW.classification <> OLD.classification
+     OR NEW.params <> OLD.params OR NEW.dedupe_key <> OLD.dedupe_key
+     OR NEW.requested_by <> OLD.requested_by
+     OR NEW.session_id IS DISTINCT FROM OLD.session_id
+     OR NEW.mfa_satisfied_at IS DISTINCT FROM OLD.mfa_satisfied_at
+     OR NEW.requested_at <> OLD.requested_at OR NEW.expires_at <> OLD.expires_at THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'what a persona act asked for never changes once it is asked', ERRCODE = '42501';
+  END IF;
+  IF NOT ((OLD.status = 'PENDING' AND NEW.status IN ('PENDING', 'RUNNING', 'EXPIRED', 'CANCELLED'))
+       OR (OLD.status = 'RUNNING' AND NEW.status IN ('PENDING', 'RUNNING', 'DONE', 'REFUSED', 'FAILED'))) THEN
+    RAISE EXCEPTION USING MESSAGE =
+      'a persona act moves ' || OLD.status || ' to ' || NEW.status || ', which is not a step it takes',
+      ERRCODE = '42501';
   END IF;
   RETURN NEW;
 END
@@ -1319,29 +1432,121 @@ END $$;
 --
 
 CREATE FUNCTION core.announce_change() RETURNS trigger
-    LANGUAGE plpgsql
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
     AS $$
-        DECLARE
-          affected uuid;
-        BEGIN
-          -- DELETE has no NEW TABLE, and an INSERT has no OLD TABLE, so
-          -- each branch reads the one that exists. A statement that
-          -- touched nothing announces nothing.
-          IF TG_OP = 'DELETE' THEN
-            SELECT case_id INTO affected FROM oldrows LIMIT 1;
-          ELSE
-            SELECT case_id INTO affected FROM newrows LIMIT 1;
-          END IF;
-          IF affected IS NULL THEN
-            RETURN NULL;
-          END IF;
-          PERFORM pg_notify(
-            'noctornal_change',
-            json_build_object('case_id', affected,
-                              'kind', TG_ARGV[0],
-                              'op', TG_OP)::text);
-          RETURN NULL;
-        END $$;
+DECLARE
+  affected uuid;
+  label_sets json;
+  label_count integer := 0;
+  unplaced boolean := false;
+  payload text;
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    SELECT case_id INTO affected FROM oldrows LIMIT 1;
+  ELSE
+    SELECT case_id INTO affected FROM newrows LIMIT 1;
+  END IF;
+  IF affected IS NULL THEN
+    RETURN NULL;
+  END IF;
+
+  IF TG_ARGV[0] = 'edge' THEN
+    -- A tie is read only where both ends are: its pair is the join of its
+    -- own labels and its endpoints'. The endpoints are read as the definer
+    -- (this function runs as the owner), because a writer that cannot see an
+    -- endpoint would otherwise leave the pair unknowable; a node row that is
+    -- not there at all is not guessed at.
+    IF TG_OP = 'DELETE' THEN
+      SELECT coalesce(bool_or(s.id IS NULL OR t.id IS NULL), false) INTO unplaced
+        FROM oldrows r
+        LEFT JOIN core.node s ON s.id = r.src_node_id
+        LEFT JOIN core.node t ON t.id = r.dst_node_id;
+      SELECT count(*), json_agg(json_build_array(d.cls, d.comps))
+        INTO label_count, label_sets
+        FROM (SELECT DISTINCT
+                     greatest(r.classification, s.classification, t.classification) AS cls,
+                     ARRAY(SELECT DISTINCT c
+                             FROM unnest(coalesce(r.compartments, '{}')
+                                         || coalesce(s.compartments, '{}')
+                                         || coalesce(t.compartments, '{}')) AS c
+                            ORDER BY c) AS comps
+                FROM oldrows r
+                JOIN core.node s ON s.id = r.src_node_id
+                JOIN core.node t ON t.id = r.dst_node_id
+               LIMIT 33) d;
+    ELSIF TG_OP = 'UPDATE' THEN
+      SELECT coalesce(bool_or(s.id IS NULL OR t.id IS NULL), false) INTO unplaced
+        FROM (SELECT src_node_id, dst_node_id FROM newrows
+              UNION ALL SELECT src_node_id, dst_node_id FROM oldrows) r
+        LEFT JOIN core.node s ON s.id = r.src_node_id
+        LEFT JOIN core.node t ON t.id = r.dst_node_id;
+      SELECT count(*), json_agg(json_build_array(d.cls, d.comps))
+        INTO label_count, label_sets
+        FROM (SELECT DISTINCT
+                     greatest(r.classification, s.classification, t.classification) AS cls,
+                     ARRAY(SELECT DISTINCT c
+                             FROM unnest(coalesce(r.compartments, '{}')
+                                         || coalesce(s.compartments, '{}')
+                                         || coalesce(t.compartments, '{}')) AS c
+                            ORDER BY c) AS comps
+                FROM (SELECT classification, compartments, src_node_id, dst_node_id
+                        FROM newrows
+                      UNION ALL
+                      SELECT classification, compartments, src_node_id, dst_node_id
+                        FROM oldrows) r
+                JOIN core.node s ON s.id = r.src_node_id
+                JOIN core.node t ON t.id = r.dst_node_id
+               LIMIT 33) d;
+    ELSE
+      SELECT coalesce(bool_or(s.id IS NULL OR t.id IS NULL), false) INTO unplaced
+        FROM newrows r
+        LEFT JOIN core.node s ON s.id = r.src_node_id
+        LEFT JOIN core.node t ON t.id = r.dst_node_id;
+      SELECT count(*), json_agg(json_build_array(d.cls, d.comps))
+        INTO label_count, label_sets
+        FROM (SELECT DISTINCT
+                     greatest(r.classification, s.classification, t.classification) AS cls,
+                     ARRAY(SELECT DISTINCT c
+                             FROM unnest(coalesce(r.compartments, '{}')
+                                         || coalesce(s.compartments, '{}')
+                                         || coalesce(t.compartments, '{}')) AS c
+                            ORDER BY c) AS comps
+                FROM newrows r
+                JOIN core.node s ON s.id = r.src_node_id
+                JOIN core.node t ON t.id = r.dst_node_id
+               LIMIT 33) d;
+    END IF;
+  ELSE
+    IF TG_OP = 'DELETE' THEN
+      SELECT count(*), json_agg(json_build_array(d.classification, d.compartments))
+        INTO label_count, label_sets
+        FROM (SELECT DISTINCT classification, compartments FROM oldrows LIMIT 33) d;
+    ELSIF TG_OP = 'UPDATE' THEN
+      SELECT count(*), json_agg(json_build_array(d.classification, d.compartments))
+        INTO label_count, label_sets
+        FROM (SELECT classification, compartments FROM newrows
+              UNION SELECT classification, compartments FROM oldrows LIMIT 33) d;
+    ELSE
+      SELECT count(*), json_agg(json_build_array(d.classification, d.compartments))
+        INTO label_count, label_sets
+        FROM (SELECT DISTINCT classification, compartments FROM newrows LIMIT 33) d;
+    END IF;
+  END IF;
+
+  IF unplaced OR label_count > 32 THEN
+    label_sets := NULL;
+  END IF;
+  payload := json_build_object('case_id', affected, 'kind', TG_ARGV[0],
+                               'op', TG_OP, 'labels', label_sets)::text;
+  IF octet_length(payload) > 7900 THEN
+    payload := json_build_object('case_id', affected, 'kind', TG_ARGV[0],
+                                 'op', TG_OP, 'labels', NULL)::text;
+  END IF;
+  PERFORM pg_notify('noctornal_change', payload);
+  RETURN NULL;
+END
+$$;
 
 --
 -- Name: assertion_derives_tie_confidence(); Type: FUNCTION; Schema: core; Owner: -
@@ -1410,6 +1615,94 @@ BEGIN
   END IF;
   RETURN NULL;
 END $$;
+
+--
+-- Name: assertion_kept(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.assertion_kept() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+BEGIN
+  RAISE EXCEPTION 'claims are never deleted: a claim is retracted or superseded and its row is kept';
+END
+$$;
+
+--
+-- Name: assertion_marked_once(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.assertion_marked_once() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+DECLARE
+  actor uuid;
+  caller text := CASE WHEN pg_catalog.current_setting('role') = 'none'
+                      THEN session_user::text
+                      ELSE pg_catalog.current_setting('role') END;
+BEGIN
+  IF OLD.retracted_at IS NOT NULL THEN
+    IF NEW.retracted_at IS DISTINCT FROM OLD.retracted_at
+       OR NEW.retracted_by IS DISTINCT FROM OLD.retracted_by
+       OR NEW.retraction_reason IS DISTINCT FROM OLD.retraction_reason THEN
+      RAISE EXCEPTION 'a retraction is recorded once and is never changed or withdrawn';
+    END IF;
+  ELSIF NEW.retracted_at IS NULL
+        AND (NEW.retracted_by IS DISTINCT FROM OLD.retracted_by
+             OR NEW.retraction_reason IS DISTINCT FROM OLD.retraction_reason) THEN
+    RAISE EXCEPTION 'a retraction is stamped with its time, its author and its reason together';
+  END IF;
+  IF OLD.superseded_at IS NOT NULL THEN
+    IF NEW.superseded_at IS DISTINCT FROM OLD.superseded_at
+       OR NEW.superseded_by IS DISTINCT FROM OLD.superseded_by THEN
+      RAISE EXCEPTION 'a supersession is recorded once and is never changed or withdrawn';
+    END IF;
+  ELSIF NEW.superseded_at IS NULL
+        AND NEW.superseded_by IS DISTINCT FROM OLD.superseded_by THEN
+    RAISE EXCEPTION 'a supersession is stamped with its time';
+  END IF;
+  /* What a statement injected into a request may NOT do with a mark (verify
+     round, 2026-10-03). The schema owner (and a superuser) is exempt, as
+     for every guard, and repairs by disabling this trigger by name; both
+     runtime roles are held, whatever else they may bypass. The caller is the
+     role in effect, as `iam.rls_caller_exempt` reads it, because this
+     function runs as its owner. */
+  IF NOT pg_catalog.pg_has_role(
+           caller,
+           (SELECT c.relowner FROM pg_catalog.pg_class c WHERE c.oid = TG_RELID),
+           'USAGE') THEN
+    IF NEW.retracted_at IS NOT NULL AND OLD.retracted_at IS NULL THEN
+      IF NEW.retracted_by IS NULL OR NEW.retraction_reason IS NULL
+         OR pg_catalog.btrim(NEW.retraction_reason) = '' THEN
+        RAISE EXCEPTION 'a retraction is stamped with its time, its author and its reason together';
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM iam.app_user u WHERE u.id = NEW.retracted_by) THEN
+        RAISE EXCEPTION 'a retraction names the person who made it';
+      END IF;
+      actor := iam.rls_actor();
+      IF actor IS NOT NULL AND NEW.retracted_by IS DISTINCT FROM actor THEN
+        RAISE EXCEPTION 'a retraction names the person signed in, and nobody else';
+      END IF;
+    END IF;
+    IF NEW.superseded_at IS NOT NULL AND OLD.superseded_at IS NULL THEN
+      IF NEW.superseded_by IS NULL OR NOT EXISTS (
+           SELECT 1 FROM core.assertion r
+            WHERE r.id = NEW.superseded_by AND r.supersedes_id = OLD.id) THEN
+        RAISE EXCEPTION 'a supersession names the claim that replaces this one';
+      END IF;
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+--
+-- Name: FUNCTION assertion_marked_once(); Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON FUNCTION core.assertion_marked_once() IS 'Invariant 5 at the database (review 2026-10-03): a retraction and a supersession are stamped once, from NULL, and never changed; for a runtime role a retraction carries its author (the signed-in person) and its reason, and a supersession names its replacement. An owner who must repair a row disables trigger assertion_marked_once by name.';
 
 --
 -- Name: assertion_protects_element(); Type: FUNCTION; Schema: core; Owner: -
@@ -1512,8 +1805,12 @@ CREATE FUNCTION core.custody_chain_hash() RETURNS trigger
     AS $$
 DECLARE prev bytea;
 BEGIN
-  NEW.occurred_at := now();  -- server-pinned; any caller value is ignored
+  NEW.occurred_at := now();
+  IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
+    RAISE EXCEPTION 'core.evidence_custody is chained under READ COMMITTED only: a snapshot taken before the last append cannot see the tail';
+  END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended('core.evidence_custody.chain', 0));
+  NEW.id := nextval('core.evidence_custody_id_seq');
   SELECT row_hash INTO prev FROM core.evidence_custody ORDER BY id DESC LIMIT 1;
   NEW.prev_hash := prev;
   NEW.row_hash := public.digest(
@@ -1529,6 +1826,20 @@ BEGIN
     'sha256');
   RETURN NEW;
 END $$;
+
+--
+-- Name: custody_chain_ordered_after(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.custody_chain_ordered_after() RETURNS bigint
+    LANGUAGE sql IMMUTABLE
+    AS $$SELECT 23::bigint$$;
+
+--
+-- Name: FUNCTION custody_chain_ordered_after(); Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON FUNCTION core.custody_chain_ordered_after() IS 'The largest core.evidence_custody.id that existed when 0149 ran. A fork whose claimants are all above it cannot come from ordinary traffic.';
 
 --
 -- Name: edge_confidence_is_derived(); Type: FUNCTION; Schema: core; Owner: -
@@ -1815,6 +2126,69 @@ END
 $$;
 
 --
+-- Name: guard_evidence_anchors(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.guard_evidence_anchors() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+BEGIN
+  IF NEW.sha256 IS DISTINCT FROM OLD.sha256
+     OR NEW.blake3 IS DISTINCT FROM OLD.blake3
+     OR NEW.byte_size IS DISTINCT FROM OLD.byte_size
+     OR NEW.storage_key IS DISTINCT FROM OLD.storage_key
+     OR NEW.storage_bucket IS DISTINCT FROM OLD.storage_bucket
+     OR NEW.case_id IS DISTINCT FROM OLD.case_id
+     OR (OLD.storage_version_id IS NOT NULL
+         AND NEW.storage_version_id IS DISTINCT FROM OLD.storage_version_id)
+  THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+      'an exhibit''s hashes, size, case and stored object are fixed when it is lodged';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+--
+-- Name: FUNCTION guard_evidence_anchors(); Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON FUNCTION core.guard_evidence_anchors() IS 'Refuses a change to an exhibit''s hashes, size, case or stored object (evidence-integrity-anchors-mutable, 2026-10-03). An operator who must correct one disables evidence_anchors_fixed by name.';
+
+--
+-- Name: guard_evidence_hold_purge(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.guard_evidence_hold_purge() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+DECLARE
+  case_held boolean;
+BEGIN
+  IF OLD.purged_at IS NULL AND NEW.purged_at IS NOT NULL THEN
+    SELECT c.legal_hold INTO case_held FROM core."case" c WHERE c.id = NEW.case_id;
+    IF NEW.legal_hold OR coalesce(case_held, false) THEN
+      RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+        'an exhibit under legal hold is not destroyed: a hold overrides all deletion';
+    END IF;
+  END IF;
+  IF OLD.purged_at IS NOT NULL AND NEW.legal_hold AND NOT OLD.legal_hold THEN
+    RAISE EXCEPTION USING ERRCODE = 'check_violation', MESSAGE =
+      'a destroyed exhibit cannot be placed under legal hold';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+--
+-- Name: FUNCTION guard_evidence_hold_purge(); Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON FUNCTION core.guard_evidence_hold_purge() IS 'A held exhibit is never marked purged and a purged one is never held (evidence-purge-hold-race, 2026-10-03).';
+
+--
 -- Name: node_tsv_update(); Type: FUNCTION; Schema: core; Owner: -
 --
 
@@ -1875,6 +2249,30 @@ BEGIN
   END IF;
   RETURN NULL;
 END $$;
+
+--
+-- Name: selector_labels_follow_owner(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.selector_labels_follow_owner() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+DECLARE
+  owner_class core.tlp;
+  owner_comps text[];
+BEGIN
+  IF NEW.node_id IS NOT NULL THEN
+    SELECT n.classification, n.compartments INTO owner_class, owner_comps
+      FROM core.node n WHERE n.id = NEW.node_id;
+    IF FOUND THEN
+      NEW.classification := owner_class;
+      NEW.compartments := owner_comps;
+    END IF;
+  END IF;
+  RETURN NEW;
+END
+$$;
 
 --
 -- Name: sync_tie_confidence(uuid); Type: FUNCTION; Schema: core; Owner: -
@@ -1954,9 +2352,11 @@ CREATE TABLE core.assertion (
     created_by uuid NOT NULL,
     lookup_result_id uuid,
     supersedes_id uuid,
+    prior_value jsonb,
     CONSTRAINT assertion_inference_needs_rationale CHECK (((basis <> ALL (ARRAY['ANALYST_INFERENCE'::core.assertion_basis, 'AUTOMATED_INFERENCE'::core.assertion_basis])) OR (rationale IS NOT NULL))),
     CONSTRAINT assertion_not_self_superseding CHECK (((supersedes_id IS NULL) OR (supersedes_id <> id))),
-    CONSTRAINT assertion_one_subject CHECK ((num_nonnulls(node_id, edge_id) = 1))
+    CONSTRAINT assertion_one_subject CHECK ((num_nonnulls(node_id, edge_id) = 1)),
+    CONSTRAINT assertion_prior_value_object CHECK (((prior_value IS NULL) OR (jsonb_typeof(prior_value) = 'object'::text)))
 );
 
 --
@@ -1970,6 +2370,12 @@ COMMENT ON COLUMN core.assertion.lookup_result_id IS 'The lookup answer an accep
 --
 
 COMMENT ON COLUMN core.assertion.supersedes_id IS 'The claim this one replaces, set once at insert (migration assertion_supersedes, 2026-10-02). The replaced row carries superseded_at and superseded_by, stamped once from NULL; its own columns are never written again.';
+
+--
+-- Name: COLUMN assertion.prior_value; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON COLUMN core.assertion.prior_value IS 'On a correction: for each field it changes, the value the element held just before it, set once at insert (review 2026-10-03). Retracting the correction restores the value the remaining live claims support.';
 
 --
 -- Name: tie_grade(core.assertion); Type: FUNCTION; Schema: core; Owner: -
@@ -2403,7 +2809,8 @@ COMMENT ON FUNCTION iam.compartments_registered(keys text[]) IS 'True iff every 
 --
 
 CREATE FUNCTION iam.countersign_blocked_by(signer uuid, signer_permission text, as_of timestamp with time zone DEFAULT now(), proposer uuid DEFAULT NULL::uuid, proposer_permission text DEFAULT NULL::text, lookback interval DEFAULT NULL::interval) RETURNS TABLE(action text, occurred_at timestamp with time zone, actor_id uuid, subject_id uuid, role_key text)
-    LANGUAGE sql STABLE
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'pg_temp'
     AS $$
   SELECT e.action, e.occurred_at, e.actor_id, e.object_id,
          CASE WHEN e.action = 'ROLE_GRANTED' THEN e.detail->>'role' END
@@ -2513,6 +2920,127 @@ END
 $$;
 
 --
+-- Name: ingest_batch_reach(uuid, uuid[]); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.ingest_batch_reach(p_batch uuid, p_cases uuid[]) RETURNS TABLE(cases uuid[], unattached boolean)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER PARALLEL RESTRICTED
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+DECLARE
+  v_fed uuid[] := ARRAY(
+    WITH RECURSIVE walk(case_id) AS (
+      (SELECT r.case_id FROM ingest.record r
+        WHERE r.batch_id = p_batch AND r.case_id IS NOT NULL
+        ORDER BY r.case_id LIMIT 1)
+      UNION ALL
+      SELECT (SELECT r.case_id FROM ingest.record r
+                WHERE r.batch_id = p_batch AND r.case_id > w.case_id
+                ORDER BY r.case_id LIMIT 1)
+        FROM walk w WHERE w.case_id IS NOT NULL)
+    SELECT w.case_id FROM walk w WHERE w.case_id IS NOT NULL);
+  v_seen uuid[];
+  v_mine uuid[];
+BEGIN
+  IF pg_catalog.cardinality(v_fed) = 0 THEN
+    RETURN QUERY SELECT '{}'::uuid[],
+                        iam.rls_caller_exempt() OR iam.rls_holds_global('ingest.manage');
+    RETURN;
+  END IF;
+  v_seen := ARRAY(SELECT f.c FROM pg_catalog.unnest(v_fed) AS f(c)
+                   WHERE p_cases IS NULL OR f.c = ANY (p_cases));
+  IF pg_catalog.cardinality(v_seen) > 0 AND NOT iam.rls_caller_exempt() THEN
+    v_mine := coalesce(iam.rls_cases(), '{}'::uuid[]);
+    v_seen := ARRAY(SELECT f.c FROM pg_catalog.unnest(v_seen) AS f(c)
+                     WHERE f.c = ANY (v_mine));
+  END IF;
+  RETURN QUERY SELECT v_seen, false;
+END
+$$;
+
+--
+-- Name: FUNCTION ingest_batch_reach(p_batch uuid, p_cases uuid[]); Type: COMMENT; Schema: iam; Owner: -
+--
+
+COMMENT ON FUNCTION iam.ingest_batch_reach(p_batch uuid, p_cases uuid[]) IS 'Of the cases a batch fed, those in the argument (NULL: all) the bound caller may read, and whether it fed none, said only to an ingest.manage holder (F51, 2026-10-02).';
+
+--
+-- Name: ingest_dead_letter_visible(uuid, core.tlp, uuid[], core.tlp, jsonb, boolean); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.ingest_dead_letter_visible(p_batch uuid, p_classification core.tlp, p_cases uuid[], p_clearance core.tlp, p_ceilings jsonb, p_manages boolean) RETURNS boolean
+    LANGUAGE plpgsql STABLE SECURITY DEFINER PARALLEL RESTRICTED
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+DECLARE
+  v_fed uuid[] := ARRAY(
+    WITH RECURSIVE walk(case_id) AS (
+      (SELECT r.case_id FROM ingest.record r
+        WHERE r.batch_id = p_batch AND r.case_id IS NOT NULL
+        ORDER BY r.case_id LIMIT 1)
+      UNION ALL
+      SELECT (SELECT r.case_id FROM ingest.record r
+                WHERE r.batch_id = p_batch AND r.case_id > w.case_id
+                ORDER BY r.case_id LIMIT 1)
+        FROM walk w WHERE w.case_id IS NOT NULL)
+    SELECT w.case_id FROM walk w WHERE w.case_id IS NOT NULL);
+  v_cases uuid[];
+  v_clr core.tlp;
+  v_ceil jsonb;
+BEGIN
+  IF pg_catalog.cardinality(v_fed) = 0 THEN
+    -- A batch that fed no case: the operator's, at their case-less ceiling.
+    IF NOT coalesce(p_manages, false)
+       OR NOT coalesce(p_classification <= p_clearance, false) THEN
+      RETURN false;
+    END IF;
+    RETURN iam.rls_caller_exempt()
+           OR (iam.rls_holds_global('ingest.manage')
+               AND coalesce(p_classification <= iam.rls_clearance(), false));
+  END IF;
+  -- The caller's own initplans say no to most rows, cheaply.
+  IF NOT EXISTS (
+      SELECT 1 FROM pg_catalog.unnest(v_fed) AS f(c)
+       WHERE f.c = ANY (p_cases)
+         AND (p_classification <= p_clearance
+              OR p_classification <= iam.rls_ceiling_for(p_ceilings, f.c))) THEN
+    RETURN false;
+  END IF;
+  IF iam.rls_caller_exempt() THEN
+    RETURN true;
+  END IF;
+  -- A yes is confirmed against the bound actor, never taken from arguments.
+  v_cases := coalesce(iam.rls_cases(), '{}'::uuid[]);
+  v_clr := iam.rls_clearance();
+  v_ceil := coalesce(iam.rls_ceilings(), '{}'::jsonb);
+  RETURN EXISTS (
+    SELECT 1 FROM pg_catalog.unnest(v_fed) AS f(c)
+     WHERE f.c = ANY (v_cases)
+       AND (p_classification <= v_clr
+            OR p_classification <= iam.rls_ceiling_for(v_ceil, f.c)));
+END
+$$;
+
+--
+-- Name: FUNCTION ingest_dead_letter_visible(p_batch uuid, p_classification core.tlp, p_cases uuid[], p_clearance core.tlp, p_ceilings jsonb, p_manages boolean); Type: COMMENT; Schema: iam; Owner: -
+--
+
+COMMENT ON FUNCTION iam.ingest_dead_letter_visible(p_batch uuid, p_classification core.tlp, p_cases uuid[], p_clearance core.tlp, p_ceilings jsonb, p_manages boolean) IS 'The one predicate of ingest.dead_letter''s policy (F51, 2026-10-02): visible through a case its batch fed, at that case''s ceiling, or, for a batch that fed none, to the operator at their case-less ceiling. Arguments only narrow.';
+
+--
+-- Name: ingest_record_facts(uuid); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.ingest_record_facts(p_id uuid) RETURNS TABLE(case_id uuid, classification core.tlp, compartments text[])
+    LANGUAGE sql STABLE SECURITY DEFINER PARALLEL SAFE
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  SELECT r.case_id, r.classification, r.compartments
+    FROM ingest.record r
+   WHERE r.id = p_id
+$$;
+
+--
 -- Name: lookup_result_facts(uuid); Type: FUNCTION; Schema: iam; Owner: -
 --
 
@@ -2597,6 +3125,29 @@ BEGIN
   RETURN NEW;
 END
 $$;
+
+--
+-- Name: recovery_codes_remaining(uuid); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.recovery_codes_remaining(p_user uuid) RETURNS integer
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+BEGIN
+  IF NOT iam.rls_caller_exempt() AND p_user IS DISTINCT FROM iam.rls_actor() THEN
+    RETURN NULL;
+  END IF;
+  RETURN (SELECT coalesce(pg_catalog.cardinality(u.recovery_codes_hash), 0)
+            FROM iam.app_user u WHERE u.id = p_user);
+END
+$$;
+
+--
+-- Name: FUNCTION recovery_codes_remaining(p_user uuid); Type: COMMENT; Schema: iam; Owner: -
+--
+
+COMMENT ON FUNCTION iam.recovery_codes_remaining(p_user uuid) IS 'How many recovery codes an account has left, for that account alone (rls-6, 2026-10-03): the request role cannot read the hashes.';
 
 --
 -- Name: refuse_compartment_removal(); Type: FUNCTION; Schema: iam; Owner: -
@@ -3033,6 +3584,17 @@ BEGIN
     RAISE EXCEPTION 'iam.session: a revoked session stays revoked'
       USING ERRCODE = '42501';
   END IF;
+  IF NEW.mfa_satisfied_at IS DISTINCT FROM OLD.mfa_satisfied_at THEN
+    RAISE EXCEPTION 'iam.session: a second factor is recorded only at sign-in'
+      USING ERRCODE = '42501';
+  END IF;
+  IF NEW.last_seen_at IS DISTINCT FROM OLD.last_seen_at
+     AND (NEW.last_seen_at IS NULL
+          OR NEW.last_seen_at < OLD.last_seen_at
+          OR NEW.last_seen_at > pg_catalog.now() + interval '5 minutes') THEN
+    RAISE EXCEPTION 'iam.session: the idle window only slides forward, to the present'
+      USING ERRCODE = '42501';
+  END IF;
   RETURN NEW;
 END
 $$;
@@ -3303,6 +3865,26 @@ BEGIN
 END $$;
 
 --
+-- Name: pii_authorisation_request_guard(); Type: FUNCTION; Schema: ingest; Owner: -
+--
+
+CREATE FUNCTION ingest.pii_authorisation_request_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+BEGIN
+  IF iam.rls_caller_exempt() THEN
+    RETURN NEW;
+  END IF;
+  IF NEW.query_count IS DISTINCT FROM OLD.query_count + 1 THEN
+    RAISE EXCEPTION 'an authorisation counts its reveals one at a time'
+      USING ERRCODE = '42501';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+--
 -- Name: provider_starts_unapproved(); Type: FUNCTION; Schema: ingest; Owner: -
 --
 
@@ -3316,6 +3898,62 @@ BEGIN
   NEW.enabled := false;
   RETURN NEW;
 END $$;
+
+--
+-- Name: record_request_guard(); Type: FUNCTION; Schema: ingest; Owner: -
+--
+
+CREATE FUNCTION ingest.record_request_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+BEGIN
+  IF iam.rls_caller_exempt() THEN
+    RETURN NEW;
+  END IF;
+  IF OLD.case_id IS NOT NULL AND NEW.case_id IS DISTINCT FROM OLD.case_id THEN
+    RAISE EXCEPTION 'a record is attached to a case once, from quarantine, and is never moved or detached'
+      USING ERRCODE = '42501';
+  END IF;
+  /* An expiry only ever moves later (g31 verification 2, 2026-10-03). NULL is
+     the latest there is: retention.due never selects a record with none, so
+     a request neither clears an expiry nor gives a record one, since a date
+     on an unclocked record is a destruction decision and retention's, not a
+     relabel's. Nothing past 1 December 9999 either: psycopg cannot read
+     infinity, or a date past the year 9999 in any time zone, so one such
+     value would poison every listing that reads the record. */
+  IF NEW.retain_until IS DISTINCT FROM OLD.retain_until
+     AND (OLD.retain_until IS NULL
+          OR NEW.retain_until IS NULL
+          OR NEW.retain_until < OLD.retain_until
+          OR NEW.retain_until > timestamptz '9999-12-01 00:00:00+00') THEN
+    RAISE EXCEPTION 'a record''s expiry only moves later, within what can be read back: a request never brings it forward, clears it or gives a record one'
+      USING ERRCODE = '42501';
+  END IF;
+  RETURN NEW;
+END
+$$;
+
+--
+-- Name: victim_credential_request_guard(); Type: FUNCTION; Schema: ingest; Owner: -
+--
+
+CREATE FUNCTION ingest.victim_credential_request_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+BEGIN
+  IF iam.rls_caller_exempt() THEN
+    RETURN NEW;
+  END IF;
+  IF NEW.reveal_count IS DISTINCT FROM OLD.reveal_count + 1
+     OR NEW.last_revealed_at IS DISTINCT FROM pg_catalog.now() THEN
+    RAISE EXCEPTION 'a reveal is counted one at a time, stamped with the time it was made'
+      USING ERRCODE = '42501';
+  END IF;
+  RETURN NEW;
+END
+$$;
 
 --
 -- Name: block_access_mutation(); Type: FUNCTION; Schema: lab; Owner: -
@@ -3432,6 +4070,38 @@ BEGIN
   END IF;
   IF OLD.report IS NOT NULL AND NEW.report IS DISTINCT FROM OLD.report THEN
     RAISE EXCEPTION 'detonation.report is set once';
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: guard_member_labels(); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.guard_member_labels() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'lab', 'core', 'pg_temp'
+    AS $$
+DECLARE
+  parent_tlp core.tlp;
+  parent_comps text[];
+BEGIN
+  IF NEW.parent_sample_id IS NULL THEN
+    RETURN NEW;
+  END IF;
+  SELECT classification, compartments INTO parent_tlp, parent_comps
+    FROM lab.sample WHERE id = NEW.parent_sample_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'sample %: its parent archive % does not exist',
+      NEW.id, NEW.parent_sample_id;
+  END IF;
+  IF NEW.classification < parent_tlp THEN
+    RAISE EXCEPTION 'sample %: a member is never labelled below its archive '
+      '(member %, archive %)', NEW.id, NEW.classification, parent_tlp;
+  END IF;
+  IF NOT (parent_comps <@ NEW.compartments) THEN
+    RAISE EXCEPTION 'sample %: a member carries every compartment of its '
+      'archive', NEW.id;
   END IF;
   RETURN NEW;
 END $$;
@@ -3754,7 +4424,8 @@ CREATE FUNCTION notify.enqueue(p_recipient uuid, p_case uuid, p_kind text, p_pri
     AS $$
 DECLARE
   v_labels text[] := coalesce(p_compartments, '{}'::text[]);
-  v_exempt boolean;
+  v_exempt boolean := iam.rls_caller_exempt();
+  v_bound uuid;
   v_clr core.tlp;
   v_held text[];
   v_cases uuid[];
@@ -3762,8 +4433,30 @@ DECLARE
   v_id uuid;
   v_at timestamptz;
 BEGIN
+  IF NOT v_exempt THEN
+    v_bound := iam.rls_actor();
+    IF v_bound IS NULL THEN
+      RAISE EXCEPTION 'notify.enqueue: the caller is bound to no session'
+        USING ERRCODE = '42501';
+    END IF;
+    IF p_actor IS NOT NULL AND p_actor IS DISTINCT FROM v_bound THEN
+      RAISE EXCEPTION 'notify.enqueue: the actor of a notice is the account that raises it'
+        USING ERRCODE = '42501';
+    END IF;
+    IF EXISTS (
+        SELECT 1
+          FROM pg_catalog.jsonb_to_recordset(coalesce(p_deliveries, '[]'::jsonb))
+               AS x(channel text, state text, blocked jsonb)
+         WHERE NOT coalesce(x.state IN ('PENDING', 'SUPPRESSED')
+                            OR (x.state = 'SENT' AND x.channel = 'IN_APP'), false)
+            OR (x.blocked IS NOT NULL
+                AND (x.blocked ->> 'state') IS DISTINCT FROM 'SUPPRESSED')) THEN
+      RAISE EXCEPTION 'notify.enqueue: a delivery is planned PENDING or SUPPRESSED, or SENT for the in-app copy alone'
+        USING ERRCODE = '42501';
+    END IF;
+  END IF;
+
   IF p_open IS NOT NULL THEN
-    v_exempt := iam.rls_caller_exempt();
     IF NOT v_exempt THEN
       v_clr := iam.rls_clearance();
       v_held := coalesce(iam.rls_compartments(), '{}'::text[]);
@@ -3820,7 +4513,10 @@ BEGIN
   SELECT v_id, x.channel,
          CASE WHEN k.kept_out THEN x.blocked ->> 'state' ELSE x.state END,
          coalesce(x.deliver_after, pg_catalog.now()),
-         CASE WHEN k.kept_out THEN NULL ELSE x.sent_at END,
+         CASE WHEN k.kept_out THEN NULL
+              WHEN v_exempt THEN x.sent_at
+              WHEN x.state = 'SENT' THEN pg_catalog.now()
+              ELSE NULL END,
          CASE WHEN k.kept_out THEN x.blocked ->> 'detail' ELSE x.detail END,
          CASE WHEN k.kept_out THEN x.blocked ->> 'cause' ELSE x.cause END
     FROM pg_catalog.jsonb_to_recordset(coalesce(p_deliveries, '[]'::jsonb))
@@ -4053,11 +4749,15 @@ CREATE TABLE collect.collection_account (
     machine_lock_code text,
     machine_lock_at timestamp with time zone,
     session_enrolled_at timestamp with time zone,
+    session_ciphertext bytea,
+    session_key_id text,
+    session_sealed_at timestamp with time zone,
     CONSTRAINT collection_account_enrolled_has_secret CHECK (((session_enrolled_at IS NULL) OR (COALESCE(octet_length(secret_ciphertext), 0) > 0))),
     CONSTRAINT collection_account_enrolled_has_uid CHECK (((session_enrolled_at IS NULL) OR (platform_uid IS NOT NULL))),
     CONSTRAINT collection_account_machine_hold_known CHECK ((((machine_hold_until IS NULL) = (machine_hold_reason IS NULL)) AND ((machine_hold_reason IS NULL) OR (machine_hold_reason = ANY (ARRAY['RATE_LIMITED'::text, 'ABANDONED'::text]))))),
     CONSTRAINT collection_account_machine_lock_known CHECK ((((machine_lock_code IS NULL) = (machine_lock_at IS NULL)) AND ((machine_lock_code IS NULL) OR (machine_lock_code = ANY (ARRAY['CREDENTIAL_REVOKED'::text, 'CREDENTIAL_DUPLICATED'::text, 'ACCOUNT_BANNED'::text, 'WRONG_ACCOUNT'::text, 'PLATFORM_REFUSED'::text]))))),
     CONSTRAINT collection_account_platform_is_persona_kind CHECK (((platform IS NULL) OR (platform = ANY (ARRAY['XENFORO'::collect.source_kind, 'MYBB'::collect.source_kind, 'PHPBB'::collect.source_kind, 'TELEGRAM'::collect.source_kind, 'DISCORD'::collect.source_kind])))),
+    CONSTRAINT collection_account_session_complete CHECK ((((session_ciphertext IS NULL) = (session_key_id IS NULL)) AND ((session_ciphertext IS NULL) = (session_sealed_at IS NULL)))),
     CONSTRAINT collection_account_telegram_fingerprint CHECK (((platform IS DISTINCT FROM 'TELEGRAM'::collect.source_kind) OR (session_enrolled_at IS NULL) OR (fingerprint_profile ?& ARRAY['device_model'::text, 'system_version'::text, 'app_version'::text, 'lang_code'::text, 'system_lang_code'::text]))),
     CONSTRAINT collection_account_telegram_has_no_venue CHECK (((platform IS DISTINCT FROM 'TELEGRAM'::collect.source_kind) OR (source_id IS NULL))),
     CONSTRAINT collection_account_telegram_needs_egress CHECK (((platform IS DISTINCT FROM 'TELEGRAM'::collect.source_kind) OR (egress_profile_id IS NOT NULL))),
@@ -4107,6 +4807,12 @@ COMMENT ON COLUMN collect.collection_account.machine_lock_code IS 'The platform 
 --
 
 COMMENT ON COLUMN collect.collection_account.session_enrolled_at IS 'When the sealed Telegram session was enrolled; NULL after a logout.';
+
+--
+-- Name: COLUMN collection_account.session_ciphertext; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.collection_account.session_ciphertext IS 'The persona''s forum session cookies, sealed as its credential is (2026-10-02). Opened only inside a member read; NULL once signed out.';
 
 --
 -- Name: collection_authority; Type: TABLE; Schema: collect; Owner: -
@@ -4253,6 +4959,30 @@ COMMENT ON COLUMN collect.collection_run.items_deleted IS 'Items the site no lon
 --
 
 COMMENT ON COLUMN collect.collection_run.authority_id IS 'The confirmed authority this poll of a forum or Telegram source ran under.';
+
+--
+-- Name: collector_heartbeat; Type: TABLE; Schema: collect; Owner: -
+--
+
+CREATE TABLE collect.collector_heartbeat (
+    instance text NOT NULL,
+    started_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    seen_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    key_ids text[] DEFAULT '{}'::text[] NOT NULL,
+    sampled integer DEFAULT 0 NOT NULL,
+    unopenable integer DEFAULT 0 NOT NULL,
+    ring_problem text,
+    CONSTRAINT collector_heartbeat_check CHECK (((unopenable >= 0) AND (unopenable <= sampled))),
+    CONSTRAINT collector_heartbeat_instance CHECK (((length(instance) >= 1) AND (length(instance) <= 120))),
+    CONSTRAINT collector_heartbeat_ring_problem_check CHECK (((ring_problem IS NULL) OR (length(ring_problem) <= 500))),
+    CONSTRAINT collector_heartbeat_sampled_check CHECK ((sampled >= 0))
+);
+
+--
+-- Name: TABLE collector_heartbeat; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON TABLE collect.collector_heartbeat IS 'One row per collector process: when it was last seen and whether its persona key ring opened what it sampled (verify:g38, 2026-10-03). No secret.';
 
 --
 -- Name: document; Type: TABLE; Schema: collect; Owner: -
@@ -4590,7 +5320,12 @@ CREATE TABLE collect.forum_member (
     document_id uuid NOT NULL,
     profile jsonb DEFAULT '{}'::jsonb NOT NULL,
     observed_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT forum_member_profile_object CHECK (((jsonb_typeof(profile) = 'object'::text) AND (octet_length((profile)::text) <= 16384)))
+    provenance text DEFAULT 'PUBLIC'::text NOT NULL,
+    collection_account_id uuid,
+    authority_id uuid,
+    CONSTRAINT forum_member_member_names_its_persona CHECK ((((provenance = 'MEMBER'::text) = (collection_account_id IS NOT NULL)) AND ((provenance = 'MEMBER'::text) = (authority_id IS NOT NULL)))),
+    CONSTRAINT forum_member_profile_object CHECK (((jsonb_typeof(profile) = 'object'::text) AND (octet_length((profile)::text) <= 16384))),
+    CONSTRAINT forum_member_provenance_known CHECK ((provenance = ANY (ARRAY['PUBLIC'::text, 'MEMBER'::text])))
 );
 
 --
@@ -4598,6 +5333,12 @@ CREATE TABLE collect.forum_member (
 --
 
 COMMENT ON TABLE collect.forum_member IS 'A collected forum member profile''s fields (title, joined, contact and custom fields, counters), one row per member document version (category FORUM_MEMBER). No label of its own: read only joined to its document. Deleted by the retention purge with its document''s text.';
+
+--
+-- Name: COLUMN forum_member.provenance; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.forum_member.provenance IS 'PUBLIC: read without signing in. MEMBER: read as the persona named, under the authority named (2026-10-02).';
 
 --
 -- Name: forum_post; Type: TABLE; Schema: collect; Owner: -
@@ -4609,6 +5350,11 @@ CREATE TABLE collect.forum_post (
     quoted_post_refs text[] DEFAULT '{}'::text[] NOT NULL,
     reactions jsonb DEFAULT '{}'::jsonb NOT NULL,
     observed_at timestamp with time zone DEFAULT now() NOT NULL,
+    provenance text DEFAULT 'PUBLIC'::text NOT NULL,
+    collection_account_id uuid,
+    authority_id uuid,
+    CONSTRAINT forum_post_member_names_its_persona CHECK ((((provenance = 'MEMBER'::text) = (collection_account_id IS NOT NULL)) AND ((provenance = 'MEMBER'::text) = (authority_id IS NOT NULL)))),
+    CONSTRAINT forum_post_provenance_known CHECK ((provenance = ANY (ARRAY['PUBLIC'::text, 'MEMBER'::text]))),
     CONSTRAINT forum_post_quotes_capped CHECK (((cardinality(quoted_post_refs) <= 50) AND (array_position(quoted_post_refs, NULL::text) IS NULL))),
     CONSTRAINT forum_post_reactions_object CHECK (((jsonb_typeof(reactions) = 'object'::text) AND (octet_length((reactions)::text) <= 8192))),
     CONSTRAINT forum_post_signature_capped CHECK (((signature_text IS NULL) OR (char_length(signature_text) <= 4000)))
@@ -4643,6 +5389,52 @@ COMMENT ON COLUMN collect.forum_post.reactions IS 'A count, up to 50 reactor nam
 --
 
 COMMENT ON COLUMN collect.forum_post.observed_at IS 'When the side row was last written: a signature or reactions that changed without the text refresh it.';
+
+--
+-- Name: COLUMN forum_post.provenance; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.forum_post.provenance IS 'PUBLIC: read without signing in. MEMBER: read as the persona named, under the authority named (2026-10-02).';
+
+--
+-- Name: persona_act; Type: TABLE; Schema: collect; Owner: -
+--
+
+CREATE TABLE collect.persona_act (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    kind text NOT NULL,
+    source_id uuid,
+    classification core.tlp NOT NULL,
+    params jsonb DEFAULT '{}'::jsonb NOT NULL,
+    dedupe_key text NOT NULL,
+    requested_by uuid NOT NULL,
+    session_id uuid,
+    mfa_satisfied_at timestamp with time zone,
+    requested_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    not_before timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    status text DEFAULT 'PENDING'::text NOT NULL,
+    attempts integer DEFAULT 0 NOT NULL,
+    claimed_by text,
+    claimed_at timestamp with time zone,
+    finished_at timestamp with time zone,
+    result jsonb,
+    CONSTRAINT persona_act_attempts_check CHECK ((attempts >= 0)),
+    CONSTRAINT persona_act_claimed CHECK (((status <> 'RUNNING'::text) OR (claimed_at IS NOT NULL))),
+    CONSTRAINT persona_act_claimed_by_check CHECK (((claimed_by IS NULL) OR (length(claimed_by) <= 120))),
+    CONSTRAINT persona_act_dedupe CHECK ((dedupe_key ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT persona_act_finished CHECK (((status = ANY (ARRAY['PENDING'::text, 'RUNNING'::text])) = (finished_at IS NULL))),
+    CONSTRAINT persona_act_kind CHECK ((kind = ANY (ARRAY['TELEGRAM_RESOLVE'::text, 'TELEGRAM_JOIN'::text, 'TELEGRAM_MEMBERSHIP'::text, 'TELEGRAM_MARK_MEMBER'::text, 'TELEGRAM_REBIND'::text, 'SOURCE_POLL'::text, 'FORUM_SIGN_OUT'::text]))),
+    CONSTRAINT persona_act_params CHECK (((jsonb_typeof(params) = 'object'::text) AND (octet_length((params)::text) <= 8192))),
+    CONSTRAINT persona_act_status CHECK ((status = ANY (ARRAY['PENDING'::text, 'RUNNING'::text, 'DONE'::text, 'REFUSED'::text, 'FAILED'::text, 'EXPIRED'::text, 'CANCELLED'::text]))),
+    CONSTRAINT persona_act_window CHECK (((expires_at > requested_at) AND (expires_at <= (requested_at + '01:00:00'::interval))))
+);
+
+--
+-- Name: TABLE persona_act; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON TABLE collect.persona_act IS 'Attended persona acts the API asked the collector to run (A collector process, 2026-10-02). No secret.';
 
 --
 -- Name: proposal; Type: TABLE; Schema: collect; Owner: -
@@ -4703,6 +5495,7 @@ CREATE TABLE collect.source (
     cursor_reset_at timestamp with time zone,
     collection_account_id uuid,
     egress_profile_id uuid,
+    compartments text[] DEFAULT '{}'::text[] NOT NULL,
     CONSTRAINT source_blocked_complete CHECK (((blocked_reason IS NULL) = (blocked_at IS NULL))),
     CONSTRAINT source_one_egress_binding CHECK (((collection_account_id IS NULL) OR (egress_profile_id IS NULL))),
     CONSTRAINT source_parser_config_is_object CHECK (((jsonb_typeof(parser_config) = 'object'::text) AND (octet_length((parser_config)::text) <= 16384)))
@@ -4749,6 +5542,12 @@ COMMENT ON COLUMN collect.source.collection_account_id IS 'The persona this sour
 --
 
 COMMENT ON COLUMN collect.source.egress_profile_id IS 'The exit a persona-less source is read through. Never set beside a persona.';
+
+--
+-- Name: COLUMN source.compartments; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.source.compartments IS 'The need-to-know lock a source and everything it collects are read under (F43, 2026-10-02). Set at creation by a person who holds every key; every collected document copies it. Bound to iam.compartment by the compartments_registered trigger.';
 
 --
 -- Name: telegram_chat; Type: TABLE; Schema: collect; Owner: -
@@ -5592,6 +6391,7 @@ CREATE TABLE core.evidence (
     legal_hold_reason text,
     purged_at timestamp with time zone,
     is_hostile_markup boolean DEFAULT false NOT NULL,
+    storage_version_id text,
     CONSTRAINT evidence_hold_has_reason CHECK (((NOT legal_hold) OR (legal_hold_reason IS NOT NULL)))
 );
 
@@ -5600,6 +6400,12 @@ CREATE TABLE core.evidence (
 --
 
 COMMENT ON COLUMN core.evidence.is_hostile_markup IS 'Attacker-authored markup/code (DOM, HAR, .eml, SVG). Download-only, and only from the separate sample origin. Never rendered inline by the API origin. See docs/19 and invariant 10.';
+
+--
+-- Name: COLUMN evidence.storage_version_id; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON COLUMN core.evidence.storage_version_id IS 'The object store version the exhibit was lodged as, set once after the put (evidence-integrity-anchors-mutable, 2026-10-03). Reads ask for this version; NULL reads the latest version of storage_key.';
 
 --
 -- Name: evidence_custody; Type: TABLE; Schema: core; Owner: -
@@ -5868,7 +6674,9 @@ CREATE TABLE core.selector (
     first_seen timestamp with time zone,
     last_seen timestamp with time zone,
     observation_cnt integer DEFAULT 1 NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    classification core.tlp DEFAULT 'CLEAR'::core.tlp NOT NULL,
+    compartments text[] DEFAULT '{}'::text[] NOT NULL
 );
 
 --
@@ -7052,9 +7860,14 @@ CREATE TABLE lab.sample (
     screened_at timestamp with time zone,
     screening_list_seq bigint,
     screening_bytes_absent_at timestamp with time zone,
+    parent_sample_id uuid,
+    archive_path text,
+    CONSTRAINT sample_archive_path_shape CHECK (((archive_path IS NULL) OR (((length(archive_path) >= 1) AND (length(archive_path) <= 512)) AND (archive_path !~~ '/%'::text) AND (archive_path !~~ '%/'::text) AND (POSITION(('\'::text) IN (archive_path)) = 0)))),
     CONSTRAINT sample_assignment_complete CHECK (((assigned_to IS NULL) = (assigned_at IS NULL))),
     CONSTRAINT sample_bytes_absent_only_on_match CHECK (((screening_bytes_absent_at IS NULL) OR (screening_outcome = 'MATCH'::text))),
     CONSTRAINT sample_match_is_rejected CHECK (((screening_outcome <> 'MATCH'::text) OR (state = 'REJECTED'::lab.sample_state))),
+    CONSTRAINT sample_member_is_not_its_own_parent CHECK (((parent_sample_id IS NULL) OR (parent_sample_id <> id))),
+    CONSTRAINT sample_member_names_its_path CHECK (((parent_sample_id IS NULL) = (archive_path IS NULL))),
     CONSTRAINT sample_preservation_complete CHECK ((((preserved_key IS NULL) = (preserved_bucket IS NULL)) AND ((preserved_key IS NULL) = (preserved_at IS NULL)) AND ((preserved_key IS NOT NULL) OR (preserved_version_id IS NULL)))),
     CONSTRAINT sample_preserved_keeps_its_key CHECK (((preserved_key IS NULL) OR (octet_length(data_key_ciphertext) > 0))),
     CONSTRAINT sample_preserved_only_when_rejected CHECK (((preserved_key IS NULL) OR (state = 'REJECTED'::lab.sample_state))),
@@ -7077,6 +7890,18 @@ COMMENT ON COLUMN lab.sample.screening_outcome IS 'Prohibited-content screening 
 --
 
 COMMENT ON COLUMN lab.sample.screening_bytes_absent_at IS 'Set once when a matched sample''s bytes were found in neither store on two passes. Recorded, never acted on: the data key is kept.';
+
+--
+-- Name: COLUMN sample.parent_sample_id; Type: COMMENT; Schema: lab; Owner: -
+--
+
+COMMENT ON COLUMN lab.sample.parent_sample_id IS 'The archive sample this one was expanded from (phase 8, 2026-10-02). A member carries its parent''s case and labels, never below them.';
+
+--
+-- Name: COLUMN sample.archive_path; Type: COMMENT; Schema: lab; Owner: -
+--
+
+COMMENT ON COLUMN lab.sample.archive_path IS 'The member''s path inside its parent archive, as the expansion child normalised it. Never used as a filesystem path.';
 
 --
 -- Name: sample_access; Type: TABLE; Schema: lab; Owner: -
@@ -7142,7 +7967,7 @@ CREATE TABLE lab.sample_analysis (
     run_id uuid,
     yara_ruleset_version_id uuid,
     CONSTRAINT sample_analysis_family_needs_confidence CHECK (((family_assessment IS NULL) OR (confidence IS NOT NULL))),
-    CONSTRAINT sample_analysis_kind_known CHECK ((kind = ANY (ARRAY['STATIC'::text, 'YARA'::text, 'MANUAL_RE'::text, 'SANDBOX'::text, 'VENDOR'::text]))),
+    CONSTRAINT sample_analysis_kind_known CHECK ((kind = ANY (ARRAY['STATIC'::text, 'YARA'::text, 'MANUAL_RE'::text, 'SANDBOX'::text, 'VENDOR'::text, 'ARCHIVE'::text]))),
     CONSTRAINT sample_analysis_machine_names_no_analyst CHECK (((origin = 'analyst'::text) OR (analyst_id IS NULL))),
     CONSTRAINT sample_analysis_machine_yara_names_its_rules CHECK (((NOT ((origin = 'machine'::text) AND (kind = 'YARA'::text))) OR ((run_id IS NOT NULL) AND (yara_ruleset_version_id IS NOT NULL)))),
     CONSTRAINT sample_analysis_origin_known CHECK ((origin = ANY (ARRAY['analyst'::text, 'machine'::text]))),
@@ -7258,8 +8083,14 @@ CREATE TABLE lab.screening_result (
     CONSTRAINT screening_result_officers_notified_check CHECK ((officers_notified >= 0)),
     CONSTRAINT screening_result_outcome_check CHECK ((outcome = ANY (ARRAY['NO_MATCH'::text, 'MATCH'::text]))),
     CONSTRAINT screening_result_sha256_check CHECK ((octet_length(sha256) = 32)),
-    CONSTRAINT screening_result_trigger_check CHECK ((trigger = ANY (ARRAY['SUBMISSION'::text, 'LIST_IMPORT'::text, 'RESCAN'::text])))
+    CONSTRAINT screening_result_trigger_check CHECK ((trigger = ANY (ARRAY['SUBMISSION'::text, 'LIST_IMPORT'::text, 'RESCAN'::text, 'ARCHIVE_MEMBER'::text])))
 );
+
+--
+-- Name: COLUMN screening_result.trigger; Type: COMMENT; Schema: lab; Owner: -
+--
+
+COMMENT ON COLUMN lab.screening_result.trigger IS 'SUBMISSION, LIST_IMPORT, RESCAN, or ARCHIVE_MEMBER: this sample was isolated because a member of its archive tree matched (the detail names which).';
 
 --
 -- Name: screening_review; Type: TABLE; Schema: lab; Owner: -
@@ -7712,22 +8543,10 @@ CREATE TABLE public.alembic_version (
 );
 
 --
--- Name: event seq; Type: DEFAULT; Schema: audit; Owner: -
---
-
-ALTER TABLE ONLY audit.event ALTER COLUMN seq SET DEFAULT nextval('audit.event_seq_seq'::regclass);
-
---
 -- Name: egress_binding seq; Type: DEFAULT; Schema: collect; Owner: -
 --
 
 ALTER TABLE ONLY collect.egress_binding ALTER COLUMN seq SET DEFAULT nextval('collect.egress_binding_seq_seq'::regclass);
-
---
--- Name: evidence_custody id; Type: DEFAULT; Schema: core; Owner: -
---
-
-ALTER TABLE ONLY core.evidence_custody ALTER COLUMN id SET DEFAULT nextval('core.evidence_custody_id_seq'::regclass);
 
 --
 -- Name: sample_access id; Type: DEFAULT; Schema: lab; Owner: -
@@ -7804,6 +8623,13 @@ ALTER TABLE ONLY collect.collection_authority_target
 
 ALTER TABLE ONLY collect.collection_run
     ADD CONSTRAINT collection_run_pkey PRIMARY KEY (id);
+
+--
+-- Name: collector_heartbeat collector_heartbeat_pkey; Type: CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.collector_heartbeat
+    ADD CONSTRAINT collector_heartbeat_pkey PRIMARY KEY (instance);
 
 --
 -- Name: document_embedding document_embedding_pkey; Type: CONSTRAINT; Schema: collect; Owner: -
@@ -7888,6 +8714,13 @@ ALTER TABLE ONLY collect.forum_member
 
 ALTER TABLE ONLY collect.forum_post
     ADD CONSTRAINT forum_post_pkey PRIMARY KEY (document_id);
+
+--
+-- Name: persona_act persona_act_pkey; Type: CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.persona_act
+    ADD CONSTRAINT persona_act_pkey PRIMARY KEY (id);
 
 --
 -- Name: proposal proposal_pkey; Type: CONSTRAINT; Schema: collect; Owner: -
@@ -8191,13 +9024,6 @@ ALTER TABLE ONLY core.embedding_space
     ADD CONSTRAINT embedding_space_pkey PRIMARY KEY (id);
 
 --
--- Name: evidence evidence_case_id_sha256_key; Type: CONSTRAINT; Schema: core; Owner: -
---
-
-ALTER TABLE ONLY core.evidence
-    ADD CONSTRAINT evidence_case_id_sha256_key UNIQUE (case_id, sha256);
-
---
 -- Name: evidence_custody evidence_custody_pkey; Type: CONSTRAINT; Schema: core; Owner: -
 --
 
@@ -8289,11 +9115,11 @@ ALTER TABLE ONLY core.retention_rule
     ADD CONSTRAINT retention_rule_pkey PRIMARY KEY (category);
 
 --
--- Name: selector selector_case_id_selector_type_norm_value_key; Type: CONSTRAINT; Schema: core; Owner: -
+-- Name: selector selector_case_id_selector_type_norm_value_labels_key; Type: CONSTRAINT; Schema: core; Owner: -
 --
 
 ALTER TABLE ONLY core.selector
-    ADD CONSTRAINT selector_case_id_selector_type_norm_value_key UNIQUE (case_id, selector_type, norm_value);
+    ADD CONSTRAINT selector_case_id_selector_type_norm_value_labels_key UNIQUE (case_id, selector_type, norm_value, classification, compartments);
 
 --
 -- Name: selector selector_pkey; Type: CONSTRAINT; Schema: core; Owner: -
@@ -8828,6 +9654,19 @@ ALTER TABLE ONLY notify.notification
     ADD CONSTRAINT notification_pkey PRIMARY KEY (id);
 
 --
+-- Name: preference preference_address_single; Type: CHECK CONSTRAINT; Schema: notify; Owner: -
+--
+
+ALTER TABLE notify.preference
+    ADD CONSTRAINT preference_address_single CHECK (((address IS NULL) OR ((length(address) <= 254) AND (address ~ '^[A-Za-z0-9_+''-]+(\.[A-Za-z0-9_+''-]+)*@[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$'::text)))) NOT VALID;
+
+--
+-- Name: CONSTRAINT preference_address_single ON preference; Type: COMMENT; Schema: notify; Owner: -
+--
+
+COMMENT ON CONSTRAINT preference_address_single ON notify.preference IS 'One plain address and nothing else (migration 0148, finding egress-notify-address-list, 2026-10-03). A list would reach every recipient in it and escape the domain allowlist.';
+
+--
 -- Name: preference preference_pkey; Type: CONSTRAINT; Schema: notify; Owner: -
 --
 
@@ -8942,6 +9781,12 @@ CREATE INDEX collection_run_started_idx ON collect.collection_run USING btree (s
 --
 
 CREATE INDEX collection_run_status_idx ON collect.collection_run USING btree (status) WHERE (status = ANY (ARRAY['QUEUED'::collect.run_status, 'RUNNING'::collect.run_status]));
+
+--
+-- Name: collector_heartbeat_seen; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX collector_heartbeat_seen ON collect.collector_heartbeat USING btree (seen_at DESC);
 
 --
 -- Name: document_author_handle_idx; Type: INDEX; Schema: collect; Owner: -
@@ -9190,6 +10035,30 @@ CREATE INDEX extraction_document_id_idx ON collect.extraction USING btree (docum
 CREATE INDEX extraction_norm_value_selector_type_idx ON collect.extraction USING btree (norm_value, selector_type);
 
 --
+-- Name: persona_act_one_live; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE UNIQUE INDEX persona_act_one_live ON collect.persona_act USING btree (requested_by, kind, dedupe_key) WHERE (status = ANY (ARRAY['PENDING'::text, 'RUNNING'::text]));
+
+--
+-- Name: persona_act_queue; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX persona_act_queue ON collect.persona_act USING btree (not_before) WHERE (status = 'PENDING'::text);
+
+--
+-- Name: persona_act_requester; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX persona_act_requester ON collect.persona_act USING btree (requested_by, requested_at DESC);
+
+--
+-- Name: persona_act_running; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX persona_act_running ON collect.persona_act USING btree (claimed_at) WHERE (status = 'RUNNING'::text);
+
+--
 -- Name: proposal_case_id_state_idx; Type: INDEX; Schema: collect; Owner: -
 --
 
@@ -9212,6 +10081,12 @@ CREATE INDEX proposal_lookup_result_idx ON collect.proposal USING btree (lookup_
 --
 
 CREATE INDEX source_collection_account_idx ON collect.source USING btree (collection_account_id) WHERE (collection_account_id IS NOT NULL);
+
+--
+-- Name: source_compartments_idx; Type: INDEX; Schema: collect; Owner: -
+--
+
+CREATE INDEX source_compartments_idx ON collect.source USING gin (compartments) WHERE (cardinality(compartments) > 0);
 
 --
 -- Name: source_due_idx; Type: INDEX; Schema: collect; Owner: -
@@ -9337,7 +10212,7 @@ CREATE INDEX conversation_case_idx ON comms.conversation USING btree (case_id, l
 -- Name: conversation_external_idx; Type: INDEX; Schema: comms; Owner: -
 --
 
-CREATE UNIQUE INDEX conversation_external_idx ON comms.conversation USING btree (case_id, platform_key, external_ref) WHERE (external_ref IS NOT NULL);
+CREATE UNIQUE INDEX conversation_external_idx ON comms.conversation USING btree (case_id, platform_key, external_ref, classification, compartments) WHERE (external_ref IS NOT NULL);
 
 --
 -- Name: device_fingerprint_value_idx; Type: INDEX; Schema: comms; Owner: -
@@ -9577,7 +10452,7 @@ CREATE INDEX edge_src_node_id_idx ON core.edge USING btree (src_node_id) WHERE (
 -- Name: edge_uniq_active; Type: INDEX; Schema: core; Owner: -
 --
 
-CREATE UNIQUE INDEX edge_uniq_active ON core.edge USING btree (src_node_id, dst_node_id, edge_type, COALESCE(valid_from, '-infinity'::timestamp with time zone)) WHERE (deleted_at IS NULL);
+CREATE UNIQUE INDEX edge_uniq_active ON core.edge USING btree (src_node_id, dst_node_id, edge_type, COALESCE(valid_from, '-infinity'::timestamp with time zone), classification, compartments) WHERE (deleted_at IS NULL);
 
 --
 -- Name: embedding_space_one_active; Type: INDEX; Schema: core; Owner: -
@@ -9644,6 +10519,30 @@ CREATE INDEX evidence_link_edge_id_idx ON core.evidence_link USING btree (edge_i
 --
 
 CREATE INDEX evidence_link_node_id_idx ON core.evidence_link USING btree (node_id);
+
+--
+-- Name: evidence_live_bytes_per_labels; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX evidence_live_bytes_per_labels ON core.evidence USING btree (case_id, sha256, classification, compartments) WHERE (purged_at IS NULL);
+
+--
+-- Name: INDEX evidence_live_bytes_per_labels; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON INDEX core.evidence_live_bytes_per_labels IS 'Identical bytes are one live exhibit per labels (rls-4, evidence-reingest-after-purge-dropped, 2026-10-03).';
+
+--
+-- Name: evidence_one_object_per_exhibit; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE UNIQUE INDEX evidence_one_object_per_exhibit ON core.evidence USING btree (case_id, sha256, storage_key);
+
+--
+-- Name: INDEX evidence_one_object_per_exhibit; Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON INDEX core.evidence_one_object_per_exhibit IS 'Two exhibits of the same bytes never share an object (evidence-ingest-dedup-oracle, 2026-10-03).';
 
 --
 -- Name: evidence_purgeable_idx; Type: INDEX; Schema: core; Owner: -
@@ -10120,6 +11019,12 @@ CREATE INDEX pii_authorisation_live_idx ON ingest.pii_authorisation USING btree 
 CREATE INDEX provider_origin_idx ON ingest.provider USING btree (origin_host, origin_port);
 
 --
+-- Name: record_batch_case_idx; Type: INDEX; Schema: ingest; Owner: -
+--
+
+CREATE INDEX record_batch_case_idx ON ingest.record USING btree (batch_id, case_id);
+
+--
 -- Name: record_batch_idx; Type: INDEX; Schema: ingest; Owner: -
 --
 
@@ -10292,6 +11197,12 @@ CREATE INDEX sample_imphash_idx ON lab.sample USING btree (imphash) WHERE (impha
 --
 
 CREATE INDEX sample_match_pending_idx ON lab.sample USING btree (screened_at) WHERE ((screening_outcome = 'MATCH'::text) AND (preserved_key IS NULL) AND (octet_length(data_key_ciphertext) > 0) AND (screening_bytes_absent_at IS NULL));
+
+--
+-- Name: sample_parent_idx; Type: INDEX; Schema: lab; Owner: -
+--
+
+CREATE INDEX sample_parent_idx ON lab.sample USING btree (parent_sample_id) WHERE (parent_sample_id IS NOT NULL);
 
 --
 -- Name: sample_queue_idx; Type: INDEX; Schema: lab; Owner: -
@@ -10480,6 +11391,12 @@ CREATE INDEX notification_unread_idx ON notify.notification USING btree (recipie
 CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF visibility_compartments ON analytics.metric_run FOR EACH ROW WHEN ((cardinality(new.visibility_compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('visibility_compartments', 'array');
 
 --
+-- Name: event audit_attribution; Type: TRIGGER; Schema: audit; Owner: -
+--
+
+CREATE TRIGGER audit_attribution BEFORE INSERT ON audit.event FOR EACH ROW EXECUTE FUNCTION audit.pin_attribution();
+
+--
 -- Name: event audit_chain; Type: TRIGGER; Schema: audit; Owner: -
 --
 
@@ -10570,6 +11487,12 @@ CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments O
 CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF read_compartments ON collect.document_embedding FOR EACH ROW WHEN ((cardinality(new.read_compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('read_compartments', 'array');
 
 --
+-- Name: source compartments_registered; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON collect.source FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
+
+--
 -- Name: document_embedding document_embedding_labels; Type: TRIGGER; Schema: collect; Owner: -
 --
 
@@ -10640,6 +11563,18 @@ CREATE TRIGGER egress_integration_route_terminal BEFORE UPDATE ON collect.egress
 --
 
 CREATE TRIGGER egress_profile_reach BEFORE UPDATE ON collect.egress_profile FOR EACH ROW EXECUTE FUNCTION collect.egress_profile_reach();
+
+--
+-- Name: persona_act guard_persona_act; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER guard_persona_act BEFORE DELETE OR UPDATE ON collect.persona_act FOR EACH ROW EXECUTE FUNCTION collect.guard_persona_act();
+
+--
+-- Name: persona_act persona_act_no_truncate; Type: TRIGGER; Schema: collect; Owner: -
+--
+
+CREATE TRIGGER persona_act_no_truncate BEFORE TRUNCATE ON collect.persona_act FOR EACH STATEMENT EXECUTE FUNCTION collect.guard_persona_act();
 
 --
 -- Name: source source_egress_bound; Type: TRIGGER; Schema: collect; Owner: -
@@ -10822,6 +11757,18 @@ CREATE TRIGGER assertion_embedding_dequeued AFTER UPDATE OF retracted_at, supers
 CREATE TRIGGER assertion_embedding_queued AFTER INSERT ON core.assertion FOR EACH ROW WHEN (((new.retracted_at IS NULL) AND (new.superseded_at IS NULL))) EXECUTE FUNCTION core.assertion_embedding_queued();
 
 --
+-- Name: assertion assertion_marked_once; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER assertion_marked_once BEFORE UPDATE OF retracted_at, retracted_by, retraction_reason, superseded_at, superseded_by ON core.assertion FOR EACH ROW EXECUTE FUNCTION core.assertion_marked_once();
+
+--
+-- Name: assertion assertion_never_truncated; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER assertion_never_truncated BEFORE TRUNCATE ON core.assertion FOR EACH STATEMENT EXECUTE FUNCTION core.assertion_kept();
+
+--
 -- Name: assertion assertion_protects_element; Type: TRIGGER; Schema: core; Owner: -
 --
 
@@ -10870,6 +11817,12 @@ CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments O
 CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON core.node FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
 
 --
+-- Name: selector compartments_registered; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER compartments_registered BEFORE INSERT OR UPDATE OF compartments ON core.selector FOR EACH ROW WHEN ((cardinality(new.compartments) > 0)) EXECUTE FUNCTION iam.refuse_unregistered_compartment('compartments', 'array');
+
+--
 -- Name: evidence_custody custody_chain; Type: TRIGGER; Schema: core; Owner: -
 --
 
@@ -10891,7 +11844,7 @@ CREATE TRIGGER edge_announce_ins AFTER INSERT ON core.edge REFERENCING NEW TABLE
 -- Name: edge edge_announce_upd; Type: TRIGGER; Schema: core; Owner: -
 --
 
-CREATE TRIGGER edge_announce_upd AFTER UPDATE ON core.edge REFERENCING NEW TABLE AS newrows FOR EACH STATEMENT EXECUTE FUNCTION core.announce_change('edge');
+CREATE TRIGGER edge_announce_upd AFTER UPDATE ON core.edge REFERENCING OLD TABLE AS oldrows NEW TABLE AS newrows FOR EACH STATEMENT EXECUTE FUNCTION core.announce_change('edge');
 
 --
 -- Name: edge edge_confidence_is_derived; Type: TRIGGER; Schema: core; Owner: -
@@ -10924,6 +11877,12 @@ CREATE TRIGGER edge_validate BEFORE INSERT OR UPDATE ON core.edge FOR EACH ROW E
 CREATE TRIGGER embedding_space_transition BEFORE UPDATE ON core.embedding_space FOR EACH ROW EXECUTE FUNCTION core.embedding_space_transition();
 
 --
+-- Name: evidence evidence_anchors_fixed; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER evidence_anchors_fixed BEFORE UPDATE ON core.evidence FOR EACH ROW EXECUTE FUNCTION core.guard_evidence_anchors();
+
+--
 -- Name: evidence_custody evidence_custody_append_only; Type: TRIGGER; Schema: core; Owner: -
 --
 
@@ -10946,6 +11905,12 @@ CREATE TRIGGER evidence_embedding_case BEFORE INSERT OR UPDATE OF evidence_id, c
 --
 
 CREATE TRIGGER evidence_embedding_queued AFTER INSERT ON core.evidence FOR EACH ROW WHEN ((new.purged_at IS NULL)) EXECUTE FUNCTION core.evidence_embedding_queued();
+
+--
+-- Name: evidence evidence_hold_purge_exclusive; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER evidence_hold_purge_exclusive BEFORE UPDATE OF purged_at, legal_hold ON core.evidence FOR EACH ROW WHEN (((old.purged_at IS DISTINCT FROM new.purged_at) OR (old.legal_hold IS DISTINCT FROM new.legal_hold))) EXECUTE FUNCTION core.guard_evidence_hold_purge();
 
 --
 -- Name: evidence evidence_tlp; Type: TRIGGER; Schema: core; Owner: -
@@ -10981,7 +11946,7 @@ CREATE TRIGGER node_announce_ins AFTER INSERT ON core.node REFERENCING NEW TABLE
 -- Name: node node_announce_upd; Type: TRIGGER; Schema: core; Owner: -
 --
 
-CREATE TRIGGER node_announce_upd AFTER UPDATE ON core.node REFERENCING NEW TABLE AS newrows FOR EACH STATEMENT EXECUTE FUNCTION core.announce_change('node');
+CREATE TRIGGER node_announce_upd AFTER UPDATE ON core.node REFERENCING OLD TABLE AS oldrows NEW TABLE AS newrows FOR EACH STATEMENT EXECUTE FUNCTION core.announce_change('node');
 
 --
 -- Name: node node_requires_assertion; Type: TRIGGER; Schema: core; Owner: -
@@ -11012,6 +11977,12 @@ CREATE TRIGGER purge_tombstone_append_only BEFORE DELETE OR UPDATE ON core.purge
 --
 
 CREATE TRIGGER purge_tombstone_no_truncate BEFORE TRUNCATE ON core.purge_tombstone FOR EACH STATEMENT EXECUTE FUNCTION core.block_tombstone_mutation();
+
+--
+-- Name: selector selector_labels_follow_owner; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER selector_labels_follow_owner BEFORE INSERT OR UPDATE OF node_id, classification, compartments ON core.selector FOR EACH ROW EXECUTE FUNCTION core.selector_labels_follow_owner();
 
 --
 -- Name: call_record call_record_tlp; Type: TRIGGER; Schema: deception; Owner: -
@@ -11224,6 +12195,12 @@ CREATE TRIGGER lookup_result_tlp BEFORE INSERT OR UPDATE ON ingest.lookup_result
 CREATE TRIGGER lookup_tlp BEFORE INSERT OR UPDATE ON ingest.lookup FOR EACH ROW EXECUTE FUNCTION core.enforce_tlp_floor();
 
 --
+-- Name: pii_authorisation pii_authorisation_request_guard; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER pii_authorisation_request_guard BEFORE UPDATE OF query_count ON ingest.pii_authorisation FOR EACH ROW EXECUTE FUNCTION ingest.pii_authorisation_request_guard();
+
+--
 -- Name: provider provider_guarded; Type: TRIGGER; Schema: ingest; Owner: -
 --
 
@@ -11240,6 +12217,18 @@ CREATE TRIGGER provider_no_truncate BEFORE TRUNCATE ON ingest.provider FOR EACH 
 --
 
 CREATE TRIGGER provider_starts_unapproved BEFORE INSERT ON ingest.provider FOR EACH ROW EXECUTE FUNCTION ingest.provider_starts_unapproved();
+
+--
+-- Name: record record_request_guard; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER record_request_guard BEFORE UPDATE OF case_id, retain_until ON ingest.record FOR EACH ROW EXECUTE FUNCTION ingest.record_request_guard();
+
+--
+-- Name: victim_credential victim_credential_request_guard; Type: TRIGGER; Schema: ingest; Owner: -
+--
+
+CREATE TRIGGER victim_credential_request_guard BEFORE UPDATE OF reveal_count, last_revealed_at ON ingest.victim_credential FOR EACH ROW EXECUTE FUNCTION ingest.victim_credential_request_guard();
 
 --
 -- Name: sample compartments_registered; Type: TRIGGER; Schema: lab; Owner: -
@@ -11300,6 +12289,12 @@ CREATE TRIGGER sample_access_no_truncate BEFORE TRUNCATE ON lab.sample_access FO
 --
 
 CREATE TRIGGER sample_match_is_permanent BEFORE UPDATE OF screening_outcome, screening_bytes_absent_at ON lab.sample FOR EACH ROW EXECUTE FUNCTION lab.guard_screening_outcome();
+
+--
+-- Name: sample sample_member_never_below_its_archive; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER sample_member_never_below_its_archive BEFORE INSERT OR UPDATE OF parent_sample_id, classification, compartments ON lab.sample FOR EACH ROW EXECUTE FUNCTION lab.guard_member_labels();
 
 --
 -- Name: sample sample_tlp; Type: TRIGGER; Schema: lab; Owner: -
@@ -11779,6 +12774,20 @@ ALTER TABLE ONLY collect.extraction
     ADD CONSTRAINT extraction_selector_type_fkey FOREIGN KEY (selector_type) REFERENCES core.selector_type(key);
 
 --
+-- Name: forum_member forum_member_authority_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.forum_member
+    ADD CONSTRAINT forum_member_authority_id_fkey FOREIGN KEY (authority_id) REFERENCES collect.collection_authority(id);
+
+--
+-- Name: forum_member forum_member_collection_account_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.forum_member
+    ADD CONSTRAINT forum_member_collection_account_id_fkey FOREIGN KEY (collection_account_id) REFERENCES collect.collection_account(id);
+
+--
 -- Name: forum_member forum_member_document_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
 --
 
@@ -11786,11 +12795,39 @@ ALTER TABLE ONLY collect.forum_member
     ADD CONSTRAINT forum_member_document_id_fkey FOREIGN KEY (document_id) REFERENCES collect.document(id) ON DELETE CASCADE;
 
 --
+-- Name: forum_post forum_post_authority_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.forum_post
+    ADD CONSTRAINT forum_post_authority_id_fkey FOREIGN KEY (authority_id) REFERENCES collect.collection_authority(id);
+
+--
+-- Name: forum_post forum_post_collection_account_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.forum_post
+    ADD CONSTRAINT forum_post_collection_account_id_fkey FOREIGN KEY (collection_account_id) REFERENCES collect.collection_account(id);
+
+--
 -- Name: forum_post forum_post_document_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
 --
 
 ALTER TABLE ONLY collect.forum_post
     ADD CONSTRAINT forum_post_document_id_fkey FOREIGN KEY (document_id) REFERENCES collect.document(id) ON DELETE CASCADE;
+
+--
+-- Name: persona_act persona_act_requested_by_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.persona_act
+    ADD CONSTRAINT persona_act_requested_by_fkey FOREIGN KEY (requested_by) REFERENCES iam.app_user(id);
+
+--
+-- Name: persona_act persona_act_source_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
+--
+
+ALTER TABLE ONLY collect.persona_act
+    ADD CONSTRAINT persona_act_source_id_fkey FOREIGN KEY (source_id) REFERENCES collect.source(id);
 
 --
 -- Name: proposal proposal_applied_edge_id_fkey; Type: FK CONSTRAINT; Schema: collect; Owner: -
@@ -13522,6 +14559,13 @@ ALTER TABLE ONLY lab.sample
     ADD CONSTRAINT sample_node_id_fkey FOREIGN KEY (node_id) REFERENCES core.node(id);
 
 --
+-- Name: sample sample_parent_sample_id_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
+--
+
+ALTER TABLE ONLY lab.sample
+    ADD CONSTRAINT sample_parent_sample_id_fkey FOREIGN KEY (parent_sample_id) REFERENCES lab.sample(id);
+
+--
 -- Name: sample sample_submitted_by_fkey; Type: FK CONSTRAINT; Schema: lab; Owner: -
 --
 
@@ -13862,6 +14906,24 @@ CREATE POLICY rls_gate ON analytics.node_metric USING (((EXISTS ( SELECT 1
 CREATE POLICY rls_gate ON analytics.projection USING ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[]))) WITH CHECK ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])));
 
 --
+-- Name: event; Type: ROW SECURITY; Schema: audit; Owner: -
+--
+
+ALTER TABLE audit.event ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: event rls_append; Type: POLICY; Schema: audit; Owner: -
+--
+
+CREATE POLICY rls_append ON audit.event FOR INSERT WITH CHECK (true);
+
+--
+-- Name: event rls_read; Type: POLICY; Schema: audit; Owner: -
+--
+
+CREATE POLICY rls_read ON audit.event FOR SELECT USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) OR ((case_id IS NULL) AND (actor_id = ( SELECT iam.rls_actor() AS rls_actor))) OR ( SELECT iam.rls_holds_global('audit.read'::text) AS rls_holds_global) OR ((case_id IS NULL) AND (object_type = 'ingest'::text) AND ( SELECT iam.rls_holds_global('ingest.manage'::text) AS rls_holds_global))));
+
+--
 -- Name: document; Type: ROW SECURITY; Schema: collect; Owner: -
 --
 
@@ -13892,10 +14954,22 @@ ALTER TABLE collect.forum_member ENABLE ROW LEVEL SECURITY;
 ALTER TABLE collect.forum_post ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: persona_act; Type: ROW SECURITY; Schema: collect; Owner: -
+--
+
+ALTER TABLE collect.persona_act ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: proposal; Type: ROW SECURITY; Schema: collect; Owner: -
 --
 
 ALTER TABLE collect.proposal ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: persona_act rls_enqueue; Type: POLICY; Schema: collect; Owner: -
+--
+
+CREATE POLICY rls_enqueue ON collect.persona_act FOR INSERT WITH CHECK (((requested_by = ( SELECT iam.rls_actor() AS rls_actor)) AND (classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) AND (status = 'PENDING'::text) AND (attempts = 0) AND (claimed_by IS NULL) AND (claimed_at IS NULL) AND (result IS NULL)));
 
 --
 -- Name: document rls_gate; Type: POLICY; Schema: collect; Owner: -
@@ -13955,9 +15029,9 @@ CREATE POLICY rls_gate ON collect.proposal USING ((case_id = ANY (( SELECT iam.r
 
 CREATE POLICY rls_gate ON collect.telegram_chat USING ((EXISTS ( SELECT 1
    FROM collect.source p
-  WHERE ((p.id = telegram_chat.source_id) AND (p.classification <= ( SELECT iam.rls_clearance() AS rls_clearance)))))) WITH CHECK ((EXISTS ( SELECT 1
+  WHERE ((p.id = telegram_chat.source_id) AND (p.classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) AND (p.compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)))))) WITH CHECK ((EXISTS ( SELECT 1
    FROM collect.source p
-  WHERE ((p.id = telegram_chat.source_id) AND (p.classification <= ( SELECT iam.rls_clearance() AS rls_clearance))))));
+  WHERE ((p.id = telegram_chat.source_id) AND (p.classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) AND (p.compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments))))));
 
 --
 -- Name: telegram_message rls_gate; Type: POLICY; Schema: collect; Owner: -
@@ -13988,6 +15062,12 @@ CREATE POLICY rls_gate ON collect.watch_hit USING (((EXISTS ( SELECT 1
   WHERE (p.id = watch_hit.watch_id))) AND (EXISTS ( SELECT 1
    FROM collect.document p
   WHERE (p.id = watch_hit.document_id)))));
+
+--
+-- Name: persona_act rls_read; Type: POLICY; Schema: collect; Owner: -
+--
+
+CREATE POLICY rls_read ON collect.persona_act FOR SELECT USING (((requested_by = ( SELECT iam.rls_actor() AS rls_actor)) AND (classification <= ( SELECT iam.rls_clearance() AS rls_clearance))));
 
 --
 -- Name: telegram_chat; Type: ROW SECURITY; Schema: collect; Owner: -
@@ -14285,9 +15365,9 @@ ALTER TABLE core.purge_tombstone ENABLE ROW LEVEL SECURITY;
 -- Name: evidence_custody rls_append; Type: POLICY; Schema: core; Owner: -
 --
 
-CREATE POLICY rls_append ON core.evidence_custody FOR INSERT WITH CHECK ((EXISTS ( SELECT 1
+CREATE POLICY rls_append ON core.evidence_custody FOR INSERT WITH CHECK (((actor_id = ( SELECT iam.rls_actor() AS rls_actor)) AND (EXISTS ( SELECT 1
    FROM core.evidence v
-  WHERE (v.id = evidence_custody.evidence_id))));
+  WHERE (v.id = evidence_custody.evidence_id)))));
 
 --
 -- Name: case rls_change; Type: POLICY; Schema: core; Owner: -
@@ -14401,7 +15481,15 @@ CREATE POLICY rls_gate ON core.node USING (((case_id = ANY (( SELECT iam.rls_cas
 -- Name: node_merge rls_gate; Type: POLICY; Schema: core; Owner: -
 --
 
-CREATE POLICY rls_gate ON core.node_merge USING ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[]))) WITH CHECK ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])));
+CREATE POLICY rls_gate ON core.node_merge USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND (EXISTS ( SELECT 1
+   FROM core.node s
+  WHERE (s.id = node_merge.source_node_id))) AND (EXISTS ( SELECT 1
+   FROM core.node t
+  WHERE (t.id = node_merge.target_node_id))))) WITH CHECK (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND (EXISTS ( SELECT 1
+   FROM core.node s
+  WHERE (s.id = node_merge.source_node_id))) AND (EXISTS ( SELECT 1
+   FROM core.node t
+  WHERE (t.id = node_merge.target_node_id)))));
 
 --
 -- Name: node_merge_edge rls_gate; Type: POLICY; Schema: core; Owner: -
@@ -14598,6 +15686,12 @@ CREATE POLICY rls_gate ON deception.email_hop USING ((EXISTS ( SELECT 1
 CREATE POLICY rls_gate ON deception.email_message USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)))) WITH CHECK (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))) AND (compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments))));
 
 --
+-- Name: dead_letter; Type: ROW SECURITY; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ingest.dead_letter ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: lookup; Type: ROW SECURITY; Schema: ingest; Owner: -
 --
 
@@ -14622,12 +15716,30 @@ ALTER TABLE ingest.lookup_batch ENABLE ROW LEVEL SECURITY;
 ALTER TABLE ingest.lookup_result ENABLE ROW LEVEL SECURITY;
 
 --
+-- Name: pii_authorisation; Type: ROW SECURITY; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ingest.pii_authorisation ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: record; Type: ROW SECURITY; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ingest.record ENABLE ROW LEVEL SECURITY;
+
+--
 -- Name: lookup_attempt rls_append; Type: POLICY; Schema: ingest; Owner: -
 --
 
 CREATE POLICY rls_append ON ingest.lookup_attempt FOR INSERT WITH CHECK ((EXISTS ( SELECT 1
    FROM ingest.lookup p
   WHERE (p.id = lookup_attempt.lookup_id))));
+
+--
+-- Name: pii_authorisation rls_count; Type: POLICY; Schema: ingest; Owner: -
+--
+
+CREATE POLICY rls_count ON ingest.pii_authorisation FOR UPDATE USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND (granted_to = ( SELECT iam.rls_actor() AS rls_actor)) AND (revoked_at IS NULL) AND (expires_at > now()))) WITH CHECK (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND (granted_to = ( SELECT iam.rls_actor() AS rls_actor)) AND (revoked_at IS NULL)));
 
 --
 -- Name: lookup rls_gate; Type: POLICY; Schema: ingest; Owner: -
@@ -14648,12 +15760,66 @@ CREATE POLICY rls_gate ON ingest.lookup_batch USING ((case_id = ANY (( SELECT ia
 CREATE POLICY rls_gate ON ingest.lookup_result USING (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id))))) WITH CHECK (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id)))));
 
 --
+-- Name: pii_authorisation rls_grant; Type: POLICY; Schema: ingest; Owner: -
+--
+
+CREATE POLICY rls_grant ON ingest.pii_authorisation FOR INSERT WITH CHECK (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND (granted_by = ( SELECT iam.rls_actor() AS rls_actor)) AND ( SELECT iam.rls_holds_global('victim_pii.authorise'::text) AS rls_holds_global) AND (granted_at = now())));
+
+--
+-- Name: dead_letter rls_read; Type: POLICY; Schema: ingest; Owner: -
+--
+
+CREATE POLICY rls_read ON ingest.dead_letter FOR SELECT USING (((compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)) AND iam.ingest_dead_letter_visible(batch_id, classification, ( SELECT iam.rls_cases() AS rls_cases), ( SELECT iam.rls_clearance() AS rls_clearance), ( SELECT iam.rls_ceilings() AS rls_ceilings), ( SELECT iam.rls_holds_global('ingest.manage'::text) AS rls_holds_global))));
+
+--
 -- Name: lookup_attempt rls_read; Type: POLICY; Schema: ingest; Owner: -
 --
 
 CREATE POLICY rls_read ON ingest.lookup_attempt FOR SELECT USING ((EXISTS ( SELECT 1
    FROM ingest.lookup p
   WHERE (p.id = lookup_attempt.lookup_id))));
+
+--
+-- Name: pii_authorisation rls_read; Type: POLICY; Schema: ingest; Owner: -
+--
+
+CREATE POLICY rls_read ON ingest.pii_authorisation FOR SELECT USING ((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])));
+
+--
+-- Name: record rls_read; Type: POLICY; Schema: ingest; Owner: -
+--
+
+CREATE POLICY rls_read ON ingest.record FOR SELECT USING (((compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)) AND (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id)))) OR ((case_id IS NULL) AND ( SELECT iam.rls_holds_global('ingest.manage'::text) AS rls_holds_global) AND (classification <= ( SELECT iam.rls_clearance() AS rls_clearance))))));
+
+--
+-- Name: victim_credential rls_read; Type: POLICY; Schema: ingest; Owner: -
+--
+
+CREATE POLICY rls_read ON ingest.victim_credential FOR SELECT USING ((EXISTS ( SELECT 1
+   FROM ingest.record p
+  WHERE (p.id = victim_credential.record_id))));
+
+--
+-- Name: record rls_update; Type: POLICY; Schema: ingest; Owner: -
+--
+
+CREATE POLICY rls_update ON ingest.record FOR UPDATE USING (((compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)) AND (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id)))) OR ((case_id IS NULL) AND ( SELECT iam.rls_holds_global('ingest.manage'::text) AS rls_holds_global) AND (classification <= ( SELECT iam.rls_clearance() AS rls_clearance)))))) WITH CHECK (((compartments <@ ( SELECT iam.rls_compartments() AS rls_compartments)) AND (((case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) AND ((classification <= ( SELECT iam.rls_clearance() AS rls_clearance)) OR (classification <= iam.rls_ceiling_for(( SELECT iam.rls_ceilings() AS rls_ceilings), case_id)))) OR ((case_id IS NULL) AND ( SELECT iam.rls_holds_global('ingest.manage'::text) AS rls_holds_global) AND (classification <= ( SELECT iam.rls_clearance() AS rls_clearance))))));
+
+--
+-- Name: victim_credential rls_update; Type: POLICY; Schema: ingest; Owner: -
+--
+
+CREATE POLICY rls_update ON ingest.victim_credential FOR UPDATE USING ((EXISTS ( SELECT 1
+   FROM ingest.record p
+  WHERE (p.id = victim_credential.record_id)))) WITH CHECK ((EXISTS ( SELECT 1
+   FROM ingest.record p
+  WHERE (p.id = victim_credential.record_id))));
+
+--
+-- Name: victim_credential; Type: ROW SECURITY; Schema: ingest; Owner: -
+--
+
+ALTER TABLE ingest.victim_credential ENABLE ROW LEVEL SECURITY;
 
 --
 -- Name: detonation; Type: ROW SECURITY; Schema: lab; Owner: -
