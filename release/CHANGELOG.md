@@ -38,7 +38,7 @@ over data they cannot take. The readiness register grows from 43 checks to
 45, none of the new ones blocking. The steps an existing deployment takes are
 the next subsection.
 
-FIGURES_PENDING
+7966 tests (`def test_` functions). The whole suite, run on a database built from nothing with every migration and with both runtime database roles present, passed 12073 and skipped 51.
 
 ### Upgrading from Alpha 7a
 
