@@ -1,7 +1,7 @@
 # What is left
 
-**State (2026-10-07):** branch `main`, Alembic head `0172`,
-7954 tests counted as `def test_` functions across the two pytest roots,
+**State (2026-10-07):** branch `main`, Alembic head `0173`,
+7966 tests counted as `def test_` functions across the two pytest roots,
 version 0.7.1 single-sourced from `pyproject.toml`. Those four counters are
 generated: `scripts/refresh_counters.py` writes them and `test_doc_invariants`
 holds them to the tree with no tolerance. Per-release totals of COLLECTED
