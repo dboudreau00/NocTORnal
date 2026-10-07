@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 #: One pattern, all of the texts of one batch: how long the child may match.
 PATTERN_WALL_S = 5.0
 #: Added to that for starting the child's interpreter, which the runner's wall
-#: clock also counts (beta 1 verification, 2026-10-07: on a loaded host a
+#: clock also counts (2026-10-07: on a loaded host a
 #: benign pattern was reported `limit` before it had begun). Small on purpose:
 #: a stopped pattern costs this much more, and the run's budget caps the sum.
 STARTUP_S = 3.0
@@ -162,7 +162,7 @@ def run(jobs: dict[str, list[str]], *, argv: list[str] | None = None,
             if not result.ok:
                 # The sandbox's own state (no worker, a busy one, an answer
                 # that is not one) says nothing about the pattern, and is
-                # never told as a crashed matcher (beta 1 gate 6, 2026-10-07).
+                # never told as a crashed matcher (2026-10-07).
                 sentence = (f"{lab_triage.CHILD_FAILURES[result.failure]}, so it "
                             f"was not matched on this run"
                             if result.failure in lab_triage.CHILD_FAILURES

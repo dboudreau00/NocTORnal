@@ -285,7 +285,7 @@ def test_the_demo_command_is_the_one_bootstrap_and_the_installer_give():
         # under (`--code %s`, DEMO_CODE_NAME), which is the code the tour
         # prints and the one `bootstrap.py demo-network` creates when it is
         # given none. OP-SHOWCASE-26 is the README's larger showcase, a
-        # different recipe (Beta 1 verification, G6).
+        # different recipe (2026-10-07).
         card = installer.read_text(encoding="utf-8")
         assert 'DEMO_CODE_NAME="OP-LATTICEWORK-26"' in card
         assert (".venv/bin/python scripts/bootstrap.py demo-network "

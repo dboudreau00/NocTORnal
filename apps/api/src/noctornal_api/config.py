@@ -1030,7 +1030,7 @@ def refuse_unsafe_job_environment(job: str, env: Mapping[str, str] | None = None
     makes both of these refusals among the rest and replaces the narrower
     questions below). They called `enforce_environment` once, which raised a
     RuntimeError: a refusal was exit 1 with a traceback where every other job
-    gave 2 (Beta 1 verification, 2026-10-07). A caller prints the lines on
+    gave 2 (2026-10-07). A caller prints the lines on
     stderr and exits `JOB_REFUSAL_EXIT`. `outbound=False` is lab_triage's,
     which sends nothing out and is given no egress proxy (`verify_environment`
     says what that excuses).

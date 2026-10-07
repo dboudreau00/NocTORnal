@@ -126,8 +126,8 @@ def readable_predicate(alias: str = "n") -> str:
     branch exists so that adding a genuinely case-independent notification
     later is a decision rather than an accident.
 
-    The labels half reads the case's labels as they stand too (Beta 1 gate
-    64): a case raised above the recipient, or given a compartment they do
+    The labels half reads the case's labels as they stand too (2026-10-07): a case raised
+    above the recipient, or given a compartment they do
     not hold, shuts them out of the case, and its notifications stayed
     readable in the centre and deliverable, labelled as they were raised.
 

@@ -126,8 +126,8 @@ def _authorised_cases(conn: psycopg.Connection, user: CurrentUser,
     still compared `u.tlp_clearance` alone. An analyst whose grant opened
     case X could read `/retention/due?case_id=X`, while the same list
     without a case id, the Destroyed list and the "records unchanged"
-    count on a rule confirmation all left X out (final review U7,
-    2026-09-23). Asking `evaluate()` cannot drift, and it also records a
+    count on a rule confirmation all left X out (2026-09-23). Asking `evaluate()` cannot
+    drift, and it also records a
     use of the grant when the grant is what opens the case, exactly as
     the per-case form of these routes always has.
     """
@@ -455,7 +455,7 @@ def due(
 #: The due items that carry labels of their own and are left out of a list
 #: for a caller above whose ceiling they sit: exhibits (the finding) and the
 #: Lab's samples, which the sweep took in the same change (lab-4), and, since
-#: g44-due-labelled-records (2026-10-03), the partner's ingest records and the
+#: due-labelled-records (2026-10-03), the partner's ingest records and the
 #: provider lookups and answers: a record's id, deadline and category (a
 #: stealer log, say) went to every retention.read holder whatever its
 #: compartment. A batch and a dead letter carry no labels and are still listed.
@@ -552,7 +552,7 @@ class PurgeBody(BaseModel):
     #: eventually be called by a script that meant to ask a question.
     dry_run: bool = True
     #: The `preview` a dry run of this case under this authority returned.
-    #: REQUIRED when `dry_run` is false (final review U20, 2026-09-23): the
+    #: REQUIRED when `dry_run` is false (2026-09-23): the
     #: real run is refused unless what is due is still exactly what that
     #: dry run counted. See `_preview_digest`.
     preview: str | None = Field(None, max_length=128)
@@ -627,7 +627,7 @@ def _preview_digest(case_id: UUID, authority: str,
                     items: list[DueItem]) -> str:
     """What a dry run counted, as one value a real run must present again.
 
-    Final review U20, 2026-09-23. The real run took only a case and an
+    2026-09-23. The real run took only a case and an
     authority and ran `due()` afresh at destroy time, while the console's
     confirmation repeated the counts of a dry run of any age. A hold lifted
     in between meant "Destroy 3 exhibits" was confirmed and 14 went: the
@@ -667,7 +667,7 @@ def _dry_counts(items: list[DueItem]) -> dict[str, int]:
     dry run counts the whole list. The service's totals include the exhibits
     above the caller, so an AMBER lead with an empty register was told
     `evidence_purged: 2, held_back: 1` whatever the case's withheld-disclosure
-    setting said (Beta 1 verification, group C, C7)."""
+    setting said (2026-10-07)."""
     live = [i for i in items if not i.held]
 
     def n(kind: str) -> int:
@@ -757,7 +757,7 @@ def purge(
     purger = _purger(sconn)
     # What is due NOW, read before anything is destroyed: a dry run hands
     # its digest back as `preview`, and a real run must present the digest
-    # of a dry run that still matches it (final review U20, 2026-09-23).
+    # of a dry run that still matches it (2026-09-23).
     # One `as_of` for this read and the sweep's own, so the clock cannot
     # move an item across its deadline between the check and the act.
     as_of = datetime.now(timezone.utc)
@@ -1013,7 +1013,7 @@ def _meter_lift(request: Request, response: Response, conn: psycopg.Connection,
     The three hold routes were metered on `retention.destroy` whichever way
     the hold went, so placing a fourth hold inside a few minutes was refused
     (a burst of three, ten an hour, shared with the purges), and with the
-    meter's store down every placement was refused (Beta 1 gate 64).
+    meter's store down every placement was refused (2026-10-07).
     Preservation is never the act a loop abuses; releasing is what makes
     destruction lawful, so a lift keeps the tight meter and fails closed, and
     a placement has the ordinary request meter."""
@@ -1130,7 +1130,7 @@ def case_legal_hold(
     # the case holds (the service refuses otherwise); a hold needs nothing
     # more than the gate above.
     clearance, held = user_ceiling(conn, user.user_id, case_id=case_id)
-    # g44-case-hold-lift-documents (2026-10-03): the collected documents the
+    # case-hold-lift-documents (2026-10-03): the collected documents the
     # case cites are counted against the caller's ceiling OUTSIDE this case,
     # the one a document is read under. A break-glass grant scoped to this
     # case raises `clearance` above, and must not release a document that
@@ -1597,7 +1597,7 @@ def review(
     It also refuses a grant that is still live, with a 409 that says to
     end it or wait. `/unreviewed` is the only list and End it now lives on
     its cards, so a verdict on a live grant hid it from every officer while
-    the raise ran on (final review U2, 2026-09-23).
+    the raise ran on (2026-09-23).
     """
     try:
         grant = BreakGlassService(sconn).review(

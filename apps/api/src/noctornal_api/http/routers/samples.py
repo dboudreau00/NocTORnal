@@ -620,8 +620,7 @@ def preserved_for_authorisation(
     user: CurrentUser = Depends(require_global("sample.preserved.authorise")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """The Security Officer's way in to the preserved samples (final review
-    U3, 2026-09-23).
+    """The Security Officer's way in to the preserved samples (2026-09-23).
 
     Authorising and revoking a retrieval were offered only inside the Lab's
     sample card, which is `GET /samples/{id}` under `sample.read`, and

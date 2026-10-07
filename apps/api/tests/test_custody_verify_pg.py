@@ -167,7 +167,7 @@ def test_untouched_chain_verifies(tamperable):
 
 
 def test_only_the_rows_that_do_not_verify_leave_the_database(tamperable):
-    """Beta 1 gate 64, as for the audit chain: the custody verifier handed
+    """2026-10-07, as for the audit chain: the custody verifier handed
     every row of the ledger back to Python. A scoped clean run now answers
     one summary row, with the count and span of what it checked."""
     from noctornal_api.custody_verify import verify_custody_chain

@@ -156,7 +156,7 @@ def test_a_case_hold_entered_during_the_sweep_waits_for_the_sweep(conn):
 
 
 def test_a_case_hold_entered_during_the_sweep_keeps_the_exhibits_it_has_not_reached(conn):
-    """Beta 1 verification, group C, C6. The sweep took the case FOR SHARE
+    """2026-10-07. The sweep took the case FOR SHARE
     once and kept it to the end, so a case hold entered during the first
     exhibit's delete waited out the WHOLE sweep and then landed on three
     destroyed exhibits with no word. Each exhibit is now claimed in a

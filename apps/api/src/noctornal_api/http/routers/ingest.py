@@ -280,7 +280,7 @@ def _case_allows(conn: psycopg.Connection, user: CurrentUser, case_id: UUID,
             mfa_satisfied_at=user.session_mfa_at,
             # A question, so no audit row of any kind: one queue load asked
             # it per case and per label set, and each answer counted as a
-            # break-glass use (final review U19 fix round, 2026-09-23, g02).
+            # break-glass use (2026-09-23).
             count_use=False)
     except (AccessResolutionError, Problem):
         return False
@@ -1594,8 +1594,8 @@ def correct_category(
         # Refuses a read-only case too: `ingest.replay` is a content verb.
         # Not counted: the read gate above resolved these same labels and
         # counted this request if a grant was what let it through, and a
-        # correction read as two uses on the officer's card (r2 u1,
-        # 2026-09-24). The verb, the lifecycle and the refusal are asked
+        # correction read as two uses on the officer's card (2026-09-24). The verb, the
+        # lifecycle and the refusal are asked
         # all the same.
         authorize_object(conn, user, case_id=case_id,
                          permission_key="ingest.replay", count_use=False,

@@ -388,7 +388,7 @@ def test_amber_strict_sends_nothing_to_jira_not_even_a_stub(conn):
 
 
 def test_a_case_raised_after_queueing_sends_nothing(conn):
-    """Beta 1 gate 64: the pass judged the labels the notification was
+    """2026-10-07: the pass judged the labels the notification was
     raised with, so a case raised to RED while the row waited went to Jira
     marked AMBER. The case's labels are composed in at the drain."""
     world = _world(conn)

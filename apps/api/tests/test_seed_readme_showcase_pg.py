@@ -631,8 +631,8 @@ def test_everything_is_clear_but_the_one_green_exhibit(estate):
     assert officer_alert == [("GREEN", None)]
     r = report.redaction
     # The seeded case discloses PRESENCE (the default), so the document says
-    # that some exhibits are above CLEAR and not how many (Beta 1, group C,
-    # C2): this asserted the exact figure 1 before.
+    # that some exhibits are above CLEAR and not how many (2026-10-07):
+    # this asserted the exact figure 1 before.
     assert (r.nodes_withheld, r.edges_withheld, r.evidence_withheld,
             r.evidence_some_withheld) == (0, 0, 0, True)
 

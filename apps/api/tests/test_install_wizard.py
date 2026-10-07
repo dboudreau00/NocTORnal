@@ -532,7 +532,7 @@ def test_a_demo_case_already_there_is_said_so_and_not_offered_again():
 
 @pytest.mark.skipif(not __import__("os").environ.get("DATABASE_URL"), reason="needs DATABASE_URL")
 def test_the_demo_presence_check_runs_against_the_real_schema():
-    done = subprocess.run([sys.executable, "-", "OP-NO-SUCH-CASE-G60"], input=_demo_present_snippet(),
+    done = subprocess.run([sys.executable, "-", "OP-NO-SUCH-CASE"], input=_demo_present_snippet(),
                           capture_output=True, text=True, timeout=60)
     assert done.returncode == 0 and done.stdout.strip() == "0", done.stdout + done.stderr
 

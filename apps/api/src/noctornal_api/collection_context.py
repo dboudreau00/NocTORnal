@@ -81,8 +81,8 @@ MAX_SAME_ORIGIN_HOPS = 3
 #: The methods an adapter may use through the seam: a read, and the member
 #: adapter's sign-in and sign-out forms. PUT, PATCH, DELETE and the rest are
 #: refused here, so no adapter can act on a site by a method the invariant
-#: "nothing posts, replies, reacts, messages or buys" never meant (g40
-#: verify minor, 2026-10-03; which adapter may POST is still its own).
+#: "nothing posts, replies, reacts, messages or buys" never meant (2026-10-03; which adapter
+#: may POST is still its own).
 ALLOWED_METHODS = ("GET", "POST")
 #: Nothing is started with less of the poll's wall clock left than this,
 #: or a tenth of the whole allowance when that is smaller: a request that
@@ -268,7 +268,7 @@ def origin_text(url: str) -> str | None:
     """`_origin` as one string, `scheme://host:port`: the key a persona's
     sealed forum session is filed under (`forum_session.origin_key`), so the
     cookies a run carries and the origin it may request are one reading
-    (g40 verify blocker 2, 2026-10-03)."""
+    (2026-10-03)."""
     origin = _origin(url)
     return None if origin is None else f"{origin[0]}://{origin[1]}:{origin[2]}"
 

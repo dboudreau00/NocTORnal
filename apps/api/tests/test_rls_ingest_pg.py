@@ -444,7 +444,7 @@ _PII_FIELDS = ("'credentials of the victim organisation only', 'order 2026-1'")
 
 
 def test_a_grantee_counts_their_authorisation_and_changes_nothing_else(owner):
-    """The verification of 2026-10-02 (g31 finding 1): the count policy
+    """The verification of 2026-10-02 (finding 1): the count policy
     pinned no column, so the grantee of a live authorisation could push its
     window out (the 30-day CHECK is counted from a granted_at they could
     move), re-attribute it to another officer and retarget it to another of
@@ -508,7 +508,7 @@ def test_a_grantee_counts_their_authorisation_and_changes_nothing_else(owner):
 
 
 def test_a_record_is_attached_once_and_its_expiry_never_brought_forward(owner):
-    """g31 finding 2 (2026-10-02): an ingest.manage holder on a case could
+    """Finding 2 (2026-10-02): an ingest.manage holder on a case could
     detach its record into quarantine by a raw UPDATE, out of the case and
     its legal hold, and any reader could move a record between two of their
     cases, lower its classification or empty it. 0155 leaves the request role
@@ -557,7 +557,7 @@ def test_a_record_is_attached_once_and_its_expiry_never_brought_forward(owner):
 
 
 def test_a_record_with_no_expiry_is_given_none_by_a_request_or_a_correction(owner):
-    """g31 verification 2 (2026-10-03): the guard compared a request's expiry
+    """2026-10-03: the guard compared a request's expiry
     with the stored one only when there was one. For a record with NO expiry
     (legacy or hand-made: the application always stamps one, and
     retention.due reads NULL as never due) any reader of its case could set
@@ -602,7 +602,7 @@ def test_a_record_with_no_expiry_is_given_none_by_a_request_or_a_correction(owne
 
 
 def test_an_expiry_the_application_cannot_read_back_is_refused(owner):
-    """g31 verification 2 (2026-10-03): a reader could push a record's expiry
+    """2026-10-03: a reader could push a record's expiry
     to 'infinity', which psycopg cannot load (DataError: timestamp too large)
     and so poisons every listing that reads the record, besides defeating its
     retention rule. 0155's guard refuses a date past 1 December 9999, the
@@ -629,7 +629,7 @@ def test_an_expiry_the_application_cannot_read_back_is_refused(owner):
 
 def test_a_correction_that_lost_a_race_for_the_expiry_keeps_the_later_one(
         owner, monkeypatch):
-    """g31 verification 2 (2026-10-03): the correction computed its expiry from
+    """2026-10-03: the correction computed its expiry from
     a read a concurrent correction had since overtaken, and the guard, which
     judges a write against the CURRENT row, raised a raw 42501 the API maps
     to a 500. The verb now writes the greater of the stored expiry and its
@@ -665,7 +665,7 @@ def test_a_correction_that_lost_a_race_for_the_expiry_keeps_the_later_one(
 
 
 def test_a_reader_of_a_credential_can_count_a_reveal_and_nothing_else(owner):
-    """g31 finding 2 (2026-10-02): any reader of a record could update its
+    """Finding 2 (2026-10-02): any reader of a record could update its
     credentials, and the encrypted-or-absent CHECK caught only some of it:
     clearing the value and its key together, or moving the credential to
     another record, went through. 0155 leaves the request role the reveal's
@@ -705,7 +705,7 @@ def test_a_reader_of_a_credential_can_count_a_reveal_and_nothing_else(owner):
 
 
 def test_a_walled_dead_letter_is_seen_only_with_its_compartment(owner):
-    """g31 finding 3 (2026-10-02): no test walled a dead letter, so the
+    """Finding 3 (2026-10-02): no test walled a dead letter, so the
     policy's compartments term could be dropped with every test passing. A
     stealer-log feed's dead letter carries the feed's compartment, through
     its case and in quarantine alike."""
@@ -737,7 +737,7 @@ def test_a_walled_dead_letter_is_seen_only_with_its_compartment(owner):
 
 
 def test_a_dead_letter_above_its_reader_is_seen_under_a_grant_that_reaches_it(owner):
-    """g31 finding 3 (2026-10-02): the break-glass branch of
+    """Finding 3 (2026-10-02): the break-glass branch of
     iam.ingest_dead_letter_visible had no test. A grant on the case raises
     that case's ceiling over the dead letters its batches fed, and nothing
     in quarantine; another case's grant raises nothing; a global grant
@@ -900,7 +900,7 @@ def _watch(owner, case, boss, selector: str) -> None:
 
 
 def test_the_selector_hit_notice_is_labelled_by_the_record_and_skips_quarantine(owner):
-    """g31 finding 3 (2026-10-02): `_notify_selector_hits` was pinned only
+    """Finding 3 (2026-10-02): `_notify_selector_hits` was pinned only
     by the text of its query. What it does, on the INGEST connection
     `score_records` opens (which is what lets an operator off every case
     reach those cases at all): one notice per case to its owner, labelled by
@@ -1217,7 +1217,7 @@ def test_a_reveal_whose_authorisation_lapsed_before_its_count_reveals_nothing(
 
 def test_a_reveal_whose_credential_left_its_reach_before_its_count_reveals_nothing(
         owner, monkeypatch):
-    """g31 finding 3 (2026-10-02): the credential half of the uncounted
+    """Finding 3 (2026-10-02): the credential half of the uncounted
     reveal had no behavioural test. The record is walled further between
     the scope read and the count, so the count reaches no row: the reveal is
     'no such credential', as the scope read would have said, and neither

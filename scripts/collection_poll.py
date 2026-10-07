@@ -349,7 +349,7 @@ def main() -> int:
     # NOCTORNAL_COLLECTOR; anywhere else a persona's poll could not open
     # its credential, and the cron loop must not hold it. Each refusal is
     # this job's refusal, exit 2 with its sentence, where it was a traceback
-    # and exit 1, the code of a pass that ran (beta 1 gate 6, 2026-10-07).
+    # and exit 1, the code of a pass that ran (2026-10-07).
     from noctornal_api.config import enforce_persona_key_boundary
     from noctornal_api.egress_routes import enforce_production_egress
     try:

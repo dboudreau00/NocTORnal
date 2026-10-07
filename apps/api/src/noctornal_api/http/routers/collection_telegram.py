@@ -84,7 +84,7 @@ router = APIRouter(prefix="/collection/telegram", tags=["collection"])
 def _storable(value: str) -> str:
     """U+0000 is text pydantic accepts and Postgres cannot store: it raised
     UntranslatableCharacter on the act's INSERT, so a join note or a reason
-    carrying one answered 500 (verify:g38 minor, 2026-10-03). clean_text
+    carrying one answered 500 (2026-10-03). clean_text
     swaps it, and a lone surrogate should one ever get here, for U+FFFD, one
     character for one, so the field's own length limits still hold. (A lone
     surrogate in a request body never gets here: pydantic refuses it with a
@@ -249,7 +249,7 @@ class ChatCreate(BaseModel):
     poll_interval_s: int = Field(default=1800, ge=300, le=7 * 86400)
     jitter_pct: int = Field(default=25, ge=0, le=50)
     max_rps: float = Field(default=0.2, ge=0.05, le=1.0)
-    #: F43 (g40 verify major 5b, 2026-10-03): the compartments the chat's
+    #: F43 (2026-10-03): the compartments the chat's
     #: source and everything it collects are filed under; the creator must
     #: hold each. Until now this route could not set them.
     compartments: list[str] = Field(default_factory=list, max_length=32)
@@ -272,7 +272,7 @@ def create_chat(
     refuse_unready(conn)
     clearance, held = user_ceiling(conn, user.user_id)
     # Everything that needs no key and no network is refused here, before
-    # anything is queued (verify:g38, 2026-10-03): a private invite link is
+    # anything is queued (2026-10-03): a private invite link is
     # a bearer join credential, and the queue's rows are never deleted, so
     # it must never be written; a typo is a cheap 400 now, not one that
     # waits for the collector. Only the reference as it was understood is

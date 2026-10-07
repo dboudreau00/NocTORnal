@@ -214,7 +214,7 @@ def test_a_directed_chain_separates_its_source_and_its_sink():
     assert "stopped after 3 rounds" in out["rege"]["limits"][0]
     # Three asked, three found: nothing was joined that the number did not
     # ask for. (Only the two "fewer" cases said so before, which a constant
-    # True also passes: g34 review item 3, 2026-10-02.)
+    # True also passes: 2026-10-02.)
     assert out["rege"]["roles_found"] == 3
     assert out["rege"]["cut"]["fewer_than_asked"] is False
 
@@ -232,8 +232,7 @@ def test_asking_for_more_roles_than_there_are_entities_is_not_fewer_than_asked()
 def test_a_role_reports_how_alike_its_members_are_on_average_and_at_the_least():
     """The chain's interior is alike but not identical, so the mean and the
     least differ: a `least_alike` that was the mean, or the greatest, passed
-    every test that held a role of one or of identical members (g34 review
-    item 3, 2026-10-02)."""
+    every test that held a role of one or of identical members (2026-10-02)."""
     ties = [(x, "VOUCHED_FOR", y) for x, y in zip(_CHAIN, _CHAIN[1:], strict=False)]
     sim = _check_against_naive(_CHAIN, ties)
     out = _run(_sub(_CHAIN, ties)[0], roles=3)
@@ -337,7 +336,7 @@ def test_entities_left_with_no_counted_tie_are_one_role_and_the_card_says_so():
     one. Counted by weight x, y and z have nothing to match, so they are alike
     one another (the zero-denominator rule) and come out as one role of
     cohesion 1: a perfect role that says nothing. The first card printed the
-    count of weightless ties and not this (g34 review item 3, 2026-10-02)."""
+    count of weightless ties and not this (2026-10-02)."""
     names = ["x", "y", "z", "h", "a", "b", "c"]
     ties = [("x", "VOUCHED_FOR", "y"), ("y", "VOUCHED_FOR", "z"),
             ("h", "VOUCHED_FOR", "a"), ("h", "VOUCHED_FOR", "b"), ("h", "VOUCHED_FOR", "c")]
@@ -372,7 +371,7 @@ def test_entities_left_with_no_counted_tie_are_one_role_and_the_card_says_so():
 # The star's only blocks are fully dense or fully empty, which every reading
 # of "tied" and of "regular" agrees on. These hold the blocks in between: a
 # threshold and a regularity test the star cannot tell apart from a wrong
-# one (g34 review item 2, 2026-10-02).
+# one (2026-10-02).
 
 def test_a_chain_has_tied_blocks_that_are_not_regular():
     """Source, interior and sink of a chain of five. Three blocks hold a
@@ -641,7 +640,7 @@ def test_the_vertices_are_taken_in_id_order_not_in_the_order_a_set_holds_them():
     """The step that makes the answer a function of the graph: the entities
     are sorted by id. With ids that ascend with the names a set iterates in
     that order anyway, so a fixture of them cannot see the step go missing
-    (g34 review item 3, 2026-10-02); with random ones it does, and the
+    (2026-10-02); with random ones it does, and the
     precondition says so."""
     ring = [f"v{i}" for i in range(14)]
     ties = [(x, "VOUCHED_FOR", y) for x, y in zip(ring, ring[1:] + ring[:1], strict=True)]
@@ -660,7 +659,7 @@ def test_a_cell_summed_from_parallel_ties_is_exact_whatever_the_order(monkeypatc
     3.12 the built-in `sum` compensates too and agrees with `fsum` on every
     positive list tried, so a value check cannot tell the two apart: the call
     is pinned as well. (The test that stood here summed single ties, so any
-    sum passed: g34 review item 3, 2026-10-02.)"""
+    sum passed: 2026-10-02.)"""
     def one_by_one(values):
         total = 0.0
         for v in values:
@@ -697,8 +696,8 @@ def test_equally_good_cuts_depend_on_the_ids_and_the_card_says_so():
     """A chain of seven cut into two roles has two cuts exactly as good as
     each other, and which one is returned follows the entities' ids: the same
     structure under another assignment is cut the other way. Fixed for a
-    graph, not for a structure, and the limits say exactly that (g34 review
-    item 3, 2026-10-02: docs/03 had said the same graph always gives the same
+    graph, not for a structure, and the limits say exactly that (2026-10-02: docs/03 had
+    said the same graph always gives the same
     roles, which reads as the same structure)."""
     chain = list("abcdefg")
     ties = [(x, "VOUCHED_FOR", y) for x, y in zip(chain, chain[1:], strict=False)]
@@ -771,8 +770,7 @@ def _directions_text(cap: int, directions: int, ties: int) -> str:
 def test_each_cap_admits_exactly_its_limit_and_refuses_one_more(monkeypatch, name, at, over,
                                                                text):
     """The refusals read `>`, so a view AT a cap is computed and one over is
-    refused: a `>=` would refuse the view the cap names (g34 review item 3,
-    2026-10-02)."""
+    refused: a `>=` would refuse the view the cap names (2026-10-02)."""
     sub = _sub(_STAR, _star("VOUCHED_FOR"))[0]           # five entities, four pairs, four ties
     monkeypatch.setattr(rege, name, at)
     rege.precheck(sub)
@@ -785,8 +783,8 @@ def test_each_cap_admits_exactly_its_limit_and_refuses_one_more(monkeypatch, nam
 def test_a_tie_with_no_direction_fills_two_directions_of_the_ties_cap(monkeypatch):
     """The same four pairs as an undirected star hold eight directions, one
     for each way each tie runs: a cap of eight admits it and seven refuses it,
-    where a directed star of four ties is under both (g34 review item 1,
-    2026-10-02: cost follows the cells a round reads, and a tie both ways
+    where a directed star of four ties is under both (2026-10-02: cost follows the cells a
+    round reads, and a tie both ways
     is two of them)."""
     sub = _sub(_STAR, _star("COMMUNICATES_WITH"))[0]
     monkeypatch.setattr(rege, "REGE_MAX_TIES", 8)
@@ -823,7 +821,7 @@ def test_the_caps_as_shipped_are_the_ones_the_docs_state():
     (docs/03, decision 157), by the shipped constants and not a patched copy:
     a view at each passes the precheck and one over is refused. Nothing is
     computed here. And the docs are read, so a number edited on either side
-    alone fails (g34 verify item, 2026-10-03: this test pinned the constants
+    alone fails (2026-10-03: this test pinned the constants
     only and never opened the page it is named for)."""
     names = [f"v{i}" for i in range(75)]
     every = [(names[i], "VOUCHED_FOR", names[j]) for i in range(75) for j in range(i + 1, 75)]
@@ -854,7 +852,7 @@ def test_the_caps_as_shipped_are_the_ones_the_docs_state():
 def test_parallel_ties_fill_one_direction_of_the_ties_cap(monkeypatch):
     """Ties repeating a cell (the same kind of tie in the same direction
     between the same two entities) collapse into one before any round runs,
-    so they are one direction, not many (g34 verify item, 2026-10-03: the cap
+    so they are one direction, not many (2026-10-03: the cap
     counted tie rows, and a one-mode view has one derived tie per pair and
     venue). The star of four has four directions however often each is
     repeated; a reverse tie, another kind of tie, or another pair is a new
@@ -930,7 +928,7 @@ def _crew_over_forums(entities: int, forums: int, seed: int = 3):
 
 
 def test_a_close_knit_crew_over_many_forums_is_admitted_and_computed():
-    """The g34 verifier's view: 40 entities, every pair sharing the same 15
+    """The view measured on 2026-10-03: 40 entities, every pair sharing the same 15
     forums, is 780 tied pairs, 11,700 derived ties (23,400 slots, over the
     5,000 cap when rows were counted) but 1,560 directions, and runs in a
     fraction of a second. Admitted by presence and by weight at the shipped
@@ -991,7 +989,7 @@ def _directed_world(entities, pairs, *, both_ways=False, seed=11):
     """Names, ties and weights for a view at a size: every tied pair carries
     the three valences (positive, negative, neutral), each in a random
     direction (or, `both_ways`, in both with a weight of its own), with random
-    weights. The dearest shapes of the g34 review's measurements."""
+    weights. The dearest shapes of the measurements of 2026-10-02."""
     rng = random.Random(seed)
     order = list(range(entities))
     rng.shuffle(order)
@@ -1031,7 +1029,7 @@ def test_a_round_reads_only_the_rows_of_m_it_needs(monkeypatch):
     """Each tie-pattern group compares its left ties with the counterparts'
     values M(k, m) for the k it holds. Taking all n rows of M for each of up
     to 63 groups was 2.2 of the 2.7 seconds of a round on three relations in
-    random directions (g34 review item 1, 2026-10-02): the rows taken must be
+    random directions (2026-10-02): the rows taken must be
     the group's own k."""
     names, ties, weights = _directed_world(60, 100)
     sub = _sub(names, ties, weights=weights)[0]
@@ -1105,10 +1103,10 @@ def _world_at_caps(kinds, mode, seed=11):
 def test_the_dearest_views_at_the_caps_stay_near_two_seconds(kinds, mode):
     """1,000 entities, filled to the pairs cap or the ties cap, whichever
     comes first, counted by weight with every tie's weight its own, three full
-    rounds. The shapes are the ones the g34 review measured: one relation tied
+    rounds. The shapes are the ones measured on 2026-10-02: one relation tied
     both ways (the first calibration's 'worst', among the cheapest), and
     relations in random directions, which took 7.5 to 8.3 s at 3,000 pairs
-    before the caps moved (g34 review item 1, 2026-10-02). Every one is
+    before the caps moved (2026-10-02). Every one is
     measured at 0.9 to 2.1 s of CPU with every core of the build host busy. The
     bound is two and a half times the dearest, so it fails on an order-of-
     magnitude regression and not on noise, and it reads the shipped caps."""
@@ -1132,7 +1130,7 @@ def test_parallel_ties_at_the_caps_cost_what_the_collapsed_view_costs():
     with five times the rows. Each repeat is a new row of the same cell, so the
     directions are unchanged and the rounds cost what they cost without the
     repeats (1.5 to 1.8 s, not more) plus the linear pass over the rows, a few
-    microseconds each (g34 verify item, 2026-10-03)."""
+    microseconds each (2026-10-03)."""
     names, ties, weights, _taken = _world_at_caps(_DIRECTED_KINDS, "mix")
     rng = random.Random(7)
     repeated, heavier = [], {}
@@ -1152,8 +1150,8 @@ def test_parallel_ties_at_the_caps_cost_what_the_collapsed_view_costs():
 
 
 def test_the_first_calibrations_dearest_view_is_now_refused_not_computed():
-    """Three relations in random directions on 3,000 pairs (the g34 verifier's
-    shape B: about 10,600 ties) took 7.5 to 8.3 s. It is over the ties cap now
+    """Three relations in random directions on 3,000 pairs (shape B of
+    2026-10-03: about 10,600 ties) took 7.5 to 8.3 s. It is over the ties cap now
     (and over the pairs cap), refused before any matrix exists."""
     names, ties, weights = _directed_world(1000, 3000)
     assert len(ties) > 10000
@@ -1229,7 +1227,7 @@ def test_a_truncated_view_carries_the_truncation_note():
 def test_the_run_is_marked_approximate_at_the_top_level_where_the_service_reads_it():
     """`analytics_runs` stores the top-level flag on the run row and in its
     audit event; REGE had it only inside its own block, so every run was
-    recorded as exact (g34 review item 3, 2026-10-02)."""
+    recorded as exact (2026-10-02)."""
     out = _run(_sub(_STAR, _star("VOUCHED_FOR"))[0])
     assert out["is_approximate"] is True and out["rege"]["is_approximate"] is True
 

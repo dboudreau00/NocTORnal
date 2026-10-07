@@ -124,7 +124,7 @@ def test_a_red_readiness_register_does_not_hold_back_the_sign_out_of_a_stop(
         conn, stub, monkeypatch):
     """A stop is always allowed (F38) and its route asks no readiness, so
     the sign-out it queues is not refused by the collector for a blocking
-    check that turned red either (beta 1 gate 6, 2026-10-07): a burnt
+    check that turned red either (2026-10-07): a burnt
     persona's board session must not stay open because, say, the security
     officer's account was deactivated."""
     from noctornal_api import persona_acts

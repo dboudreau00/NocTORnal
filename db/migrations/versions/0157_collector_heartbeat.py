@@ -1,4 +1,4 @@
-"""The collector's heartbeat (verify:g38, 2026-10-03).
+"""The collector's heartbeat (2026-10-03).
 
 ## Why
 

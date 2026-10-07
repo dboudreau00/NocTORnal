@@ -179,7 +179,7 @@ def _persona(args) -> int:
     print(f"persona ring: active {active}"
           + (f", retired {', '.join(ids[1:])}" if ids[1:] else ", no retired keys"))
     conn = connect_system(SystemPurpose.SCRIPT)
-    # BEFORE the inventory opens anything (verify:g38, 2026-10-03): a row
+    # BEFORE the inventory opens anything (2026-10-03): a row
     # still sealed under the TOTP ring is opened with that ring, so a
     # process without the TOTP key must be refused by name here, with exit
     # 2, and not crash in the inventory with a traceback and exit 1.

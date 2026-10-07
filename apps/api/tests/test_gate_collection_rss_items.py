@@ -1,5 +1,4 @@
-"""What a feed poll does not keep is said, never dropped (beta 1 gate 6,
-2026-10-07; invariant 12).
+"""What a feed poll does not keep is said, never dropped (2026-10-07; invariant 12).
 
 An item with no guid, id, link or title was skipped without a word, and a
 feed had no cap on its items: a 16 MiB feed of bare items was some 600,000

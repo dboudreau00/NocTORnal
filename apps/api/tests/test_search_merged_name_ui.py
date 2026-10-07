@@ -1,5 +1,5 @@
 """The Search pane says when a hit was found by a merged record's name
-(final review U10, 2026-09-23).
+(2026-09-23).
 
 Pure: no database, no browser, like test_ui_invariants.py beside it. The
 server half is test_a_merged_records_own_name_finds_its_survivor and

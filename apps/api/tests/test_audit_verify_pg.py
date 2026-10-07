@@ -162,7 +162,7 @@ class _RowCounter:
 
 
 def test_only_the_rows_that_do_not_verify_leave_the_database(tamperable):
-    """Beta 1 gate 64: every row of the chain came back to Python, 380 MB
+    """2026-10-07: every row of the chain came back to Python, 380 MB
     and 35 seconds of the API process for a 1.5 million row log. A clean
     chain now answers one summary row however long it is, and a tampered
     one adds the rows that do not verify."""

@@ -419,7 +419,7 @@ def test_an_unreadable_file_is_one_sentence_naming_it_and_sudo(prod, monkeypatch
 def test_a_file_that_is_not_utf8_is_one_sentence_and_no_traceback(prod):
     """The docstring promises a file the helper cannot read is one sentence
     and never a traceback, and only OSError was caught: a Windows-1252
-    comment ended in a UnicodeDecodeError (g32 verify of 2026-10-03). The
+    comment ended in a UnicodeDecodeError (2026-10-03). The
     sentence says where the byte is, never what it is."""
     _old_layout(prod)
     with (prod / "secrets.env").open("ab") as handle:
@@ -453,7 +453,7 @@ _LAST = ("secrets.env is written last, so it still holds every line it had; once
 ])
 def test_a_file_it_cannot_write_stops_it_naming_the_file_and_what_changed(
         prod, monkeypatch, failing, changed):
-    """g32 verify of 2026-10-03: the file the owner's lines leave is written
+    """2026-10-03: the file the owner's lines leave is written
     LAST, whichever write fails, so secrets.env keeps them until the files
     they move into hold them, and running it again finishes the job."""
     _old_layout(prod)
@@ -516,7 +516,7 @@ def test_a_blocked_last_write_leaves_the_real_dsn_where_a_rerun_finds_it(prod):
 
 
 def test_a_failed_chmod_leaves_the_file_it_was_for_as_it_was(prod, monkeypatch):
-    """chmod comes BEFORE the rename (g32 verify of 2026-10-03). After it, a
+    """chmod comes BEFORE the rename (2026-10-03). After it, a
     chmod that failed on secrets.env left the file replaced while the run
     said it had not been written."""
     _old_layout(prod)
@@ -590,7 +590,7 @@ def test_every_file_and_backup_is_created_and_left_mode_600(prod, monkeypatch):
     assert recording.created and all(mode == 0o600 for _, mode in recording.created), \
         recording.created
     # A file is chmodded as the temporary it is written to, before the
-    # rename (g32 verify of 2026-10-03), so ".NAME.tmp-PID" stands for NAME.
+    # rename (2026-10-03), so ".NAME.tmp-PID" stands for NAME.
     assert {re.sub(r"^\.(.+)\.tmp-\d+$", r"\1", name) for name, _ in recording.chmodded} == {
         "secrets.env", "postgres-init.env", "migrate.env",
         f"secrets.env.backup-{STAMP}", f"postgres-init.env.backup-{STAMP}"}
@@ -720,7 +720,7 @@ def test_install_sh_reports_what_is_left_and_exits_1(prod):
                          env=_path_with_this_python())
     assert run.returncode == 1, run.stdout + run.stderr
     assert "still to do: choose the schema owner's password" in run.stdout
-    # The whole sentence, not "not finished" (g32 verify of 2026-10-03): the
+    # The whole sentence, not "not finished" (2026-10-03): the
     # old one, "what is left is listed above, and nothing it refused was
     # written", was false for a stop that listed nothing, and a substring
     # check let it back in unnoticed.
@@ -739,7 +739,7 @@ def test_the_installers_say_a_stop_the_same_true_way_and_lock_the_same_files():
     below exists on Windows alone. This is the half that exists everywhere,
     and it was written as a skip until 2026-10-03, which CI's Linux runner
     counted as a skipped test and the "No tests were skipped" gate failed
-    the build for (g32 verify of 2026-10-03)."""
+    the build for (2026-10-03)."""
     sh = (ROOT / "release" / "install.sh").read_text(encoding="utf-8")
     ps1 = (ROOT / "release" / "install.ps1").read_text(encoding="utf-8")
     for name, text in (("install.sh", sh), ("install.ps1", ps1)):

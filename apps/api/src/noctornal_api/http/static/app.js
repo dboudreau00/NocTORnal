@@ -1880,7 +1880,7 @@ const CASE_CONTENT_CONTROLS = [
  *  shares with a governance one or a read: a merge approval's Approve,
  *  Reject and Execute merge carry it, and Withdraw beside them does not;
  *  a Feeds record's triage and category verbs carry it and its Open and
- *  Rescore do not; ACH's Score it now carries it (u3, u15, 2026-09-24). */
+ *  Rescore do not; ACH's Score it now carries it (2026-09-24). */
 const CASE_CONTENT_RENDERED = [
   '.tag-x', '.insp-linker',                 // inspector: tags, exhibit links
   '.assert-actions', '#merge-history button', // retract a claim, reverse a merge
@@ -1961,7 +1961,7 @@ async function caseTurnedReadOnly() {
     if (state.caseId !== id) return;
     state.caseRec = rec;
     renderCaseState(rec);
-    /* g01, final review u2 (2026-09-24): the Triage and Feeds badges
+    /* 2026-09-24: the Triage and Feeds badges
        count no work on a read-only case, and they are repainted here too,
        or a case closed in another tab kept its count until the next load. */
     repaintWorkBadges();
@@ -2544,7 +2544,7 @@ async function reloadAll() {
 /* ── projection: the only thing a metric is ever computed against ─────── */
 
 async function loadPresets() {
-  /* Token-guarded like loadLayout below (final review U15, 2026-09-23):
+  /* Token-guarded like loadLayout below (2026-09-23):
      openCase checks the case only after both land, and by then an older
      case's reply has already written the shared state. */
   const token = caseToken();
@@ -2692,7 +2692,7 @@ function subgraphKey() {
      which the coverage chip cross-checks, and with the tie's flag left out
      an exhibit linked to a relationship was served the answer from before
      the link: the chip's title then reported a metrics count of 0 against
-     the canvas's 1, a disagreement that did not exist (u8, 2026-09-24). */
+     the canvas's 1, a disagreement that did not exist (2026-09-24). */
   for (const e of state.gedges) {
     mix(e.id + ',' + e.src_node_id + ',' + e.dst_node_id + ',' + e.weight + ','
         + e.sign + ',' + e.confidence + ',' + (e.is_inferred ? 1 : 0)
@@ -2747,7 +2747,7 @@ async function refreshMetrics(seq, q) {
   /* A role the case record says lacks analytics.run is not asked: the
      server refuses it every time, and every refusal is a permanent
      AUTHZ_DENIED row, a hum from each case open by a reader or a liaison
-     (Beta 1 gate 61; the reason `refreshFeedsBadge` stops asking). */
+     (2026-10-07; the reason `refreshFeedsBadge` stops asking). */
   if (!caseCan(state.caseRec, 'analytics.run')) {
     applyMetrics(null);
     $('sel-metric').disabled = true;
@@ -2908,7 +2908,7 @@ function renderEvidenceCoverage() {
   /* What the canvas draws. An ego or a set focus draws part of the
      projection, and the chip went on counting all of it under a title
      that says it counts the canvas: Meridian crew's ego focus, 19 entities
-     and 85 ties, read "0 of 592 elements" (u7, 2026-09-24). An analyst
+     and 85 ties, read "0 of 592 elements" (2026-09-24). An analyst
      judging whether one suspect's neighbourhood is evidenced read the
      whole case's share as that neighbourhood's. The focus is counted
      from the rows setRendered keeps on each sim node and link (their
@@ -2958,7 +2958,7 @@ function backedCount(nodes, edges) {
  *
  *  `whole` ({backed, elements}) is given while the canvas draws a focus:
  *  the figure is then the focus's, says so, and the title adds the whole
- *  projection's (u7, 2026-09-24). The metrics cross-check is left out
+ *  projection's (2026-09-24). The metrics cross-check is left out
  *  then, because the metrics are computed over the whole projection. */
 function coverageLine(nodes, edges, fromMetrics, truncated, whole) {
   const elements = nodes.length + edges.length;
@@ -5624,7 +5624,7 @@ function syncCanvasControls() {
 
   const save = $('btn-save-layout');
   /* Never on a read-only case: its Save layout is off, and a dot there
-     promised a save nothing can make (u10, 2026-09-24). */
+     promised a save nothing can make (2026-09-24). */
   const dirty = caseReadOnly() ? 0 : state.layoutDirty.size;
   if (save) {
     if (save.classList.contains('dirty') !== dirty > 0) save.classList.toggle('dirty', dirty > 0);
@@ -5979,7 +5979,7 @@ function initCanvas() {
  *  way into the pane is a click on it, which leaves the focus on it, and
  *  Space there re-selected the pane already open instead of peeking: no
  *  peek, no "release Space" chip, inferred ties still drawn while the
- *  analyst held the key to hide them (u9, 2026-09-24). Pressing the
+ *  analyst held the key to hide them (2026-09-24). Pressing the
  *  selected tab again does nothing, so Space loses nothing there. */
 function spacePeeks(t) {
   if (state.tab !== 'graph' || !state.graph || !signedIn()) return false;
@@ -6202,7 +6202,7 @@ function sayFocusMode() {
  * it on every load destroys real analytic value. */
 
 async function loadLayout() {
-  /* final review U15, 2026-09-23. openCase checks caseChanged only after
+  /* 2026-09-23. openCase checks caseChanged only after
      this returns, and this assigns state.layout itself, so NIGHTJAR's reply
      landing after KESTREL's replaced KESTREL's saved positions: KESTREL
      drew with none of its pins, and the next Save layout overwrote its
@@ -6223,7 +6223,7 @@ async function loadLayout() {
      came back read-only (a status change to CLOSED re-opens it): nothing
      can store them there, so they are this view's alone and are not
      marked. Marking them lit the unsaved dot on a Save layout that is off,
-     and the next leave dropped them without a word (u10, 2026-09-24). */
+     and the next leave dropped them without a word (2026-09-24). */
   const carry = state.layoutCarry;
   if (carry && carry.caseId === state.caseId) {
     state.layoutCarry = null;
@@ -6363,7 +6363,7 @@ function saveLayoutOnLeave(caseId, code, positions, moved) {
  *  case still takes a layout write, and say so. Closing a case with its
  *  final picture arranged and not saved re-opened it with the unsaved dot
  *  on a Save layout that was off, and the next leave dropped the
- *  arrangement without a word (u10, 2026-09-24). Called by submitStatus
+ *  arrangement without a word (2026-09-24). Called by submitStatus
  *  before it sends the change. It never throws: the status change is what
  *  the analyst asked for, so a failed save is reported and the change
  *  goes ahead. */
@@ -8693,7 +8693,7 @@ function jumpToEntity(id) {
    is the finding. */
 function viaLine(hit, q) {
   const v = hit.via;
-  /* final review U10, 2026-09-23: a merged record's own name now finds
+  /* 2026-09-23: a merged record's own name now finds
      its survivor, and the server names the record whose name matched
      when it is the only reason or the better one. Without this line the
      survivor would be a hit whose name does not contain the query, or
@@ -8998,7 +8998,7 @@ function renderInspector() {
        never fire. What was left was the wording: a bare 'opacity 1.00'
        read as a probability, and nothing said this is the value the canvas
        draws and the confidence filter tests.
-       "LOW when none grades it" since the final review (U11, 2026-09-23):
+       "LOW when none grades it" since the final review (2026-09-23):
        a tie held up only by a weight or attribute correction has no live
        claim that grades it, takes LOW, and was described as resting on
        "its strongest live claim" when it rested on none. */
@@ -11033,7 +11033,7 @@ function renderAssertions(box, all) {
       /* What else holds the element up, counted the way the projection
          counts: every row neither retracted nor superseded, whatever the
          checkbox shows. Superseded rows counted until the final review
-         (U11, 2026-09-23), so after the demo seed's --regrade the last
+         (2026-09-23), so after the demo seed's --regrade the last
          live claim was offered as "1 other live assertion remains" and the
          tie stayed drawn on a replaced claim nobody could retract. */
       const others = all.filter(
@@ -12181,7 +12181,7 @@ const createForms = {
      until the case's entities arrive and restored only for the same case. */
   keptEnds: null,
   /* Entities the Link form was opened from that the case's entity page
-     does not hold, by id (final review U12, 2026-09-23). The page is the
+     does not hold, by id (2026-09-23). The page is the
      newest 1000 (`/nodes?limit=1000`) and the canvas draws the oldest 800,
      so in a large case an entity can be drawn, selected and offered "Link
      from this..." without being in `state.nodes`, and the pickers, built
@@ -12506,7 +12506,7 @@ async function restoreEndpoint(which, nodeId) {
  *  it. The other end, the type and the grading stay unchosen.
  *
  *  The entity is pinned first when the case's entity page does not hold
- *  it (final review U12, 2026-09-23): it used to open on "Choose the
+ *  it (2026-09-23): it used to open on "Choose the
  *  source entity" without a word for any entity beyond that page, which in
  *  a large case is most of the ones the canvas draws. If it cannot be read
  *  at all, the form says so instead of opening blank. */
@@ -12670,8 +12670,8 @@ function refreshEdgeTypes() {
  *  ux06-entry:edge-type-note-stale (2026-09-23): the note described the
  *  first PERMITTED type, not the chosen one, so an analyst picking
  *  "is an alias of" was told it counted as a social tie. The describing
- *  half was fixed on 2026-09-22; the reading and the separate count are
- *  this round's. The reading is the check that the direction is right
+ *  half was fixed on 2026-09-22; the reading and the separate count came
+ *  after it. The reading is the check that the direction is right
  *  before the tie is committed, and it is what a swap changes. */
 function edgeTypeWords(t, src, dst) {
   const s = src ? src.label : 'the source', d = dst ? dst.label : 'the target';
@@ -13127,7 +13127,7 @@ function selectorLeadWords(selType, ownerLabel) {
 
 /* ── what a create just made ───────────────────────────────────────────
  *
- * ux06-entry:post-create-state (2026-09-23), second round. The outcome
+ * ux06-entry:post-create-state (2026-09-23). The outcome
  * went to the corner banner stack first, and the verifier measured what
  * that did: the stack is fixed over the top of the inspector, so a
  * success card sat on the name of the entity just opened, one more
@@ -14393,7 +14393,7 @@ function notificationRoute(n) {
     return { label: 'Open the merge', tab: 'graph', merge: n.object_id };
   }
   if (t === 'case_review' && n.case_id) {
-    /* The rail tab's own caption (u23, 2026-09-24): "Open Lifecycle" named
+    /* The rail tab's own caption (2026-09-24): "Open Lifecycle" named
        a tab renamed Records in the same pass, and led to a pane headed
        with a word the button never said. */
     return { label: 'Open Records', tab: 'governance', sub: 'retention' };
@@ -16504,8 +16504,8 @@ function renderTriageBadge() {
       + 'is unknown.';
     return;
   }
-  /* A read-only case's queue is a record, not work (final review u2,
-     2026-09-24): accept, reject and defer all refuse there and nothing
+  /* A read-only case's queue is a record, not work (2026-09-24): accept, reject and defer
+  all refuse there and nothing
      expires, so its count badged the case for good. The server's
      Waiting counts leave it out the same way. */
   const proposed = caseReadOnly() ? 0 : (state.triageCounts || {}).PROPOSED || 0;
@@ -16518,7 +16518,7 @@ function renderTriageBadge() {
 }
 
 /** Both work badges, after the case turned read-only under the console
- *  (final review u2, 2026-09-24). Closing it here goes through openCase,
+ *  (2026-09-24). Closing it here goes through openCase,
  *  which reloads both; closing it in another tab reached only
  *  renderCaseState, and the counts stood until the next load. Only the
  *  zeroing is done here: a reopen goes through openCase again. */
@@ -20281,7 +20281,7 @@ function paintCategoryOptions(facets) {
  *  so a hit surfaced only for somebody who happened to open Feeds. */
 function paintFeedsBadge(facets) {
   const badge = $('feeds-badge');
-  /* Not on a read-only case (g01, final review u2, 2026-09-24): record
+  /* Not on a read-only case (2026-09-24): record
      triage refuses there, so the badge was a count nobody could clear. */
   const n = facets && !caseReadOnly()
     ? Number(facets.watched_untriaged || 0) : 0;
@@ -20648,7 +20648,7 @@ function ingestRow(r) {
     return b;
   };
   /* `case-write` on what a read-only case refuses: triage and a category
-     correction on a record in the case's own queue (u3, 2026-09-24). They
+     correction on a record in the case's own queue (2026-09-24). They
      stayed live under a strip saying such controls were off, and failed
      only with the 409. Only a record in a case: a quarantined one belongs
      to none, and its row stays live whatever the open case's state. Open,
@@ -20719,8 +20719,7 @@ function ingestRow(r) {
           + '. The classifier’s ' + r.category + ' is kept on the row. '
           + (out.retain_until === null
             /* A record with no expiry keeps none: a date on it would be a
-               destruction decision, retention's (g31 verification 2,
-               2026-10-03). */
+               destruction decision, retention's (2026-10-03). */
             ? 'This record has no expiry, and a correction does not give '
               + 'it one.'
             : out.retain_until_kept ? 'The expiry stays '
@@ -20774,8 +20773,8 @@ function ingestRow(r) {
 /** The cases a quarantined record may be attached to: every case this
  *  viewer was given whose content is not read-only. The picker compared
  *  the status with CLOSED and ARCHIVED, a second copy of the rule that
- *  missed PURGED, which it offered and the server then refused (u3,
- *  2026-09-24). `caseReadOnly` reads each case's own `read_only`. */
+ *  missed PURGED, which it offered and the server then refused (2026-09-24). `caseReadOnly`
+ *  reads each case's own `read_only`. */
 function attachTargets() {
   return (state.cases || []).filter((c) => !caseReadOnly(c));
 }
@@ -20867,7 +20866,7 @@ function rowForm(card, spec) {
     if (same) return;
   }
   /* `spec.write` is the opening verb's ' case-write', so a form still open
-     when its case turns read-only is turned off with the verb (u3). */
+     when its case turns read-only is turned off with the verb. */
   const wrap = el('div', 'row-inline' + (spec.write || ''));
   wrap.dataset.kind = spec.kind;
   if (spec.help) wrap.appendChild(el('p', 'help', spec.help));
@@ -25329,7 +25328,7 @@ async function loadLatestAnalysis() {
   /* The stored regular roles too (REGE, 2026-10-02), read and never
      computed on opening. */
   loadRege(true);
-  /* The open trend is fetched again, as after a Run (u14, 2026-09-24):
+  /* The open trend is fetched again, as after a Run (2026-09-24):
      the stored run may be one computed since Trend was pressed, by this
      analyst under another view or by a colleague. */
   if (state.analyticsHistoryNode) {
@@ -25775,7 +25774,7 @@ function dueExhibitRow(d) {
  *
  * The server's `dry_run` still defaults to true; none of this replaces it.
  *
- * Final review U20, 2026-09-23: the confirmation repeated a dry run's
+ * 2026-09-23: the confirmation repeated a dry run's
  * counts, but the real run sent only the case and the authority and the
  * server read what was due afresh. A preview of any age was kept, so a
  * hold lifted in between turned "Destroy 3 exhibits" into 14 destroyed.
@@ -25931,7 +25930,7 @@ async function doPurge(authority, dry) {
   $('ret-destroy-go').disabled = true;
   const json = { case_id: caseId, authority, dry_run: dry };
   /* A real run names the dry run it confirms, and the server destroys only
-     if what is due still matches it (final review U20, 2026-09-23). */
+     if what is due still matches it (2026-09-23). */
   if (!dry) json.preview = purgePreview ? purgePreview.preview : null;
   let body;
   try {
@@ -26183,7 +26182,7 @@ const GLASS_HOURS = [1, 2, 3, 4, 6, 8];   // InvokeBody caps at 8
    officer's card cannot describe three different counts. They said "each
    exhibit it opens" while captures, messages and entity changes were
    counted too, and on a case classified above the invoker every request
-   was (final review U19, 2026-09-23). test_ui_governance_invariants holds
+   was (2026-09-23). test_ui_governance_invariants holds
    the two to each other. */
 const GLASS_COUNTED = 'It counts each exhibit, capture or message you open '
   + 'above your own clearance and each change you make to an entity above '
@@ -26678,8 +26677,8 @@ function glassRow(g) {
   /* A live grant cannot be reviewed: the server refuses the verdict,
      because a review judges everything done under the grant and while it
      is live that is still growing. Before, a verdict took a live grant
-     out of the only list and away from the only End it now (final review
-     U2, 2026-09-23). So the card offers the one thing that can be done. */
+     out of the only list and away from the only End it now (2026-09-23). So the card offers
+     the one thing that can be done. */
   if (g.is_live) {
     card.appendChild(el('p', 'help',
       'Still live, so it cannot be reviewed yet. End it now, or review it '
@@ -27037,7 +27036,7 @@ function renderAchRanking(body) {
        rendered, 2026-09-23): the line named the test and left the analyst
        to find the cell. `case-write`: it opens the stance chooser for a
        write a read-only case refuses, and stayed live beside cells that
-       were off (u15, 2026-09-24). The line itself stays: it is analysis. */
+       were off (2026-09-24). The line itself stays: it is analysis. */
     const go = el('button', 'btn small ach-next-go case-write', 'Score it now');
     go.type = 'button';
     go.addEventListener('click', () => openStanceChooser(
@@ -30516,7 +30515,7 @@ function emailSaw(m) {
   }
   /* The defanged form only. The kit writes the Message-ID, and
      `<a@pay.evil.example/verify>` gives a "host" with a path, which every
-     chat client links (final review U17, 2026-09-23). */
+     chat client links (2026-09-23). */
   if (m.message_id_domain_defanged) {
     const k = fact('message-id host', visibleText(m.message_id_domain_defanged));
     k.title = 'The domain in the Message-ID. Generated by the sending kit, '
@@ -30539,8 +30538,7 @@ function emailProved(m) {
   if (origin) {
     /* The HELO name is the sender's choice, recorded as given, so it is
        read in its defanged form like every other string the sender wrote:
-       EHLO `pay.evil.example/verify` was drawn live here (final review
-       U17, 2026-09-23). */
+       EHLO `pay.evil.example/verify` was drawn live here (2026-09-23). */
     const where = [origin.host_defanged ? visibleText(origin.host_defanged)
       : null, origin.ip].filter(Boolean).join(' ');
     const host = fact('sending host', where || 'not recorded');
@@ -30760,7 +30758,7 @@ async function openDeceptionEmail(id, opener) {
        recipient's own relay. */
     /* Hosts in their defanged forms: below the boundary every word of a
        line is the sender's, and a `from` or `by` with a path is a URL
-       (final review U17, 2026-09-23). */
+       (2026-09-23). */
     for (const h of hops) {
       const row = el('p',
         'hop-row' + (h.is_attacker_writable ? ' claimed' : ''));
@@ -32886,7 +32884,7 @@ let reviewHome = null;
 /** The deployment view's name, by what the account may do there. An
  *  officer-only account's view holds the break-glass review queue AND the
  *  preserved-sample authorisations, so it is not named for one of them
- *  (final review U3, 2026-09-23). */
+ *  (2026-09-23). */
 function adminViewName() {
   // An officer who may countersign two-person changes is one too.
   // And one who confirms collection authorities (2026-09-24).
@@ -33009,7 +33007,7 @@ async function showAdmin() {
     $('view-admin').appendChild(review);
     loadGlassQueue();
   }
-  /* The officer's preserved samples (final review U3, 2026-09-23), built
+  /* The officer's preserved samples (2026-09-23), built
      and loaded by the Lab code; hidden for an account that is not one. */
   showPreservedReview(canReview);
   /* 2026-09-24: the collection authorities waiting for a second person,
@@ -35449,8 +35447,8 @@ let shareReturn = null;
 /** The name a person reads for a role on this panel: the server's
  *  `*_name` beside each key, so CASE_OWNER reads as Lead investigator for
  *  every case worker and not only for an administrator, whose
- *  `/admin/roles` is the only other source (final review U21,
- *  2026-09-23). The key stands in when no name came back. */
+ *  `/admin/roles` is the only other source (2026-09-23). The key stands in when no name
+ *  came back. */
 function shareRoleName(name, key) {
   return visibleText(name || key || '');
 }
@@ -35582,8 +35580,7 @@ function shareRow(u, canGrant) {
   /* Sent only to a caller who can manage the roster, and only while this
      colleague opens the case through a break-glass grant rather than
      their own clearance: at that instant they drop back to "cannot open",
-     and a clearance change, not a re-share, is what fixes it (final
-     review U22, 2026-09-23). */
+     and a clearance change, not a re-share, is what fixes it (2026-09-23). */
   if (u.emergency_access_until) {
     facts.appendChild(fact('emergency access ends',
       fmtTime(u.emergency_access_until), 'warn'));
@@ -35872,7 +35869,7 @@ onCaseSwitch(() => {
   $('smp-counts').textContent = '';
   show($('smp-empty'), false);
   show($('samples-badge'), false);
-  /* And the submit form (final review U14, 2026-09-23): a file, and the
+  /* And the submit form (2026-09-23): a file, and the
      note on where it came from, chosen on one case were sent from the
      next case's Lab. The case choice is rebuilt for the new case when the
      Submit tab is next opened. */
@@ -35958,7 +35955,7 @@ function smpCloseDetail(restoreFocus) {
  *  said in words. It was a free-text uuid field, blank by default, and a
  *  blank submit landed a sample with no case, which the case-scoped queue
  *  (ux13-lab:lab-not-case-scoped) does not list: "Quarantined as 3f9a..."
- *  and then an empty queue (final review U14, 2026-09-23). */
+ *  and then an empty queue (2026-09-23). */
 function fillSampleCase() {
   const select = $('smp-case');
   /* A read-only case cannot take a sample (the server answers 409), so
@@ -35981,7 +35978,7 @@ function fillSampleCase() {
  *  says in its title what it counts. Silent on failure, like the inbox
  *  counter: an analyst without `sample.read` gets no badge, not an error.
  *  Refused once, it is not asked again this session: `sample.read` is a
- *  global grant, and each refusal is an AUTHZ_DENIED row (Beta 1 gate 61,
+ *  global grant, and each refusal is an AUTHZ_DENIED row (2026-10-07,
  *  as `refreshFeedsBadge`).
  */
 const SAMPLE_BADGE = { refusedFor: null };
@@ -39050,7 +39047,7 @@ function preservationPanel(s, p) {
   /* Where the officer does it, said here because this card is the only
      place the lead investigator meets the control. The authorise form and
      Revoke used to be on this card, which every reader of it was refused
-     and the officer could never open (final review U3, 2026-09-23). */
+     and the officer could never open (2026-09-23). */
   box.appendChild(el('p', 'help warn',
     'Retrieval needs a Security Officer\'s authorisation naming you. The '
     + 'officer grants it under Preserved samples, in Oversight beside the break-glass '
@@ -39102,7 +39099,7 @@ function preservationPanel(s, p) {
 /** One authorisation, as a record. `after` (the officer's list only) is
  *  what to reload once it is revoked; without it there is no Revoke,
  *  because nobody who can open the Lab card holds the verb that revokes
- *  (final review U3, 2026-09-23). */
+ *  (2026-09-23). */
 function authorisationRow(s, a, msg, after) {
   const card = el('div', 'card row-card compact');
   const head = el('div', 'row-head');
@@ -39153,8 +39150,8 @@ function authorisationRow(s, a, msg, after) {
 
 /** The Security Officer's half, drawn on the officer's own list
  *  (`preservedReviewRow`). It used to be drawn only on the Lab card, which
- *  needs sample.read, so the officer never saw it (final review U3,
- *  2026-09-23). The server still refuses anybody without
+ *  needs sample.read, so the officer never saw it (2026-09-23). The server still refuses
+ *  anybody without
  *  `sample.preserved.authorise`. `after` reloads the list. */
 function authoriseForm(s, msg, after) {
   const box = el('details', 'authorise-form');
@@ -39233,7 +39230,7 @@ function authoriseForm(s, msg, after) {
 
 /* ── the Security Officer's preserved samples ──────────────────────────
  *
- * Final review U3, 2026-09-23. The authorise form and Revoke were drawn
+ * 2026-09-23. The authorise form and Revoke were drawn
  * only on the Lab's sample card, which reads GET /samples/{id} under
  * sample.read. SECURITY_OFFICER holds no sample.read, because Security
  * Officers read no case content, and is assigned to no case, so the one
@@ -41156,10 +41153,10 @@ function stopSessionClock() {
   hideIdleWarning();
   show($('reauth-scrim'), false);
   /* The sheet is taken down here without `closeReauth`, so its fields
-     are emptied here too (final review U16, 2026-09-23). */
+     are emptied here too (2026-09-23). */
   $('reauth-password').value = '';
   $('reauth-totp').value = '';
-  endReauthChange();                 // and a held one-time password (u5)
+  endReauthChange();                 // and a held one-time password
   show($('account-scrim'), false);
   clearSessionSecrets();             // secrets do not outlive the session
   SESSION.accountWasOpen = false;
@@ -41383,11 +41380,11 @@ function closeReauth() {
   /* The fields go with the sheet. Only opening it or a sign-in that
      worked emptied them, so a password typed and then cancelled, or
      left behind by "Sign in as someone else", stayed in the hidden input
-     for whoever used this tab next (final review U16, 2026-09-23). */
+     for whoever used this tab next (2026-09-23). */
   $('reauth-password').value = '';
   $('reauth-totp').value = '';
   /* And a one-time password held for the new-password stage, which still
-     signs in until it is replaced (final review u5, 2026-09-24). */
+     signs in until it is replaced (2026-09-24). */
   endReauthChange();
   /* A step-up sheet opened from Account returns to Account, which is
      modal too: the app stays inert under it. */
@@ -41407,7 +41404,7 @@ function guardUnsaved(event) {
 
 /* --- a new password, inside the sign-in sheet ---------------------------
  *
- * Final review u5 (2026-09-24). An administrator's reset signs out every
+ * 2026-09-24. An administrator's reset signs out every
  * session, so a person who was working meets the lapse sheet, which says
  * that their case, pane and anything they had typed are still behind it.
  * They type the one-time password they were given, and the server answers
@@ -41542,7 +41539,7 @@ async function submitReauth(event) {
     /* An administrator reset this account's password while the session
        was open (which is what ended it): the one-time password was right,
        and it has to be replaced. Here, in this sheet, so the screen behind
-       it stays (final review u5, 2026-09-24; it went through `endSession`
+       it stays (2026-09-24; it went through `endSession`
        to the sign-in page's card until then). */
     if (!changing && isPasswordChangeRequired(err)) {
       startReauthChange(json.password);
@@ -41654,7 +41651,7 @@ async function leaveReauth() {
 }
 
 /** "Sign in as someone else" after THIS tab's clock ended the session
- *  (fix round 2, 2026-09-23). The server may still hold it: its idle
+ *  (2026-09-23). The server may still hold it: its idle
  *  window is slid by requests this tab does not see (the live socket's
  *  handshake among them), and the limit here is an estimate. Leaving went
  *  through `endSession` alone, which cannot delete the HttpOnly cookie,
@@ -41970,7 +41967,7 @@ async function confirmThenIssue(msg) {
 
 /* --- the session sheets hold the keyboard ------------------------------
  *
- * Fix round 2 (2026-09-23), for regressions the verifier found in the
+ * 2026-09-23, for regressions found in the
  * 2026-09-22 fixes. `inert` on the app stops focus and clicks reaching it,
  * but not the key handlers on `document`. With Account or the sign-in
  * sheet open, a stray a, r or d still accepted, rejected or deferred the

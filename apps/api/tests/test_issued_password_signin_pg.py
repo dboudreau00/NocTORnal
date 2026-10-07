@@ -8,12 +8,12 @@ spends (final review of Alpha 6, 2026-09-24).
   not asked to. `bootstrap.py create-user` follows the same line: the
   first account on an empty database is the operator's own, and any later
   one (the installers' Security Officer advice) is someone else's.
-- u4: the must-change refusal (403) and the no-change-pending refusal
+- the must-change refusal (403) and the no-change-pending refusal
   (409) came after `authenticate` had spent a single-use recovery code,
   so finishing one reset cost two codes, and the last code could never
   finish it. A recovery code is now spent only by a sign-in that mints a
   session, and a concurrent spend of the same code still wins once.
-- u22: `last_login_at`, which the Admin card calls "last password
+- `last_login_at`, which the Admin card calls "last password
   sign-in", was stamped by the 403 and 409 refusals and by an Account
   password change, none of which signs anyone in.
 
@@ -291,7 +291,7 @@ def test_the_someone_else_read_is_whether_any_account_exists(conn):
     assert _bootstrap()._issued_to_someone_else(Empty()) is False
 
 
-# --- u4: a refused sign-in spends no recovery code --------------------------
+# --- a refused sign-in spends no recovery code --------------------------
 
 def test_the_must_change_refusal_spends_no_recovery_code(conn, client):
     from noctornal_api.stores import PgUserStore
@@ -362,7 +362,7 @@ def test_a_recovery_code_spent_meanwhile_still_wins_once(
     assert _row(conn, uid)[:2] == (True, None)
 
 
-# --- u22: last password sign-in is a sign-in --------------------------------
+# --- last password sign-in is a sign-in --------------------------------
 
 def test_a_refusal_and_an_account_change_record_no_sign_in(conn, client):
     admin, _, _ = _make_user(conn, global_roles=("SYS_ADMIN",))

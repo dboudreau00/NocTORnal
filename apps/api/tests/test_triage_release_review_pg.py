@@ -10,10 +10,10 @@ Each test fails on d0faa34 and names the finding it holds:
   a compartmented case could not keep its document inside the compartment.
   The fix round kept a re-paste from reaching into another case's queue
   and from naming, in its reply, a label above the analyst.
-- u2: a closed case's pending proposals counted as waiting for ever.
-- u6: an entity accepted from Triage had an undated claim, so its first
+- a closed case's pending proposals counted as waiting for ever.
+- an entity accepted from Triage had an undated claim, so its first
   and last seen stayed blank although its capture was dated.
-- u12: the "waiting in triage" notice was labelled at the case, so an
+- the "waiting in triage" notice was labelled at the case, so an
   owner below the capture's label was told what it raised.
 
 Email prefix `trr-`, document titles `trr-`, unique to this file.
@@ -462,7 +462,7 @@ def test_an_unknown_capture_label_is_a_400(conn, client):
 
 
 # ---------------------------------------------------------------------------
-# u2: a read-only case waits for nobody
+# a read-only case waits for nobody
 # ---------------------------------------------------------------------------
 
 def test_a_closed_case_counts_nothing_as_waiting(conn, client):
@@ -494,7 +494,7 @@ def test_a_closed_case_counts_nothing_as_waiting(conn, client):
 
 
 # ---------------------------------------------------------------------------
-# u6: an accepted claim is dated by its capture
+# an accepted claim is dated by its capture
 # ---------------------------------------------------------------------------
 
 def test_an_entity_accepted_from_a_capture_has_a_first_seen(conn, client):
@@ -546,7 +546,7 @@ def test_an_entity_accepted_from_a_capture_has_a_first_seen(conn, client):
 
 
 # ---------------------------------------------------------------------------
-# u12: the triage notice is labelled at the capture
+# the triage notice is labelled at the capture
 # ---------------------------------------------------------------------------
 
 def test_an_owner_below_the_capture_is_not_told_what_it_raised(conn, client):

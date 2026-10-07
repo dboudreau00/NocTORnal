@@ -80,7 +80,7 @@ def connect():
 
 def main(argv: list[str] | None = None) -> int:
     # It takes no options, and says so: with no parser, `--help` was not
-    # read and ran a drain, sending the outbox (beta 1 gate 6, 2026-10-07).
+    # read and ran a drain, sending the outbox (2026-10-07).
     argparse.ArgumentParser(
         description="Drain the notification outbox once: the outbox, the "
                     "review-due sweep and the escalation of unacknowledged "

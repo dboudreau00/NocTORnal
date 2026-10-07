@@ -566,23 +566,23 @@ def _run_minio_init(tmp_path: Path, **extra: str):
     body = script.replace(". /mc-alias.sh", ":", 1)
     path = tmp_path / "minio-init.sh"
     path.write_text(_MC_STUB + body + "\n", encoding="utf-8", newline="\n")
-    env = {**os.environ, "MINIO_ROOT_USER": "g57-root", "EVIDENCE_BUCKET": "ev", "INGEST_BUCKET": "in",
+    env = {**os.environ, "MINIO_ROOT_USER": "test-root", "EVIDENCE_BUCKET": "ev", "INGEST_BUCKET": "in",
            "SAMPLE_BUCKET": "smp", "PRESERVE_BUCKET": "pres",
-           "SAMPLE_ACCESS_KEY": "g57-sample-ak", "SAMPLE_SECRET_KEY": "G57-SAMPLE-SECRET-q9Zx",
-           "PRESERVE_ACCESS_KEY": "g57-pres-ak", "PRESERVE_SECRET_KEY": "G57-PRESERVE-SECRET-w3Lm", **extra}
+           "SAMPLE_ACCESS_KEY": "test-sample-ak", "SAMPLE_SECRET_KEY": "TEST-SAMPLE-SECRET-q9Zx",
+           "PRESERVE_ACCESS_KEY": "test-pres-ak", "PRESERVE_SECRET_KEY": "TEST-PRESERVE-SECRET-w3Lm", **extra}
     return subprocess.run([shell, path.as_posix()], capture_output=True, text=True, env=env, timeout=60)
 
 
 def test_minio_init_does_not_print_the_new_accounts_secret_key_into_its_log(tmp_path):
     """`mc admin user svcacct add` echoes the account's secret key on stdout, so
     the first run left it in `docker logs minio-init` for as long as the
-    container existed (Beta 1 verification, 2026-10-07). Both accounts, the
+    container existed (2026-10-07). Both accounts, the
     sample one and the preserve one, are created with stdout discarded; stderr
     stays, so a warning still reaches the log."""
     done = _run_minio_init(tmp_path)
     assert done.returncode == 0, done.stderr
     seen = done.stdout + done.stderr
-    for secret in ("G57-SAMPLE-SECRET-q9Zx", "G57-PRESERVE-SECRET-w3Lm"):
+    for secret in ("TEST-SAMPLE-SECRET-q9Zx", "TEST-PRESERVE-SECRET-w3Lm"):
         assert secret not in seen, "a secret key reached the container log"
     assert "Secret Key:" not in seen
     assert done.stderr.count("mc: stub stderr line") == 2, "stderr is kept for both accounts"
@@ -693,7 +693,7 @@ def test_each_loop_stops_between_steps_not_only_between_passes(name):
 
 
 # ---------------------------------------------------------------------------
-# g48 verification round (2026-10-03): the README's umask, the modes the
+# 2026-10-03: the README's umask, the modes the
 # capability-less containers read, and the ignore lists in both directions
 # ---------------------------------------------------------------------------
 
@@ -754,7 +754,7 @@ def test_no_readme_command_leaves_a_umask_or_shell_option_in_the_operators_shell
     `tls/` 0700 and `public.crt` 0600 under it: the application (uid 10001)
     and MinIO (root, no DAC_OVERRIDE) could not read the certificate, and a
     `git pull` in that shell wrote 0600 files the image copied with their
-    modes (g48 verification, 2026-10-03). Scoped, the setting ends with the
+    modes (2026-10-03). Scoped, the setting ends with the
     command that needed it."""
     seen: list[tuple[str, str]] = []
     for block in _readme_sh_blocks():
@@ -1062,7 +1062,7 @@ def test_no_template_or_script_still_calls_connecting_as_the_owner_a_silent_supp
     """infra-4 made a production boot refuse a DATABASE_URL naming the owner
     or a superuser, but the template's comment still said the deployment
     'works' there 'silently', and the init script printed 'This deployment
-    will connect as the owner' (g48 verification, 2026-10-03)."""
+    will connect as the owner' (2026-10-03)."""
     template = _text(PRODUCTION / "secrets.env.example")
     comment = template[template.index("# What the API, the sample origin and the cron loop connect as."):
                        template.index("\nDATABASE_URL=")]

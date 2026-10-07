@@ -513,8 +513,8 @@ def test_ci_starts_the_acl_redis_and_names_both_urls(redis_service):
 
 #: Every skip the files of the 2026-10 secrets and Redis work may carry, each
 #: with what makes it false on CI's runner. A skip is a line in the first
-#: leg's summary, and "No tests were skipped" fails the build for it (g32
-#: verify of 2026-10-03: a skipif on Windows PowerShell did, on the Linux
+#: leg's summary, and "No tests were skipped" fails the build for it (2026-10-03: a skipif
+#: on Windows PowerShell did, on the Linux
 #: runner, under a count the fixer took on Windows). A new skip has to be
 #: added here with its reason, which is the moment to ask whether CI has it.
 CI_SATISFIES = {

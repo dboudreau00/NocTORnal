@@ -1,5 +1,5 @@
 """One observation of a selector per value, per labels (beta review,
-2026-10-03, second round: graph-selector-record-oracle, http_ui-002, rls-2).
+2026-10-03: graph-selector-record-oracle, http_ui-002, rls-2).
 
 ## Why
 

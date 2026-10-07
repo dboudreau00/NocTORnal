@@ -522,7 +522,7 @@ How that is held in `break_glass.py` and `stores.py` (final review,
   unreviewed grants only and End it now sits on those cards, so a verdict
   on a live grant hid it from every officer while the analyst kept the
   raised clearance, and every later access was counted against a grant
-  nobody would open again (U2).
+  nobody would open again.
 - **A use is a request the grant let through.** `PgAccessResolver.resolve`
   counts one when the gate ALLOWS the request and the object's label sits
   above the invoker's own clearance and within the grant's. Refused

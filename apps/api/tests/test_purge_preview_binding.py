@@ -1,6 +1,6 @@
 """A real purge destroys what its dry run counted, or nothing (pure half).
 
-Final review U20, 2026-09-23. The HTTP half, with a real database and a
+2026-09-23. The HTTP half, with a real database and a
 hold lifted between the count and the confirmation, is
 `test_purge_preview_binding_pg.py`. These need no database: the digest
 itself, and the route handler driven with a stand-in purger, so they run

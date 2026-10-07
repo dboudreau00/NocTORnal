@@ -1,5 +1,4 @@
-"""F43's remaining readers and writers honour a source's compartments (g40
-verify round, 2026-10-03; Alembic 0163).
+"""F43's remaining readers and writers honour a source's compartments (2026-10-03; Alembic 0163).
 
 The first F43 round converted the document and source readers. The verifier
 found the rest: the unhealthy and never-polled lists named a compartmented

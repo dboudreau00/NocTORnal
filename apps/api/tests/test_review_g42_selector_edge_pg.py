@@ -151,11 +151,11 @@ def test_creating_an_entity_with_a_value_a_hidden_entity_holds_leaves_it_alone(
     assert _selector_row(owner, w, email) == before
 
 
-# --- the membership oracle, second round (0134) --------------------------------
+# --- the membership oracle (0134) ----------------------------------------------
 #
-# Round one stopped POST /selectors handing back and bumping a row owned above
+# The first fix stopped POST /selectors handing back and bumping a row owned above
 # the caller by answering such a value as a first sighting and storing
-# nothing. The verifier's second round: a repeat post, a read after a post, a
+# nothing. A repeat post, a read after a post, a
 # second entity and the id as a merge's basis each still told a held value
 # from an unheld one. The index is keyed by labels now, so the caller's own
 # sighting is a row of their own.

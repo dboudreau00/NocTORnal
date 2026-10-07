@@ -523,7 +523,7 @@ def _chat_row(conn, source_id: UUID, clearance: str,
     """A Telegram source and its chat, or CollectionNotFound: a source the
     caller may not see under the foundation's one predicate (its label AND,
     since F43, its compartments: a holder of the key acts on the chat, a
-    reader without it meets a missing one; g40 verify major 5b, 2026-10-03)
+    reader without it meets a missing one; 2026-10-03)
     answers exactly like a missing one."""
     row = conn.execute(
         f"""SELECT {_CHAT_COLUMNS}, s.name, s.classification::text,
@@ -612,7 +612,7 @@ def check_create_request(ref, access_mode: str,
     refuses to take), an access mode, a basic group asked for as public,
     and the offline sentences. One function, so the route that queues the
     act (it refuses at the door, before anything is stored) and the
-    collector that runs it cannot disagree (verify:g38, 2026-10-03: a
+    collector that runs it cannot disagree (2026-10-03: a
     pasted invite link was queued first, and kept for ever in a table whose
     rows are never deleted)."""
     try:
@@ -692,7 +692,7 @@ class TelegramChats:
         its chat, under 0164's policy and everything it collects) under keys
         the creator holds (`held_compartments`); until 2026-10-03 this route
         could not set them, so the chat policy was reachable only by editing
-        a row by hand (g40 verify major 5b). A key the creator does not hold
+        a row by hand (2026-10-03). A key the creator does not hold
         is refused with the other offline refusals, before the persona is
         asked anything."""
         parsed = check_create_request(ref, access_mode, classification,

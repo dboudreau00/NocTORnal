@@ -1,4 +1,4 @@
-"""The Deception pane's second round of fixes (review of 2026-09-22, closed
+"""The Deception pane's later fixes (review of 2026-09-22, closed
 on 2026-09-23): the channels pivot on what they share, the Received chain
 says where trust ends, the call row says what the network recorded and
 how far it vouches, the web capture shows its durable identifiers, and

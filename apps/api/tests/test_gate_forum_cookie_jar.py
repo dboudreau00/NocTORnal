@@ -1,5 +1,5 @@
 """A board cannot poison a persona's session jar into a header the client
-refuses (beta 1 gate 6, 2026-10-07).
+refuses (2026-10-07).
 
 Each cookie was capped at 4096 characters and the jar at 20, but the Cookie
 header they made could reach some 80 KB, and pinned_http refuses a header

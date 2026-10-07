@@ -6,12 +6,12 @@ count a live grant, global or on that case, at its level. Three other
 answers to "can this person open that case" were restatements in SQL that
 still compared `u.tlp_clearance` alone (final review, 2026-09-23):
 
-- U7: governance's `_authorised_cases`, behind `/retention/due` and the
+- governance's `_authorised_cases`, behind `/retention/due` and the
   Destroyed list with no case id and the "records unchanged" count on a
   rule confirmation, and comms' `_visible_cases`, behind the impersonation
   candidates. A case a grant opened answered per case and was missing
   from the cross-case forms.
-- U22: the Share roster's `effective` and `reasons`, which told a case's
+- the Share roster's `effective` and `reasons`, which told a case's
   owner that a colleague working in it under an emergency grant "cannot
   open the case" because "their clearance is below the case's
   classification".
@@ -143,7 +143,7 @@ def _exhibit(conn, case_id, owner, level):
 
 
 # ---------------------------------------------------------------------------
-# U7: the cross-case lists
+# the cross-case lists
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
@@ -240,7 +240,7 @@ def test_an_expired_or_revoked_grant_opens_nothing(conn, estate):
 
 
 # ---------------------------------------------------------------------------
-# U22: the Share roster
+# the Share roster
 # ---------------------------------------------------------------------------
 
 @pytest.fixture

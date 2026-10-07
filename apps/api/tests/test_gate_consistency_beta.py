@@ -1,4 +1,4 @@
-"""Release gate 9 (Beta 1, 2026-10-07): cross-cutting consistency fixes,
+"""Cross-cutting consistency fixes (2026-10-07),
 each pinned here where no existing test covered it."""
 from __future__ import annotations
 

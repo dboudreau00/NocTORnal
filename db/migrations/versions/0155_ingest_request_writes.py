@@ -43,7 +43,7 @@ as in 0112, so every fixture and system path is unchanged):
   cleared; its expiry only ever moves later (a correction keeps or extends
   it): it is never brought forward or cleared, a record with NO expiry is
   given none, and no date goes past 1 December 9999, the furthest the
-  application can read back (g31 verification 2, 2026-10-03);
+  application can read back (2026-10-03);
 - a credential's reveal count rises by one, stamped now;
 - an authorisation's query count rises by one.
 
@@ -86,8 +86,8 @@ grantee, on their own live authorisation. None of these hides, moves or
 destroys anything, and every real reveal has its PII_REVEALED row in the
 append-only audit log.
 
-One of them does defeat something, and it is said plainly (g31
-verification 2, 2026-10-03): "an expiry only later" lets any reader of a
+One of them does defeat something, and it is said plainly (2026-10-03): "an expiry only
+later" lets any reader of a
 record push its expiry out, as far as 1 December 9999, so a record outlives
 the retention rule it was filed under. That is a retention failure, the
 opposite of a destruction: nothing is lost, and the audit log records no

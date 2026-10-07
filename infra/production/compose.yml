@@ -414,7 +414,7 @@ services:
   # the same way: that step writes one. The host is compared in lower case,
   # as that step reads it (a host name has no case), so `REDIS` and `Redis`
   # are this service too; compared as typed they started it idle with an
-  # "another host" note and no client (g32 verify of 2026-10-03).
+  # "another host" note and no client (2026-10-03).
   #
   # A REDIS_URL naming ANOTHER host (a Redis of the operator's own, review
   # of 2026-10-02) is the operator's choice and not this service's to
@@ -798,8 +798,8 @@ services:
   # once, the first time each account is created (the `svcacct info` guard
   # skips it after), and the keys reach one bucket each. A stated residual.
   # `svcacct add` prints the new account's access key and SECRET key on its
-  # stdout, which `docker logs` would keep for good (Beta 1 verification,
-  # 2026-10-07), so both calls send stdout to /dev/null. stderr is kept, and
+  # stdout, which `docker logs` would keep for good (2026-10-07), so both calls send stdout
+  # to /dev/null. stderr is kept, and
   # `set -e` still sees a failed add.
   minio-init:
     image: ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
@@ -1318,8 +1318,8 @@ services:
     # 120 seconds, and the poll child, which ends on SIGTERM at once, is given
     # up to 30 more before it is killed; docker's default
     # of 10 would kill the process mid-act and leave it RUNNING, to be
-    # failed as "outcome unknown" fifteen minutes later (verify:g38,
-    # 2026-10-03). test_persona_act_queue_pg holds the number.
+    # failed as "outcome unknown" fifteen minutes later (2026-10-03).
+    # test_persona_act_queue_pg holds the number.
     stop_grace_period: 180s
     env_file:
       - secrets.env

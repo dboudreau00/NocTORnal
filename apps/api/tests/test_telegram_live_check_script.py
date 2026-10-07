@@ -199,7 +199,7 @@ def test_a_failing_poll_fails_the_check_and_still_logs_out(conn):
 
 
 def test_an_unattended_exception_prints_its_class_and_never_its_text():
-    """g40 verify minor, 2026-10-03: the module promises never a library's
+    """2026-10-03: the module promises never a library's
     text, and the redactor masks neither a bare phone number nor an address
     with a user name."""
     module = _script()

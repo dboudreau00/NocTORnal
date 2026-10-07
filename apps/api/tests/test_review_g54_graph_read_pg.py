@@ -1,5 +1,4 @@
-"""The graph read side, round three of the beta verification (2026-10-07,
-Group A of the final fix list).
+"""The graph read side, as found on re-verification (2026-10-07).
 
 Seven independent verifiers re-ran the earlier review's fixes and found a
 handful of places where a caller below an entity could still tell a hidden
@@ -32,7 +31,7 @@ import rls_support as s
 
 pytestmark = g.GATED
 
-CL = g.CLAIM | {"rationale": "g54 correction"}
+CL = g.CLAIM | {"rationale": "correction"}
 
 
 @pytest.fixture
@@ -69,8 +68,8 @@ def test_a_label_correction_does_not_tell_a_value_held_above_the_caller_from_a_f
         owner, client):
     from noctornal_api.selectors import SelectorStore
     w = g.World(owner, "NONE")
-    red = w.node("g54 red phone holder", "RED")
-    walled = s.node(owner, w.case_id, w.boss, "g54 compartment phone holder",
+    red = w.node("red phone holder", "RED")
+    walled = s.node(owner, w.case_id, w.boss, "compartment phone holder",
                     "AMBER", ("G54X",))
     store = SelectorStore(owner)
     store.record(case_id=w.case_id, selector_type="PHONE",
@@ -132,12 +131,12 @@ def test_a_merge_over_a_hidden_duplicate_tie_is_made_as_one_over_no_tie_and_is_r
     duplicate is now set aside, recorded as the merge's own and given back by
     its reversal."""
     w = g.World(owner)
-    control_a, control_b = w.node("g54 control a"), w.node("g54 control b")
-    third = w.node("g54 shared contact")
+    control_a, control_b = w.node("control a"), w.node("control b")
+    third = w.node("shared contact")
     w.edge(control_a, third, "AMBER")
     assert _merge(client, w, w.lead, control_a, control_b).status_code == 201
 
-    source, target = w.node("g54 source"), w.node("g54 target")
+    source, target = w.node("source"), w.node("target")
     kept, set_aside = (w.edge(target, third, "RED"),
                        w.edge(source, third, "RED"))
     r = _merge(client, w, w.lead, source, target)
@@ -168,8 +167,8 @@ def test_a_merge_over_ties_to_a_third_party_the_merger_cannot_read_is_made_too(
     """The same, where the ties are AMBER and the third party is RED: the
     refusal named neither but still said that two ties to one existed."""
     w = g.World(owner)
-    source, target = w.node("g54 source two"), w.node("g54 target two")
-    red_third = w.node("g54 red third party", "RED")
+    source, target = w.node("source two"), w.node("target two")
+    red_third = w.node("red third party", "RED")
     kept, set_aside = (w.edge(target, red_third, "AMBER"),
                        w.edge(source, red_third, "AMBER"))
     r = _merge(client, w, w.lead, source, target)
@@ -183,8 +182,8 @@ def test_a_merge_over_a_duplicate_tie_the_merger_can_read_is_still_refused(
     about: the refusal that tells them what to retire stands, naming the
     third party when they can read it."""
     w = g.World(owner)
-    source, target = w.node("g54 source three"), w.node("g54 target three")
-    third = w.node("g54 open third party")
+    source, target = w.node("source three"), w.node("target three")
+    third = w.node("open third party")
     w.edge(target, third, "RED")
     w.edge(source, third, "RED")
     refused = _merge(client, w, w.boss, source, target)
@@ -198,7 +197,7 @@ def test_a_merge_over_a_duplicate_tie_the_merger_can_read_is_still_refused(
 
 def _reverse(client, w, uid, merge_id):
     return client.post(w.url(f"/merges/{merge_id}/reverse"),
-                       headers=w.headers(uid), json={"reason": "g54 undo"})
+                       headers=w.headers(uid), json={"reason": "undo"})
 
 
 def test_a_reversal_blocked_by_a_merge_the_caller_cannot_read_does_not_name_it(
@@ -207,8 +206,8 @@ def test_a_reversal_blocked_by_a_merge_the_caller_cannot_read_does_not_name_it(
     lead's reversal of the first is refused until the second is reversed, and
     the refusal named the second's id, which the ledger hides from them."""
     w = g.World(owner, "NONE")
-    red = w.node("g54 red survivor", "RED")
-    a, b, d = w.node("g54 a"), w.node("g54 b"), w.node("g54 d")
+    red = w.node("red survivor", "RED")
+    a, b, d = w.node("a"), w.node("b"), w.node("d")
     w.edge(a, d)
     first = _merge(client, w, w.lead, a, b)
     assert first.status_code == 201, first.text
@@ -231,18 +230,18 @@ def test_a_reversal_blocked_by_a_merge_the_caller_cannot_read_does_not_name_it(
 def test_curating_a_node_merged_into_one_above_the_caller_does_not_name_the_survivor(
         owner, client):
     w = g.World(owner, "NONE")
-    red = w.node("g54 red survivor", "RED")
+    red = w.node("red survivor", "RED")
     alias, plain_survivor, plain_alias = (
-        w.node("g54 amber alias"), w.node("g54 amber survivor"),
-        w.node("g54 amber alias two"))
+        w.node("amber alias"), w.node("amber survivor"),
+        w.node("amber alias two"))
     assert _merge(client, w, w.boss, alias, red).status_code == 201
     assert _merge(client, w, w.boss, plain_alias, plain_survivor
                   ).status_code == 201
     tag = client.post(w.url("/curation/tags"), headers=w.headers(w.lead),
-                      json={"namespace": "g54", "name": "ns"})
+                      json={"namespace": "review", "name": "ns"})
     assert tag.status_code == 201, tag.text
     made = client.post(w.url("/curation/sets"), headers=w.headers(w.lead),
-                       json={"name": "g54 set"})
+                       json={"name": "set"})
     assert made.status_code == 201, made.text
 
     def attempts(node):
@@ -273,7 +272,7 @@ def _conversation(owner, w, classification="RED"):
     svc = CommsService(owner)
     conv = svc.open_conversation(
         case_id=w.case_id, platform_key="TELEGRAM",
-        provenance_class="OPEN_GROUP", external_ref=f"g54-{uuid4().hex[:8]}",
+        provenance_class="OPEN_GROUP", external_ref=f"review-{uuid4().hex[:8]}",
         classification=classification)
     for n in range(3):
         svc.add_message(conv, sender_handle=f"@member{n}", body=f"message {n}")
@@ -293,7 +292,7 @@ def test_flagging_or_minimising_a_conversation_above_the_caller_is_one_404_and_d
     def minimise(uid, conv):
         return client.post(
             w.url(f"/comms/conversations/{conv}/minimise"),
-            headers=w.headers(uid), json={"authority": "g54 closure order"})
+            headers=w.headers(uid), json={"authority": "closure order"})
 
     for who in (w.analyst, w.lead):
         random = uuid4()

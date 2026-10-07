@@ -1,6 +1,6 @@
 """The two ledger sequences are the chain triggers' alone (F51, 2026-10-03).
 
-## What was wrong (verify:g37, 2026-10-03)
+## What was wrong (2026-10-03)
 
 0149 draws `audit.event.seq` and `core.evidence_custody.id` inside the chain
 lock, in the trigger, as the owner. It left the column defaults

@@ -263,7 +263,7 @@ def create_app() -> FastAPI:
     # next test's first request.
     app.state.limiter = build_limiter()
 
-    # The closed first-run door (g45 verification, 2026-10-03), registered
+    # The closed first-run door (2026-10-03), registered
     # before everything else so it is the innermost wrapper, inside the
     # body ceiling too: a closed door answers as an unknown path does
     # BEFORE the body is read, or a 413 or a 422 would tell the two apart.

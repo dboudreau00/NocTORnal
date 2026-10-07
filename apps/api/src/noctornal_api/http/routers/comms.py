@@ -140,7 +140,7 @@ def _visible_cases(conn: psycopg.Connection, user: CurrentUser,
               -- CaseService.list_for_user, which this mirrors. Comparing
               -- u.tlp_clearance alone left out a case a GLOBAL grant opened,
               -- while the case-less block ceiling applied below was raised
-              -- by that same grant (final review U7, 2026-09-23).
+              -- by that same grant (2026-09-23).
               -- Compartments are never widened by a grant.
               AND c.classification <= GREATEST(u.tlp_clearance, COALESCE(
                     (SELECT max(bg.granted_classification)
@@ -1104,7 +1104,7 @@ def mark_incidental(
     if not CommsService(sconn).mark_incidental(conversation_id, body.handle,
                                                incidental=body.incidental):
         # It answered 200 and the flag for a handle nobody in the
-        # conversation has, and changed nothing (Beta 1 gate 61).
+        # conversation has, and changed nothing (2026-10-07).
         raise Problem(404, "Not found",
                       "no participant of this conversation has that handle")
     return {"conversation_id": str(conversation_id), "handle": body.handle,

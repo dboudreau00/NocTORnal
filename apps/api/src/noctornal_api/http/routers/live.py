@@ -191,8 +191,8 @@ _HELLO_MAX_CHARS = 4096
 #: one is 43 URL-safe characters). A token is hashed before it is looked up,
 #: and the hash encodes the text as UTF-8: a lone surrogate escape in the
 #: hello (`"\ud800"`) decodes to text that cannot be encoded, so a peer with
-#: no session made the handshake log a traceback and close 1011 (Beta 1
-#: verification, G1). Anything else is the same refusal as no token.
+#: no session made the handshake log a traceback and close 1011 (2026-10-07). Anything else
+#: is the same refusal as no token.
 _TOKEN_MAX_CHARS = 512
 
 #: The largest WebSocket frame the server reads, in bytes: the value every
@@ -1097,7 +1097,7 @@ def _recheck(user_id: UUID, case_id: UUID, mfa_at) -> bool:
     request and counted once at its gate; this re-asks the same question
     before each delivery so a revoked assignment stops the stream, and on
     a case above the caller's clearance it counted every event on a busy
-    case as another use (final review U19 fix round, 2026-09-23, g02)."""
+    case as another use (2026-09-23)."""
     conn = connect_request()
     try:
         return _may_read(conn, user_id, case_id, mfa_at, count_use=False)
@@ -1107,7 +1107,7 @@ def _recheck(user_id: UUID, case_id: UUID, mfa_at) -> bool:
 
 #: The change kinds whose payload names the labels of what changed: node and
 #: edge from `core.announce_change` (0146), and proposal from
-#: `proposals.announce` (G3, Beta 1 verification). Every other kind is
+#: `proposals.announce` (2026-10-07). Every other kind is
 #: delivered on the case alone. A labelled kind that arrives with no labels
 #: is dropped: what cannot be placed is not announced.
 _LABELLED_KINDS = frozenset({"node", "edge", "proposal"})
@@ -1249,7 +1249,7 @@ async def _stream(ws: WebSocket, queue: asyncio.Queue, user_id: UUID,
     try:
         while True:
             # Only when there is NO getter, never because the last one is
-            # done (the g45 verification's lost-hint finding, 2026-10-03).
+            # done (the lost-hint finding, 2026-10-03).
             # A getter is set to None the moment its result is read, so a
             # getter that is done HERE finished while the loop was in the
             # idle branch below (the session check and the ping each

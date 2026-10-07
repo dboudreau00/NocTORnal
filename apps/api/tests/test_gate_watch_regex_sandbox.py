@@ -1,5 +1,5 @@
 """A watch pattern the sandbox did not run is not told as a crashed matcher
-(beta 1 gate 6, 2026-10-07). analysis_runner says the runner's own failures
+(2026-10-07). analysis_runner says the runner's own failures
 (no worker, a busy one, an answer that is not one) are the sandbox's state
 and never a crashed step; watch_regex read every one of them as "the
 matching process stopped without an answer". Pure: the runner is replaced.

@@ -1,5 +1,5 @@
-"""No file a secret can sit in reaches the image (verify:g38 blocker and
-major, review infra-1, 2026-10-03).
+"""No file a secret can sit in reaches the image (review infra-1,
+2026-10-03).
 
 The Dockerfile does one `COPY . /app` and compose builds ONE image from the
 whole checkout for every service. A file .gitignore keeps out of a commit is
@@ -346,7 +346,7 @@ def test_the_api_test_suite_never_reaches_the_image():
 
 
 def test_the_persona_key_file_never_reaches_the_image():
-    """The verify:g38 blocker by name: the API container must not hold the
+    """By name (2026-10-03): the API container must not hold the
     persona key on disk, whatever the file is called."""
     for path in ("infra/production/collector.env", "collector.env",
                  "scripts/collector.env", "infra/production/collector.env.old",

@@ -111,7 +111,7 @@ def _gate_the_item(conn: psycopg.Connection, user: CurrentUser,
     by an AMBER analyst under a RED grant, reached them body and all
     without ever passing the gate at RED, and the gate is where a grant's
     use is counted. So it went uncounted, while the officer's card said
-    items opened one by one are (final review U23, 2026-09-23). Asked
+    items opened one by one are (2026-09-23). Asked
     after the fetch, which already applied the same ceiling, this refuses
     nothing new; it is the use being recorded, as the screenshot route
     and the exhibit routes already record it. Lists stay uncounted, as
@@ -301,8 +301,8 @@ def create_capture(
         # caller's labels with its 403 and AUTHZ_DENIED row, not a silent 404 from
         # row-level security. Content is read only after the gate.
         # Same answer for "does not exist", "belongs to a case you cannot
-        # see" and "is above your labels" (Beta 1 authorization gate,
-        # 2026-10-07): a status code must not be an existence oracle. The
+        # see" and "is above your labels" (2026-10-07): a status code must not be an
+        # existence oracle. The
         # verb is `evidence.read`, which the route's own gate did not ask,
         # so it is asked first whether or not the exhibit exists.
         gate_element(conn, user, case_id=case_id, kind="evidence",

@@ -104,7 +104,7 @@ def test_the_evidence_headline_never_waits_on_the_metered_call():
     """The "0% evidenced" line came from /graph/metrics, so when that call
     was refused the red line vanished while the analyst was exploring."""
     render = _fn("renderEvidenceCoverage")
-    # The projection's rows, or the rows of the focus on the canvas (u7).
+    # The projection's rows, or the rows of the focus on the canvas.
     assert "const gnodes = state.gnodes || [], gedges = state.gedges || [];" in render
     assert "coverageLine(nodes, edges," in render
     line = _fn("coverageLine")

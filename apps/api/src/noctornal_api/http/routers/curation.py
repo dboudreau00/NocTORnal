@@ -761,7 +761,7 @@ def list_members(
     # `withheld` where it belongs.
     #
     # The survivor's id only where the caller may read the survivor
-    # (graph-merged-into-pointer, 2026-10-03, second round): a member folded
+    # (graph-merged-into-pointer, 2026-10-03): a member folded
     # into an entity above the caller is an alias of it, which the merge
     # ledger withholds, so the pointer is null here and the row still says
     # the member is merged away. The survivor's own labels are tested, not

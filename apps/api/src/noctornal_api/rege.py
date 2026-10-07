@@ -110,7 +110,7 @@ REGE_MAX_NODES = 1000
 #: sharing one of its features, so the cost grows with BOTH numbers: the pairs
 #: set how many patterns and counterparts there can be, and the directions how
 #: many features each comparison reads. A cap on pairs alone left views of one
-#: size far apart (g34 review item 1, 2026-10-02: at 2,500 pairs one relation
+#: size far apart (2026-10-02: at 2,500 pairs one relation
 #: tied both ways and counted as present took 0.4 s and every pair tied in
 #: three relations both ways, counted by weight with every weight its own,
 #: took 3.4 s), and the first calibration called one relation tied both ways
@@ -119,7 +119,7 @@ REGE_MAX_NODES = 1000
 #: Directions are counted, not the ties behind them, because parallel ties
 #: collapse into one cell (a sum under `weight`, 1 under presence) before any
 #: round runs and so add nothing to what a round reads. Counting rows refused
-#: cheap views (g34 verify item, 2026-10-03: a one-mode view has one derived
+#: cheap views (2026-10-03: a one-mode view has one derived
 #: tie per pair and venue, so 40 entities all posting on 15 forums is 11,700
 #: derived ties and 23,400 slots, over the cap, though only 1,560 directions
 #: and about half a second of CPU by weight through the service). A view with
@@ -139,7 +139,7 @@ REGE_MAX_NODES = 1000
 #: ways on 2,500 pairs 2.1 s; two relations in random directions on 2,100
 #: pairs (5,000 directions) 2.1; three, each tie in one direction, on 1,700
 #: pairs 1.7; three tied both ways on 833 pairs 0.9. Counted as present, 0.3 to
-#: 1.5. Peak memory 70 to 145 MB. The g34 verifier's shape B (three
+#: 1.5. Peak memory 70 to 145 MB. Shape B, measured 2026-10-03 (three
 #: relations in random directions on 3,000 pairs and 10,600 ties) took 7.5 to
 #: 8.3 s; with a round reading only the rows of M it needs, the algorithm
 #: below takes 4.1 s on it and 5.1 s on every pair tied in all three
@@ -163,7 +163,7 @@ DEFAULT_WEIGHTING = WEIGHT_PRESENCE
 #: Elements per chunk of a round's comparison, about 4 MB of float64. A
 #: chunk is live several times over (the rows copied, the kernel, the match),
 #: so this sets the peak: 16 MB chunks peaked near 200 MB on the dearest view
-#: and 4 MB chunks near 160 MB at the same speed (g34 review item 1).
+#: and 4 MB chunks near 160 MB at the same speed (2026-10-02).
 CHUNK_ELEMENTS = 1 << 19
 #: Above this many distinct tie patterns the kernel is computed per chunk
 #: rather than looked up in a table (a weighted view can have one pattern
@@ -208,7 +208,7 @@ def _usable(sub: Subgraph, weighting: str = DEFAULT_WEIGHTING
     ways and fills two; ties repeating a cell (parallel ties, one derived tie
     per shared venue, time-sliced edges) fill it once; and counted by weight a
     tie with no positive weight fills none, because `build_values` leaves it
-    out (g34 verify item, 2026-10-03: the count was of tie rows, so a crew
+    out (2026-10-03: the count was of tie rows, so a crew
     sharing several forums was refused for a size it does not have)."""
     ids = {n["id"] for n in sub.nodes}
     tied: set = set()
@@ -260,7 +260,7 @@ def precheck(sub: Subgraph, *, roles: int = REGE_DEFAULT_ROLES,
     if directions > REGE_MAX_TIES:
         # The figure the analyst can check is the view's own tie count, which
         # the card and the pane show, so it is named beside the directions
-        # they make (g34 verify item, 2026-10-03: "this view has 23400" matched
+        # they make (2026-10-03: "this view has 23400" matched
         # nothing on screen for a view of 11,700 derived ties).
         raise AnalyticsError(
             f"regular equivalence is capped at {REGE_MAX_TIES} tie directions (a tie "
@@ -369,7 +369,7 @@ class _Plan:
     - **Only the rows of M a group reads are taken.** A group's left ties
       name some of the entities as k, and only their rows of M meet the
       counterparts; taking all n rows for each of up to 63 groups was most
-      of a round (g34 review item 1, 2026-10-02)."""
+      of a round (2026-10-02)."""
 
     def __init__(self, mats: list[numpy.ndarray]):
         n = mats[0].shape[0]
@@ -411,7 +411,7 @@ class _Plan:
             # The rows of M this group reads are the distinct k of its left
             # keys, not all n: taking every row for each of up to 63 masks
             # was most of a round on a view with several relations in random
-            # directions (2.2 of 2.7 s, 2026-10-02, g34 review item 1).
+            # directions (2.2 of 2.7 s, 2026-10-02).
             need, row_of = numpy.unique(key_k[left], return_inverse=True)
             self.groups.append((left, need, numpy.asarray(row_of).ravel(), kp,
                                 self.vs[right], has, starts, cols, kernel_r,
@@ -587,7 +587,7 @@ def _limits(weighting: str, rounds: int, converged: bool, change: float,
                    "change with the weighting.")
         # An entity whose every tie carries no positive weight has nothing to
         # match, and a pair with nothing to match is alike, so they are cut
-        # into one role of perfect cohesion (g34 review item 3, 2026-10-02:
+        # into one role of perfect cohesion (2026-10-02:
         # the card counted the weightless ties and said nothing of this).
         if weightless_entities == 1:
             out.append("1 entity has ties but none that count by weight, so it has nothing "
@@ -603,8 +603,7 @@ def _limits(weighting: str, rounds: int, converged: bool, change: float,
                    "one, and the roles can change.")
     # The first wording named a label filter, which no view has, and left out
     # two real reasons a tie is not compared: inferred ties unless the view
-    # opts in, and ties above the reader's clearance or compartments (g34
-    # review item 3, 2026-10-02).
+    # opts in, and ties above the reader's clearance or compartments (2026-10-02).
     out.append("Only the ties this view admits are compared: a tie the view leaves out "
                "(by type, confidence, date or review state, or because it is inferred), "
                "or one above your clearance or compartments, shapes no role.")
@@ -613,7 +612,7 @@ def _limits(weighting: str, rounds: int, converged: bool, change: float,
                "the roles.")
     # The cut is fixed for a graph but not by its structure alone: among
     # equally good cuts the entities' order decides, and that order is their
-    # identifiers' (g34 review item 3, 2026-10-02: a chain of seven entities
+    # identifiers' (2026-10-02: a chain of seven entities
     # cut two ways under 40 random identifier assignments).
     out.append("Where several cuts are equally good, or differ only in the last decimal "
                "places of a similarity, the one kept depends on the order of the "
@@ -643,8 +642,8 @@ def rege(sub: Subgraph, p: Projection, params: AnalyticsParams, *,
     k = len(actors)
     # Entities whose ties all carry no positive weight, counted by weight:
     # nothing to match, so every pair of them is alike (the zero-denominator
-    # rule) and they come out as one role of cohesion 1 (g34 review item 3,
-    # 2026-10-02). Only possible by weight; by presence every tie counts.
+    # rule) and they come out as one role of cohesion 1 (2026-10-02). Only possible by
+    # weight; by presence every tie counts.
     weightless_entities = 0
     if weighting == WEIGHT_VALUE:
         held = sum(x.sum(axis=1) + x.sum(axis=0) for _key, _label, x, _count in rels)
@@ -747,8 +746,7 @@ def rege(sub: Subgraph, p: Projection, params: AnalyticsParams, *,
             "entities are in") if sub.truncated else None,
         # The run service stores the TOP-LEVEL flag on the run row and in its
         # audit event; the copy inside `rege` (CONCOR's layout) was the only
-        # one, so every REGE run was recorded as exact (g34 review item 3,
-        # 2026-10-02).
+        # one, so every REGE run was recorded as exact (2026-10-02).
         "is_approximate": True,
         "review_scope": review_scope_block(p, sub),
         "one_mode": one_mode_block(sub),

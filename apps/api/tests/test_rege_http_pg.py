@@ -153,8 +153,8 @@ def test_roles_outside_two_to_eight_and_an_unknown_weighting_are_a_422(conn, cli
     ("REGE_MAX_NODES", 2, "capped at 2 entities")])
 def test_a_view_over_a_cap_is_a_422_that_names_it_and_leaves_no_run(
         conn, client, monkeypatch, name, value, text):
-    """Each cap over HTTP, the ties cap in its direction wording (g34 verify
-    item, 2026-10-03): a problem+json refusal naming the cap and the count,
+    """Each cap over HTTP, the ties cap in its direction wording (2026-10-03): a
+    problem+json refusal naming the cap and the count,
     no run row, no audit event, no trace, and no stored run to read back."""
     from noctornal_api import rege
     token, case_id = _setup(conn, client)
@@ -202,8 +202,8 @@ def test_a_role_that_may_read_the_case_but_not_run_analytics_is_refused_on_both_
         conn, client, role):
     """The unassigned caller and the Security Officer are refused by ANY
     case-level gate, so they could not tell `analytics.run` from `case.read`
-    (weakening either route to `case.read` passed every test: g34 review item
-    2, 2026-10-02). These roles hold `case.read` and not `analytics.run`
+    (weakening either route to `case.read` passed every test: 2026-10-02). These roles hold
+    `case.read` and not `analytics.run`
     (migration 0021): the assignment works, the read is theirs, and the
     analysis is not."""
     owner_id, token, case_id = _setup_with_owner(conn, client)
@@ -234,7 +234,7 @@ def test_the_routes_serve_the_role_to_role_blocks_to_the_number(conn, client):
     two entities together hold half the ties they could (the view's own
     density is a third), so the block is tied and, with one of them sending
     nothing back into the role, not regular. Which two is the ids' choice, a
-    tie in the data that the card's limits name (g34 review item 3), so each
+    tie in the data that the card's limits name (2026-10-02), so each
     cut is held to its own numbers. Four roles asked of three entities: each
     alone, and each single tie a full block, so tied and regular. Served by
     the run, and again by the stored read, null for a block of nobody."""

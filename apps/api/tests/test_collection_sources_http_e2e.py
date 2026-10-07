@@ -172,8 +172,7 @@ def test_a_refused_source_is_409_and_writes_no_run(conn, api, monkeypatch):
 
 def test_poll_now_of_a_deactivated_feed_fetches_nothing(conn, api, monkeypatch):
     """Only the authority path asked whether a source was deactivated, so a
-    feed an operator had switched off was still fetched by Poll now (beta 1
-    gate 6, 2026-10-07)."""
+    feed an operator had switched off was still fetched by Poll now (2026-10-07)."""
     from noctornal_api import collection
     client, _stub = api
     _uid, amber = _caller(conn)

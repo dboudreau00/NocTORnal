@@ -4,8 +4,8 @@
 ## Why
 
 An entity retired as a mistake "should never have been in the case file", so
-the selector index must not keep naming it. Since the first fix round of
-this review, retiring an entity lets go of its rows in the same transaction
+the selector index must not keep naming it. Since 2026-10-03,
+retiring an entity lets go of its rows in the same transaction
 (`SelectorStore.release_node`), and a live entity recording the same value
 takes a row over from a retired owner (`SelectorStore.record`). Rows that
 were already owned by a retired entity before that are only taken over

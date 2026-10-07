@@ -282,7 +282,7 @@ def test_the_watch_text_is_one_function_for_the_verdicts_and_the_matching():
     assert _watch_texts(Item(external_id="p", body="b")) == ("\nb", "")
 
 
-# --- through the isolated worker (Beta 1 verification, group F2) ------------
+# --- through the isolated worker (2026-10-07) ------------
 # `run_child` defaulted to the kind `lab_static`, which neither the runner's
 # KINDS nor the worker's KIND_ARGV had a `watch_regex` for: with the worker's
 # socket set, every pattern was answered `bad_header` and reported failed. The

@@ -227,7 +227,7 @@ def _jsonable(value):
 def dedupe_key(kind: str, source_id: UUID | None, params: dict) -> str:
     """What makes two asks the same act: the kind, the SOURCE and the
     parameters. The source is in it because the routes pass it beside the
-    parameters, never inside them (verify:g38, 2026-10-03): without it a
+    parameters, never inside them (2026-10-03): without it a
     membership check of chat B, a Poll now of source B or a join of B with
     the same note, asked while A's was live, was answered with A's act and
     nothing was queued for B."""
@@ -248,8 +248,8 @@ def _audit(conn, actor_id, action: str, act_id, detail: dict) -> None:
 
 
 #: A PENDING row still before its expiry, or a RUNNING row claimed within
-#: STALE_S: the only twins an ask may be answered with (verify:g38,
-#: 2026-10-03). An expired PENDING act or a RUNNING act a dead runner left
+#: STALE_S: the only twins an ask may be answered with (2026-10-03). An expired PENDING act
+#: or a RUNNING act a dead runner left
 #: is no act any more, whatever the sweep has not yet written.
 _LIVE_SQL = ("((status = 'PENDING' AND expires_at > clock_timestamp()) "
              "OR (status = 'RUNNING' AND claimed_at >= clock_timestamp() "
@@ -282,7 +282,7 @@ def submit(conn: psycopg.Connection, *, user_id: UUID, session_id: UUID | None,
 
     A twin that is past its expiry, or RUNNING with a runner that died, is
     swept first, as the system purpose, so the new ask is a new act rather
-    than the dead one answered again (verify:g38, 2026-10-03). In
+    than the dead one answered again (2026-10-03). In
     development's inline mode nothing else ever sweeps; in production the
     collector does too, and this only reaches the caller's own dead twin
     before the unique index would refuse the new row."""
@@ -434,8 +434,8 @@ def instance_name(prefix: str = "collector") -> str:
     return f"{prefix}:{socket.gethostname()[:60]}:{os.getpid()}"
 
 
-#: What a claim admits, whatever the row says about itself (verify:g38,
-#: 2026-10-03). The request role writes the row, so its own expiry and
+#: What a claim admits, whatever the row says about itself (2026-10-03). The request role
+#: writes the row, so its own expiry and
 #: start are capped here by constants: asked no later than now and within
 #: MAX_TTL_S of now. persona_act_window (0156) caps expires_at the same
 #: way, so a forged far expiry is refused at the door as well.
@@ -487,8 +487,8 @@ def _finish(status_conn, act: dict, status: str, *, body: dict | None = None,
         # The sweep already finished it (it ran past STALE_S and was failed
         # as "outcome unknown"), so the row and its FINISHED event say
         # FAILED. Auditing the outcome computed here as well would put two
-        # contradicting FINISHED events on one act (verify:g38,
-        # 2026-10-03). The act's own events say what it did; the log says
+        # contradicting FINISHED events on one act (2026-10-03). The act's own events say
+        # what it did; the log says
         # it came back late, by id and status only.
         log.warning("persona act %s (%s) came back %s after it was already "
                     "finished", act["id"], act["kind"], status)
@@ -520,11 +520,11 @@ def _recheck(conn, act: dict) -> tuple[str, frozenset[str]]:
     from noctornal_api.security.sessions import IDLE_TIMEOUT
 
     # Every expiry SessionService.validate enforces, the idle one included
-    # (verify:g38, 2026-10-03): NOCTORNAL_ACT_TTL_SECONDS reaches an hour,
+    # (2026-10-03): NOCTORNAL_ACT_TTL_SECONDS reaches an hour,
     # and an act must not run for a session the console would already 401.
     # The second factor's time is the SESSION's, which only a sign-in writes
     # (0144), never the act row's copy: the request role writes that row, so
-    # a forged copy would have passed the step-up (beta 1 gate 6, 2026-10-07).
+    # a forged copy would have passed the step-up (2026-10-07).
     session = act["session_id"] is not None and conn.execute(
         """SELECT mfa_satisfied_at FROM iam.session
             WHERE id = %s AND user_id = %s AND revoked_at IS NULL
@@ -538,7 +538,7 @@ def _recheck(conn, act: dict) -> tuple[str, frozenset[str]]:
         for permission, force in KINDS[act["kind"]].permissions:
             authorize_global(conn, user, permission, force_step_up=force)
         # A stop is always allowed (F38): the stop route asks no readiness,
-        # so the sign-out it queues is not held to it either (beta 1 gate 6).
+        # so the sign-out it queues is not held to it either (2026-10-07).
         if act["kind"] not in STOP_KINDS:
             refuse_unready(conn)
         clearance, held = user_ceiling(conn, act["requested_by"])
@@ -740,7 +740,7 @@ def drain(conn: psycopg.Connection, *, instance: str, limit: int = 20,
     after `max_seconds`, or as soon as `should_stop()` says so. Counts by
     outcome; never an act's words.
 
-    `should_stop` is asked before every claim (verify:g38, 2026-10-03): a
+    `should_stop` is asked before every claim (2026-10-03): a
     SIGTERM finishes the act in hand and claims no other, so the stop
     grace period covers one act rather than a whole pass of twenty."""
     counters = {"claimed": 0, "done": 0, "refused": 0, "failed": 0,
@@ -801,7 +801,7 @@ COLLECTOR_ACTION_KEY = (
     "key in NOCTORNAL_PERSONA_KEK_RETIRED; or enrol those personas again")
 
 # ---------------------------------------------------------------------------
-# The collector's heartbeat (0157, verify:g38, 2026-10-03)
+# The collector's heartbeat (0157, 2026-10-03)
 # ---------------------------------------------------------------------------
 
 #: How often the collector moves its heartbeat while it runs.
@@ -869,7 +869,7 @@ def readiness_verdict(conn: psycopg.Connection) -> tuple[bool, str, str]:
     Outside the inline mode a collector must also have been SEEN lately
     (its heartbeat, 0157), whatever the queue holds, and the persona ring
     it started with must have opened every credential it sampled
-    (verify:g38, 2026-10-03). Until then an empty queue read green while
+    (2026-10-03). Until then an empty queue read green while
     no collector ran, and in production that is also every scheduled poll
     stopped, feeds no persona reads included."""
     from noctornal_api.security import persona_envelope as pe

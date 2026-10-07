@@ -87,7 +87,7 @@ def test_the_retention_action_names_the_console_first_and_keeps_the_route():
     body = src[src.index("def _retention_rules_confirmed("):]
     body = body[:body.index("\ndef ")]
     # "under Records, ": the rail tab's name since ux19. It said Lifecycle,
-    # a name that leads nowhere (u23, 2026-09-24).
+    # a name that leads nowhere (2026-09-24).
     assert body.index("under Records, ") < body.index("POST"), (
         "the retention action leads with curl again")
     assert "/retention/rules" in body

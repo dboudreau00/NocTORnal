@@ -14,7 +14,7 @@ where every line of it traces back to an exhibit.
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![Postgres 16](https://img.shields.io/badge/postgres-16%20%2B%20pgvector-336791.svg)](https://www.postgresql.org/)
 [![CI](https://github.com/dboudreau00/NocTORnal/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/dboudreau00/NocTORnal/actions/workflows/ci.yml)
-[![Status](https://img.shields.io/badge/status-alpha%20%C2%B7%20unaudited-orange.svg)](#status)
+[![Status](https://img.shields.io/badge/status-beta%20%C2%B7%20unaudited-orange.svg)](#status)
 
 ![The sociogram](docs/images/01-graph.png)
 
@@ -161,10 +161,11 @@ sociogram is for.
 ### What it is *not*
 
 - **Not an OSINT collection suite.** It ingests; it is not a scraper farm.
-  Collection adapters exist for RSS, public XenForo and MyBB forums, Telegram
-  and the ingest API, and every forum and Telegram read needs a written
-  authority recorded by one person and confirmed by another, and leaves
-  through an exit that is not your own address. Whether you may collect at
+  Collection adapters exist for RSS, XenForo and MyBB forums (public, or as a
+  signed-in persona), Telegram and the ingest API, and every forum and
+  Telegram read needs a written authority recorded by one person and
+  confirmed by another, and leaves through an exit that is not your own
+  address. Whether you may collect at
   all is the legal items above.
 - **Not an attribution oracle.** There is no "is this the same person?"
   button. There is a model that makes your reasoning explicit and
@@ -210,7 +211,7 @@ carries Mark-of-the-Web, and an unzipped `.sh` has no execute bit.
 3. creates `.venv` and installs the two workspace packages
 4. generates a fresh TOTP key and ingest pepper into `.env.local` (mode 600) and **never overwrites an existing one**
 5. starts Postgres, Redis, MinIO and Mailpit, then waits for the database to actually accept connections
-6. applies all 131 Alembic migrations (Alembic head 0131)
+6. applies all 172 Alembic migrations (Alembic head 0172)
 7. offers to create your first account, printing the password **once** with a QR code to scan (on both systems, before the API starts), then offers a fictional demo case
 8. starts the API and prints the console URL, <http://127.0.0.1:8000/ui/>
 
@@ -301,7 +302,7 @@ export DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:
 .venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-With the containers up, expect **no failures** across **6329 tests** (`def test_`
+With the containers up, expect **no failures** across **7954 tests** (`def test_`
 functions across both pytest roots, maintained by
 `scripts/refresh_counters.py`; each parametrises to one or more collected
 items, and the collected total for a given release is in
@@ -622,7 +623,7 @@ test named after it.
 | 4 | **Inferred edges stay distinct**, dashed, and out of metrics | projection opt-in; `is_social_tie` on the edge type |
 | 5 | **History is superseded, never overwritten** | no destructive `UPDATE` on `assertion`; a retraction is a one-time stamp on the row, never a rewrite |
 | 6 | **The audit log is append-only** | row *and* statement triggers; `TRUNCATE` refused |
-| 7 | **Credentials never leave the vault** | `PersonaVault.use()` yields the plaintext to one block and drops it; there is no `get_secret()`. The vault runs INSIDE the API process (there is no separate collector), so this bounds the shape of the code, not the blast radius of a compromised host. `ProviderVault` holds lookup provider keys the same way, each bound to its origin and route, and exposure approvals are bound to origin and network. Every outbound path is operator-configured, labelled, audited and capped by a ceiling, and in production the egress proxy is the only way out |
+| 7 | **Credentials never leave the vault** | `PersonaVault.use()` yields the plaintext to one block and drops it; there is no `get_secret()`. In production the persona vault runs in the collector service, which alone holds `NOCTORNAL_PERSONA_KEK`, so a compromised API process cannot open a persona credential. That is a process boundary and not a network zone: the collector also holds the TOTP key ring and the system role's connection string, and in development one process runs both, where this bounds the shape of the code and not the blast radius of a compromised host. `ProviderVault` holds lookup provider keys the same way, each bound to its origin and route, and exposure approvals are bound to origin and network. Every outbound path is operator-configured, labelled, audited and capped by a ceiling, and in production the egress proxy is the only way out |
 | 8 | **TLP gates egress** | one `can_egress`, called by every outbound path (export, SMTP, webhook, Jira, outbound lookups, key lookups, the model server, the sandbox, collection targets); a destination with no gate record is refused |
 | 9 | **Durable identifiers, not displayed ones** | per-type normalisers; `durable_selector_type` |
 | 10 | **Samples never render, never execute** | separate origin, encryption at rest, `is_hostile_markup` |
@@ -643,7 +644,7 @@ test named after it.
 | **Object store** | MinIO, S3 object lock | Every exhibit is written under a per-object COMPLIANCE retention, which not even a root credential can shorten. The shipped compose file sets the BUCKET DEFAULT to `GOVERNANCE 365d`; the default is the floor for anything written by another path, and the guarantee above is the per-object lock `EvidenceStorage.put()` applies. GOVERNANCE alone is bypassable and is not a WORM guarantee. |
 | **Cache / limits** | Redis | GCRA rate limiting in one atomic Lua script. |
 | **Egress** | one pinned client and an egress proxy | Every outbound connection takes its route from one function and goes through one client that connects only to the address it checked. In production the proxy (HTTP CONNECT and SOCKS5 on one internal listener) is the only way out, and records every connection in a ledger the application cannot write ([`docs/20`](docs/20-outbound-connections.md)). |
-| **Migrations** | Alembic | 131 revisions (Alembic head 0131), one concern each. Reversible on an EMPTY database, which is what the round-trip test proves; a downgrade past `0017` on a populated one is refused on purpose, because dropping the seeded ontology would take the assertions with it. |
+| **Migrations** | Alembic | 172 revisions (Alembic head 0172), one concern each. Reversible on an EMPTY database, which is what the round-trip test proves; a downgrade past `0017` on a populated one is refused on purpose, because dropping the seeded ontology would take the assertions with it. |
 | **Live updates** | Postgres `LISTEN`/`NOTIFY` | Over Redis pub/sub because `pg_notify` inside a trigger is **part of the writing transaction**, no dual write, no lost event. |
 
 ### Frontend
@@ -663,7 +664,7 @@ enforces it.
 
 ### Testing
 
-**6329 tests** (`def test_` functions across two pytest roots, maintained by
+**7954 tests** (`def test_` functions across two pytest roots, maintained by
 `scripts/refresh_counters.py`). Every invariant has a test named
 after it. About half are database-backed and gated on `DATABASE_URL`; the
 rest need no services at all.
@@ -690,7 +691,7 @@ noctornal/
 │   └── generated/             TypeScript + SQL seed (do not edit)
 ├── db/
 │   ├── schema.sql             generated mirror (scripts/dump_schema.py; CI diffs it)
-│   └── migrations/versions/   131 Alembic revisions
+│   └── migrations/versions/   172 Alembic revisions
 ├── docs/                      00-20, the reasoning
 ├── release/                   installers, INSTALL, MANUAL, CHANGELOG
 ├── scripts/                   launch, bootstrap, demo seeds, screenshots
@@ -704,6 +705,7 @@ noctornal/
 | Read | For |
 |---|---|
 | **[`release/INSTALL.md`](release/INSTALL.md)** | installing, in detail, with troubleshooting |
+| **[`release/START-HERE.md`](release/START-HERE.md)** | the one page to follow first: what you need, three install steps, the first sign-in |
 | **[`release/MANUAL.md`](release/MANUAL.md)** | operating it, every pane, every refusal, and what it means |
 | [`docs/18-legal-review-pack.md`](docs/18-legal-review-pack.md) | **the sign-off document**, with a row to answer each question in |
 | [`docs/16-legal-and-external.md`](docs/16-legal-and-external.md) | **the register**: every place the build stops because the next step is a legal question, and why holding this material is dangerous |
@@ -737,24 +739,28 @@ noctornal/
 
 ## Status
 
-**Alpha. Unaudited. Not certified for evidential use.**
+**Beta. Unaudited. Not certified for evidential use. Not lawful to operate against real material until the five blocking items above are settled.** It is fit for other people to try on synthetic or published, non-personal data.
 
 Working end to end: cases; the graph and assertion layer; evidence with
 WORM and custody; the five-part access gate; SNA analytics, with roles and
 forum and wallet projection; proposals and triage; entity merge and the
 two-person policy; comms, contact blocks, PGP verification and vendor keys;
-collection from feeds, forums and Telegram under a two-person authority,
-and ingest; similarity search; retention, legal hold and break-glass; ACH;
+collection from feeds, forums and Telegram under a two-person authority
+(the Telegram adapter has never met Telegram, docs/17 F31), and ingest; similarity search; retention, legal hold and break-glass; ACH;
 reporting with a TLP egress gate; the malware lab, with static triage,
-YARA, prohibited-content screening and a self-hosted sandbox; Jira, the
-delivery ledger and outbound lookups; the egress proxy; the deception
-subsystem; live change push; and the analyst console over all of it.
+YARA, archive expansion, prohibited-content screening and a self-hosted
+sandbox; Jira, the delivery ledger and outbound lookups; the egress proxy;
+the collector service that alone holds the persona key, and the isolated
+worker that parses hostile bytes; row-level security on every case table;
+the deception subsystem; live change push; a one-command installer and a
+first-sign-in walkthrough; and the analyst console over all of it.
 
 Deliberately absent, with reasons in [`docs/17`](docs/17-flagged-for-review.md):
-WebAuthn (password + TOTP today), session IP/UA binding by default,
-row-level security on five of its tables (docs/17 F51), perceptual matching of prohibited content, archive
-expansion, an authenticated forum reader, and **any form of live
-interception**.
+WebAuthn (password + TOTP today), session IP/UA binding by default in
+development (a production start refuses to run without it), perceptual
+matching of prohibited content, expansion of RAR and 7-Zip archives, and
+**any form of live interception**. What the 2026-10-03 review and the fixes
+after it left open is in the same document, under Known residuals at Beta 1.
 
 ### Findings that carry forward
 
@@ -790,10 +796,12 @@ Decoding is now arithmetic and namespaced by id space (`u:`/`c:`/`g:`);
 migration `0051` re-keys stored selectors. It cannot undo a merge already
 made, and says so.
 
-**The software has been adversarially reviewed eight times. Every pass
-found a real defect (four times a critical one) each time under a fully
-passing test suite. Three of those were green tests asserting the bug.
-Assume the ninth pass would find something too.**
+**The software has been adversarially reviewed nine times, and every pass
+found real defects, four times a critical one. The first eight found them
+under a fully passing test suite, and three of those were green tests
+asserting the bug. The ninth, on 2026-10-03, kept 82 findings (16 high), and
+the independent re-verification of its fixes and nine release reviews found
+more. Assume the next pass would find something too.**
 
 ---
 

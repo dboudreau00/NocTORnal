@@ -316,7 +316,7 @@ The ones worth knowing:
 
 | Variable | Effect if unset |
 |---|---|
-| `NOCTORNAL_TOTP_KEK` | The API will not start. Generated for you at install. |
+| `NOCTORNAL_TOTP_KEK` | A production start refuses. In development the API starts and sign-in is refused with a named 503, because no TOTP secret can be sealed or opened. Generated for you at install. |
 | `NOCTORNAL_PERSONA_KEK` | A collection persona's credential can be neither sealed nor opened, so a persona cannot be enrolled or used and every act or poll that needs one is refused by name. A key of its own, never the TOTP key. Generated for you at install. In production only the collector service holds it (`infra/production/collector.env`). |
 | `NOCTORNAL_COLLECTOR_INLINE` | Persona acts are queued for the collector process and wait for it. A development install sets it to `1`, so the API runs them itself; it is refused in production. Written for you at install. |
 | `NOCTORNAL_INGEST_PEPPER` | Ingest keys cannot be issued. Generated for you. |
@@ -329,7 +329,17 @@ The ones worth knowing:
 | `NOCTORNAL_LIVE_MAX_PENDING_PER_PEER` | 8 of those per peer address, the same address the rate limiter uses, trusted proxy hops included. |
 | `NOCTORNAL_LIVE_HELLO_SECONDS` | 10 seconds for an accepted socket to send its hello before it is closed and its slot returned. |
 | `NOCTORNAL_RELAX_SEASONING_DAYS` | 7 days: the second person who approves turning off a case's merge requirement must have held `case.update` on that case for at least this long, read from the assignment's grant time by the database clock. `0` turns the rule off and is the only value that does; a value that is not a whole number from 0 to 365 is held to 7 and refused at a production boot. |
-| `REDIS_URL` | Rate limiting falls back to per-process, and says so loudly at startup. |
+| `NOCTORNAL_ACT_WAIT_SECONDS` | 8 seconds: how long a route waits for the collector to finish a persona act it queued, before it answers "queued". Never more than 25. |
+| `NOCTORNAL_ACT_TTL_SECONDS` | 900 seconds (15 minutes): how long a queued persona act may wait to be claimed before it lapses. Held between 60 and 3600. |
+| `NOCTORNAL_DB_CONNECT_TIMEOUT` | 10 seconds to make a database connection before giving up. A value below 1 is held to 1, and one that is not a whole number reads as 10. |
+| `NOCTORNAL_EGRESS_DB_WORKERS` | 8 threads for the egress proxy's reads of the database, from 1 to 64. Read by the proxy alone. |
+| `NOCTORNAL_ANALYSIS_SOCKET`, `NOCTORNAL_ANALYSIS_LOCAL`, `NOCTORNAL_ANALYSIS_WORKER_CONCURRENCY`, `NOCTORNAL_ANALYSIS_WORKER_MAX_BYTES` | The isolated analysis worker (`infra/production/README.md`, Analysis worker, has the table). With no socket a production process refuses to parse hostile bytes; `NOCTORNAL_ANALYSIS_LOCAL=1` parses in a local child on purpose, and the register says so. The worker runs 2 requests at once (1 to 16) and reads at most 1 GiB. |
+| `NOCTORNAL_ARCHIVE_MAX_MEMBERS`, `NOCTORNAL_ARCHIVE_MAX_TOTAL_BYTES`, `NOCTORNAL_ARCHIVE_MAX_MEMBER_BYTES`, `NOCTORNAL_ARCHIVE_MAX_RATIO`, `NOCTORNAL_ARCHIVE_MAX_DEPTH`, `NOCTORNAL_ARCHIVE_WALL_S`, `NOCTORNAL_ARCHIVE_MAX_TREE_MEMBERS` | Archive expansion limits. Unset: 200 members (1 to 10,000), 256 MiB of members in all, 64 MiB for one member, a ratio of 100 (2 to 10,000), 2 levels (1 to 5), 60 seconds (10 to 600), and 1,000 members across a whole tree (never below the per-archive count). A value that does not parse, or a byte cap the analysis memory cannot hold, is a named refusal at a production start. |
+| `NOCTORNAL_SAMPLE_ANALYSIS_MEMORY`, `NOCTORNAL_SAMPLE_ANALYSIS_MAX_BYTES`, `NOCTORNAL_SAMPLE_FUZZY_MAX_BYTES`, `NOCTORNAL_SAMPLE_ANALYSIS_TIMEOUT_S`, `NOCTORNAL_SAMPLE_ANALYSIS_CONCURRENCY` | The bounds of a static-triage child. Unset: 2 GiB of address space (256 MiB to 64 GiB); the largest sample analysed is the sample upload cap or a third of what the memory leaves after the parser (about 512 MiB), whichever is less; the largest sample fuzzy-hashed is 32 MiB, or the analysis maximum if less; 300 seconds of wall clock for a step (10 to 3600); 1 run at once (1 to 8). A setting that does not parse, or a maximum the memory cannot hold, is a named refusal at a production start. |
+| `NOCTORNAL_YARA_SCAN_TIMEOUT_S`, `NOCTORNAL_YARA_MAX_UPLOAD_BYTES` | A YARA scan of one sample stops after 60 seconds (5 to 600), and a rule set upload may be 32 MiB (1 MiB to 256 MiB). |
+| `NOCTORNAL_EMBED_WORDING` | `on`: similar wording runs in this process, reads no model file and sends nothing. `off` turns it off; any other value is reported as a problem and leaves it on. |
+| `NOCTORNAL_EMBED_MEANING_URL` and the other `NOCTORNAL_EMBED_MEANING_*` settings | Unset, similar meaning is off and nothing is sent. Set, it names the base address of a model server that speaks the OpenAI embeddings protocol (http or https, no user name or password, no query), reached only through the `embeddings` egress route, and needs `_MODEL` and `_CEILING` (the highest TLP it may receive, which has no default). Optional: `_KEY` (kept out of every log), `_AUTHORITY` (the recorded authority to send case text) and `_MESSAGE_AUTHORITY` (the same for message text), `_LOCAL_HOST` (declares that the host in the URL is this host, development on a direct route only), `_NETWORK` (the private network of IPv4 /16 or narrower, or IPv6 /64, that a named endpoint may resolve into), `_CA_FILE`, `_REVISION`, `_QUERY_PREFIX`, `_DOCUMENT_PREFIX`, `_DIMENSIONS`, `_MAX_CHARS` (2000, 200 to 32000), `_BATCH` (16, 1 to 128) and `_TIMEOUT_S` (30, 1 to 300). A setting with a placeholder, or one that does not parse, is a named problem and leaves meaning off. |
+| `REDIS_URL` | Rate limiting falls back to per-process, and says so loudly at startup. In production it must sign in as `noctornal_limiter`, and the `redis` service refuses to start otherwise. |
 | `NOCTORNAL_ENABLE_DOCS` | The OpenAPI schema stays off. It publishes the full route inventory of a law-enforcement case system, so it is opt-in. |
 
 ---
@@ -368,6 +378,13 @@ existing `secrets.env`, and until it has, the migrate job and Redis each
 refuse to start with a sentence naming it, and nothing that waits on them
 starts. [secrets-upgrade/README.md](secrets-upgrade/README.md) is that
 upgrade step by step, with the way back.
+
+**Backups and restore** are in `infra/production/README.md`, Day-to-day.
+Read its Restoring paragraphs before you rely on a backup: a restore needs
+the three runtime roles to exist before `pg_restore` runs, and a mirror of
+the evidence bucket keeps the bytes of an exhibit lodged since Alembic 0139
+but not the object version it records, so a restored exhibit reads as
+missing until an owner step is run.
 
 ---
 

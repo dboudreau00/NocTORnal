@@ -364,7 +364,7 @@ def verify_chain(
       LEFT JOIN claims c ON c.prev_hash = w.prev_hash
     )
     -- Only the rows that do not verify leave the database, beside the
-    -- count and the span of what was checked (Beta 1 gate 64): every row
+    -- count and the span of what was checked (2026-10-07): every row
     -- came back to Python, 380 MB and 35 seconds of the API process for a
     -- 1.5 million row log. One summary row always, even with nothing wrong.
     SELECT s.checked, s.first_seq, s.last_seq,

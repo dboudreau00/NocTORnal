@@ -110,7 +110,7 @@ REFUSALS = ARCHIVE_REFUSALS + MEMBER_REFUSALS
 #: directory, a link, a device and an empty entry hold no bytes, so a
 #: refusal of one leaves nothing unscreened. Every other member refusal
 #: left bytes that no screening saw, which the derived "members were not
-#: compared" gap says (g40 verify major 3, 2026-10-03).
+#: compared" gap says (2026-10-03).
 CONTENT_FREE_REFUSALS = ("directory", "symlink", "hardlink", "device", "empty")
 
 _DRIVE = re.compile(r"^[A-Za-z]:")
@@ -185,8 +185,8 @@ class _Walk:
         self.entries = 0
         self.total = 0
         #: Bytes decompressed to get past members refused over the
-        #: per-member cap in a STREAMING tar (g40 verify major 4,
-        #: 2026-10-03): the reader must still decompress them, so they
+        #: per-member cap in a STREAMING tar (2026-10-03): the reader must still decompress
+        #: them, so they
         #: count against the total and the ratio like any other byte.
         self.skipped = 0
         self.seen_exact: dict[str, int] = {}
@@ -359,8 +359,7 @@ def _zip_kind(info: zipfile.ZipInfo) -> str | None:
     Windows and most extractors write out as an ordinary file. So an entry
     marked as a device that holds any bytes, or as a link that holds more
     than a link target, is read as the file it is: refused as content-free,
-    it hid a payload from expansion and screening (beta 1 gate 6,
-    2026-10-07)."""
+    it hid a payload from expansion and screening (2026-10-07)."""
     if info.is_dir():
         return "directory"
     mode = (info.external_attr >> 16) & 0xF000
@@ -386,7 +385,7 @@ def walk_zip(data: bytes, walk: _Walk) -> None:
         # the LAST end record and shifts every offset past whatever precedes
         # it, so a zip appended to another one listed only the second, and
         # the first one's members went unexpanded and unscreened with nothing
-        # refused (beta 1 gate 6, 2026-10-07).
+        # refused (2026-10-07).
         if infos and min(i.header_offset for i in infos) != 0:
             raise Refused("corrupt", error="bytes_before_first_member")
         for info in infos:
@@ -473,7 +472,7 @@ def _tar_stream(data: bytes):
     readers, which read EVERY stream of a multi-stream gzip, bzip2 or xz file
     as `tar xzf` does. tarfile's own `r|*` decompressor stops at the end of
     the first stream, so a second stream's members were neither expanded nor
-    refused (beta 1 gate 6, 2026-10-07)."""
+    refused (2026-10-07)."""
     raw = io.BytesIO(data)
     if data[:2] == b"\x1f\x8b":
         return gzip.GzipFile(fileobj=raw, mode="rb")

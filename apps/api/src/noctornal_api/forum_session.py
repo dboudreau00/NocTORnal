@@ -30,10 +30,9 @@ clears it (`clear_session` with no origin opens nothing).
 
 A jar is `{name: value}` for ONE origin, and what is sealed is one jar PER
 ORIGIN (`{"v": 2, "origins": {origin: jar}}`), because a persona may read
-more than one board and a cookie is the board's own: g40's verifier found
-the jar keyed by persona alone, so a persona bound to two boards sent the
-first board's live session to the second's operator (blocker 2,
-2026-10-03). A run opens only the jar of the origin of the source it is
+more than one board and a cookie is the board's own: the jar was once keyed by persona alone,
+so a persona bound to two boards sent the first board's live session to
+the second's operator (2026-10-03). A run opens only the jar of the origin of the source it is
 reading (`origin_key`), and the run context refuses a request to any other
 origin, so a board's cookies reach that board and no other. A blob in the
 earlier shape (one flat jar for the persona) cannot be attributed to any
@@ -152,7 +151,7 @@ def take_cookies(jar: dict[str, str], set_cookie_values, *,
 
 def _sendable(name, value) -> bool:
     """Whether a cookie can ride in a request: a printable name and an ASCII
-    value within the caps (beta 1 gate 6, 2026-10-07: a value printable but
+    value within the caps (2026-10-07: a value printable but
     not ASCII, or a jar whose header outgrew what the client sends, made
     every later request of the persona's session fail, and the poisoned jar
     was sealed, so every later run failed the same way)."""

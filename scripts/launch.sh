@@ -231,16 +231,16 @@ if [ -f "$ENV_LOCAL" ]; then
     [ -n "$name" ] || continue
     # Only an identifier is a name. `${!name+x}` below evaluates an array
     # subscript, so `x[$(cmd)]=1` in a handed-over file ran `cmd` as this user
-    # (Beta 1 verification, 2026-10-07: the sibling of infra-9 that install.sh
+    # (2026-10-07: the sibling of infra-9 that install.sh
     # closed with the same check). Skipped silently, as install.sh does: a name
     # that is not an identifier is not worth echoing back.
     case "$name" in [!A-Za-z_]*|*[!A-Za-z0-9_]*) continue ;; esac
-    # A name that changes how programs start is left out (g48 verification,
-    # 2026-10-03): this loop is data, not shell, but it still exported any
+    # A name that changes how programs start is left out (2026-10-03): this loop is data,
+    # not shell, but it still exported any
     # identifier, so `PYTHONPATH=./evil`, `PATH=./evilbin`, `LD_PRELOAD=` or
     # `BASH_ENV=` in a handed-over file ran code as this user in the next
     # python this script starts. The tools it starts are on the list too
-    # (Beta 1 verification, 2026-10-07): `DOCKER_CONFIG` ran a fake compose
+    # (2026-10-07): `DOCKER_CONFIG` ran a fake compose
     # plugin as root. Not an allow-list on purpose: a new setting
     # would silently stop loading. The same list is in release/install.sh,
     # scripts/_env.py, scripts/launch.ps1 and scripts/open-ui.ps1; a test holds

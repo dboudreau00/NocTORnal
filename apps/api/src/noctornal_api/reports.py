@@ -178,7 +178,7 @@ class Redaction:
     #: withheld-disclosure setting (0030) decides what the document may say
     #: about them: nothing under NONE, that there are some under PRESENCE
     #: (this flag, with `evidence_withheld` left at 0), the figure only under
-    #: COUNT (Beta 1 verification, group C, C2: the figure used to be stated
+    #: COUNT (2026-10-07: the figure used to be stated
     #: whatever the setting).
     evidence_some_withheld: bool = False
 
@@ -477,7 +477,7 @@ class ReportBuilder:
         # The exhibit figure follows the case's withheld-disclosure setting
         # (0030): NONE says nothing, PRESENCE that some are above the
         # ceiling, and only COUNT the number. It was stated exactly under
-        # all three (Beta 1 verification, group C, C2), so a case set to NONE
+        # all three (2026-10-07), so a case set to NONE
         # had a register showing 0 beside a document saying "2 exhibits".
         hidden_exhibits = evidence_total - len(evidence_rows)
         redaction = Redaction(
@@ -553,7 +553,7 @@ class ReportBuilder:
             },
             # The union of what actually went in: the case header when it
             # is included, plus every exhibit's, entity's and tie's own
-            # (Beta 1 verification, group C, C1: the last two were left out,
+            # (2026-10-07: the last two were left out,
             # so a compartmented entity left through `export` and `smtp`
             # with its label in the document). The projection's nodes and
             # edges cannot contribute beyond the requester's read-in because
@@ -1067,7 +1067,7 @@ def render_markdown(report: Report) -> str:
                  f"evidence)**" if purged else e["title"])
         # The whole digest: half of one cannot be checked against a digest
         # recomputed from the exhibit, which is what the column is for
-        # (Beta 1 gate 64).
+        # (2026-10-07).
         lines.append(f"| {title} | `{e['sha256'] or ''}` | "
                      f"{e['acquired_at']} | {e['acquisition_method']} |")
     if not d["evidence"]:

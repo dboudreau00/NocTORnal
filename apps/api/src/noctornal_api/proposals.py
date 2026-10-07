@@ -353,8 +353,8 @@ def announce(conn: psycopg.Connection, case_id: UUID, proposal_id: UUID) -> None
     notifications into one, which is why a capture raises its proposals
     in one.
 
-    The hint names the labels of the proposal that changed (G3, Beta 1
-    verification, as 0146 does for a node or an edge): its read label and
+    The hint names the labels of the proposal that changed (2026-10-07, as 0146 does for a
+    node or an edge): its read label and
     the compartments of what it came from, the same expressions the queue
     filters on. The live channel drops the hint for a reader who could not
     read that proposal, so a case reader is not woken when a proposal above
@@ -612,8 +612,8 @@ class ProposalStore:
         one: a case-scoped break-glass grant raises a read of that case
         only, and this read spans them all.
 
-        A read-only case (CLOSED, ARCHIVED, PURGED) counts nothing (final
-        review u2, 2026-09-24). Accept, reject and defer are content writes
+        A read-only case (CLOSED, ARCHIVED, PURGED) counts nothing (2026-09-24). Accept,
+        reject and defer are content writes
         and all refuse there, proposals never expire, and an ARCHIVED case
         cannot be reopened, so a case closed with work in its queue said
         "2 proposals to triage" on the case list for good, as a nag nobody
@@ -737,7 +737,7 @@ class ProposalReview:
                 "been dispositioned")
 
         # When the material was seen: the post's own date, or failing that
-        # when it was captured (final review u6, 2026-09-24). First and
+        # when it was captured (2026-09-24). First and
         # last seen are derived from `observed_at` on an entity's live
         # claims (projections.seen_sql), and this claim never set it, so
         # every entity accepted from Triage read "no claim dates an

@@ -1,4 +1,4 @@
-"""Shared fixtures for the 2026-10-03 graph review tests (group g43).
+"""Shared fixtures for the 2026-10-03 graph review tests.
 
 The five findings this covers (claims mutable by the request role, a
 retracted correction that stays in force, selector index drift, URL

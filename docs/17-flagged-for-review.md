@@ -39,6 +39,8 @@ is the section to act on first.**
 | **Records written under older rules** (L1 and L2, 2026-09-24) | Triage claims accepted before Alpha 6 with no `observed_at`; ATTRIBUTE claims readable below the material they came from, or attached across cases; captured documents cited by cases that share no compartment, which migration 0071 could not label | Each was written under a rule this release tightened, and nothing can recompute what was never recorded: an observation date, or the lock every citing case's readers hold. They are counted by the readiness rows `triage_claims_dated`, `triage_claims_within_labels` and `captured_documents_compartmented` | `python scripts/legacy_records.py` lists them per case. An analyst decides each: raise an entity, retract a claim, or file the capture again under the right case. An analyst gives a claim its date by superseding it (the inspector's Date this claim); nothing writes a date onto a recorded claim (docs/00 decision 170) |
 | **Contact blocks parsed under cb-1 with a gpg-spaced PGP line** (F37, 2026-10-02) | `comms.contact_block` where `parser_version = 'cb-1'` and an entry has `selector_type = 'PGP_FPR'` with a 20-character `durable_value` | The parser cut the value at the first run of two spaces, so a fingerprint copied from gpg kept 20 of 40 hex characters; a CLAIMED proposal may carry the truncated value, the line cannot confirm a key, and the block is not paired with the same text parsed later | Nothing re-reads a stored block: parse the text again in a case of its own and reject the old proposal. Do not edit the rows |
 | **Telegram ids recorded from a bare positive number** before 2026-09-11 | `core.selector` and `comms.channel_binding`, `TELEGRAM_ID` | A bare positive id was assumed to be a user (`u:`), so an MTProto channel observed as a bare number shares a row with a same-numbered user. The normaliser refuses a bare positive now, but nothing can recompute a type that was never observed. | `scripts/telegram_bare_ids.py` lists them per case. Confirm each against its source and re-record typed (`c:<id>`) where a channel is wearing a user's row. |
+| **Credentials that stayed after 0137** (2026-10-07) | `core.assertion.rationale` where an accepted proposal copied its context; `collect.document` text; `core.selector` e-mail rows read out of the userinfo of a link that is not http or https; URL rows of the `url:login:password` layout written before that shape was refused | 0137 scrubbed URL selectors, entity labels, proposals, extraction rows and a correction's `prior_value`, and does not touch a claim's recorded rationale (invariant 5), the captured text or the audit detail | The queries under Known residuals at Beta 1 list them. Removing one is an owner decision |
+| **Forks in the audit and custody chains from before 0149** | The audit and custody rows at or below the boundary 0149 recorded | Alpha 7a's concurrent writers forked both chains. Verification reports them as legacy and they do not break `intact`; a fork above the boundary is a break | Nothing: they are history, and the log is append-only |
 
 ---
 
@@ -47,130 +49,347 @@ is the section to act on first.**
 Nothing the 2026-09-22 review found is open here. The owner decided F2,
 F14, F16 and F24 that day, and F3 was reclassified as an accepted cost (it
 was never a defect: the register already refuses on it). Each decision, and
-what was built to hold it, is in the next section. The entries below were
-added with the features since Alpha 6; F35, F36 and F37 closed on
-2026-10-02 (table at the end). The 2026-10-03 review's open findings
-follow them.
+what was built to hold it, is in the section after the next two. F35, F36 and
+F37 closed on 2026-10-02, and F51 and F52, the two items this section carried
+at Alpha 8, are closed at Beta 1 (table at the end).
 
-### F51: Five tables are not under row-level security yet
+What is open is in the two sections that follow. The first says what became of
+each finding of the 2026-10-03 review. The second is every gap the fixes, the
+independent re-verification and the release reviews found and left, organised
+by area. Read the second before reporting a weakness: a residual named there
+is known, and by this file's own definition each one is CHANGE LIKELY unless
+its entry says it is an accepted cost or a judgement to confirm.
 
-Added 2026-09-25 (roadmap S1), updated 2026-10-03. Row-level security
-stands on 76 tables (docs/00 decisions 137 to 163): the notification
-tables, the lookup ledger and `collect.telegram_chat` joined it on
-2026-10-02 (Alembic 0125 to 0129, decisions 152 to 163). These five are
-listed in `rls_registry.DEFERRED`, each with the work it still needs, and
-on them a statement injected into a request reaches every row the request
-role can:
+---
 
-- `audit.event`: a policy of its own (decision 151). Owed first: its
-  readers on the request connection (a case's timeline, review history and
-  the ingest triage state) are converted, attaching a quarantined record
-  must copy its triage state onto a row in the case, and
-  `iam.countersign_blocked_by`, which reads the log for the countersigning
-  rule, must become a definer.
-- `ingest.record`: the unauthenticated submit, the parse, replay, scoring
-  and rescoring run as system purposes first, because they dedupe against
-  every record, score against every watch and write rows their caller may
-  be below. Found while converting the notifications (2026-10-02): the
-  selector-hit notice reads the case on the caller's connection, so an
-  ingest operator who is not on the case raises none.
-- `ingest.victim_credential`: a child of the record, after it; the reveal
-  and the masked listing are gated on the PII authorisation first.
-- `ingest.dead_letter`: one definer predicate backed by an index on
-  `ingest.record (batch_id, case_id)`, after the record.
-- `ingest.pii_authorisation`: the case template for the Lead investigator's
-  reveal, and a term admitting a global holder of `victim_pii.authorise`,
-  because the Security Officer who grants it holds no case assignment.
+## The 2026-10-03 review at Beta 1
 
-Policies on these five were built in part on 2026-10-02 and 2026-10-03 and
-stopped before they merged; none of that work is in Alpha 8.
+An adversarial review of the build at commit 718f92d (2026-10-03), each
+area's findings put to a second reader who tried to refute them, kept 82 of
+84: 16 high, 25 medium and 41 low, none critical. Seven independent readers
+then re-ran every reproduction against the merged code, and the fixes that
+followed were checked again by the release reviews. At Beta 1, 77 are fixed,
+one (rls-6) is fixed for account credentials and stated for the rest, and
+four are stated and not fixed. A fixed finding that leaves something carries
+the sentence here and an entry under Known residuals. Reproduction steps are
+not published.
 
-**Fix:** convert each family's readers and move it into `POLICY`; the
-registry test and the readiness row follow by themselves.
+### Row-level security and accounts
 
-### F52: The schema owner's password still reaches the runtime services
-
-Added 2026-09-25 (roadmap S1). `POSTGRES_PASSWORD` and the migration
-connection string sit in `secrets.env`, which every application service
-reads, so a process that should hold only the request and system roles
-can also connect as the owner, which row security does not bind and which
-can switch off the append-only triggers. Moving them now would stop every
-existing production deployment at boot until the installers change.
-**Fix:** move both into `postgres-init.env` and a file only the migrate
-job reads, and change the installers with them. Built in part on
-2026-10-02 and stopped before it merged; not in Alpha 8.
-
-## Open from the 2026-10-03 review
-
-An adversarial review of the beta build at commit 718f92d (2026-10-03),
-each area's findings put to a second reader who tried to refute them, kept
-82 of 84: 16 high, 25 medium and 41 low, none critical. **None is fixed in
-Alpha 8**: fixes were in progress when the build stopped. Several high findings are one
-defect reached from two or three sides, and each is listed under its own
-id. By this file's own definition every one is CHANGE LIKELY. Reproduction
-steps are deliberately not published here while the findings are open.
-
-### High
-
-| Id | Area | What is wrong, and what it costs |
+| Id | Severity | At Beta 1 |
 |---|---|---|
-| rls-1 | Row-level security, merges | Merge history returns merges of entities above the reader's clearance or outside their compartments, with both entity ids and the merger's free-text reason, to every holder of `case.read`, the read-only and liaison roles included. The merge table's policy has the case term only. |
-| graph-merge-ledger-and-approvals-leak | Graph, merges and approvals | The same disclosure through the merge ledger and the node-merge approval requests: hidden entities' ids, the fact that two hidden personas are one actor, and the written reason and justification, to any case reader. The ids are the first step toward the merge and tie findings below. |
-| graph-merge-no-element-label-gate | Graph, merges | Merge and unmerge check the case's labels only and run on the system connection, so a member below an entity's label can merge it away or reverse a merge of it, and the hidden entity's ties then show on the visible survivor, which keeps its lower label. |
-| graph-selector-record-oracle | Graph, selectors | Recording a selector answers with the existing row even when its owner is an entity the caller cannot see, so an analyst can test whether the case holds an identifier and learn the hidden owner's id, and each test changes the hidden row's counters. |
-| evidence-hold-lift-below-label | Evidence, legal hold | A Lead investigator cleared below an exhibit can lift its legal hold alone, with no reason and no second person, because the route checks the case's labels and not the exhibit's; the next purge can then destroy it. |
-| evidence-case-hold-unreachable | Evidence, legal hold | Nothing in the product sets a case-level legal hold, though the purge, the lookup purge and sample preservation all read one, so ingest records, lookups and exhibits lodged after an order cannot be held through the product. F45 below and the retention module said a case could be held. |
-| evidence-purge-hold-race | Evidence, purge | A legal hold placed on an exhibit while a purge is running is acknowledged and then ignored: the exhibit leg reads the holds once, before its store deletes, and neither locks nor reads them again. The document leg does (decision 74). |
-| evidence-report-case-raise-leak | Reports | A report built at a lower label than its case includes everything created before the case was raised, and the egress gate lets it out at the lower mark, while exporting the same exhibit is refused. Invariant 8 is not met on the report path. |
-| egress-notify-address-list | Notifications | The domain allowlist for a personal notification address checks one domain, and an address field holding a list escapes it, so a user can copy every notice they receive (case codes, summaries up to AMBER) to an outside mailbox. The change is audited, not prevented. |
-| lab-1 | Lab, sandbox | Where the operator lists a sandbox machine on a live network, a send that names no machine, the console's default, skips the named second person, so one analyst can detonate on an internet-attached machine. |
-| http_ui-001 | HTTP, merges | The merge defects above, reached from the routes: merge, unmerge and merge history ignore the entities' own labels. |
-| http_ui-002 | HTTP, selectors | The selector defect above, reached from the route. |
-| http_ui-004 | HTTP, audit log | Every unauthenticated request carrying an invalid session appends a permanent audit row with no source address, bounded only by the per-address request ceiling, so anyone can flood the append-only log and bury real events. |
-| http_ui-005 | HTTP | No request body ceiling on JSON or form routes, and the proxy sets none, so one unauthenticated request can make the single API process buffer an arbitrarily large body before it is refused. |
-| http_ui-006 | HTTP, audit log | A failed sign-in records the submitted email in the audit log, unbounded, so an unauthenticated caller can write large permanent rows into a table nothing may delete. |
-| infra-2 | Infrastructure, backups | The documented backup writes a plaintext dump of the whole case database into the repository root, which is the Docker build context, and the documented update then builds it into the image every service runs. The evidence mirror is written world-readable. |
+| rls-1 | high | Fixed (Alembic 0132): merge history and the merge approvals are visible only where both entities are. |
+| rls-2 | medium | Fixed (0134): a selector's key includes its labels, so the owner and the counters of a hidden row are never returned. |
+| rls-3 | medium | Fixed (0133): a live tie's key includes its labels, so creating one says nothing about a hidden one. A merge over a duplicate the merger cannot read sets it aside and records it. |
+| rls-4 | medium | Fixed (0141): the bytes of a hidden exhibit upload as novel bytes. |
+| rls-5 | low | Fixed (0147): a conversation's external key is unique per labels. |
+| rls-6 | medium | Fixed for credentials (0143): the request role cannot read the password hash, the sealed TOTP secret, its key id, the recovery hashes or the last counter. Case membership, session metadata and break-glass justifications are still readable by it (Known residuals). |
+| rls-7 | low | Fixed (0144): the request role cannot write step-up freshness, and a session guard confines the idle clock. |
+| rls-8 | low | Fixed (0145): `notify.enqueue` answers only a bound caller, as itself. |
+| rls-9 | low | Fixed: a node set's member list follows the case's disclosure setting. |
+| rls-10 | low | Fixed: the documents give the registry's real count, 82 tables under policy and none deferred. |
 
-### Medium
+### Graph
 
-| Id | Area | What is wrong, and what it costs |
+| Id | Severity | At Beta 1 |
 |---|---|---|
-| authz-session-revoke-bypass | Access control, sessions | A request in flight when a session is revoked can write the session back as live, undoing a sign-out, a password change, a deactivation or a TOTP re-enrolment. In production the request role's guard refuses that write and the request fails; wherever requests connect as the owner (development, a single-role deployment) the revocation is lost. |
-| rls-2 | Row-level security, selectors | The selector defect above, seen from the policy: the selector table's policy has the case term only, and this route skips the owner check its reader applies (decision 147). |
-| rls-3 | Row-level security, ties | The uniqueness rule on live ties spans labels, so creating a tie between two visible entities tells the caller whether a hidden tie of that type already joins them. |
-| rls-4 | Row-level security, exhibits | Exhibit upload looks for a duplicate in the uploader's filtered view, so the bytes of a hidden exhibit answer with a server error instead of success, an existence oracle, and each attempt adds a locked object version under the hidden exhibit's key. |
-| rls-6 | Row-level security, accounts | The request role, even unbound, can read every account's password hash, sealed TOTP secret and recovery hashes, every session's token hash and every case's membership, so a statement injected anywhere can take them for offline cracking. |
-| graph-edge-endpoints-not-gated | Graph, ties | A tie can be created to an entity above the caller, and shows on that entity's graph as an accepted tie; retiring a visible entity retires ties to hidden ones and returns a count that localises them. |
-| graph-retracted-correction-stays-in-force | Graph, corrections | A correction to a label, attributes or a weight overwrites the column, and retracting the correction leaves the new value in force with no live claim behind it, so a withdrawn value keeps driving the canvas and the measures. |
-| graph-assertion-claims-mutable-by-request-role | Graph, invariant 5 | The database does not hold invariant 5 for claims: the request role can rewrite a claim's grading and value, un-retract it or delete it, with no audit row. Only the application refrains. |
-| graph-selector-index-drift | Graph, selectors | The selector index drifts from the graph: a corrected label, a retired and recreated entity and an accepted proposal each leave it wrong or empty, so search misses the live entity and a strong-selector duplicate is never raised as a merge lead. |
-| graph-url-selector-keeps-credentials | Graph, normalisers | The URL normaliser keeps a user name, a password and secret query values, so a pasted stealer line becomes an entity label holding a victim's password, outside the victim-credential store and its two-person handling. |
-| evidence-integrity-anchors-mutable | Evidence, integrity | Exhibit integrity is checked against columns the request role can rewrite, the hash-chained original digest is never compared with them, and a hidden object answers with an error rather than an integrity alarm, so a substitution made with the API's own credentials verifies as intact. |
-| evidence-audit-chain-forks | Evidence, audit chain | The audit and custody chains fork under ordinary concurrent writes, which the product says cannot happen, and a fork's dead-end row can be removed by the table owner with the verifier still reporting the chain intact. |
-| evidence-ingest-dedup-oracle | Evidence, upload | The duplicate-upload oracle of rls-4, found from the evidence side; it reaches every ingest route, captures and deception emails included. |
-| evidence-due-leaks-hold-reason | Evidence, retention | The retention due list shows the ids and free-text hold reasons of exhibits above the caller's labels to every case role, for any date the caller chooses. |
-| evidence-category-clock-outlives-case | Evidence, retention | The rule that a category's clock may only shorten a case's retention has no production caller, so a record attached to a case can be kept long past the case's own clock. |
-| evidence-ledger-actor-time-forgeable | Evidence, audit and custody | The request role can append audit rows that name another user and any time, and custody rows that name another user, and the chains verify them, because they hash whatever is written. The audit log is one of the five tables F51 lists. |
-| egress-rss-floor | Egress, feeds | RSS and web feeds labelled AMBER_STRICT or RED are polled without the egress floor, and the upgrade's adopt step sets the passive profile's ceiling to the highest feed label, so a RED feed is read from the deployment's own address on schedule while readiness shows green. |
-| collection-shared-exit | Collection, personas | A persona can be created on an egress profile a persona-less public read already uses, so a covert persona and a public forum read leave from one exit address; the reverse order is refused, and neither the availability flag, the separation report nor the proxy notices. |
-| collection-rss-doctype-bypass-utf16 | Collection, feeds | The feed parser's refusal of document type declarations, its stated defence against external entities and entity expansion, does not see one in a feed in a wide character encoding. The XML library's own limits held in the review, so nothing worse was shown, but the defence rests on library behaviour the code says it does not rely on. |
-| lab-4 | Lab, retention | Samples are outside the retention purge, so a purged case's samples stay downloadable for good, while docs/11 and the samples router say they leave through it. |
-| http_ui-003 | HTTP, evidence | An exhibit's locked bytes are written before its database row, so any refusal after that (a label below the case's floor, a control character in a field) leaves a permanent object no custody or audit row names. |
-| http_ui-010 | HTTP, first run | The first-run route makes whoever calls it first an administrator, Security Officer and RED-cleared lead, with no proof of possession, on a fresh deployment already reachable from the internet. |
-| http_ui-011 | HTTP, approvals | The approvals disclosure above, reached from the route: node-merge requests show hidden entity ids and the justification to every case reader, and raising one does not check the entities it names. |
-| infra-1 | Infrastructure, images | `.dockerignore` omits the three secret files the egress work introduced, so every image carries the system role's database password (a role that bypasses row security) and the egress proxy's private sealing key. |
-| infra-3 | Infrastructure, first run | The first-run window of http_ui-010 on the production stack: the proxy publishes the site before the documented first-administrator step. |
+| graph-merge-ledger-and-approvals-leak | high | Fixed (0132 and the approval routes): hidden entities' ids and the merger's reason are not shown, and a hidden approval answers as a missing one. |
+| graph-merge-no-element-label-gate | high | Fixed: merge and reversal check the entities' own labels, and a hidden entity answers as a missing one. |
+| graph-selector-record-oracle | high | Fixed (0134): a hidden holder reads as no holder, on `POST /selectors`, `POST /nodes` and a label correction. |
+| graph-edge-endpoints-not-gated | medium | Fixed: a tie to a hidden, other-case or unknown entity answers 404, and a retirement count no longer localises a hidden tie. |
+| graph-retracted-correction-stays-in-force | medium | Fixed (0136): a correction records the value it replaced, and retracting it puts that value back. |
+| graph-assertion-claims-mutable-by-request-role | medium | Fixed: 0135 refuses UPDATE, DELETE and TRUNCATE of a claim to both runtime roles, and 0171 binds an INSERT. The worker role keeps what it holds (Known residuals). |
+| graph-selector-index-drift | medium | Fixed (0138 and the writers): the index follows a corrected label, a retired and recreated entity and an accepted proposal. |
+| graph-url-selector-keeps-credentials | medium | Fixed for the shapes known: a link's userinfo, credential-bearing query values and the `url:login:password` layout are refused or redacted on every path, and 0137 scrubbed what was stored. Shapes no pattern can see, and rows stored before 0137, are in Known residuals. |
+| graph-unmerge-loses-ties-after-target-retired | low | Fixed: retiring the target of a live merge is refused (409), and a reversal reports the ties it restored and the ones left retired. |
+| graph-unmerge-500-and-ties-to-merged-nodes | low | Fixed: a tie to a merged-away entity is refused (409), and a reversal that would duplicate a tie is a 409 naming the fix. |
+| graph-valid-to-cannot-be-set-after-creation | low | Fixed: `PATCH` of an entity or a tie accepts `valid_to` as a correction that can be retracted. |
+| graph-coparticipation-ignores-withheld-none | low | Fixed for the stated count, which is gone under NONE. A weight still divides by the room's raw size (Known residuals). |
 
-### Low
+### Evidence, retention, reports and the ledgers
 
-41 low findings: row-level security 5, graph 4, evidence and retention 6,
-egress 2, collection 1, the Lab 4, HTTP and the console 9, and
-infrastructure 10. Most are smaller existence oracles and withheld counts,
-error paths that answer 500, ledger and lock edge cases, and deployment
-hardening (images pulled by tag, no HSTS from the shipped terminator, job
-loops that ignore a stop signal, secrets on command lines). One of them,
-rls-10, is that three documents gave stale table counts; these documents
-now give the right ones.
+| Id | Severity | At Beta 1 |
+|---|---|---|
+| evidence-hold-lift-below-label | high | Fixed: lifting a hold needs the lifter cleared for the exhibit, and a written reason. |
+| evidence-case-hold-unreachable | high | Fixed in the API (`POST /api/v1/retention/cases/{id}/legal-hold`). The console has no control for it (Known residuals). |
+| evidence-purge-hold-race | high | Fixed: the purge runs one exhibit per transaction and reads the case hold again for each item. A delete already running is not stopped (Known residuals). |
+| evidence-report-case-raise-leak | high | Fixed: a report built below the case's label leaves out what was created before the raise, and says it was withheld. |
+| evidence-integrity-anchors-mutable | medium | Fixed (0139, 0140): hashes, key, size and case are fixed when an exhibit is lodged, reads ask for its recorded version, and a missing or replaced version raises an integrity alarm. |
+| evidence-audit-chain-forks | medium | Fixed (0149): both chains take their number inside the chain lock. |
+| evidence-ingest-dedup-oracle | medium | Fixed: see rls-4. |
+| evidence-due-leaks-hold-reason | medium | Fixed: the due list leaves out exhibits above the caller, and a hold's text goes only to `retention.manage` holders. |
+| evidence-category-clock-outlives-case | medium | Fixed: a record is due at its case's date at the latest. |
+| evidence-ledger-actor-time-forgeable | medium | Fixed (0150, 0151, 0169): the request role cannot name another user, date a row or draw the ledger sequences. |
+| evidence-orphan-locked-object | low | Fixed: the row is inserted first and the object second, and a short write records `EVIDENCE_OBJECT_ORPHANED`. |
+| evidence-reingest-after-purge-dropped | low | Fixed: bytes whose exhibit was purged lodge as a new exhibit. |
+| evidence-report-release-in-app | low | Fixed: `in_app` and `model_host` answer 400. |
+| evidence-unswept-unattached-and-dead-letter | low | Not fixed, stated (F55). |
+| evidence-chain-no-anchor | low | Not fixed, stated: `/audit/verify` returns the tail it checked and says what a verification cannot see, and the anchor that would catch a cut tail is the operator's to record. |
+| evidence-purge-stalls-audit-chain | low | Fixed: a four-exhibit purge took 4.1 seconds while an unrelated audit insert waited 0.0. |
+
+### Egress, notifications and collection
+
+| Id | Severity | At Beta 1 |
+|---|---|---|
+| egress-notify-address-list | high | Fixed (0148): a personal address is one plain address, and the drain refuses a stored list. |
+| egress-rss-floor | medium | Fixed: a RED or AMBER_STRICT feed is refused, and the adopt step caps a feed's ceiling at AMBER. |
+| egress-lookup-signoff-exposure | low | Fixed: raising a provider's exposure cancels a lookup that awaits sign-off. |
+| egress-ledger-withheld-oracle | low | Fixed apart from one count: the withheld figure is one number for the whole log (Known residuals). |
+| collection-shared-exit | medium | Fixed: a persona is refused on an exit a public read uses. |
+| collection-rss-doctype-bypass-utf16 | medium | Fixed: a feed whose decoded text holds a NUL is refused, which closes UTF-16 and UTF-32 with or without a byte-order mark. |
+| collection-watch-regex-redos | low | Fixed: a pattern runs in a bounded child, in the isolated worker in production, and is stopped at its limit. |
+
+### The Lab
+
+| Id | Severity | At Beta 1 |
+|---|---|---|
+| lab-1 | high | Fixed: with a live machine listed, a send that names none is refused. |
+| lab-2 | low | Fixed: while a screening pass runs over a newly imported list, the sample's ticket, download, triage claim and sandbox send answer "no such sample". |
+| lab-3 | low | Fixed: a record-only detonation is `PENDING` and notifies the named authoriser. |
+| lab-4 | medium | Fixed: samples are due, and disposed of, by the purge. |
+| lab-5 | low | Fixed: the origin split is asked before a ticket is spent. |
+| lab-6 | low | Not fixed, stated (Known residuals). |
+
+### HTTP, sessions and the console
+
+| Id | Severity | At Beta 1 |
+|---|---|---|
+| authz-session-revoke-bypass | medium | Fixed: a revoked session stays revoked, tested under concurrent requests. |
+| http_ui-001 | high | Fixed: see rls-1. |
+| http_ui-002 | high | Fixed: see graph-selector-record-oracle. |
+| http_ui-003 | medium | Fixed: the row is inserted before the object, and a label below the case's floor or a NUL in a field is a 400. |
+| http_ui-004 | high | Fixed: a bad bearer token writes no audit row, and replaying a revoked real token writes one row in all, however often it is replayed. |
+| http_ui-005 | high | Fixed for JSON and form routes (a 1 MiB ceiling, chunked bodies included). An upload with a junk credential is still read to its cap (Known residuals). |
+| http_ui-006 | high | Fixed: a failed sign-in's email is 254 characters at most, and is recorded as typed only when it is shaped like an address (Known residuals). |
+| http_ui-007 | low | Narrowed, stated (Known residuals). |
+| http_ui-008 | low | Fixed: a binding to a node of another case, above the caller or unknown answers alike. |
+| http_ui-009 | low | Fixed: a NUL in a parsed header no longer makes an e-mail unrecordable. |
+| http_ui-010 | medium | Fixed: in production the first-run route does not exist without `NOCTORNAL_SETUP_TOKEN`, and needs the token when it is set. |
+| http_ui-011 | medium | Fixed: raising a node-merge request checks the entities, and a hidden approval answers as a missing one. |
+| http_ui-012 | low | Fixed: a change hint carries the labels of what changed, and the socket drops it for a reader below them. |
+| http_ui-013 | low | Fixed: a hello that is not a JSON object closes 1008 without a logged error. |
+| http_ui-014 | low | Fixed: a NUL, and a lone surrogate, in a JSON body is a 422. |
+| http_ui-015 | low | Fixed: per-element lists take `limit` (at most 1000) and `offset`; the two case-wide exceptions are in CONVENTIONS.md. |
+| http_ui-016 | low | Fixed in status and wording: a hidden element answers as a missing one. The time it takes and the audit row differ (Known residuals). |
+| http_ui-017 | low | Fixed: a `#token=` link names the account it would sign in as and asks first. |
+
+### Infrastructure
+
+| Id | Severity | At Beta 1 |
+|---|---|---|
+| infra-1 | medium | Fixed: `.dockerignore` leaves out every secret file the stack names, and local working notes. |
+| infra-2 | high | Fixed: the documented backup writes outside the checkout, private from the first byte and encrypted in the pipe, and the dump names are ignored by the image and by git. |
+| infra-3 | medium | Fixed: see http_ui-010. |
+| infra-4 | low | Fixed: a boot refuses a request role named `noctornal` or `postgres`, and a connection as the owner or a bypassing role is refused when it is made. |
+| infra-5 | low | Fixed: every service drops all capabilities and Caddy holds only `NET_BIND_SERVICE`. What stays is in Known residuals. |
+| infra-6 | low | Fixed: Caddy sends Strict-Transport-Security, speaks TLS 1.3 only and redirects plain HTTP. |
+| infra-7 | low | Fixed for the production stack, whose images are pinned by digest. The development compose file, the CI actions, pip and gnupg are not (Known residuals). |
+| infra-8 | low | Fixed: Postgres runs with `log_parameter_max_length=0` and its error twin. |
+| infra-9 | low | Fixed in `install.sh`, `launch.sh` and `start.sh`: `.env.local` is parsed as data. |
+| infra-10 | low | Fixed apart from one argument (Known residuals). |
+| infra-11 | low | Fixed: the cron loops stop on the stop signal after the pass in hand. |
+| infra-12 | low | Fixed: every job script refuses a published credential, and the egress DSN's placeholder. |
+| infra-13 | low | Fixed: `yara_db.py` does not follow a symlink in a pulled rule repository. |
+
+---
+
+## Known residuals at Beta 1
+
+What the fixes, the re-verification and the release reviews found and left,
+by area. Each entry says what is true, what it costs and what would close it.
+An entry marked "decision" records a call the owner may want to make
+differently.
+
+### Access control and row-level security
+
+| Id | What is left, and what it costs | What would close it |
+|---|---|---|
+| rls-6 (part) | The request role, even with no session bound, can still read every `iam.case_assignment` row (who holds which role on which case), `iam.session` (`token_hash`, `rls_binding_hash`, `ip`, `user_agent`) and `iam.break_glass.justification`. The credential columns of `iam.app_user` are closed (0143). `token_hash` is a sha256 of a 256-bit random token and the binding proof is derived from the raw token, not from that hash, so neither opens a session; what is disclosed is who works which case and from where. It takes a statement injected into a request. 0109 made the IAM plane read-only to the request role instead of filtered, because the policies read it on every request. | A column-level REVOKE of the session and break-glass columns with definer functions for the legitimate readers; filtering `iam.case_assignment` needs its readers moved to definer functions first. Each is a migration. |
+| sealed columns outside the accounts table | The unbound request role can read as ciphertext or a keyed hash: `collect.collection_account.secret_ciphertext` and `session_ciphertext`, `ingest.api_key.secret_hmac`, `ingest.provider.secret_ciphertext`, `lab.download_ticket.token_hash`, and, for a bound caller with no assignment, `lab.sample.data_key_ciphertext`. No plaintext follows without the key encryption key or the pepper, which live in the process environment, and the persona key is held only by the collector in production. | A column-level REVOKE with definer readers for the length and null checks the API makes. A migration. |
+| unpolicied configuration tables | The request role can write egress destinations, routes and profiles, `collect.source`, `core.retention_rule`, `ingest.api_key`, `notify.jira_destination` and similar tables, and no row policy filters them. One statement injected through a session could add an egress route or shorten a retention rule without the step-up and the audit the administration routes apply. | Move the writes to a system connection and revoke them from the request role, as 0109 did for the accounts plane. |
+| hold and purge columns, and soft-delete tables | `noctornal_app` holds table-level UPDATE on `core.evidence` and `core."case"`, so a statement injected as that role can set an exhibit's `legal_hold` false, its `purged_at`, `retention_until` or `is_worm_locked`, and a case's `legal_hold` or `retention_until`. The database refuses a row that is both held and destroyed (0142) and fixes an exhibit's hashes, storage key, version id and case (0140); nothing guards `legal_hold` going to false. The request role also holds DELETE on soft-delete-only case tables and UPDATE on columns the application never writes as that role. The same class as F52 was: a process holding the request role's credentials can do what the application refrains from. | Narrow the request role's UPDATE and DELETE to the columns and tables the application writes as that role, or move those columns behind the system role by trigger, as 0140 did for the anchors. |
+| definer functions answer for any id | `iam.case_facts`, `iam.element_facts` and `iam.countersign_blocked_by` answer the labels and the administration metadata of any id, without content. That is by design (decision 141). `SELECT last_value` on `lab.sample_access_id_seq` reads the Lab ledger's volume. | Not proposed for the facts; the sequence could be revoked as 0169 did for the two ledgers. |
+| idle window at the binding | `iam.rls_actor` checks a session's absolute expiry and not its 30-minute idle window. The HTTP layer refuses first, so this needs a raw token and direct access to the database. | Check the idle window in the function. |
+| session clock | The request role may move its own session's `last_seen_at` forward by up to five minutes past the database's clock (`CLOCK_SKEW` in 0144, stated there as intended: it keeps an API host with a fast clock from failing every request). | None proposed. |
+| `notify.enqueue` text | A caller bound to a live session can send arbitrary text to any eligible recipient, as itself, with a pending mail delivery. 0145 stops it being sent as anyone else and stops it forging delivery rows; it does not limit what a bound account may say. | A kind and template allowlist inside the function. A migration. |
+| the audit log's append policy | The insert policy on `audit.event` admits any row, so a bound user who is not on a case can append a state-bearing row naming it (a triage verdict, a category correction, ACH history, a report hypothesis note), and the readers that take the newest row by object id (`triage_state`) then read it. Attribution holds, because the row names the planter. Needs SQL as the request role. | Require the case term (`case_id = ANY(iam.rls_cases())`) or `ingest.manage` in the append policy for those actions. Not for refusals: an honest refusal names a case the caller cannot read. |
+| LIAISON is not single-case | docs/05 says a liaison holds one case; one liaison account can be assigned to several. An assignment with no end is refused (decision 185). | Refuse a second live assignment of a LIAISON. |
+| a second permission check in a handler | `embeddings.py` makes a global-permission check in the handler, outside the gate, and its 403 writes no AUTHZ_DENIED row. | Move it into the gate. |
+| refusals are recorded as SUCCESS | An AUTHZ_DENIED audit row is stored with outcome SUCCESS (`http/deps.py`), so a filter on outcome misses them. | Store DENIED. |
+| `real_name` on an identity | The graph service accepts `attrs.real_name` on an IDENTITY entity, which goes against invariant 2 in spirit though not in the schema. | Refuse the key. |
+| development without row security | On an owner connection (development, a single-role deployment) the layout lists hidden entities and an ACH stance on a hidden claim answers 200. Under the production role both hold. | None: the request role is the control. |
+
+### Graph, merges and selectors
+
+| Id | What is left, and what it costs | What would close it |
+|---|---|---|
+| label correction after a retraction | A label correction asks which selector types other entities hold only with the caller's labels. A retraction that restores a label passes none, so the lookup is not made there; a retraction never refuses, so nothing is told. The narrow cost is that the restored label of an entity that owns no index row for its own label (a duplicate of a value another entity holds) is not indexed under that holder's type. | None proposed. |
+| merge set-aside (decision 176) | While a merge is live a set-aside tie is retired, so its claims count toward nothing and the survivor's own tie stands alone; reversing the merge restores them and nothing is destroyed. The column comment on `deleted_by_merge` (0055) still says a self-loop, and a merge record's `edges_self_loop_deleted` counts set-aside duplicates with the ties between the two entities; `edges_duplicate_folded` in the `NODE_MERGED` audit detail and the owner's notification tell them apart. A merge made through the service with no labels is refused as before. | Rewording the comment needs a migration. |
+| conversations above everyone assigned (decision 177) | A RED conversation in an AMBER case can be flagged or minimised only by someone cleared for it; where nobody assigned is, nobody can. Whether a case's closure should look for a conversation no one on the team can minimise is not decided. | Decide it. |
+| a refused reversal names that a later merge exists | The sentence says that a later merge the reader cannot see holds the reversal. That one bit cannot go without allowing the reversal the rule forbids, which would write old endpoints over ties a live merge owns. | None. |
+| hidden and missing differ in time and in the audit log | The status and the sentence are one answer for a hidden element and a missing one. Medians over 40 interleaved in-process calls each were 97.6 ms against 79.1 ms (merge), 95.9 against 80.4 (tie create) and 81.1 against 66.5 (entity correction), and the gate writes an AUTHZ_DENIED row for the hidden id and none for the missing one. Doing the same work for a missing id would append a denial row for every id that names nothing, and the gap was measured with no network in between. | Decide whether a missing id should cost the same. |
+| retiring an entity with a hidden tie | The refusal (`HIDDEN_TIES_REFUSAL`) is the same under NONE, PRESENCE and COUNT, so under NONE it still says that a tie above the caller touches the entity, while docs/14 U2 makes what is said about withheld material a per-case setting. Honouring NONE needs a decision between retiring over ties the caller cannot see and a refusal in words no different from any other. | Decide it. |
+| co-participation weights | A weight divides by the room's raw size, hidden members included, so under NONE a room of two AMBER identities and one RED one weighs 0.5 where a two-person room weighs 1.0, and a reader who knows a room can difference a weight to learn that someone they cannot see is in it. The explicit count is gone under NONE; the weight is not. Migration 0030 already concedes that differencing is possible. | Divide by the visible size, at the cost of a figure that changes with the reader. |
+| credentials no pattern finds (decision 181) | A secret in a URL path with no separator (`/hooks/<workspace>/<channel>/<token>`), a `?l=` or `?hash=` value whose name does not say it is a credential, a pair with one separator, a pair with no path (`https://y.example:carol:pw`), and a bare `alice:pw@host`, which is read as an e-mail selector. A final path segment with two separators that is not a login pair (a time, an IPv6 address, a URN) is cut as if it were one, so two such URLs can collide in the selector index. | Not detectable by shape. |
+| rows stored before the fixes | The 0137 scrub does not touch a claim's rationale, the captured document's text, `audit.event` detail, or an e-mail selector read out of the userinfo of a link that is not http (`mysql://root:Secret123@db.example/app` was read as `Secret123@db.example`). The `url:login:password` layout without an `@` is not cleaned from rows written before the fix either, and no migration was added for it. The queries below find them; run them as the schema owner, they are read-only, and look at each hit before changing anything. A label is corrected through the product, which records the correction as a claim. A claim's rationale is never rewritten by the product (invariant 5): the owner who decides to remove one does it as the schema owner with the `assertion_marked_once` trigger disabled for that statement, and the cost is a claim whose recorded rationale no longer equals what the analyst accepted. | Owner-run, per row. |
+
+```sql
+-- Claim rationales that copied a link carrying a password (any scheme)
+SELECT a.id, a.case_id, a.node_id, a.edge_id
+  FROM core.assertion a
+ WHERE a.retracted_at IS NULL
+   AND a.rationale ~* '[a-z][a-z0-9+.-]*://[^/?#[:space:]@]+:[^/?#[:space:]@]*@';
+
+-- Entities accepted from a link that is not http or https and carries userinfo,
+-- whose label is shaped like an e-mail address
+SELECT n.id AS node_id, n.case_id, n.label
+  FROM core.node n
+  JOIN collect.proposal p ON p.applied_node_id = n.id
+ WHERE p.rationale ~* '\m(?!https?://)[a-z][a-z0-9+.-]*://[^/?#[:space:]@]+:[^/?#[:space:]@]*@'
+   AND n.label ~ '^[^@[:space:]]+@[^@[:space:]]+$';
+
+-- The stealer layout url:login:password written before the fix
+WITH shape(re) AS (VALUES (
+  '^[a-z][a-z0-9+.-]*://[^/?#]+(/[^/?#]*)*/[^/?#:|@]*[:|][^/?#:|@]+[:|][^/?#]+([?#].*)?$'))
+SELECT 'core.node' AS "table", n.id, n.case_id, 'label' AS "column"
+  FROM core.node n, shape WHERE n.label ~* re
+UNION ALL
+SELECT 'core.node', n.id, n.case_id, 'attrs.raw_value'
+  FROM core.node n, shape WHERE n.attrs ->> 'raw_value' ~* re
+UNION ALL
+SELECT 'core.selector', s.id, s.case_id, 'raw_value or norm_value'
+  FROM core.selector s, shape
+ WHERE s.selector_type IN ('URL', 'SOCIAL_URL')
+   AND (s.raw_value ~* re OR s.norm_value ~* re)
+UNION ALL
+SELECT 'collect.proposal', p.id, p.case_id, 'payload label or raw_value'
+  FROM collect.proposal p, shape
+ WHERE p.payload ->> 'label' ~* re OR p.payload -> 'attrs' ->> 'raw_value' ~* re
+UNION ALL
+SELECT 'collect.extraction', e.id, NULL, 'raw_value or norm_value'
+  FROM collect.extraction e, shape
+ WHERE e.selector_type IN ('URL', 'SOCIAL_URL')
+   AND (e.raw_value ~* re OR e.norm_value ~* re);
+```
+
+The last query's shape also matches the false positives named in the previous
+table. The pasted line itself stays in the captured document's text and in any
+claim rationale that copied its context.
+
+### Evidence, retention and reports
+
+| Id | What is left, and what it costs | What would close it |
+|---|---|---|
+| no console control for a hold | The console has no control to place or lift a hold on an exhibit or on a case. The one hold control is the collected document's (the document card, Place a legal hold). An exhibit is held with `POST /api/v1/retention/legal-hold` (`evidence_id`, `on`, `reason`) and a case with `POST /api/v1/retention/cases/{id}/legal-hold` (`on`, `reason`): both need `retention.manage` through the gate with a fresh second factor and a written reason of at least five characters whichever way the hold goes, and both write `LEGAL_HOLD_APPLIED` or `LEGAL_HOLD_LIFTED`. docs/08 says where an analyst finds this. | A control on the exhibit card and on the case header that calls the two routes. |
+| lifting a hold is one person (decision 193) | Lifting a hold is one person with a written reason. A review suggested two people and the owner did not adopt it, so the code comments, this entry and the tests describe the single-person design. A lift below the material is refused: an exhibit's needs the lifter cleared for it, and a case-level lift needs a ceiling that covers every live exhibit, record, sample, lookup and cited collected document the case holds. | A two-person approval kind. |
+| a hold cannot reach into a delete in flight | A case hold entered while a purge runs waits for the exhibit being destroyed at that moment, and that exhibit is destroyed. Every exhibit after it is read as held and kept, and the purge says so. The records, lookups and samples of a case share one short transaction that holds the case row `FOR SHARE`, so a hold entered during it lands after it; a destroying sample rejection holds the case row for its own delete. The hold's own answer does not say what the purge destroyed while it waited. | Have the hold response report it. |
+| the tombstone and the out-of-schedule purge | `purge_due` marks each exhibit destroyed in the transaction that deleted it and writes the tombstones afterwards. If a tombstone cannot be written the exhibits are destroyed and marked and the error says how many; they are no longer due, so another purge does not write it. `purge_out_of_schedule` is still one transaction with the approval's spend, because the approval must be spent with the destruction, so a failure there after a store delete rolls the marks back, leaves the approval usable and the object gone. A destroying Lab rejection opens a second, system connection for the length of the delete, to hold the case row. | None proposed. |
+| the purge's own answer | The purge dry run's totals and its withheld notice follow the case's setting, as the due list's do. The real run's response and its tombstone still total what the sweep acted on, exhibits above the caller included, so a caller who may run a real purge learns the count afterwards. A refused case-hold lift names nothing above the lead under NONE, but the refusal itself still differs from a lift that succeeds, which no wording can hide. | The same counts over the visible items for the real run. |
+| report counts (decision 179) | Only the exhibit figure follows the case's withheld-disclosure setting. The entity and relationship counts, and the hypothesis matrix's count of withheld evidence, are still printed as exact numbers under PRESENCE, and under NONE the redaction statement reads "nothing has been withheld" when entities or exhibits were. | Carry the mode into `Redaction` and say "some" for all three figures. |
+| reports and the destination's ceilings | `POST /report/release` judges SMTP, webhook and Jira on the caller's typed ceiling only. It ignores `NOCTORNAL_SMTP_CEILING`, `NOCTORNAL_WEBHOOK_CEILING`, `NOCTORNAL_JIRA_CEILING` and the Jira destination's own ceiling, which the drain applies, so a release is allowed that the drain then refuses. A lead read into a compartment can never release a report on a case that holds compartmented material. | Judge against the destination's ceiling at release. |
+| a sample download does not call the egress gate | `SampleService.download` never calls `can_egress`, while the production of an exhibit containing attacker markup does. The download is the one authorised outbound act of a sample, behind a one-shot ticket (F22). | Decide whether a download is egress. |
+| same bytes at other labels (0141) | The same bytes at different labels are separate exhibits, each with its own object, custody trail and register row. A case can therefore hold several copies of one file. The upload route takes a classification and no compartments, so lodging the same bytes into another compartment is reachable only through the service (capture, lookups, deception e-mails). | None proposed. |
+| hold rows name no exhibit | A hold or lift writes an audit row with `object_id` NULL, and `/audit/events` omits `detail`, so an officer cannot tell which exhibit was held. | Carry the exhibit's id in `object_id`. |
+| upload answers | An unknown classification answers 403 where 400 is right. A store that is down answers a raw 500 after about 18 seconds, with an audit row saying an object was orphaned when none was stored. | Validate the classification first; bound the store's timeout. |
+| rows from before the key fix | An exhibit stored at a nested key before the key fix (development and test databases only, since no released build wrote them) stays unpurgeable. | Re-lodge it. |
+| the destruction meter | Lifts and dry runs still share the `retention.destroy` meter, and a request refused for a stale sign-in uses it too, so after about three actions a lead waits roughly six minutes per action. Placing a hold no longer spends it (decision 192). | A meter per act. |
+| F55 | Dead letters and caseless ingest records are swept by nothing (below). | The owner's decision. |
+
+### Sessions, HTTP and the console
+
+| Id | What is left, and what it costs | What would close it |
+|---|---|---|
+| a junk credential is still read | The refusal before an upload is about a request that presents nothing. A request that carries any Bearer value or a session cookie is still read, and spooled to disk up to the route's cap, before the route judges it, because telling a live session from a junk one takes the database and the layer that refuses is deliberately free of it. The API container has no size-limited `/tmp` and the proxy sets no body limit, so one request can still write up to 256 MiB, bounded by the per-address request meter. | A size-limited tmpfs for `/tmp` on the API service and a `request_body` `max_size` in the Caddyfile for the upload routes. |
+| the failed-sign-in email | A password that is itself shaped like an address (`Hunter2@home.net`) is not told apart from an address and is stored as typed. For everything else the sha256 prefix is unsalted, so a short typed secret can be guessed from it by anyone who can read the audit log. The same hashing already stands in `ip_hash`. | A keyed hash under a server secret the audit path does not hold today. |
+| the socket says ready early | The live socket answers "ready" before the hub's LISTEN is registered, so a write in that gap is missed; the tests wait a second to cover it. | Answer ready after the registration. |
+| no compression of the console | Caddy does not compress `/ui/*`: 2.35 MiB goes out where 0.66 MiB would. | An `encode` directive limited to `/ui/*`. |
+| the case list at 375 px | The case list page scrolls sideways by 280 to 390 px on a phone-width window; the panes inside a case do not. The cause was not isolated. | Find it. |
+| `parse` with a case id | `POST /ingest/batches/{id}/parse` with `case_id` always answers 403, because no case role carries `ingest.manage`; parse and then attach works. | Give the permission to a case role or drop the parameter. |
+
+### Egress, notifications and collection
+
+| Id | What is left, and what it costs | What would close it |
+|---|---|---|
+| mail with no trusted stamp (http_ui-007) | `Authentication-Results` is believed only when its authserv-id is a trusted MTA (`NOCTORNAL_TRUSTED_MTA_HOSTS`), the topmost `Received` header was written by a trusted MTA and the header sits above every `Received` header (`deception.py`, `_auth_results_believed`). A message the receiving MTA never stamped (forwarded, exported, handed over as a file) carries only sender-written headers, and a sender who writes a forged `Received: by mx.<trusted host>` line and a forged `Authentication-Results` above it passes all three tests: the message then records `dkim=pass` for a domain of the sender's choosing and proposes it as a durable DOMAIN candidate. A lone header, and a header below a `Received` line, are still refused. The check is only as good as the border MTA removing inbound headers that carry its own authserv-id, which RFC 8601's security considerations name. Until it is closed, treat the recorded SPF, DKIM and DMARC of a message that did not arrive through the trusted MTA as the sender's claim. | A stamp the sender cannot compute (an HMAC header the MTA adds under a deployment key), or reading a verdict only for mail the capture path received from the MTA itself. |
+| the withheld count of the connection log | The listing reports how many rows of the whole log the caller's clearance hides, and that count no longer moves with the route, event or window asked about. It is still one number for the whole log, so a reader below a label who polls it and subtracts successive answers learns when hidden egress rows arrive and roughly how many, though not which route, destination or case. | Report no count, only that some rows are withheld, which would also stop telling an officer how incomplete the view is for them. |
+| collection checks pass no compartments | Collection's TLP checks (`collection.py` `_feed_floor_refusal`, `collection_authority.ceiling_refusal`, `telegram_service.py`) pass no compartments, while the gate's collection rule refuses compartmented material and F43 deliberately polls compartmented sources. | A decision on which is right. |
+| a notice raised after it was queued | A drain judges a case at its current labels, but an element raised after its notification was queued is not rechecked. | Recheck the element. |
+| the MISP floor can fail open | An unknown answer shape from MISP becomes NOT_FOUND with no TLP floor, and the floor reads only the first 50 attributes (`lookup_adapters.py`). What shapes a real MISP sends is not known (F27). | Fail closed on an unknown shape. |
+| the proxy's shutdown | `egress_proxy.py`'s `stop()` does not wait for open tunnels, so the ledger's CLOSE rows can be lost on SIGTERM. | Wait for tunnels, bounded. |
+| the pinned client's TLS check | `pinned_http.open_connection` skips `_refuse_unverifying`. Hardening only: its one caller passes a verifying context. | Call it. |
+| a poll killed by SIGTERM | A poll child killed by SIGTERM leaves its collection runs in the RUNNING state for good. | Mark them on the next pass. |
+| a member mark's requeue | `mark_member` commits before it takes the persona lock, so a retry reports the wrong outcome. | Take the lock first. |
+| a stopped persona resealed | A stop racing the seal can leave a burnt persona holding a sealed forum session (`forum_member.py`). | Seal under the persona lock. |
+| the lookup's raw body | The raw body of a lookup answer is not scrubbed of live secrets, so a vendor that echoed the API key would have it stored. Uncertain; no vendor is known to. | Scrub with the live key. |
+| echoed secrets in a transformed form | The member walk removes the persona's password and session cookie exactly, in the plain, URL-encoded, form-encoded, base64 and (for markup) HTML-escaped forms, and only for a secret of at least six characters. A board that echoes a transformed form (hashed, case-changed, split across tags) is not caught. | None proposed. |
+| the feed parser and a wide feed | A clean BOM-less UTF-16 feed that does not start with an XML declaration is refused too, and says why. No such feed is known. | None. |
+| watch patterns | A pattern killed by its CPU limit reads as "stopped without an answer" and not as its time limit, and a stopped pattern costs 3 seconds more than it did (`STARTUP_S`). A pattern that is slow but finishes inside its limits, and a defect in the interpreter's own matcher, are as the module's docstring says. | Wording. |
+| F53, F54, F55 | No route or console form creates a watch (F53), a chat watch with no term fires on every message (F54), and dead letters and caseless ingest records are swept by nothing (F55). Entries below. | |
+
+### The Lab and the isolated worker
+
+| Id | What is left, and what it costs | What would close it |
+|---|---|---|
+| lab-6 | A duplicate upload is refused (409) when the bytes are already held and accepted (201) when they are not. The refusal names no hash and says nothing more to a caller who may not see the existing sample, and nothing is stored in the prober's name, but the status code is still one bit across a compartment or label boundary: a holder of `sample.submit` who has a candidate file can learn whether this deployment already holds that exact file in a case they cannot see, which is the fact that somebody else is working the same intrusion. A probe that is accepted stores a sample, so each probe of a novel file leaves a row. This is inherent in content deduplication (`samples.py`, the comment at the dedupe branch, and `test_review46_duplicate_residual_pg.py` pin what still holds). | Store a second copy per label set, which for live malware is a decision for the owner. |
+| a download ticket is burned before the refusal | A download ticket is spent, and a `SAMPLE_DOWNLOAD_TICKET_REDEEMED` audit row written, when it is presented, before the download checks the caller's live clearance and the sample's screening state. If the download then refuses, the holder gets "no such sample", the ticket is gone, and there is a REDEEMED row and no `DOWNLOADED` custody row, so the audit row reads as a redemption that served nothing. Spending first is deliberate (one statement makes the ticket one-shot); `lab.sample_access` is the record of what was served. | None proposed. |
+| the archive tree count is not locked | The tree's member count is read before the members are stored and not locked, so two archives of one tree expanded at the same moment by two processes can each pass the cap, by at most one archive's member cap each. The count includes members that turn out to be duplicates, which errs toward refusing. | A lock. |
+| archive limits the pre-check trusts | `zip_preflight` trusts the end record's entry count, so about 150 MiB of directory records are parsed before the count refusal; the parent's checks of a child's answer miss RecursionError and non-finite floats (exploiting this needs a compromised child); an archive answer is held about four times in the parent. | Bound the directory read; harden the checks. |
+| an oversize sample is re-queued every pass | A `worker_refused` for size re-queues the sample on every pass. Depends on configuration. | Mark it skipped. |
+| YARA in the worker | YARA was run in the Windows virtual environment's suites and not in the worker image: the only Linux build used had no yara-x. | Run the worker image's suite with the extra. |
+| `yara_db.py` is outside the single client | `scripts/yara_db.py fetch` runs `git` outside the one HTTP client. It is an operator tool, and the single-exit test does not scan `scripts/`. | Scan `scripts/`. |
+| the YARA fetch does not pin the head | `scripts/yara_db.py fetch` clones (or fast-forwards to) the default branch of each of the nine third-party repositories in `yara/sources.json`, depth 1. The commit pulled is recorded in `yara/fetch.lock.json`, but nothing reads it back as a pin. `import` never activates a rule set: a lab member adopts the imported version and a Security Officer who is neither of them activates it, so a changed rule reaches a reviewer and not a scan. | A `commit` field in `sources.json` that `fetch` will not move past without a flag. |
+| the proxy's DSN naming the worker role | `verify_proxy_environment` does not refuse `NOCTORNAL_EGRESS_DATABASE_URL` naming `noctornal_worker` (BYPASSRLS, owns nothing). The schema owner is refused by `egress_proxy.start_checks`. Operator error only: the worker's DSN is not in a file the proxy reads. | A role check beside the ownership query. |
+| `lab_triage` and an undeclared policy | `scripts/lab_triage.py` prints "refused:" for an undeclared prohibited-content policy and exits 0, where an unusable setting exits 1. | Decide the exit code. |
+
+### The ledgers and the migrations
+
+| Id | What is left, and what it costs | What would close it |
+|---|---|---|
+| the tail anchor is the operator's | A verification cannot see the newest rows being cut off or the chain being rewritten and re-hashed by the owner. With an anchor held on a file the host cannot write, deleting the tail answers `ANCHOR_MISSING` and rewriting it `ANCHOR_REWRITTEN`; nothing records the anchor on its own. | Schedule `scripts/audit_verify.py --record` from a host that holds the file. |
+| owner and worker rows | The owner and `noctornal_worker` keep whatever actor and time they supply, and their rows can sit slightly out of time order. An owner who inserts a row forked off a pre-boundary row would be counted as a legacy fork. `INSERT ... RETURNING seq, prev_hash` on a row the writer may read returns the newest seq and hash of the whole log (0169 documents it, and no application code asks for a row back). | None: they need owner rights. |
+| downgrades that print a key | 0133, 0134, 0141 and 0147 fail on the unique index they rebuild when Beta 1 has stored two rows that differ only by labels, with a raw unique violation whose DETAIL prints the duplicated key, which can be a selector value. | Catch and name the count. |
+| `search_path` carries over | In about 50 released migrations a session-wide `SET search_path` carries into later revisions of the same run. No effect today: a fresh and an upgraded schema are equal. | Use `SET LOCAL`. |
+| 0134 holds a table | 0134 holds `core.selector` locked about 24 seconds per 300,000 rows; no faster form was found (dropping and rebuilding its trigram indexes around the rewrite measured 22 seconds against 20). | None. |
+
+### Deployment, installers and backups
+
+| Id | What is left, and what it costs | What would close it |
+|---|---|---|
+| what a mirror backup does not carry | An exhibit lodged after 0139 reads its recorded object version, and a mirror to disk keeps bytes and not version ids, so evidence restored into a new MinIO reads as missing until the owner step in `infra/production/README.md` makes those exhibits read the latest version again. Preserved samples have the same limit. Nothing here restores either from a mirror. This was reasoned from S3 behaviour and the code, and not reproduced against a restored bucket. | A restore that sets the version ids it was given. |
+| the backup was not restored on a fresh host | The documented dump and mirror commands ran as written, with the gpg alternative because `age` was not installed, and the dump was listed and decrypted. A dump of an upgraded database was restored into a new database on the same cluster, and its row counts, grants and chains matched. A restore on a fresh host, through `age`, into a new object store was not tried. | Try it. |
+| the `.env.local` deny list | The loaders (`release/install.sh`, `scripts/launch.sh`, `scripts/_env.py`, `release/install.ps1`, `scripts/launch.ps1`, `scripts/open-ui.ps1` and the one-line loader in `release/INSTALL.md`) leave out names that change how the next program starts: `DOCKER_*`, `COMPOSE_*`, `GIT_*`, `PIP_*`, `NODE_*`, `PSModulePath` and the earlier set. A name outside the list still loads: `HTTPS_PROXY`, `SSL_CERT_FILE` or `REQUESTS_CA_BUNDLE` are read by pip and the other tools the installer starts. Reasoned from the list, not demonstrated. An allow-list would silently stop loading every new setting, which is a quieter failure; the attack needs a handed-over `.env.local` on the victim's machine. | Add a name to every loader's list when a tool is found to read it. |
+| a MinIO key is an argument, once | `mc admin user svcacct add --secret-key ...` for the `SAMPLE_` and `PRESERVE_` accounts is visible in the host's process list for the moment it runs, the first time each account is created; its stdout, which echoed the secret into `docker logs minio-init`, is discarded. One bucket each, once, and `hidepid=2` on the Docker host hides it from other local accounts. | `mc` takes the key only as an argument. |
+| the application image and the proxy hops | Caddy still runs as uid 0, has a route out, and the hops to Postgres and Redis are plaintext; `./tls` with `private.key` is mounted into every application container. | Terminate TLS in a service of its own; TLS to Postgres and Redis. |
+| unpinned inputs | The development compose file's images (`pgvector:pg16`, `redis:7-alpine`), the CI actions, pip and gnupg are pulled by tag, not pinned by digest. | Pin them. |
+| a missing hop count | `NOCTORNAL_TRUSTED_PROXY_HOPS` at 0 or unset is neither refused nor reported in production, so the rate limiter meters the whole internet as one subject. | Report it in the register. |
+| bucket names have no shell default | `$EVIDENCE_BUCKET`, `$INGEST_BUCKET` and `$SAMPLE_BUCKET` have no default in the `minio-init` script, though the code defaults them. | Default them. |
+| the volume name | `release/install.sh` detects a new database volume by the fixed name `noctornal-prod_prod-pgdata`. | Ask Docker. |
+| `Server: uvicorn` | The header passes through Caddy to clients. Information only. | Strip it. |
+| what was not run | `install.ps1` was never run on a clean Windows machine and nothing was tried on macOS. The installers did not run against a production-shaped Windows host. The production stack was not run behind Let's Encrypt, as a non-root operator, through the secrets and egress upgrade paths, or with a cron job stopped in the middle of a pass. | Run them. |
+
+### Load and performance
+
+Measured on a database of 300 users and 60 cases with one AMBER case of 101,000
+entities, 300,000 ties and 1,000,000 claims, at 1, 10 and 50 concurrent users
+(release/CHANGELOG.md, Beta 1, has the numbers).
+
+| Id | What is left, and what it costs | What would close it |
+|---|---|---|
+| the ceiling | Writes, entity and claim reads, selectors, search and audit hold at 100,000 entities and 1,000,000 claims per case, with single-user reads under a second (the register 2.4 s, a report 2.7 s) and no errors at 10 concurrent users. The canvas, the metrics, the report and ego are built for about 5,000 entities per case and past that answer truncated. At 50 users cheap reads reach about 3 seconds at the 95th percentile. | Not proposed. |
+| ego and path past 5,000 entities | The ego and path views build only the first 5,000 entities of a case by creation time (`projections.py`) and answer 404 for a centre outside them: 88 of 100 ego requests on the large case. | Build from the centre outward, not from the first 5,000. |
+| no statement timeout | Nothing sets a `statement_timeout` on request connections, so an abandoned request keeps running: ten stacked register queries were seen, the oldest ten minutes old. | Set one on request connections. |
+| the register grows with the case | The evidence register computes what each exhibit backs for every exhibit on every page (2.4 s at 15,000 exhibits), so a page costs more as the case grows. | Compute it for the page only. |
+| a connection for every request | Each request opens a database connection (about 14 ms on the measuring host) and the fixed cost is 45 to 55 ms a request; one process topped out near 75 requests a second, and four workers on Windows reached 101. A pool needs a new dependency. | A pool. |
+| measured on one host | Every number is from a Windows host talking to Postgres in WSL2, where a statement costs about 1.2 ms of round trip. The fixed per-request cost and the throughput ceiling are pessimistic for a Linux deployment, which was not measured. The before figures for the graph, projection and report paths are one request each that outlasted the client's timeout, and the betweenness and Leiden analytics were not run on the large case. | Measure a Linux deployment. |
+
+### Tests and code structure
+
+| Id | What is left, and what it costs | What would close it |
+|---|---|---|
+| duplicated rules | About ten copies of the "is this production" check exist and several hard-code the variable name; about 14 tuples order the TLP levels beside `security/access.Tlp`, and one of them had drifted (the AMBER_STRICT row of the admin list, fixed); `compartments._refuse` duplicates `admin._refuse`. | One `config.is_production()`, one TLP order. |
+| test isolation | Some tests skip or fail depending on rows other suites leave (`test_screening_readiness_pg`, `test_review46_screening_window_pg`, `test_telegram_readiness_pg`, the ledger anchor tests), and CI's no-skip gate turns the skips into failures whenever another suite leaves rows; 82 of 99 `client` fixtures repeat the same app and limiter set-up; one module logs under `noctornal.*` and 13 under `noctornal_api.*`; one test sleeps a second four times waiting for lock waits. The roughly 470 test files not sampled were not checked for leftovers. | Roll back in the tests; one `api_client` fixture; one logger namespace; poll `pg_stat_activity`. |
+
+---
 
 ## Decided by the owner, 2026-09-22
 
@@ -655,41 +874,15 @@ Recorded 2026-09-24 (roadmap F5.2 and F5.3). Every Telegram test runs
 against a fake transport, and the SOCKS5 path through Telethon is tested
 against the egress contract's stub proxy on loopback, whose dial to a data
 centre the test refuses. Enrolment, a poll, a join and a logout have not
-been run against Telegram through the real egress proxy, and no test yet
-runs a persona's run, act and stop contexts through the real listener. Telethon 1.x is maintained by one
+been run against Telegram through the real egress proxy, and a test now
+runs a persona's run, act and stop contexts through the real listener
+(`test_persona_contexts_through_proxy_pg.py`). `scripts/telegram_live_check.py`
+is the owner's one run against a real Telegram account, which only the owner
+can make, and F31 stays open until it is run. Telethon 1.x is maintained by one
 author, and pyaes, which it uses for AES-IGE, has had no release since
 2017: a flaw in either lands on the host that holds every persona's
 session. The DC network list is Telegram's published one of 2026-09-24,
 and a new range fails closed until it is updated.
-
-### F42: Parse and analysis children are bounded, not isolated
-
-Added 2026-09-24 (roadmap F3, F4 and F11). Hostile bytes are parsed in
-child processes: each static-triage step, and every forum page (lexbor's
-tree builder is quadratic on markup a hostile board can serve). A child
-starts without the deployment's secrets and is bounded by a wall clock
-everywhere, and by rlimits on CPU, memory and file writes on Linux. It is
-not isolated: on Linux it can read the environment of other processes
-running as the same user, which hold those secrets, and it shares its
-container's network with the database. `RLIMIT_FSIZE=0` stops writes but
-still lets a child create an empty file, and on Windows development hosts
-the wall clock is the only bound. The readiness row
-`sample_static_analysis` reports both facts on the host it runs on.
-
-**The cost:** a parser exploit in a hostile sample or page is a compromise
-of the deployment. A separate container with no secrets and no network is
-the remedy, and is a deployment change not made (docs/16 L1).
-
-### F43: Collected documents carry no compartments unless captured
-
-Added 2026-09-24. A document an adapter collects (a feed item, a forum
-post, a Telegram message) is labelled by its source and carries no
-compartments, because a source cannot carry them yet; only a capture into a
-compartmented case does (docs/00 decision 78). Compartmented and
-above-ceiling work is collected by hand, through capture.
-
-**The cost:** a unit that needs a forum read under a compartment has to
-capture it rather than poll it.
 
 ### F44: A retention rule confirmed later does not reach documents collected before it
 
@@ -705,10 +898,10 @@ migration.
 
 Added 2026-09-24. A hold is placed on a document, with every earlier
 version, or on a case, which holds every document it cites. Nothing holds
-everything a source has collected in one act. The 2026-10-03 review found
-that nothing in the product sets a case's hold either
-(evidence-case-hold-unreachable, above): until that is fixed, a hold
-reaches a document only through the document itself.
+everything a source has collected in one act. Since Beta 1 a case can be held
+through the API (`POST /api/v1/retention/cases/{id}/legal-hold`), and a hold on
+a case holds every document it cites; the console has no control for
+it (Known residuals at Beta 1).
 
 ### F46: A raw markup object can be left unreferenced
 
@@ -769,9 +962,12 @@ Not defects, not done. Listed so they are not mistaken for oversights.
 
 | Item | Consequence today |
 |---|---|
-| Session binding enforcement | Every session records the address and client it was minted from (0058) and `NOCTORNAL_SESSION_STRICT_BINDING=1` refuses a mismatch with an audit row. The production compose sets it; it is off by default everywhere else, so until an operator sets it a stolen token is portable |
-| Row-level security on five tables | Row-level security stands on 76 tables (docs/00 decisions 137 to 163). Five are not under it yet (F51): the audit log and the ingest record family. On those, a statement injected into a request still reaches every row the request role can |
+| Session binding by default | Every session records the address and client it was minted from (0058), and `NOCTORNAL_SESSION_STRICT_BINDING=1` refuses a mismatch with an audit row. A production start refuses to run without it, and `infra/production/secrets.env.example` sets it. In development it is off by default, so a stolen token is portable there |
 | WebAuthn | TOTP only. A deliberate absence, stated in four documents; SECURITY.md says reporting it is not a finding |
+
+Row-level security is no longer on this list: it stands on 82 tables and
+defers none (F51, in the table below). What the request role can still reach
+outside it is under Known residuals at Beta 1.
 
 ---
 
@@ -783,6 +979,11 @@ behind each closure is in `release/CHANGELOG.md` under its date.
 
 | | What it was | Closed |
 |---|---|---|
+| **The 2026-10-03 review** | 82 findings, 16 high, 25 medium and 41 low (section above) | 2026-10-07: 77 fixed, one fixed for credentials and stated for the rest (rls-6), four stated and not fixed. Each one's status is in The 2026-10-03 review at Beta 1, and what the fixes left is in Known residuals at Beta 1 |
+| **F51** | Five tables were not under row-level security: the audit log, and the ingest records, victim credentials, dead letters and PII authorisations | 2026-10-03: all five are under policy and no table is deferred, 82 under policy (Alembic 0152 to 0155 and 0166 to 0169, docs/00 decisions 76, 143 and 151). `rls_registry.DEFERRED` is empty and a registry test names any table that carries labels and is in none of the three lists. Row security stays enabled and never forced (decision 143) |
+| **F52** | The schema owner's password still reached the runtime services | 2026-10-02 to 2026-10-03: `POSTGRES_PASSWORD` and `NOCTORNAL_MIGRATION_DATABASE_URL` moved into `postgres-init.env` and `migrate.env`, each read by one service, and the API and every cron job refuse to run holding either; the rate limiter's Redis runs under an ACL and the limiter signs in as `noctornal_limiter`; every job script makes one refusal on a published credential (`release/secrets-upgrade/README.md`) |
+| **F42** | Parse and analysis children were bounded, not isolated, so a parser exploit in a hostile sample or page was a compromise of the deployment | 2026-10-03: in production each hostile read (static triage, archive expansion, watch patterns, forum pages) runs in `analysis-worker`, a container with no secrets and no network, reached over a Unix socket (`infra/production/README.md`, Analysis worker). A local child remains for development, and `NOCTORNAL_ANALYSIS_LOCAL=1` keeps it in production on purpose, which the register reports |
+| **F43** | Collected documents carried no compartments unless captured, so compartmented work was collected by hand | 2026-10-03: `collect.source` can carry compartments (Alembic 0163, 0164), every document a source collects carries them, and the readers, the notices, the Telegram path and the capture path honour them (docs/00 decision 78) |
 | **F28** | A webhook signature carried no timestamp and no replay window | 2026-10-02: an opt-in signature v2 signs a timestamp with the body (`NOCTORNAL_WEBHOOK_SIGNATURE=v2`); docs/07 gives the receiver's replay window, the order to move in and a verifier (docs/00 decision 167). A receiver still on v1 stays replayable as before, which is the cost for anyone who does not opt in |
 | **F35** | A persona could be created on a profile that cannot carry persona traffic | 2026-10-02: refused at creation, in the egress proxy's own sentence (`test_persona_creation_exit_pg.py`, decision 164) |
 | **F36** | A run's warning lost a typed Telegram id | 2026-10-02: the ids this product's adapters write (`c:`, `g:`, `post:`, `member:`) are kept in a run's item label, and every other id still passes the redactor (`test_item_label_typed_ids.py`, decision 165) |
@@ -818,279 +1019,3 @@ confirmed by somebody who can carry it, and record who, in
 The failure mode this file prevents is the one docs/16 names: a system whose
 assumptions live only in the heads of the people who wrote it ships, changes
 hands, and then somebody discovers an assumption by breaking it.
-
----
-
-## Beta 1 verification residuals (Group D)
-
-What the second verification pass of the deployment and installers (2026-10-07)
-left open after its fixes. A separate docs pass integrates these into the
-sections above.
-
-| | What it is | Why it is bounded | What would close it |
-|---|---|---|---|
-| **The YARA fetch takes the head of each source and does not pin it** | `scripts/yara_db.py fetch` clones (or fast-forwards to) the default branch of each of the nine third-party repositories in `yara/sources.json`, depth 1. The commit that was pulled is recorded per source in `yara/fetch.lock.json`, but nothing reads that commit back as a pin: a second `fetch` moves to whatever the head is then, and no document said so. | `import` never activates a rule set. A lab member must adopt the imported version in the Lab's Rules tab and a Security Officer who is neither of them must activate it, clearing the licence when the source asks for review. A rule text that changed upstream therefore reaches a reviewer, not a scan. The lock is the record of what was reviewed. | A `commit` field in `sources.json` that `fetch` checks out and refuses to move past without a flag, so a re-fetch is a reviewed bump. Not built: the sources are public and nothing activates without two people. |
-| **`verify_proxy_environment` does not refuse a proxy DSN that names the worker role** | `NOCTORNAL_EGRESS_DATABASE_URL` naming `noctornal_worker` (BYPASSRLS, owns nothing) is not refused by the environment check. The schema owner is: `egress_proxy.start_checks` refuses a role that owns the connection ledger. | Operator error only. The worker's DSN is in `secrets.env`, which the proxy does not read, so someone has to copy it into the proxy's own file. The proxy is meant to hold only the egress role's grants (read routes, append to the connection ledger). | A refusal in `verify_proxy_environment` for a DSN whose role is `db.WORKER_ROLE`, or a `rolbypassrls` check beside the ownership query in `start_checks`. Not a one-line change (it needs a DSN parse or a second query, a sentence and a test), so it was left. |
-| **The `.env.local` deny list is a deny list** | The loaders (`release/install.sh`, `scripts/launch.sh`, `scripts/_env.py`, `release/install.ps1`, `scripts/launch.ps1`, `scripts/open-ui.ps1`, and the one-line loader in `release/INSTALL.md`) leave out names that change how the next program starts: the earlier set, now also `DOCKER_*`, `COMPOSE_*`, `GIT_*`, `PIP_*`, `NODE_*` and `PSModulePath`. A name outside the list still loads: for example `HTTPS_PROXY`, `SSL_CERT_FILE` or `REQUESTS_CA_BUNDLE` are read by pip and the other tools the installer starts. Reasoned from the list, not demonstrated. | An allow-list would silently stop loading every new setting, which is a quieter failure than this one, and the attack needs a handed-over `.env.local` on the victim's machine. Each name added goes into every loader and `test_g48_install_env_data.py` holds them to each other. | Add the name to every loader's list in one change when a tool the installer starts is found to read it. |
-| **A MinIO service-account secret is still a command-line argument, once** | `mc admin user svcacct add --secret-key ...` for the `SAMPLE_` and `PRESERVE_` accounts is visible in the host's process list for the moment it runs, the first time each account is created. Its stdout, which echoed the new secret key into `docker logs minio-init`, is now discarded (Beta 1 verification, D3). | One bucket each, once, and `hidepid=2` on the Docker host hides it from other local accounts (`infra/production/README.md`). | `mc` takes the key only as an argument; a policy-bound user created through MinIO's admin API would not. Not built. |
-## Beta 1 verification residuals (Group F)
-
-The final verification of the beta build (2026-10-07) re-ran the egress,
-collection, Lab, archive and forum fixes of the 2026-10-03 review and found
-what follows. Two tables: what is documented and not fixed, and what was fixed
-in this round with what each fix leaves. Reproductions are deliberately not
-published here.
-
-### Documented, not fixed
-
-| Id | Area | What is true, and what it costs |
-|---|---|---|
-| http_ui-007 | Notifications, email capture | `Authentication-Results` is believed only when its authserv-id is a trusted MTA (`NOCTORNAL_TRUSTED_MTA_HOSTS`), the topmost `Received` header was written by a trusted MTA, and the header sits above every `Received` header (`deception.py`, `_auth_results_believed`). A message the receiving MTA never stamped (forwarded, exported, handed over as a file) carries only sender-written headers, and a sender who writes a forged `Received: by mx.<trusted host>` line and a forged `Authentication-Results` above it passes all three tests: the message then records `dkim=pass` for a domain of the sender's choosing and proposes it as a durable DOMAIN candidate. Nothing in the order or the names of the headers tells the two apart. A lone header, and a header below a `Received` line, are still refused. The check is only as good as the border MTA removing inbound headers that carry its own authserv-id, which RFC 8601's security considerations name. The smallest real fix is a stamp the sender cannot compute (an HMAC header the MTA adds under a deployment key, checked here), or reading a verdict only for mail the capture path received from the MTA itself and never for an imported file. Until then, treat the recorded SPF, DKIM and DMARC of a message that did not arrive through the trusted MTA as the sender's claim |
-| lab-6 | Lab, submit | A duplicate upload is refused (409) when the bytes are already held and accepted (201) when they are not. The refusal names no hash and says nothing more to a caller who may not see the existing sample, and nothing is stored in the prober's name, but the status code is still one bit across a compartment or label boundary: a holder of `sample.submit` who has a candidate file can learn whether this deployment already holds that exact file in a case they cannot see, which is the fact that somebody else is working the same intrusion. A probe that is accepted stores a sample, so each probe of a novel file leaves a row. This is inherent in content deduplication. Closing it would store a second copy per label set, which for live malware is a decision for the owner (`samples.py`, the comment at the dedupe branch, and `test_review46_duplicate_residual_pg.py` pin what still holds) |
-| lab-download-ticket-burned | Lab, download | A download ticket is spent, and a `SAMPLE_DOWNLOAD_TICKET_REDEEMED` audit row written, when it is presented, before the download itself checks the caller's live clearance and the sample's screening state. If the download then refuses (a label raised after the ticket was minted, or a sample isolated by screening in the same minute), the holder gets "no such sample", the ticket is gone, and there is a REDEEMED row and no `DOWNLOADED` custody row. The audit row therefore reads as a redemption that served nothing. Spending first is deliberate (one statement makes the ticket one-shot); the cost is that a refused download needs a new ticket and the REDEEMED row alone does not prove bytes moved. The custody ledger (`lab.sample_access`) is the record of what was served, and it has no row for this case |
-| egress-ledger-withheld-poll | Egress ledger | The listing reports how many rows of the whole log the caller's clearance hides, and since the 2026-10-03 fix that count no longer moves with the route, event or window asked about. It is still one number for the whole log, so a reader below a label who polls the ledger and subtracts successive answers learns when hidden (for example RED) egress rows arrive and roughly how many, though not which route, destination or case. Closing it means reporting no count at all (only that some rows are withheld), which would also stop telling an officer how incomplete the view is for them. Not done |
-
-### Fixed in this round, and what each leaves
-
-| Id | Area | What changed, and what is left |
-|---|---|---|
-| collection-rss-doctype-bypass-utf16 (sibling) | Collection, RSS | A UTF-16 or UTF-32 feed with no byte-order mark that did not open with `<?` was decoded as UTF-8, kept its NUL characters, passed the DOCTYPE scan unread, and was then parsed as the wide encoding with its DTD expanded (a 1 MB feed became 45 million characters). `_feed_text` now refuses any feed whose decoded text holds a NUL. What it leaves: a legitimate BOM-less wide feed that does not start with an XML declaration is refused too, and says why; no such feed is known |
-| collection-watch-regex-isolated-kind | Collection, watches | `watch_regex` ran as the kind `lab_static`, which neither `analysis_runner.KINDS` nor `analysis_worker.KIND_ARGV` could start for it: with the isolated worker in use, every watch pattern was reported failed and none ever matched. It is now a kind of its own, registered in both and proved through the runner and the worker. The pattern's wall clock also counted the child's start, so a benign pattern on a loaded host was reported as over its limit: the wall is now the pattern's time plus `STARTUP_S` (3 seconds), still inside the run's budget. What it leaves: a pattern that is slow but finishes inside its limits, and a defect in the interpreter's own matcher, are as the module docstring says; a stopped pattern costs 3 seconds more than it did |
-| lab-archive-tree-size | Lab, archive expansion | The caps were per archive and depth 2 expands two levels, so one upload of about 4 MB could create some 40,200 samples with an encrypted object and a queued triage run each. The members of a whole tree, every level, are now held to `NOCTORNAL_ARCHIVE_MAX_TREE_MEMBERS` (1,000 by default, never below `NOCTORNAL_ARCHIVE_MAX_MEMBERS`): an archive that would pass it is refused whole with the numbers in the sentence and nothing stored. What it leaves: the count is read before the members are stored and not locked, so two archives of one tree expanded at the same moment by two processes can each pass it, by at most one archive's member cap each; and the count includes members that turn out to be duplicates, which errs toward refusing |
-| forum-member-reflected-secrets | Collection, forum member read | A board that reflected the persona's password or session cookie into a page (a debug echo, or a hostile board) had them stored in the document text, the forum side rows and the raw markup store, contrary to the module's account of the vault. The member walk now removes both, exactly, from every item's text, side data and markup while they are still live secrets, and keeps the post with a marker where the echo was. What it leaves: only the exact value is removed, in the plain, URL-encoded, form-encoded, base64 and (for markup) HTML-escaped forms, and only for a secret of at least six characters, as for the redactor; a board that echoes a transformed form (hashed, case-changed, split across tags) is not caught |
-
-Archive expansion, which `docs/11` described as not built, is built; that
-document now says what it does and does not compare.
-## Beta 1 verification residuals (Group A)
-
-Found on 2026-10-07 by the independent verifiers who re-ran the review's 82
-fixes against the merged beta head (the graph read side: selectors, merges,
-communications, curation and URL credentials). Each entry says what was
-fixed, what was decided, and what is left. A residual is a judgement the owner
-may want to make differently, so none of them is closed by a test alone. A
-separate pass folds this section into the register above.
-
-### A1: a label correction no longer tells a held value from a free one
-
-`PATCH /graph/nodes/{id}` refused a label correction to junk with the
-ontology's reason, naming the selector type, when the value the entity held
-was also held by an entity the caller cannot read, and accepted it when no one
-held the value. `core.selector` is policied by case alone (0134), so row
-security did not hide the holder. `SelectorStore._types_held_by_others` now
-reads only rows the caller may read (the same predicate as every other
-selector read), so a value held above them answers as one held by nobody.
-
-**Left.** The lookup needs the caller's clearance and compartments, which the
-route passes down. A retraction that restores a label passes none, so the
-lookup is not made there. A retraction never refuses, so nothing is told. The
-narrow cost is that the restored label of an entity that owns no index row for
-its own label (a duplicate of a value another entity holds) is not indexed
-under that holder's type: the index holds nothing for it, which `strict=False`
-already allows.
-
-### A2: a merge over duplicate ties the merger cannot read sets them aside
-
-A merge that would give the survivor two live ties of one type to one third
-party was refused with a 409 naming the type, where a merge with no such tie
-answered 201. An AMBER merger therefore learned that two ties they cannot read
-exist. `MergeService.merge` now takes the merger's clearance and compartments.
-When the colliding tie, or the entity at its far end, is above them, the
-duplicate is retired and recorded in `core.node_merge_edge` with
-`deleted_by_merge = true`, as a tie between the two entities already is, so the
-reversal gives it back at its original endpoints. The merge answers 201 as it
-does with no collision. Where the merger can read the tie, the refusal is
-unchanged and still names the third party only to a reader of it.
-
-**Left.**
-
-- While the merge is live the set-aside tie is retired, so its claims count
-  toward nothing and the survivor's own tie stands alone. Reversing the merge
-  restores them. Nothing is destroyed.
-- The column comment on `deleted_by_merge` (0055) still says a self-loop, and a
-  merge record's `edges_self_loop_deleted` counts set-aside duplicates with the
-  ties between the two entities. `edges_duplicate_folded` in the `NODE_MERGED`
-  audit detail, and the case owner's notification, tell them apart. Rewording
-  the comment needs a migration, which this round did not add.
-- A merge made through the service with no labels (the suite, a script) is
-  refused as before, because nothing says what the caller may read.
-
-### A3: flagging and minimising a conversation needs the conversation's labels
-
-`POST .../comms/conversations/{id}/incidental` and `/minimise` ran on the
-minimisation system connection after a check that threw the conversation's
-labels away. An AMBER analyst could flag a participant of a RED conversation
-and an AMBER lead could minimise it, while a random id answered 404. Both
-routes now gate at the conversation's own labels and answer one 404, the
-sentence for a missing conversation, for a conversation that is missing, in
-another case or above the caller. The hidden case keeps its AUTHZ_DENIED row.
-
-**Decision recorded.** Minimisation is a legal duty (docs/16 L4), and the
-system connection stays so that minimising a conversation the caller may read
-still drops every body, a message above them included. The duty is not a
-licence to act on a conversation above the caller's labels: the code comment
-described a complete drop on a conversation the minimiser can read, not a
-minimisation anyone may order by id.
-
-**Left.** A RED conversation in an AMBER case can now be flagged or minimised
-only by someone cleared for it. Where no such person is assigned, nobody can.
-Whether a case's closure should look for a conversation no one on the team can
-minimise is not decided.
-
-### A4 and A5: two refusals named what the caller cannot read
-
-Curating a node that was merged into another (`_node_for_write`) named the
-survivor, and a reversal held up by a later merge named that merge and how many
-ties they shared. Each now names the entity or the merge only to a reader of
-it, and otherwise says "another" or that the later merge is not one they can
-see.
-
-**Left.** A refused reversal still says that a later merge the reader cannot
-see exists. That one bit cannot go without allowing the reversal the rule
-forbids, which would write old endpoints over ties a live merge owns.
-
-### A6: `POST /selectors` refuses a link with a password
-
-`POST /selectors` stored the raw value of a URL as written and answered with it,
-so `https://alice:...@mail.bank.example/login`, a `?api_key=` query and the
-other shapes of `carries_credential` came back with the secret in them. The
-route now refuses with the sentence `POST /nodes` gives (400, nothing stored).
-
-**Decision.** Refuse rather than redact, because this is a route a person types
-a value into and its neighbour for an entity label refuses. `SelectorStore.record`,
-the write of the machine paths, still redacts, since a capture's text is not the
-typist's to correct. Rows this route stored earlier are cleaned by the 0137
-scrub where the shape is one it knows.
-
-### A7: a login that is not an e-mail address after a path
-
-The stealer-log layout `url:login:password` was cut only when the login held an
-`@`. `https://y.example/login:carol:Zq9Pass7p` (or with `|` between) was kept
-whole in the label, the selector and the raw value, on capture, accept,
-`POST /nodes` and a label correction. `normalisers._login_cut` now cuts a final
-path segment shaped `name:login:password`, with `:` or `|` between the three,
-at its first separator, for the normal form, the redacted text and the credential
-spans alike.
-
-**Cost.** A final path segment with two separators that is not a login pair (a
-time such as `/at/10:30:00`, an IPv6 address, a URN) is cut too, so two such
-URLs can collide in the selector index. That was chosen over keeping a possible
-password.
-
-**Not found, and cannot be.** A secret in a path with no separators
-(`/hooks/T0/B0/<token>`), a `?l=` or `?hash=` value whose name does not say it
-is a credential, a pair with one separator, and a pair with no path
-(`https://y.example:carol:pw`).
-
-**Rows written before this change are not cleaned.** The 0137 scrub has the same
-blind spot, and no migration was added for it. An owner-run query lists them;
-the shape also matches the false positives above, so look at each hit before
-changing it. A label is corrected through the product, which records the
-correction as a claim.
-
-```sql
-WITH shape(re) AS (VALUES (
-  '^[a-z][a-z0-9+.-]*://[^/?#]+(/[^/?#]*)*/[^/?#:|@]*[:|][^/?#:|@]+[:|][^/?#]+([?#].*)?$'))
-SELECT 'core.node' AS "table", n.id, n.case_id, 'label' AS "column"
-  FROM core.node n, shape WHERE n.label ~* re
-UNION ALL
-SELECT 'core.node', n.id, n.case_id, 'attrs.raw_value'
-  FROM core.node n, shape WHERE n.attrs ->> 'raw_value' ~* re
-UNION ALL
-SELECT 'core.selector', s.id, s.case_id, 'raw_value or norm_value'
-  FROM core.selector s, shape
- WHERE s.selector_type IN ('URL', 'SOCIAL_URL')
-   AND (s.raw_value ~* re OR s.norm_value ~* re)
-UNION ALL
-SELECT 'collect.proposal', p.id, p.case_id, 'payload label or raw_value'
-  FROM collect.proposal p, shape
- WHERE p.payload ->> 'label' ~* re OR p.payload -> 'attrs' ->> 'raw_value' ~* re
-UNION ALL
-SELECT 'collect.extraction', e.id, NULL, 'raw_value or norm_value'
-  FROM collect.extraction e, shape
- WHERE e.selector_type IN ('URL', 'SOCIAL_URL')
-   AND (e.raw_value ~* re OR e.norm_value ~* re);
-```
-
-The pasted line itself stays in the captured document's text and in any claim
-rationale that copied its context, as 0137 records for the other shapes. Run
-the query as the schema owner: it is read-only, and row security hides rows
-from the request role.
-
-### A8: three disclosures that were found and not changed
-
-- **Hidden and missing differ in time and in the audit log.** The status and the
-  sentence are one answer for a hidden element and a missing one, which was the
-  fix. Medians over 40 interleaved in-process calls each were 97.6 ms against
-  79.1 ms (merge), 95.9 against 80.4 (tie create) and 81.1 against 66.5 (entity
-  correction), and the gate writes an AUTHZ_DENIED row for the hidden id and
-  none for the missing one. Not changed: doing the same work for a missing id
-  would append a denial row for every id that names nothing, and the gap was
-  measured with no network between the caller and the process.
-- **Retiring an entity that carries a tie the caller cannot read ignores
-  `withheld_disclosure`.** The refusal (`HIDDEN_TIES_REFUSAL`) is the same under
-  NONE, PRESENCE and COUNT, so under NONE it still says that a tie above the
-  caller touches the entity, while docs/14 U2 makes what is said about withheld
-  material a per-case setting. The docstring of
-  `GraphWriteService._refuse_if_ties_above_clearance` said the refusal made the
-  same disclosure as the console's notice; that is corrected. Honouring NONE
-  needs a decision between retiring over ties the caller cannot see and a
-  refusal in words no different from any other.
-- **Co-participation weights divide by the room's raw size.** Hidden members are
-  in the divisor, so under NONE a room of two AMBER identities and one RED one
-  weighs 0.5 where a two-person room weighs 1.0, and a reader who knows a room
-  can difference a weight to learn that someone they cannot see is in it. The
-  explicit count is gone under NONE; the weight is not. Migration 0030 already
-  concedes that differencing is possible.
-
----
-
-## Beta 1 verification residuals (Group G)
-
-Seven independent readers re-checked the 82 fixes of the 2026-10-03 review
-against the merged beta build (migration head 0170, 2026-10-07). The one
-that took HTTP, sessions and the live socket found 13 of its 15 ids closed,
-rls-6 closed for credentials only, and http_ui-006 closed for size. What it
-found that was new, and what it left open, is here. The status rewrite of
-the review ids above is a separate pass; this section is written so it can
-be folded into it.
-
-### Closed in the same pass
-
-| Id | What was wrong | What changed |
-|---|---|---|
-| G1 | A lone surrogate escape (`\ud800` to `\udfff` with no partner) in an unconstrained text field answered 500, and in the live socket's hello it logged a traceback and closed 1011 for a peer with no session. | `http/body_ceiling.py` refuses an unpaired escape in a UTF-8 JSON body with 422 (paired escapes and an escaped backslash are untouched), `http/errors.py` answers the encoding failure that remains with 422, and `_handshake` closes 1008 unless the token is ASCII and at most 512 characters. |
-| G2 | An unauthenticated multipart upload was read and spooled to disk up to the route's cap (256 MiB for exhibits, 64 MiB for samples) before the 401. | `BodyCeilingMiddleware` answers the route's own 401 before the first read when a `body_cap` route is asked with no Bearer value and no session cookie. The two ticket routes, whose credential is in the form body, are marked and unchanged. See the residual below. |
-| G3 | A proposal queued above a reader's labels still woke their console: the hint named no labels, so only node and edge hints were filtered. | `proposals.announce` carries the proposal's read label and source compartments, and the live socket drops the hint for a reader who could not read the proposal. A hint with no labels is dropped. |
-| G4 | The live socket's first frame was buffered whole (uvicorn's default limit is 16 MiB) before the 4096 character check ran. | `--ws-max-size 8192` on every uvicorn start line: both launchers, both installers, the image's default command and the two production commands. The server closes 1009 and the application never sees the frame. |
-| G5 | A failed sign-in stored the submitted email verbatim up to 64 characters, so a password typed into the wrong box for an unknown account sat in the audit log in clear. | `_audit_email` keeps a value as typed only when it is shaped like an address (one `@`, no whitespace, a dot in the domain). Anything else is recorded as its length and a sha256 prefix. |
-| G6 | The first-sign-in tour printed `OP-SHOWCASE-26` as the demo case's code while the installer loads it as `OP-LATTICEWORK-26`, and a test pinned the installer to the wrong one. | The tour and its test now give `OP-LATTICEWORK-26`: the code `bootstrap.py demo-network` creates when it is given none, and the one the installers and `release/START-HERE.md` print. `OP-SHOWCASE-26` stays what it was, the README's larger showcase recipe. |
-
-### Residuals
-
-| Id | Area | What is left, and what it costs | Smallest fix, if wanted |
-|---|---|---|---|
-| rls-6 (part) | Row-level security, membership and session metadata | The request role, even with no session bound, can still read every `iam.case_assignment` row (who holds which role on which case), `iam.session` (`token_hash`, `rls_binding_hash`, `ip`, `user_agent`) and `iam.break_glass.justification`. The credential columns of `iam.app_user` are closed (0143). `token_hash` is a sha256 of a 256-bit random token and the binding proof is derived from the raw token, not from that hash, so neither opens a session; what is disclosed is who works which case and from where. It takes a statement injected into a request. 0109 made the IAM plane read-only to the request role instead of filtered, because the policies read it on every request. | A column-level `REVOKE` of the session and break-glass columns from the request role with definer functions for the legitimate readers. Filtering `iam.case_assignment` needs its readers moved to definer functions first. Each is a migration. |
-| NEW-4 | Row-level security, sealed columns outside IAM | The unbound request role can read these as ciphertext or a keyed hash: `collect.collection_account.secret_ciphertext` and `session_ciphertext`, `ingest.api_key.secret_hmac`, `ingest.provider.secret_ciphertext`, `lab.download_ticket.token_hash`, and, for a bound caller with no assignment, `lab.sample.data_key_ciphertext`. No plaintext follows without the key encryption key or the pepper, which live in the process environment, and the persona key is held only by the collector in production. The API reads `secret_hmac` and the provider ciphertext legitimately. rls-6 sealed `iam.app_user` only. | A column-level `REVOKE` on those columns, with definer readers for the length and null checks the API makes. A migration. |
-| session clock | Sessions | The request role may move its own session's `last_seen_at` forward by up to five minutes past the database's clock (`CLOCK_SKEW` in 0144, stated there as intended: it keeps an API host with a fast clock from failing every request). A forged value gains five minutes of idle window, once per write. | None proposed: the margin is deliberate, and the store clamps its own writes inside it. |
-| notify.enqueue | Notifications | A caller bound to a live session can send arbitrary text to any eligible recipient, as itself, with a pending mail delivery. 0145 stops it being sent as anyone else and stops it forging delivery rows; it does not limit what a bound account may say. | A kind and template allowlist inside the function, so only the notice kinds the product raises are accepted. A migration. |
-| G2 (left) | HTTP, uploads | The pre-read refusal is about a request that presents nothing. A request that carries any Bearer value or a session cookie is still read, and spooled to disk up to the route's cap, before the route judges it, because telling a live session from a junk one takes the database and the layer that refuses is deliberately free of it. The API container has no size-limited `/tmp` and the proxy sets no body limit, so one request can still write up to 256 MiB, bounded by the per-address request meter. | A size-limited `tmpfs` for `/tmp` on the API service, and a `request_body` `max_size` in the Caddyfile for the upload routes. |
-| G5 (left) | Audit log | A password that is itself shaped like an address (`Hunter2@home.net`) is not told apart from an address and is stored as typed. For everything else the sha256 prefix is unsalted, so a short typed secret can be guessed from it by anyone who can read the audit log. The same hashing already stands in `ip_hash`. | A keyed hash (an HMAC under a server secret) in place of the bare sha256, which needs a secret the audit path does not hold today. |
-## Beta 1 verification residuals (Group C)
-
-Seven independent verifiers re-ran the 82 findings of the 2026-10-03 review
-against the merged beta build (2026-10-07) and found a few new ones in
-evidence, retention and reports. The code items are fixed (C1 to C8 of the
-Beta 1 fix list, each with a regression test). What
-remains is below: the documented gaps (C9) and the edges of the fixes
-themselves. A later docs pass folds these into the sections above.
-
-| Id | Area | What is left, and what it costs |
-|---|---|---|
-| C9-a | Console, legal hold | The console has no control to place or lift a hold on an exhibit or on a case. The one hold control in the console is the collected document's (the document card, Place a legal hold). An exhibit is held with `POST /api/v1/retention/legal-hold` (`evidence_id`, `on`, `reason`) and a case with `POST /api/v1/retention/cases/{id}/legal-hold` (`on`, `reason`): both need `retention.manage` through the gate with a fresh second factor, a written reason of at least five characters whichever way the hold goes, and both write `LEGAL_HOLD_APPLIED` or `LEGAL_HOLD_LIFTED` with the reason replaced. docs/08 now says where an analyst finds this. **Fix:** a control on the exhibit card and on the case header that calls these two routes. |
-| C9-b | Legal hold, lifting | Lifting a hold is one person with a written reason. A review suggested two people and the owner did not adopt it (2026-10-07), so the code comments, this entry and the tests describe the single-person design. A lift below the material is refused: the exhibit's lift needs the lifter cleared for that exhibit, and a case-level lift needs a ceiling that covers every live exhibit, record, sample, lookup and cited collected document the case holds. The decision has no number in docs/00 yet; the docs pass gives it one. |
-| C9-c | Database, hold and purge columns | The request role can still `UPDATE` the hold, retention and purge columns directly. `noctornal_app` holds table-level `UPDATE` on `core.evidence` and `core."case"`, so a statement injected as that role can set an exhibit's `legal_hold` false, its `purged_at`, `retention_until` or `is_worm_locked`, and a case's `legal_hold` or `retention_until`, on any row row-level security lets it reach. The database refuses a row that is both held and destroyed (0142) and fixes an exhibit's hashes, storage key, version id and case (0140); nothing guards `legal_hold` going to false. The same class as F52: a process holding the request role's credentials can do what the application refrains from. **Fix:** narrow the request role's `UPDATE` to the columns the application writes as that role, or move these columns behind the system role by trigger, as 0140 did for the anchors. |
-| C2-r | Reports, disclosure | Only the exhibit figure follows the case's withheld-disclosure setting in a report (nothing under NONE, "some exhibits" under PRESENCE, the number under COUNT). The entity and relationship counts and the hypothesis matrix's count of withheld evidence are still printed as exact numbers under PRESENCE: `Withheld` carries them to the builder, and the graph view hides them while the report does not. Under NONE the redaction statement reads "nothing has been withheld" when entities or exhibits were, which is what NONE has always meant for the entity counts. **Fix:** carry the mode into `Redaction` and say "some" for all three figures. |
-| C3-r | Evidence, upload | The same bytes at different labels are now separate exhibits, each with its own object, custody trail and register row, which is what 0141 allows. A case can therefore hold several copies of one file. The upload route takes a classification and no compartments, so lodging the same bytes into another compartment is reachable only through the service (capture, lookups, deception emails). |
-| C5-r | Retention, purge | `purge_due` marks each exhibit destroyed in the transaction that deleted it and writes one tombstone for the batch afterwards. If that tombstone cannot be written, the exhibits are destroyed and marked purged and no tombstone exists: the error names how many, and they are no longer due, so another purge does not write it. `purge_out_of_schedule` is still one transaction with the approval's spend, because the approval must be spent with the destruction, so a failure there after a store delete still rolls the marks back, leaves the approval usable and the object gone. A destroying Lab rejection now opens a second, system connection for the length of the delete, to hold the case row. |
-| C6-r | Retention, case hold | A case hold entered while a purge runs waits for the exhibit being destroyed at that moment, and that exhibit is destroyed: a hold cannot reach into a delete in flight. Every exhibit after it is read as held and kept, and the purge says so. The records, lookups and samples of a case share one short transaction that holds the case row `FOR SHARE`, so a hold entered during it lands after it; a destroying sample rejection holds the case row for its own delete. |
-| C7-r | Retention, disclosure | The purge dry run's totals and its withheld notice now follow the case's setting, as the due list's do. The real run's response and its tombstone still total what the sweep acted on, exhibits above the caller included, so a caller who may run a real purge learns the count afterwards. A refused case-hold lift names nothing above the lead under NONE, but the refusal itself still differs from a lift that succeeds, which no wording can hide. **Fix:** the same counts over the visible items for the real run's response. |

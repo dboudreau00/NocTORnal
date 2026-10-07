@@ -189,7 +189,7 @@ def test_an_identity_preserving_rewrite_is_still_an_exact_form():
     identifier as the stored form. They are not one contiguous run of the
     query's letters and digits, so `_lossless` dropped them, and as the
     fragment pattern is the query as typed the selector was not matched at
-    all (final review U8, 2026-09-23)."""
+    all (2026-09-23)."""
     assert _forms("alice+burner@gmail.com")["EMAIL"] == "alice@gmail.com"
     assert _forms("ember.hobby+shop@gmail.com")["EMAIL"] == "emberhobby@gmail.com"
     assert _forms("Alice@GoogleMail.com")["EMAIL"] == "alice@gmail.com"

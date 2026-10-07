@@ -212,7 +212,7 @@ def test_the_operators_documents_say_how():
         assert needle in readme, needle
     assert "x-setup-token" in readme.lower()
     # The curl example reads a shell variable; the README must say to set it
-    # (g45 verification, 2026-10-03).
+    # (2026-10-03).
     assert "export NOCTORNAL_SETUP_TOKEN" in readme
     assert "# NOCTORNAL_SETUP_TOKEN=" in example, "the example must ship it commented out"
     assert "\nNOCTORNAL_SETUP_TOKEN=" not in example
@@ -221,7 +221,7 @@ def test_the_operators_documents_say_how():
 
 # ---------------------------------------------------------------------------
 # A closed door is indistinguishable from no door for EVERY request shape
-# (g45 verification, 2026-10-03)
+# (2026-10-03)
 # ---------------------------------------------------------------------------
 #
 # The first version closed the door in the route's dependency, which FastAPI

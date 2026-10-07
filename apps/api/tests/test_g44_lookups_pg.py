@@ -1,6 +1,6 @@
 """A case-level hold, placed through the product, keeps the case's lookups
 (evidence-case-hold-unreachable, unit g44, 2026-10-03), and the due list leaves
-out a lookup above the reader (g44-due-labelled-records, same date).
+out a lookup above the reader (due-labelled-records, same date).
 
 `test_lookup_ledger_pg.py` holds the lookup purge to the case's hold with a
 raw UPDATE, which is all there was until the product could place one. This
@@ -72,7 +72,7 @@ def test_a_case_hold_keeps_the_lookups_and_lifting_it_lets_retention_empty_them(
 
 
 def test_the_due_list_leaves_out_a_lookup_and_its_answer_above_the_caller(conn):
-    """g44-due-labelled-records: `/retention/due` listed every lookup and
+    """due-labelled-records: `/retention/due` listed every lookup and
     answer of a case to any retention.read holder, whatever their labels,
     though the ledger itself hides what is above them. A lookup is never
     above AMBER (the lookup_never_above_amber check), so the reader below it is

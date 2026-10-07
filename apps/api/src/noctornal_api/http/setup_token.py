@@ -38,7 +38,7 @@ true only while the door can actually be used, so a closed door never
 invites the first-run card. It adds `setup_token_required` so the card
 knows to ask for the token.
 
-## A closed door answers before the request is read (g45 verification, 2026-10-03)
+## A closed door answers before the request is read (2026-10-03)
 
 The first version closed the door inside the route's own dependency, and
 FastAPI reads and parses the body, and validates every parameter, BEFORE a

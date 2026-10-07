@@ -73,7 +73,7 @@ Every remaining reader is listed by function, with the term or the system
 purpose that answers it, in `test_rls_audit_paths.py`, which fails by name
 on a new reader nobody classified.
 
-## The backfill (verify:g37, 2026-10-03)
+## The backfill (2026-10-03)
 
 A record attached before this revision has its quarantine-era triage rows
 and category correction on rows that carry no case, which only the

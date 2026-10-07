@@ -157,8 +157,8 @@ def test_a_body_of_tiny_chunks_is_read_in_pieces(monkeypatch):
     """`http.client` reads a chunked body into a list of one object per
     chunk and joins it at the end, so one `read(max_bytes + 1)` of 16 MiB
     served as two-byte chunks held about a gigabyte (measured in memory: 2
-    MiB of them peaked at 125 MiB, read in 64 KiB pieces at 6 MiB; beta 1
-    gate 6, 2026-10-07). No read asks for more than a piece."""
+    MiB of them peaked at 125 MiB, read in 64 KiB pieces at 6 MiB; 2026-10-07). No read asks
+    for more than a piece."""
     import http.client
 
     asked: list[int | None] = []

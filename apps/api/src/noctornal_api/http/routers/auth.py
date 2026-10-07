@@ -84,7 +84,7 @@ def _audit_email(email: str) -> dict:
     request made a permanent multi-megabyte row (http_ui-006).
 
     A value that is not shaped like an address records only its length and
-    the prefix (Beta 1 verification, G5): the sign-in box is where people
+    the prefix (2026-10-07): the sign-in box is where people
     type a password by mistake, and for an unknown account the row would
     otherwise keep it in clear in a log nothing can delete from. An
     address-shaped password (`Hunter2@home.net`) is not told apart from an
@@ -204,7 +204,7 @@ def _login(body: LoginBody, request: Request,
     # A recovery code is checked here and spent only once the sign-in is
     # known to go ahead (`spend`, below): the must-change and
     # no-change-pending refusals come first, and until 2026-09-24 each of
-    # them cost the person a single-use code (final review u4).
+    # them cost the person a single-use code (2026-09-24).
     service = AuthService(PgUserStore(conn))
     result = service.authenticate(
         body.email, body.password, body.totp_code, spend_recovery=False
@@ -306,7 +306,7 @@ def _password_change_due(conn, user_id, body: LoginBody,
       `PASSWORD_CHANGE_REQUIRED_TYPE`, and NO session. A TOTP code this
       request carried has been spent (replay protection), so the console
       asks for a fresh one with the new password. A recovery code has
-      not: `login` spends it only after this answers (final review u4);
+      not: `login` spends it only after this answers (2026-09-24);
     - the flag is set and a new password came: True, and `login` stores
       it and clears the flag in one statement (`iam_admin.change_password`)
       once the second factor is spent, then mints the session with it;

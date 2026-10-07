@@ -53,10 +53,20 @@ Violating any of these is a bug even if tests pass.
    accepted before it carried an observation date is dated by recording a
    new claim that cites it (`supersedes_id`, 0131) and stamping the old
    one once, from NULL (`supersede_assertion`). The old claim's own columns
-   are never written, so the invariant is not amended.
+   are never written, so the invariant is not amended. The database holds
+   it against the runtime roles since 2026-10-03: they cannot UPDATE a claim
+   except to stamp one of its five mark columns once, nor DELETE or TRUNCATE
+   it (0135), a correction records the value it replaced (0136), and a claim
+   inserted by the request role is live, authored by the bound user and dated
+   by the database's clock (0171). The schema owner and the system role are
+   exempt, because migrations and the machine paths run as them.
 
 6. **The audit log is append-only.** No code, migration or admin tool
-   gains `UPDATE` or `DELETE` on `audit.event`.
+   gains `UPDATE` or `DELETE` on `audit.event`. Since 2026-10-03 the audit
+   and custody chains also take their number inside the chain lock, so
+   concurrent writers cannot fork them (0149), and the request role cannot
+   name another user as the actor, date a row or draw the ledger sequences
+   (0150, 0151, 0169).
 
 7. **Credentials never leave the vault.** `collection_account.secret_*`
    is envelope-encrypted at rest (AES-256-GCM, the same scheme as TOTP
@@ -120,8 +130,8 @@ firehose into a half-built model produces a landfill.
 
 `ARCHITECTURE.md` holds the reasoning. What is in the tree:
 
-- Postgres 16 + pgvector as the system of record; 157 Alembic revisions
-  (`0001`-`0157`), `db/schema.sql` regenerated from them
+- Postgres 16 + pgvector as the system of record; 172 Alembic revisions
+  (`0001`-`0172`), `db/schema.sql` regenerated from them
 - Python 3.12+ / FastAPI, serving the REST API under `/api/v1`, the
   analyst console under `/ui` and the `/api/v1/live` WebSocket, and
   running the analytics, the notification drain and the Poll now of a feed
@@ -144,7 +154,11 @@ firehose into a half-built model produces a landfill.
 - MinIO (S3 + object lock) for evidence, raw captures and samples
 - Mailpit as the development SMTP sink
 - Authorisation is the five-part gate in `security/access.py`, answered
-  from `iam.*` in Postgres, no external authorisation engine
+  from `iam.*` in Postgres, no external authorisation engine. Row-level
+  security stands behind it on every table that carries a case or a label
+  (82 tables, none deferred): requests run as `noctornal_app`, bound to
+  their session, and work that must see every row runs as a named system
+  purpose on `noctornal_worker`
 - The 2026-07 sketch's Next.js, sigma.js/WebGL, OpenFGA/SpiceDB, NATS and Arq/Celery are not in the tree; they were superseded (decisions 8, 9, 30, 37; compose R13 removed OpenFGA and NATS on 2026-07-26)
 
 ## Conventions

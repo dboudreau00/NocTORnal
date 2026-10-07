@@ -174,8 +174,8 @@ def test_an_archive_expands_into_members_that_are_samples_of_the_same_material(c
     assert findings["refused"] == [{"path": "../escape.exe",
                                     "reason": "the path walks out of the archive "
                                               "(a .. component)"}]
-    # "unscreened" counts the refused entries with bytes behind them (g40
-    # verify major 3, 2026-10-03): the traversal name holds content.
+    # "unscreened" counts the refused entries with bytes behind them (2026-10-03): the
+    # traversal name holds content.
     assert findings["counts"] == {"entries": 3, "accepted": 2, "refused": 1,
                                   "stored": 2, "unscreened": 1}
     # Each member was stored exactly as an upload is: its own envelope in
@@ -213,8 +213,8 @@ def test_a_zip_link_or_device_entry_carrying_a_payload_is_expanded_as_a_member(
     """In a zip a link or a device is a mode bit on an entry that carries
     bytes, which Windows and most extractors write out as an ordinary file.
     Refused as content-free, a payload marked so was neither expanded nor
-    screened and the card said every member was compared (beta 1 gate 6,
-    2026-10-07). An entry that holds more than a link target is read as the
+    screened and the card said every member was compared (2026-10-07). An entry that holds
+    more than a link target is read as the
     file it is; a real link stays a content-free refusal."""
     owner = make_user(conn, PREFIX, roles=("CASE_OWNER",))
     case = make_case(conn, owner, classification="AMBER")
@@ -419,7 +419,7 @@ def test_a_whole_archive_refusal_names_its_limit_and_stores_nothing(conn, store,
 
 
 def test_a_tree_is_held_to_one_cap_not_one_per_archive(conn, store, monkeypatch):
-    """Beta 1 verification, group F3. The caps were per archive and depth 2
+    """2026-10-07. The caps were per archive and depth 2
     expands two levels, so one upload could make (cap + cap x cap) samples,
     each with an encrypted object and a queued triage run. The whole tree,
     root excluded, is now held to NOCTORNAL_ARCHIVE_MAX_TREE_MEMBERS: an

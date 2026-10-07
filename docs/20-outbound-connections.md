@@ -596,8 +596,11 @@ Not blocking, with no consequence entry.
 
 `config.verify_environment` refuses, in production, a malformed
 `NOCTORNAL_EGRESS_PROXY_URL` or `NOCTORNAL_EGRESS_INTERNAL_CIDRS`, and,
-with a proxy configured, a missing or malformed client key, fingerprint
-key or seal public key, naming the variable and never the value.
+with a proxy configured, a missing or malformed client key or fingerprint
+key, and a seal public key that is set and malformed, naming the variable
+and never the value. A missing seal public key is not refused at boot: it
+is checked only when set, and the register's `egress_exits_open` row says,
+as a caveat, that a profile with no exit yet cannot be sealed without it.
 `egress_routes.enforce_production_egress` runs when the API, the
 collection poll and the notification drain start, and refuses to start a
 production process that has any outbound use and no proxy, rather than

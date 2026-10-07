@@ -532,7 +532,7 @@ def test_sign_in_asks_for_a_new_password_and_keeps_the_old_one_only_in_memory():
     end = _source(js, "endPasswordChange")
     assert "PWCHANGE.password = ''" in end
     # The in-place sign-in asks for the new password in its own sheet, so
-    # the screen behind it stays (final review u5, 2026-09-24; it handed
+    # the screen behind it stays (2026-09-24; it handed
     # over to the sign-in page's card, through endSession, until then).
     assert "startReauthChange(json.password)" in _source(js, "submitReauth")
     for fn in ("startReauthChange", "endReauthChange", "reauthSignIn"):

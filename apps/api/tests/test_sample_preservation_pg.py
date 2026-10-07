@@ -472,7 +472,7 @@ def test_a_rejection_that_cannot_get_the_row_gives_up_cleanly(conn, monkeypatch,
 
     And that message is what the router's 409 carries: raised from the
     LockNotAvailable, `safe_detail` replaced it with "the request could not
-    be completed (ref ...)" (final review verifier on U5, 2026-09-23)."""
+    be completed (ref ...)" (2026-09-23)."""
     from noctornal_api import samples
     from noctornal_api.db import connect
     from noctornal_api.http.errors import safe_detail
@@ -520,7 +520,7 @@ def test_a_failure_after_the_copy_names_the_held_copy(conn):
     key = f"preserved/{sample.sha256[:2]}/{sample.sha256}"
     assert key in str(refused.value) and "version v1" in str(refused.value)
     # A delete that raised may still have removed the object, so the
-    # refusal may not promise the working copy is there (U4, 2026-09-23).
+    # refusal may not promise the working copy is there (2026-09-23).
     assert "did not confirm deleting" in str(refused.value)
     assert "still in place" not in str(refused.value)
     assert _key_row(conn, sample.id)[2] == QUARANTINED
@@ -682,7 +682,7 @@ def _fail_the_audit_once(svc, action):
     it, so nothing else can fail after the working-copy delete. A
     RuntimeError stood in here until the final review's verifier found it
     hid the real defect: `safe_detail` discards the whole message of an
-    error chained to a psycopg one (U4, 2026-09-23)."""
+    error chained to a psycopg one (2026-09-23)."""
     import psycopg
     real = svc._audit
     state = {"failed": False}
@@ -699,7 +699,7 @@ def _fail_the_audit_once(svc, action):
 
 def test_a_failure_after_the_delete_says_so_and_the_retry_adopts_the_copy(
         conn):
-    """Final review U4, 2026-09-23. A failure after the working-copy delete
+    """2026-09-23. A failure after the working-copy delete
     was reported as "the working copy is still in place"; the retry then
     found nothing to read and pointed at a record-only rejection, which
     left the held copy named by no row, for good. Now the refusal says the
@@ -746,7 +746,7 @@ def test_a_failure_after_the_delete_says_so_and_the_retry_adopts_the_copy(
 
 def test_a_dropped_connection_after_the_delete_still_names_the_copy(conn):
     """The final review verifier's case, with a connection that really
-    dies between the working-copy delete and COMMIT (U4, 2026-09-23). The
+    dies between the working-copy delete and COMMIT (2026-09-23). The
     audit row recording the failure cannot be written either, on the same
     dead connection, so the refusal is the only record of where the one
     remaining copy is, and it has to reach the analyst whole. A retry on a
@@ -793,8 +793,8 @@ def test_an_adoption_that_cannot_check_the_copy_refuses_cleanly(
         conn, monkeypatch, fault):
     """Adoption reads the held copy and opens it with the kept data key.
     Either failing raised raw and answered a bare 500, where a missing
-    working object had always been a 409 (final review verifier on U4,
-    2026-09-23). Now it is a refusal that names the held copy it found and
+    working object had always been a 409 (2026-09-23). Now it is a refusal that names the
+    held copy it found and
     records nothing."""
     from noctornal_api import samples
     from noctornal_api.http.errors import safe_detail
@@ -831,7 +831,7 @@ def test_an_adoption_that_cannot_check_the_copy_refuses_cleanly(
 
 
 def test_the_retry_adopts_the_held_version_in_the_real_store(conn, written):
-    """U4 against the real object-locked bucket: `latest_held` must find the
+    """`latest_held` against the real object-locked bucket must find the
     version the failed attempt wrote (a HEAD and a hold read, which the
     preservation account's policy allows), and the retry must record THAT
     version, not write another."""
@@ -904,7 +904,7 @@ def test_an_unreachable_working_store_is_not_read_as_a_missing_object(conn):
 @pytest.mark.parametrize("path", ["record_only", "destroy"])
 def test_a_rejection_waiting_on_another_changes_nothing(conn, monkeypatch,
                                                          path):
-    """Final review U5, 2026-09-23: only the preserving path locked the
+    """2026-09-23: only the preserving path locked the
     row, so a record-only (or destroy) rejection that started while
     another was in flight passed the unlocked pre-check, waited on its
     UPDATE, then overwrote the first one's reason and appended a second,
@@ -1319,7 +1319,7 @@ def test_a_retrieval_crosses_the_split_on_a_ticket_minted_for_it(
 
 def test_the_officer_reaches_preserved_samples_without_reading_content(
         conn, client):
-    """Final review U3, 2026-09-23: authorising a retrieval was offered only
+    """2026-09-23: authorising a retrieval was offered only
     inside the Lab's sample card, under `sample.read`, which the Security
     Officer does not hold (Security Officers read no case content). So the
     only role allowed to authorise could never reach the form. The officer

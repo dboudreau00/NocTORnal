@@ -1,5 +1,5 @@
 """The ontology and its reference vocabulary are read-only to the request
-role (Beta 1 authorization gate, 2026-10-07).
+role (2026-10-07).
 
 ## Why
 
@@ -9,7 +9,7 @@ run time kept the full four: the ontology's `core.node_type`,
 `core.edge_type` and `core.selector_type`, the comms catalogue
 `comms.platform`, and the ingest category vocabulary
 `ingest.category_rule`. They are written by migrations alone (the ontology
-by `definition.py` and a revision, CLAUDE.md), carry no case and no label,
+by `definition.py` and a revision), carry no case and no label,
 and are under no policy (`rls_registry.EXEMPT`, reference vocabulary), so
 the request role's write reached every row.
 

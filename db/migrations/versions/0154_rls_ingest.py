@@ -56,7 +56,7 @@ dead letters and the reveal authorisations (F51, 2026-10-02).
   officer who grants and the grantee who reveals stay two people, and the
   window stays the one that was granted, at the database too.
 
-  What this does NOT hold (g31 verification 2, 2026-10-03): the case half
+  What this does NOT hold (2026-10-03): the case half
   of the route's gate. The route asks `authorize_object` for
   `victim_pii.authorise` on the case, which reads the permission off the
   caller's one role on that case (0062), and no SQL helper answers that, so
@@ -157,7 +157,7 @@ DEAD_LETTER = (f"dead_letter.compartments <@ {_HELD} AND "
                f"dead_letter.classification, {_CASES}, {_CLR}, {_CEIL}, {_MANAGES})")
 
 _PII_CASE = f"pii_authorisation.case_id = ANY ({_CASES})"
-#: Dated now (2026-10-02, g31 verification finding 1): the 30-day CHECK is
+#: Dated now (2026-10-02, finding 1): the 30-day CHECK is
 #: counted from granted_at, so a grant dated in the future would be live,
 #: and unbounded, from the moment it was inserted.
 PII_GRANT = (f"{_PII_CASE} AND pii_authorisation.granted_by = {_ACTOR} AND "

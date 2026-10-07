@@ -14,7 +14,7 @@ commit you tested. A proof of concept is welcome and never required.
 
 ## Scope
 
-This project is **alpha, unaudited, and not certified for evidential
+This project is **beta, unaudited, and not certified for evidential
 use**. It has never been operated against real targets. That means:
 
 - **In scope:** anything that breaches one of the twelve invariants in
@@ -51,14 +51,29 @@ use**. It has never been operated against real targets. That means:
   anybody's session would otherwise sign a signed-out colleague in as its
   author). `deps.session_token` still accepts `Authorization:
   Bearer`, for clients that are not browsers.
+- **How the database backs the invariants, so a report starts from the
+  right model.** Row-level security stands on 82 tables, enabled and not
+  forced, so the schema owner is not bound and a production start refuses a
+  request role that is the owner. A claim is never rewritten or deleted by
+  a runtime role (0135), is inserted live, as the bound user, at the
+  database's clock (0171), and a correction records the value it replaced
+  (0136). The audit and custody chains take their number inside the chain
+  lock (0149), and the request role cannot name another user, date a row or
+  draw the ledger sequences (0150, 0151, 0169). A verification cannot see
+  the newest rows being cut off, which an anchor held by the operator
+  catches. The request role reads no account's credential columns (0143),
+  cannot write step-up freshness (0144), and cannot write the ontology
+  (0172). What the request role can still reach is listed in the register.
 - **Known and already documented:** everything in
-  [`docs/17-flagged-for-review.md`](docs/17-flagged-for-review.md). Please
-  read it before reporting, row-level security under a non-owner
-  database role, WebAuthn and login timing equalisation are absent *on
-  purpose and on the record*, and session binding is recorded on every
-  session (0058) but enforced only under
-  `NOCTORNAL_SESSION_STRICT_BINDING`. A report that one of them is
-  missing is not a finding.
+  [`docs/17-flagged-for-review.md`](docs/17-flagged-for-review.md), above
+  all its Known residuals at Beta 1. Please read it before reporting.
+  WebAuthn is absent *on purpose and on the record*, and session binding is
+  recorded on every session (0058) and enforced under
+  `NOCTORNAL_SESSION_STRICT_BINDING`, which a production start requires
+  and development leaves off. A report that WebAuthn is missing, or that a
+  development install does not bind sessions, is not a finding, and neither
+  is a gap the register already names. A way past one of the fixes the
+  register records as made is.
 - **Out of scope:** the development `docker-compose.yml`. It ships
   `dev_only_change_me` as a password on purpose, publishes its ports on
   127.0.0.1 (IPv4 loopback) only, and says "development only" in its first
@@ -69,7 +84,9 @@ use**. It has never been operated against real targets. That means:
 Unusually, and deliberately: **a violation of an invariant is a bug even
 if every test is green.** Eight adversarial reviews have each found a real
 defect under a fully passing suite, and three of those defects were green
-tests asserting the bug. If you can show an invariant does not hold, that
+tests asserting the bug. The ninth, of the beta build on 2026-10-03, kept 82
+findings, and its fixes and the nine release reviews that followed found
+more. If you can show an invariant does not hold, that
 is a valid report regardless of what CI says.
 
 ## Hardening this is *not* responsible for

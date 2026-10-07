@@ -1,5 +1,5 @@
 """A recovery code checked at sign-in and spent only when the sign-in goes
-ahead (final review u4, 2026-09-24). Unit tests, no database.
+ahead (2026-09-24). Unit tests, no database.
 
 Sign-in's must-change and no-change-pending refusals answer after the
 credentials are checked, and `authenticate` used to spend a recovery code

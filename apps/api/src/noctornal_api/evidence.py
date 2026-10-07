@@ -153,7 +153,7 @@ def own_key(plain: str, evidence_id: UUID) -> str:
     """The storage key of an exhibit whose bytes another exhibit already
     holds under `plain`: beside it, never under it.
 
-    Beta 1 gate 64. It was `plain/evidence_id`, and MinIO does not list an
+    2026-10-07. It was `plain/evidence_id`, and MinIO does not list an
     object whose name continues another object's name past a "/": measured
     against the dev store, a versioned listing of that key returns nothing
     while the object is served by version id. Both `delete_all_versions` and
@@ -580,7 +580,7 @@ class ExhibitUnavailable(EvidenceError):
     retention destroyed them, or a purge is destroying them now. Raised
     before anything is recorded against the exhibit, because a destroyed
     exhibit has no integrity to fail and the custody and audit ledgers are
-    court-facing and append-only (g44-verify-destroyed-exhibit, 2026-10-03).
+    court-facing and append-only (verify-destroyed-exhibit, 2026-10-03).
     The router answers 409 with the sentence."""
 
 
@@ -816,8 +816,8 @@ class EvidenceService:
         # indistinguishable from novel bytes. A purged exhibit is never
         # reused (evidence-reingest-after-purge-dropped, same date): its
         # bytes are gone, so lodging them again stores them again.
-        # Nor is one at other labels than the ones asked for (Beta 1
-        # verification, group C, C3): AMBER bytes and then the same bytes as
+        # Nor is one at other labels than the ones asked for (2026-10-07): AMBER bytes and
+        # then the same bytes as
         # RED used to answer `deduplicated` with the AMBER exhibit, and the
         # RED request was dropped without a word. One live exhibit per
         # labels is what 0141 keeps.
@@ -919,7 +919,7 @@ class EvidenceService:
                     # custody or audit append, the version update, the commit):
                     # raised from inside this handler, so the sibling below
                     # never sees it, and the locked object would be named by
-                    # nothing (g44-unique-after-put, 2026-10-03).
+                    # nothing (unique-after-put, 2026-10-03).
                     self._record_orphan(evidence_id, case_id, storage_key,
                                         shahex, acquired_by, exc)
                     raise
@@ -1043,7 +1043,7 @@ class EvidenceService:
         Raises `ExhibitUnavailable` when that is retention's doing and
         returns when it is not, so the caller raises the alarm.
 
-        g44-verify-destroyed-exhibit (2026-10-03): the first read of the row
+        verify-destroyed-exhibit (2026-10-03): the first read of the row
         said live, and a purge may have committed since (the row is then
         destroyed), or be part way through (it deleted the object and holds
         the row until it commits, which can be minutes on a large batch). Both
@@ -1104,7 +1104,7 @@ class EvidenceService:
         if row is None:
             raise EvidenceError(f"evidence {evidence_id} not found")
         key, stored_sha, stored_blake, case_id, version, purged_at = row
-        # g44-verify-destroyed-exhibit (2026-10-03): retention destroyed the
+        # verify-destroyed-exhibit (2026-10-03): retention destroyed the
         # bytes of a purged exhibit on purpose, so there is nothing to
         # verify and nothing to alarm about. Said before any read.
         if purged_at is not None:
@@ -1244,7 +1244,7 @@ class EvidenceService:
         if row is None:
             raise EvidenceError(f"evidence {evidence_id} not found")
         key, stored_sha, case_id, stored_blake, version, purged_at = row
-        # g44-verify-destroyed-exhibit (2026-10-03): see `verify_integrity`.
+        # verify-destroyed-exhibit (2026-10-03): see `verify_integrity`.
         if purged_at is not None:
             raise ExhibitUnavailable(PURGED_DETAIL)
         # evidence-integrity-anchors-mutable (2026-10-03): the version it was

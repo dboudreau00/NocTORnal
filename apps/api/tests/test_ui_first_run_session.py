@@ -426,7 +426,7 @@ function dispatch(target, key, mods) {
 
 
 def test_a_session_sheet_holds_the_keyboard():
-    """Fix round 2, 2026-09-23. `inert` on the app does not stop the key
+    """2026-09-23. `inert` on the app does not stop the key
     handlers on `document`: with Account open (a LIVE session) a stray a,
     r or d accepted, rejected or deferred the selected triage proposal
     behind it, Ctrl+K opened the palette over Account and one Escape then
@@ -793,7 +793,7 @@ def test_the_same_analyst_comes_back_to_their_case_and_pane():
 
 
 def test_leaving_a_lapse_signs_out_a_session_the_server_still_holds():
-    """Fix round 2, 2026-09-23. "Sign in as someone else" after this tab's
+    """2026-09-23. "Sign in as someone else" after this tab's
     own clock ended the session went through `endSession` alone, which
     cannot delete the HttpOnly cookie: if the server still held the
     session (the live socket's handshake slides it unseen), the previous

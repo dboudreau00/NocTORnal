@@ -1,5 +1,5 @@
 """An SMTP relay that echoes the password in its refusal does not get it into
-the delivery ledger (beta 1 gate 6, 2026-10-07).
+the delivery ledger (2026-10-07).
 
 `send_smtp` redacted its error text after `secret_in_scope` had ended, so the
 exact removal of the live password no longer applied, and a short password

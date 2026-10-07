@@ -66,7 +66,7 @@ if (Test-Path -LiteralPath $EnvLocal) {
         $value = $trimmed.Substring($split + 1).Trim().Trim('"').Trim("'")
         if (-not $name) { continue }
         # A name that changes how programs start is left out, as in
-        # launch.ps1 (g48 verification, 2026-10-03): `PATH` or `PYTHONPATH` in
+        # launch.ps1 (2026-10-03): `PATH` or `PYTHONPATH` in
         # a handed-over file would redirect the python started below. The
         # same list is in scripts/_env.py, release/install.sh,
         # scripts/launch.sh and scripts/launch.ps1; a test holds all five

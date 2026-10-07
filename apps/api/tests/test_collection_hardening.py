@@ -137,7 +137,7 @@ def test_a_live_secret_is_removed_verbatim_however_it_is_encoded():
 
 
 def test_scrubbing_removes_exactly_the_live_secrets_and_nothing_else():
-    """Beta 1 verification, group F4: stored material (a post, its markup) is
+    """2026-10-07: stored material (a post, its markup) is
     scrubbed of the secrets this process holds, and ONLY those: a post that
     says `password: hunter2` is still the investigator's evidence, which
     `redact`'s structural patterns would have changed."""

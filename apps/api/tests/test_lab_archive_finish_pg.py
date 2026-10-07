@@ -1,5 +1,4 @@
-"""Archive expansion, the verifier's blockers and majors closed (g40 verify
-round, 2026-10-03).
+"""Archive expansion, the verifier's blockers and majors closed (2026-10-03).
 
 What these hold: an isolation that meets a busy sibling is FINISHED, not
 lost (the cascade runs on every call, goes on past the sample it cannot
@@ -400,7 +399,7 @@ def test_the_policy_sentence_no_longer_says_members_are_never_screened():
 
 # ---------------------------------------------------------------------------
 # A duplicate member: said no more than the archive's readers may know, and
-# a twin of matched material isolates the archive (g40 verify, 2026-10-03)
+# a twin of matched material isolates the archive (2026-10-03)
 # ---------------------------------------------------------------------------
 
 def test_a_duplicate_the_archives_readers_cannot_see_is_not_named_as_one(conn, store):

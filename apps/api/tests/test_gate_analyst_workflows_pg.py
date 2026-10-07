@@ -1,5 +1,5 @@
-"""Defects found driving the analyst workflows end to end (Beta 1 release
-gate 61, 2026-10-07), each pinned where it was found.
+"""Defects found driving the analyst workflows end to end (2026-10-07), each pinned where it
+was found.
 
 - An exhibit above the caller's labels answered its routes with the gate's
   403 "missing permission evidence.read on this case", to an analyst who
@@ -26,7 +26,7 @@ import pytest
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 pytestmark = pytest.mark.skipif(
-    not DATABASE_URL, reason="DATABASE_URL not set; gate 61 tests are gated")
+    not DATABASE_URL, reason="DATABASE_URL not set; these tests are gated")
 
 os.environ.setdefault("NOCTORNAL_TOTP_KEK", "A" * 43 + "=")
 
@@ -91,8 +91,8 @@ def _auth(conn, uid) -> dict:
 
 def _case(conn, client, owner) -> str:
     r = client.post("/api/v1/cases", headers=_auth(conn, owner), json={
-        "code": f"OP-G61W-{uuid4().hex[:6].upper()}", "title": "Gate 61",
-        "legal_basis": "gate 61 regression", "classification": "AMBER",
+        "code": f"OP-WORKFLOW-{uuid4().hex[:6].upper()}", "title": "Workflows",
+        "legal_basis": "workflow regression", "classification": "AMBER",
         "retention_until": str(date(2030, 1, 1)),
         "review_due": str(date(2027, 1, 1))})
     assert r.status_code == 201, r.text

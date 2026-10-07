@@ -510,7 +510,7 @@ def decide(
     # 404 whether or not the request is real (deps.py rule 2).
     if (record is None or record.case_id != case_id
             # Before the signer permission is asked (graph-merge-approval-
-            # hidden, 2026-10-03, second round): a caller who lacks it was
+            # hidden, 2026-10-03): a caller who lacks it was
             # told 403 "missing permission" for a merge request naming
             # entities above them and 404 for a random id, which said the
             # request exists. The listing's 404, as for no request, whoever

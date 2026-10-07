@@ -648,7 +648,7 @@ def test_no_router_takes_a_limit_above_1000_except_the_two_recorded_exceptions()
 
 
 # ---------------------------------------------------------------------------
-# Beta 1 verification, Group G (2026-10-07)
+# 2026-10-07
 # ---------------------------------------------------------------------------
 
 BS = "\\"
@@ -675,7 +675,7 @@ LONE_SURROGATES = [
 
 @pytest.mark.parametrize("name,basis", LONE_SURROGATES, ids=[n for n, _ in LONE_SURROGATES])
 def test_a_lone_surrogate_escape_is_a_422_not_a_500(client, world, name, basis):
-    """G1 (verifier u4): `{"statement":"ok","basis":"\\udc00"}` reached
+    """`{"statement":"ok","basis":"\\udc00"}` reached
     Postgres as text no encoding can hold and answered 500 with a logged
     UnicodeEncodeError. Fields with a length bound happened to answer 422."""
     r = client.post(f"/api/v1/cases/{world['case']}/assumptions",
@@ -760,7 +760,7 @@ def test_the_capped_upload_routes_are_found():
 
 
 def test_an_unauthenticated_upload_is_refused_before_a_byte_is_read(app, client):
-    """G2 (verifier u4): FastAPI parses a form before any dependency runs,
+    """FastAPI parses a form before any dependency runs,
     and Starlette spools the parse to disk, so 300 MiB streamed at
     `POST /cases/{id}/evidence` with no credential was read up to the
     route's 256 MiB cap before the 401 (the API container has no tmpfs
@@ -840,7 +840,7 @@ def _failed_login_by_hash(conn, digest: str):
 
 
 def test_a_password_typed_into_the_email_box_is_not_stored(owner, client):
-    """G5 (verifier u4, http_ui-006): the 'email' of a failed sign-in was
+    """http_ui-006: the 'email' of a failed sign-in was
     kept verbatim up to 64 characters, so a password typed into the wrong
     box for an unknown account sat in the append-only log in clear."""
     typed = f"g45http-pw-{uuid4().hex[:6]}-Hunter2-typed-in-email-box"

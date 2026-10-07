@@ -7,7 +7,7 @@
   into the open one. The server now refuses that move
   (`test_breakglass_ingest_export_pg.py`); the form offers a row's own
   cases and quarantine, and selects the row's own case.
-- u25: the ingest key secret shown once under Feeds > Keys stayed on the
+- the ingest key secret shown once under Feeds > Keys stayed on the
   screen through a case switch, a pane change and a Feeds subtab change,
   unlike the Admin card's one-time credentials, until the session ended.
 
@@ -109,7 +109,7 @@ def test_the_replay_form_takes_its_choice_from_replay_targets():
 
 
 # ---------------------------------------------------------------------------
-# u25: the issued key's secret leaves with the tab, the pane and the case
+# the issued key's secret leaves with the tab, the pane and the case
 # ---------------------------------------------------------------------------
 
 def test_the_key_secret_is_cleared_by_one_function():

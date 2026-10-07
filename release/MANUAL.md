@@ -1,12 +1,16 @@
 # NocTORnal: analyst manual
 
-> Alpha software. See [README.md](README.md) for the legal status; five
+> Beta software. See [README.md](README.md) for the legal status; five
 > decisions, L1 to L5, gate any use against real material.
 
 This is not a feature tour. It explains what each screen is *for*, what
 the numbers mean, and the places where the tool will refuse you on
 purpose, because a refusal you do not understand looks like a bug, and a
 number you do not understand gets quoted.
+
+First time in? [START-HERE.md](START-HERE.md) is the page to follow before
+this one. The console shows a six-step tour at your first sign-in, and
+Help, Getting started, shows it again.
 
 ---
 
@@ -223,6 +227,10 @@ Material arriving from outside.
 - **Sources**, collection schedules and health. "Never polled" is listed
   separately from "unhealthy": a source that has not run yet is not an
   alert.
+- **Persona acts**, what the console asked the collector to do for a
+  persona (look a chat up, join, check, rebind, sign out, poll now). Each is
+  queued, runs in the collector service, and reads pending, running, done,
+  refused or failed; an act nobody claims lapses.
 - **Keys**, ingest keys are **write-only**. A key that could read the case
   file is a bug, and there is a database constraint saying so. A leaked
   ingest key means junk data, never the case file.
@@ -316,6 +324,14 @@ that label is a number that will be quoted without it.
   whose authority. Append-only, and it outlives the thing it records,
   otherwise a destruction and a deletion of the record of it look
   identical.
+- **Legal hold** stops a purge. A collected document is held from its
+  card in the console (Place a legal hold). An exhibit and a case are held
+  through the API: `POST /api/v1/retention/legal-hold` with `evidence_id`,
+  `on` and `reason`, and `POST /api/v1/retention/cases/{id}/legal-hold` with
+  `on` and `reason`. Both need a fresh second factor and a written reason of
+  at least five characters, whichever way the hold goes, and only someone
+  cleared for the material can lift one; a lift is one person's act. The
+  console has no control for either yet.
 - **Break-glass** is emergency access: easy to obtain, loud in every other
   way, capped at eight hours. It refuses outright if nobody holds
   `SECURITY_OFFICER`, because the mandatory review is the control and a
@@ -394,10 +410,18 @@ by design.
 - **Entropy is a hint, not a verdict.** Above ~7.2 is usually packed or
   encrypted, but a ZIP scores the same as a packer, which is why the
   bar sits next to the file type rather than alone.
-- **Gaps are listed before findings.** Fuzzy hashing, YARA and sandbox
-  detonation are not built, and each absence is recorded on the row with
-  its reason. An analyst reading findings needs to know what was never
-  looked at.
+- **Gaps are listed before findings.** A step that has not run, one that
+  was refused (an archive entry, a file over the analysis maximum) and one
+  the build does not do (a RAR or 7-Zip archive is not expanded) are each
+  recorded on the row with their reason. An analyst reading findings needs
+  to know what was never looked at.
+- **An archive's members are samples.** A zip, tar or tar.gz, tar.bz2 or
+  tar.xz is walked after static triage, and each accepted member becomes a
+  sample of its own, screened before it is stored and carrying its archive's
+  case and labels, never lower. A member that matches a prohibited-content
+  list isolates the whole tree for good. Caps are named when they refuse: 200
+  members, 256 MiB, a 100 to 1 ratio and two levels per archive, and 1,000
+  members in a whole tree.
 - **Download is a separate origin, step-up gated.** It is the one action
   that puts working malware on a disk. The archive password `infected` is
   an interlock against a double-click and a mail gateway, **not**
@@ -416,9 +440,12 @@ by design.
   does not get to choose. `GET /samples/policy` says which disposition is
   in force.
 
-**Detonation / VM.** Records an authorisation; **submits nothing**. There is
-no sandbox integration in this build. The exposure level is the decision
-the panel exists to slow down:
+**Detonation / VM.** Records an authorisation. Where the operator has
+configured one self-hosted CAPEv2, the sandbox worker can then send the
+sample, as the encrypted archive and never the raw file, after a second
+person's sign-off where the target or route is exposed; where none is
+configured, nothing is submitted and the row says so. The exposure level is
+the decision the panel exists to slow down:
 
 | | |
 |---|---|
@@ -440,13 +467,13 @@ None of these is a bug.
 | **404 on something you know exists** | You are not assigned to that case, or not read into its compartment. The status code is deliberately the same as "does not exist", otherwise it would be an existence oracle for a compartmented operation. |
 | **"re-authenticate with your second factor"** | A step-up permission with a stale session. Merges, exports, purges and sample downloads all require a *recent* second factor, not merely a valid session. |
 | **451 on a sample upload** | No prohibited-content policy has been declared. This is legal item L1, and the refusal is the feature. |
-| **"sample downloads are refused"** | One of four: `NOCTORNAL_SAMPLE_ORIGIN` is not configured (the origin split is OFF and every download refuses); it is not an origin (a path is a location on an origin, not an origin); it equals the application origin (`NOCTORNAL_BASE_URL` -- two names for one origin is not a split); or this process is the application origin, in which case fetch from the sample origin, which runs as a second process of this code with `NOCTORNAL_PUBLIC_ORIGIN` set to it. The refusal message names which, and so does `GET /samples/policy`. |
+| **"sample downloads are refused"** | One of four: `NOCTORNAL_SAMPLE_ORIGIN` is not configured (the origin split is OFF and every download refuses); it is not an origin (a path is a location on an origin, not an origin); it equals the application origin (`NOCTORNAL_BASE_URL`: two names for one origin is not a split); or this process is the application origin, in which case fetch from the sample origin, which runs as a second process of this code with `NOCTORNAL_PUBLIC_ORIGIN` set to it. The refusal message names which, and so does `GET /samples/policy`. |
 | **"this is already held"** *or* **"not accepted"** | A duplicate. The first message means you could have seen the existing one; the second means you could not, and it stays vague on purpose. |
 | **"a hold overrides all deletion"** | Legal hold. Lift it deliberately, with its own authority, or record the outcome without destroying. |
 | **"notifications go to your account email"** | Redirecting your own notification email is refused unless an operator has declared permitted domains. A subject line carries a case code, and a case code is intelligence. |
 | **"no active user holds SECURITY_OFFICER"** | Break-glass will not grant. The review is the control. |
 | **"This value is personal data or looks like it"** | A lookup refuses personal data toward every provider until a transfer authority is recorded (legal item L2). A JABBER address is refused too, because it is shaped like an email address. |
-| **"no sample hash leaves it"** | A hash that any sample holds is not looked up anywhere until prohibited-content screening exists (legal item L1), whether you typed it or picked it. |
+| **"no sample hash leaves this deployment"** | A hash that a sample holds is not looked up anywhere while no prohibited-content policy is declared, no hash list is loaded, or the sample was rejected (legal item L1), whether you typed it or picked it. |
 | **"Name a colleague who may sign this off"** | A lookup to a vendor or the public needs a named colleague's sign-off and a reason before anything is sent. |
 
 ---
