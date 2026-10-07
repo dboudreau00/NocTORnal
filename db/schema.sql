@@ -1,7 +1,7 @@
 -- =====================================================================
 -- NocTORnal -- db/schema.sql
 --
--- GENERATED MIRROR of the schema at Alembic revision 0170.
+-- GENERATED MIRROR of the schema at Alembic revision 0171.
 -- Produced by scripts/dump_schema.py from
 --   pg_dump --schema-only --no-owner --no-privileges
 -- with session SET lines, version comments and pg_dump's per-run
@@ -26,7 +26,7 @@
 -- superseded, never overwritten; edges are signed and time-bounded;
 -- the ontology lives in reference tables, not enums.
 --
--- Alembic revision: 0170
+-- Alembic revision: 0171
 -- =====================================================================
 
 --
@@ -305,11 +305,18 @@ CREATE FUNCTION audit.chain_hash() RETURNS trigger
     AS $$
 DECLARE prev bytea;
 BEGIN
-  IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
-    RAISE EXCEPTION 'audit.event is chained under READ COMMITTED only: a snapshot taken before the last append cannot see the tail';
+  IF pg_catalog.current_setting('transaction_isolation')
+       NOT IN ('read committed', 'read uncommitted') THEN
+    RAISE EXCEPTION 'audit.event is chained under READ COMMITTED only, and this transaction is %: a snapshot taken before the last append cannot see the tail',
+      pg_catalog.current_setting('transaction_isolation')
+      USING ERRCODE = 'invalid_transaction_state',
+            HINT = 'Run the append in a READ COMMITTED transaction.';
   END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended('audit.event.chain', 0));
   NEW.seq := nextval('audit.event_seq_seq');
+  IF NEW.occurred_at = 'infinity'::pg_catalog.timestamptz THEN
+    NEW.occurred_at := pg_catalog.clock_timestamp();
+  END IF;
   SELECT row_hash INTO prev FROM audit.event ORDER BY seq DESC LIMIT 1;
   NEW.prev_hash := prev;
   NEW.row_hash := public.digest(
@@ -337,7 +344,7 @@ END $$;
 
 CREATE FUNCTION audit.chain_ordered_after() RETURNS bigint
     LANGUAGE sql IMMUTABLE
-    AS $$SELECT 5109::bigint$$;
+    AS $$SELECT 2::bigint$$;
 
 --
 -- Name: FUNCTION chain_ordered_after(); Type: COMMENT; Schema: audit; Owner: -
@@ -372,7 +379,7 @@ BEGIN
   IF iam.rls_caller_exempt() THEN
     RETURN NEW;
   END IF;
-  NEW.occurred_at := pg_catalog.now();
+  NEW.occurred_at := 'infinity'::pg_catalog.timestamptz;
   IF NEW.actor_id IS NULL THEN
     RETURN NEW;
   END IF;
@@ -408,7 +415,7 @@ END $$;
 -- Name: FUNCTION pin_attribution(); Type: COMMENT; Schema: audit; Owner: -
 --
 
-COMMENT ON FUNCTION audit.pin_attribution() IS 'The request role may not date an audit row. A claimed actor must be the user its connection is bound to, or the holder of a ticket it spent: another user is refused, and a claim from a connection bound to nobody is kept in detail as unverified_actor_id with actor_id NULL (0150). Fires before audit_chain.';
+COMMENT ON FUNCTION audit.pin_attribution() IS 'The request role may not attribute an audit row to another user. A claimed actor must be the user its connection is bound to, or the holder of a ticket it spent: another user is refused, and a claim from a connection bound to nobody is kept in detail as unverified_actor_id with actor_id NULL (0150). Fires before audit_chain.';
 
 --
 -- Name: authority_target_fits(); Type: FUNCTION; Schema: collect; Owner: -
@@ -1617,6 +1624,43 @@ BEGIN
 END $$;
 
 --
+-- Name: assertion_insert_guard(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.assertion_insert_guard() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+DECLARE who uuid;
+BEGIN
+  IF iam.rls_caller_exempt() THEN
+    RETURN NEW;
+  END IF;
+  IF NEW.retracted_at IS NOT NULL OR NEW.retracted_by IS NOT NULL
+     OR NEW.retraction_reason IS NOT NULL
+     OR NEW.superseded_at IS NOT NULL OR NEW.superseded_by IS NOT NULL THEN
+    RAISE EXCEPTION 'core.assertion: a claim is recorded live; a retraction or a supersession is stamped afterwards, once, on a claim that exists';
+  END IF;
+  who := iam.rls_actor();
+  IF who IS NULL THEN
+    RAISE EXCEPTION 'core.assertion: a claim is recorded by a connection bound to its author, and this one is bound to nobody'
+      USING ERRCODE = '42501';
+  END IF;
+  IF NEW.created_by IS DISTINCT FROM who THEN
+    RAISE EXCEPTION 'core.assertion: a connection bound to one user may not attribute a claim to another'
+      USING ERRCODE = '42501';
+  END IF;
+  NEW.recorded_at := pg_catalog.clock_timestamp();
+  RETURN NEW;
+END $$;
+
+--
+-- Name: FUNCTION assertion_insert_guard(); Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON FUNCTION core.assertion_insert_guard() IS 'The request role records a claim live, as the user its connection is bound to, at the database''s time: a claim inserted already retracted or superseded, naming another user, or naming nobody bound is refused, and recorded_at is replaced by clock_timestamp(). The owner and the system role (row security exempt) are left as they were (0171). Fires before assertion_supersedes_guarded.';
+
+--
 -- Name: assertion_kept(); Type: FUNCTION; Schema: core; Owner: -
 --
 
@@ -1805,12 +1849,16 @@ CREATE FUNCTION core.custody_chain_hash() RETURNS trigger
     AS $$
 DECLARE prev bytea;
 BEGIN
-  NEW.occurred_at := now();
-  IF pg_catalog.current_setting('transaction_isolation') <> 'read committed' THEN
-    RAISE EXCEPTION 'core.evidence_custody is chained under READ COMMITTED only: a snapshot taken before the last append cannot see the tail';
+  IF pg_catalog.current_setting('transaction_isolation')
+       NOT IN ('read committed', 'read uncommitted') THEN
+    RAISE EXCEPTION 'core.evidence_custody is chained under READ COMMITTED only, and this transaction is %: a snapshot taken before the last append cannot see the tail',
+      pg_catalog.current_setting('transaction_isolation')
+      USING ERRCODE = 'invalid_transaction_state',
+            HINT = 'Run the append in a READ COMMITTED transaction.';
   END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended('core.evidence_custody.chain', 0));
   NEW.id := nextval('core.evidence_custody_id_seq');
+  NEW.occurred_at := pg_catalog.clock_timestamp();
   SELECT row_hash INTO prev FROM core.evidence_custody ORDER BY id DESC LIMIT 1;
   NEW.prev_hash := prev;
   NEW.row_hash := public.digest(
@@ -1833,7 +1881,7 @@ END $$;
 
 CREATE FUNCTION core.custody_chain_ordered_after() RETURNS bigint
     LANGUAGE sql IMMUTABLE
-    AS $$SELECT 23::bigint$$;
+    AS $$SELECT 0::bigint$$;
 
 --
 -- Name: FUNCTION custody_chain_ordered_after(); Type: COMMENT; Schema: core; Owner: -
@@ -11755,6 +11803,12 @@ CREATE TRIGGER assertion_embedding_dequeued AFTER UPDATE OF retracted_at, supers
 --
 
 CREATE TRIGGER assertion_embedding_queued AFTER INSERT ON core.assertion FOR EACH ROW WHEN (((new.retracted_at IS NULL) AND (new.superseded_at IS NULL))) EXECUTE FUNCTION core.assertion_embedding_queued();
+
+--
+-- Name: assertion assertion_insert_guarded; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER assertion_insert_guarded BEFORE INSERT ON core.assertion FOR EACH ROW EXECUTE FUNCTION core.assertion_insert_guard();
 
 --
 -- Name: assertion assertion_marked_once; Type: TRIGGER; Schema: core; Owner: -
