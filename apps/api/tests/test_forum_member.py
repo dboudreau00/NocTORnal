@@ -832,6 +832,74 @@ def test_a_member_read_over_plain_http_to_a_clearnet_host_is_refused_before_a_re
         board.close()
 
 
+@pytest.mark.parametrize("platform", ["xenforo", "mybb"])
+def test_a_board_that_reflects_the_personas_secrets_gets_none_of_them_stored(
+        conn, stub, monkeypatch, platform):
+    """Beta 1 verification, group F4: a board that echoed the persona's
+    password and session cookie into a post (a debug echo, or a hostile
+    board) had both stored as the post's text, in its side rows and in the
+    raw markup store, contrary to this module's own account of the vault. The
+    secrets are removed from every item while they are still live; the post
+    itself is kept, with the place of the echo marked."""
+    from noctornal_api.collection import CollectionService
+    from noctornal_api.rawstore import InMemoryDocumentRawStorage
+
+    anchors = {"xenforo": b'class="bbWrapper">Fresh batch in. ',
+               "mybb": b'<div class="post_body scaleimages" id="pid_120">'}
+    anchor = anchors[platform]
+    real_send = _Handler._send
+    echoed: list[str] = []
+
+    def echoing(self, status, body, *, headers=None):
+        if status == 200 and anchor in body:
+            session = self._cookie()
+            echoed.append(session)
+            echo = (f"debug echo password {PASSWORD} form "
+                    f"{urllib.parse.quote_plus(PASSWORD)} cookie {session} ")
+            body = body.replace(anchor, anchor + echo.encode(), 1)
+        return real_send(self, status, body, headers=headers)
+
+    monkeypatch.setattr(_Handler, "_send", echoing)
+    w = _world(conn, stub, platform)
+    board = w["board"]
+    raw = InMemoryDocumentRawStorage()
+    svc = CollectionService(conn, registry(), raw_store=raw, sleep=lambda _s: None)
+    try:
+        result = svc.run_once(w["source"], actor_id=None)
+        assert result.status == "OK", _run(conn, result.run_id)
+        assert echoed and all(echoed), "the board never reflected anything: no proof"
+        session = next(iter(board.sessions))
+        secrets = (PASSWORD, urllib.parse.quote_plus(PASSWORD), session)
+        docs = conn.execute(
+            """SELECT external_id, external_url, thread_ref, author_handle, title,
+                      body_text FROM collect.document WHERE source_id = %s""",
+            (w["source"],)).fetchall()
+        assert docs
+        text = " ".join(str(c) for row in docs for c in row)
+        side = conn.execute(
+            """SELECT fp.signature_text, fp.quoted_post_refs::text, fp.reactions::text
+                 FROM collect.forum_post fp JOIN collect.document d
+                   ON d.id = fp.document_id WHERE d.source_id = %s""",
+            (w["source"],)).fetchall()
+        text += " " + " ".join(str(c) for row in side for c in row)
+        assert side, "the posts have side rows"
+        for value in secrets:
+            assert value not in text, "a reflected secret was stored"
+        assert "debug echo" in text and "[REDACTED]" in text, \
+            "the post is kept, the echo's place is marked"
+        # The raw markup store holds the fragment of the post the echo was in.
+        assert raw._objects, "no raw markup was stored, so nothing was shown"
+        for data in raw._objects.values():
+            for value in secrets:
+                assert value.encode() not in data, "a reflected secret was stored as markup"
+        assert any(b"[REDACTED]" in data for data in raw._objects.values())
+        # Nothing of it in the run row either.
+        assert all(value not in " ".join(str(x) for x in _run(conn, result.run_id))
+                   for value in secrets)
+    finally:
+        board.close()
+
+
 def test_the_transport_rule_allows_https_and_onion_hosts_only():
     from noctornal_api.forum_member import PLAIN_HTTP, transport_problem
 

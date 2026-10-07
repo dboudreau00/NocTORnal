@@ -41,6 +41,7 @@ import contextvars
 import email.utils
 import hashlib
 import hmac
+import html
 import http.client
 import ipaddress
 import re
@@ -386,6 +387,30 @@ def redact(text: str | None, *, secrets: tuple[str, ...] = ()) -> str:
     out = _SECRET_PATTERNS[2].sub("[REDACTED]", out)
     out = _SECRET_PATTERNS[3].sub(r"\1\2\3[REDACTED]", out)
     out = _SECRET_PATTERNS[4].sub(r"\1=[REDACTED]", out)
+    return out
+
+
+def scrub_live_secrets(text: str | None, *, markup: bool = False) -> str:
+    """`text` with every live secret removed, EXACTLY and nothing else.
+
+    `redact` is for an error message: it also masks anything shaped like a
+    credential, which would change an investigator's words. This is for
+    material that is stored as evidence (a collected post, its markup): only
+    a secret this process holds is removed, in each form `redact` knows and,
+    with `markup`, the HTML-escaped forms a page spells it in. A board that
+    reflects the persona's password or session cookie back into a page
+    otherwise gets it stored (beta 1 verification, 2026-10-07)."""
+    if not text:
+        return text or ""
+    out = text
+    for value in _LIVE_SECRETS.get():
+        if len(value) < MIN_REDACTABLE_LENGTH:
+            continue
+        forms = set(_secret_forms(value))
+        if markup:
+            forms.update((html.escape(value, quote=True), html.escape(value, quote=False)))
+        for form in sorted(forms, key=len, reverse=True):
+            out = out.replace(form, "[REDACTED]")
     return out
 
 

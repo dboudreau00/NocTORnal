@@ -174,3 +174,45 @@ def test_a_text_escape_codec_cannot_smuggle_the_declaration_past_the_scan():
 def test_the_old_utf8_refusal_still_holds_and_names_the_same_cause():
     with pytest.raises(CollectionError, match="DOCTYPE or ENTITY"):
         parse_rss(_feed().encode())
+
+
+# Beta 1 verification, group F1: a BOM-less UTF-16 feed that does not begin
+# with `<?` fell to the UTF-8 branch. The decoded text kept its NULs, the
+# prolog walk saw no declaration, and the parser then re-detected UTF-16 and
+# expanded the DTD (a 1 MB feed became 45 M characters). A NUL is not a legal
+# XML character, so the decode refuses it: no encoding has to be guessed.
+_BILLION = ('<!DOCTYPE rss [<!ENTITY big "' + "A" * 450 + '">]>'
+            "<rss><channel><item><guid>g</guid><title>"
+            + "&big;" * 2_000 + "</title></item></channel></rss>")
+
+
+@pytest.mark.parametrize("codec", ["utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"])
+@pytest.mark.parametrize("lead", ["", " ", "\n", "\t", "<!-- c -->", "<!-- c --> \n"])
+def test_a_bomless_wide_feed_is_never_parsed_whatever_precedes_the_doctype(codec, lead):
+    with pytest.raises(CollectionError):
+        parse_rss((lead + _BILLION).encode(codec))
+
+
+@pytest.mark.parametrize("codec", ["utf-16-le", "utf-16-be"])
+def test_a_bomless_wide_feed_is_refused_before_the_parser_sees_it(codec):
+    """The refusal is the decode's, not the DOCTYPE walk's: the walk cannot
+    read this text, so a NUL in it is what must stop it."""
+    from noctornal_api.collection import _feed_text
+
+    with pytest.raises(CollectionError, match="NUL"):
+        _feed_text((" " + _BILLION).encode(codec))
+
+
+def test_a_bomless_wide_feed_that_is_clean_is_refused_not_guessed_at():
+    """Fail closed: a clean UTF-16 feed with no byte-order mark that does not
+    begin with `<?` cannot be told from the hostile one by its bytes."""
+    body = (" " + _clean('<?xml version="1.0"?>')).encode("utf-16-le")
+    with pytest.raises(CollectionError, match="NUL"):
+        parse_rss(body)
+
+
+def test_a_nul_in_a_single_byte_feed_is_refused_too():
+    body = _clean('<?xml version="1.0" encoding="ISO-8859-1"?>',
+                  title="a\x00b").encode("latin-1")
+    with pytest.raises(CollectionError, match="NUL"):
+        parse_rss(body)

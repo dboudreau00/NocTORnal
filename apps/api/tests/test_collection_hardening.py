@@ -136,6 +136,41 @@ def test_a_live_secret_is_removed_verbatim_however_it_is_encoded():
             "Authorization: Basic VHIwdWI0ZG9yJjMtcGVyc29uYS1wYXNzd29yZA==")
 
 
+def test_scrubbing_removes_exactly_the_live_secrets_and_nothing_else():
+    """Beta 1 verification, group F4: stored material (a post, its markup) is
+    scrubbed of the secrets this process holds, and ONLY those: a post that
+    says `password: hunter2` is still the investigator's evidence, which
+    `redact`'s structural patterns would have changed."""
+    from noctornal_api.pinned_http import scrub_live_secrets
+
+    secret = "Tr0ub4dor&3-<persona>-\"pw\""
+    post = "they said password: hunter2, then login=bob and sid=abc"
+    with secret_in_scope(secret):
+        assert scrub_live_secrets(post) == post
+        raw = f"echo {secret} and {secret!r}"
+        assert secret not in scrub_live_secrets(raw)
+        assert "[REDACTED]" in scrub_live_secrets(raw)
+        # The forms a request or a form body spells it in.
+        assert "Tr0ub4dor%263" not in scrub_live_secrets(
+            "q=Tr0ub4dor%263-%3Cpersona%3E-%22pw%22")
+        # A page spells it HTML-escaped; only markup mode knows that form.
+        escaped = "Tr0ub4dor&amp;3-&lt;persona&gt;-&quot;pw&quot;"
+        assert scrub_live_secrets(escaped) == escaped
+        assert "Tr0ub4dor" not in scrub_live_secrets(escaped, markup=True)
+        assert scrub_live_secrets(None) == "" and scrub_live_secrets("") == ""
+
+
+def test_scrubbing_ignores_a_value_too_short_to_be_a_secret_and_a_block_that_ended():
+    from noctornal_api.pinned_http import scrub_live_secrets
+
+    with secret_in_scope("abc"):
+        assert scrub_live_secrets("the abc of it") == "the abc of it"
+    secret = "stale-persona-password"
+    with secret_in_scope(secret):
+        pass
+    assert scrub_live_secrets(f"left {secret}") == f"left {secret}"
+
+
 def test_a_secret_stops_being_removed_once_its_block_ends():
     """A ContextVar rather than a global, so a secret cannot outlive its
     block by being forgotten."""

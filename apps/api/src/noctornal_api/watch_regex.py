@@ -41,9 +41,13 @@ import re
 import sys
 from dataclasses import dataclass, field
 
-#: One pattern, all of the texts of one batch: how long the child may run,
-#: start included.
+#: One pattern, all of the texts of one batch: how long the child may match.
 PATTERN_WALL_S = 5.0
+#: Added to that for starting the child's interpreter, which the runner's wall
+#: clock also counts (beta 1 verification, 2026-10-07: on a loaded host a
+#: benign pattern was reported `limit` before it had begun). Small on purpose:
+#: a stopped pattern costs this much more, and the run's budget caps the sum.
+STARTUP_S = 3.0
 #: Every pattern of one run together. A run with many slow patterns stops
 #: matching rather than holding its poll lock for ever.
 RUN_BUDGET_S = 30.0
@@ -62,6 +66,10 @@ _HEADER_CAP = 64 * 1024
 #: The child. A module attribute so a test can point it at one that never
 #: answers.
 CHILD_ARGV: list[str] = [sys.executable, "-m", "noctornal_api.watch_regex"]
+#: Its kind for `analysis_runner`: in production the isolated worker starts
+#: the module this names (`analysis_worker.KIND_ARGV`), and a request that
+#: named any other kind ran lab_static, which refuses the header.
+CHILD_KIND = "watch_regex"
 
 #: Why a pattern was not matched, by kind. `compile`: it is not a valid
 #: expression. `limit`: it did not finish, or the child could not run.
@@ -148,8 +156,9 @@ def run(jobs: dict[str, list[str]], *, argv: list[str] | None = None,
                       "memory_bytes": CHILD_MEMORY_BYTES}
             result = lab_triage.run_child(
                 header, (_encode(pattern, batch),),
-                wall_s=max(0.5, min(wall, remaining)),
-                stdout_cap=STDOUT_CAP, argv=argv or CHILD_ARGV)
+                wall_s=max(0.5, min(wall + STARTUP_S, remaining)),
+                stdout_cap=STDOUT_CAP, argv=argv or CHILD_ARGV,
+                kind=CHILD_KIND)
             if not result.ok:
                 out.failed[pattern] = (LIMIT, _LIMIT_SENTENCES.get(
                     result.failure or "crashed", _LIMIT_SENTENCES["crashed"]))

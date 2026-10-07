@@ -1764,6 +1764,16 @@ def _feed_text(body: bytes) -> str:
         text = body.decode(codec)
     except Exception as exc:  # noqa: BLE001 - an undecodable feed is not a crash
         raise CollectionError(f"feed did not parse: {type(exc).__name__}") from exc
+    # A NUL is not an XML character. UTF-16 or UTF-32 with no byte-order mark
+    # that does not open with `<?` falls to UTF-8 above and keeps its NULs:
+    # the scan below then reads no declaration, and the parser, given the
+    # same text, re-detects the wide encoding and expands the DTD it never
+    # saw (beta 1 verification, 2026-10-07). Refused here, for any codec.
+    if "\x00" in text:
+        raise CollectionError(
+            "feed did not parse: it holds a NUL, which is no XML character "
+            "(a UTF-16 or UTF-32 feed needs a byte-order mark or an XML "
+            "declaration)")
     # The parser is given this text, so what it is given has no mark the
     # scan below has not looked past.
     return text.lstrip("\ufeff")

@@ -17,9 +17,12 @@ Prefix `r46w2-`. DATABASE_URL-gated.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+import socket
 import sys
+import threading
 import time
 from datetime import date
 from uuid import uuid4
@@ -277,3 +280,129 @@ def test_the_watch_text_is_one_function_for_the_verdicts_and_the_matching():
                 meta={"forum": {"signature": "SIG Line"}})
     assert _watch_texts(item) == ("hello\nworld", "sig line")
     assert _watch_texts(Item(external_id="p", body="b")) == ("\nb", "")
+
+
+# --- through the isolated worker (Beta 1 verification, group F2) ------------
+# `run_child` defaulted to the kind `lab_static`, which neither the runner's
+# KINDS nor the worker's KIND_ARGV had a `watch_regex` for: with the worker's
+# socket set, every pattern was answered `bad_header` and reported failed. The
+# child is now a kind of its own, and these run it through the runner, not
+# only as a local subprocess.
+
+SOCK = "/run/noctornal-analysis/worker.sock"
+
+
+@contextlib.contextmanager
+def _tcp_worker():
+    """The real Worker on a loopback listener, and a connector for it (the
+    Unix socket's stand-in, as test_lab_archive_runner_pg does)."""
+    from noctornal_api import analysis_worker as aw
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(64)
+    worker = aw.Worker(listener)
+    thread = threading.Thread(target=worker.serve_forever, daemon=True)
+    thread.start()
+    addr = listener.getsockname()
+    try:
+        yield lambda _path: socket.create_connection(addr, timeout=5)
+    finally:
+        worker.stop()
+        thread.join(5)
+        listener.close()
+
+
+@pytest.fixture
+def isolated(monkeypatch):
+    """Point the runner at the loopback worker instead of the Unix socket."""
+    from noctornal_api import analysis_runner as ar
+
+    monkeypatch.delenv(ar.LOCAL_ENV, raising=False)
+    monkeypatch.delenv("NOCTORNAL_ENV", raising=False)
+
+    def use(connect):
+        monkeypatch.setattr(ar, "HAS_UNIX", True)
+        monkeypatch.setattr(ar, "_connect_unix", connect)
+        monkeypatch.setenv(ar.SOCKET_ENV, SOCK)
+
+    return use
+
+
+def test_the_watch_regex_child_is_a_kind_of_the_runner_and_of_the_worker():
+    from noctornal_api import analysis_runner as ar
+    from noctornal_api import analysis_worker as aw
+    from noctornal_api import watch_regex
+
+    assert watch_regex.CHILD_KIND in ar.KINDS
+    argv = aw.KIND_ARGV[watch_regex.CHILD_KIND]
+    assert argv[1:] == ["-m", "noctornal_api.watch_regex"]
+    assert watch_regex.CHILD_ARGV[1:] == argv[1:]
+
+
+def test_the_matcher_asks_the_runner_for_its_own_kind_and_for_startup_headroom(monkeypatch):
+    from noctornal_api import analysis_runner as ar
+    from noctornal_api import watch_regex
+
+    asked = {}
+
+    def fake(kind, header, payloads=(), *, wall_s, stdout_cap, argv, **_kw):
+        asked.update(kind=kind, wall=wall_s, argv=argv)
+        return ar.ChildResult(True, b'{"ok":true,"hits":[true]}')
+
+    monkeypatch.setattr(ar, "run", fake)
+    verdicts = watch_regex.run({"a": ["a"]}, wall_s=2.0)
+    assert verdicts.hits == {("a", "a"): True}
+    assert asked["kind"] == "watch_regex" and asked["argv"] == watch_regex.CHILD_ARGV
+    # The pattern's own time is the caller's; starting an interpreter is not
+    # charged to it (a benign pattern was reported `limit` on a loaded host).
+    assert asked["wall"] == pytest.approx(2.0 + watch_regex.STARTUP_S)
+
+
+def test_startup_headroom_never_runs_past_the_runs_budget(monkeypatch):
+    from noctornal_api import analysis_runner as ar
+    from noctornal_api import watch_regex
+
+    asked = []
+
+    def fake(kind, header, payloads=(), *, wall_s, stdout_cap, argv, **_kw):
+        asked.append(wall_s)
+        return ar.ChildResult(True, b'{"ok":true,"hits":[true]}')
+
+    monkeypatch.setattr(ar, "run", fake)
+    watch_regex.run({"a": ["a"]}, wall_s=5.0, budget_s=2.0)
+    assert asked and asked[0] <= 2.0
+
+
+def test_the_matcher_answers_the_same_through_the_isolated_worker(isolated):
+    """The verdicts, the compile error and the stopped pattern are what the
+    local child gives, and they come from `watch_regex` and not from
+    `lab_static` (which answers a watch header `bad_header`)."""
+    from noctornal_api import watch_regex
+
+    jobs = {"ok+": ["xxokkxx", "nothing"], "[unclosed": ["x"], HOSTILE: [CRAFTED]}
+    with _tcp_worker() as connect:
+        isolated(connect)
+        verdicts = watch_regex.run(jobs, wall_s=2.0)
+    assert verdicts.hits == {("ok+", "xxokkxx"): True, ("ok+", "nothing"): False}
+    assert verdicts.failed["[unclosed"][0] == watch_regex.COMPILE
+    assert "unterminated" in verdicts.failed["[unclosed"][1]
+    assert verdicts.failed[HOSTILE][0] == watch_regex.LIMIT
+    assert "time limit" in verdicts.failed[HOSTILE][1]
+
+
+def test_production_with_no_worker_never_starts_a_local_watch_child(monkeypatch):
+    from noctornal_api import analysis_runner as ar
+    from noctornal_api import watch_regex
+
+    monkeypatch.delenv(ar.SOCKET_ENV, raising=False)
+    monkeypatch.delenv(ar.LOCAL_ENV, raising=False)
+    monkeypatch.setenv("NOCTORNAL_ENV", "production")
+
+    def never(*_a, **_k):
+        raise AssertionError("a local child was started in production")
+
+    monkeypatch.setattr(ar, "run_local", never)
+    verdicts = watch_regex.run({"a": ["a"]}, wall_s=2.0)
+    assert "a" in verdicts.failed and verdicts.failed["a"][0] == watch_regex.LIMIT
+    assert not verdicts.hits
