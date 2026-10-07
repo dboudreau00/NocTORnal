@@ -483,6 +483,8 @@ const SESSION = { mode: null, codesLeft: 3, confirmWaiters: [] };
 function show(node, on) { node.hidden = !on; }
 function clear() {}
 function closePalette() { log.push('closePalette'); }
+// The walkthrough (2026-10-06): not under test here.
+function closeTour() {}
 function acceptProposal() { log.push('accept'); }
 function rejectProposal() { log.push('reject'); }
 function deferProposal() { log.push('defer'); }

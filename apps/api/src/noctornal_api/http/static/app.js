@@ -1330,6 +1330,7 @@ function endSession(title, detail, evenWhileBooting) {
      requests down the cookie path against a session that is gone. */
   document.cookie = CSRF_COOKIE + '=; Max-Age=0; Path=/; Secure; SameSite=Strict';
   closePalette();
+  closeTour(false);
   stopGraph();
   /* Before the view swap. A socket left open on a dead session keeps a
      database connection LISTENing on the server for as long as the tab
@@ -1691,6 +1692,7 @@ async function startApp() {
   show($('login-form'), true);
   show($('view-app'), true);
   await showCaseList();
+  maybeShowWelcomeTour();      // once per browser: see the walkthrough block
 }
 
 /* ── case-switch resets ───────────────────────────────────────────────── */
@@ -13874,6 +13876,376 @@ function toggleKeys(on) {
 }
 
 
+/* ── guided walkthrough: the first-sign-in tour and Getting started ──────
+ *
+ * Added 2026-10-06 for the public beta, so that a first-time user is told
+ * what this console is, what it must not be used on yet, and where to start,
+ * instead of landing on an empty case list. One dialog (`#tour-scrim`), two
+ * views:
+ *
+ *   - "tour": six short steps, shown by itself ONCE after a successful
+ *     sign-in on a browser (`maybeShowWelcomeTour`, called at the end of
+ *     `startApp`) and from Help, Take the tour;
+ *   - "help": Getting started, the first five things to try, from the Help
+ *     button in the top bar.
+ *
+ * "Seen" is a per-viewer convenience, so it lives in localStorage inside
+ * try/catch like the other two (`TRIAGE_KEYS_PREF`, `SMP_BANNER_KEY`): where
+ * storage is blocked the tour is simply shown again at the next sign-in, and
+ * `tourAutoShown` keeps that to once per page load.
+ *
+ * Every word on screen is a string in `TOUR_STEPS` or `GETTING_STARTED`
+ * written with `textContent` (through `el`). Nothing is assigned as markup and
+ * nothing is written to `element.style`: the spotlight is the class
+ * `tour-spot`, put on the rail tile or button a step talks about and taken
+ * off when the step changes or the dialog closes. A target that is not on
+ * the screen (the rail is hidden on the case list) is skipped, so a step
+ * never waits on an element. The dialog is held like the case record's
+ * (`holdDialogKeys`): Tab stays inside, Escape closes, and focus goes back
+ * to whatever opened it.
+ *
+ * The wording follows what the console really offers: the pane names are
+ * the rail's own captions and the form labels are the forms' own labels
+ * (test_ui_walkthrough holds the six titles, the counter and the command).
+ */
+const TOUR_SEEN_KEY = 'noctornal.tour.seen';
+
+/** Once per page load, whatever storage says. */
+let tourAutoShown = false;
+
+function tourSeen() {
+  try { return localStorage.getItem(TOUR_SEEN_KEY) === '1'; }
+  catch (_e) { return false; }
+}
+
+function rememberTour() {
+  try { localStorage.setItem(TOUR_SEEN_KEY, '1'); }
+  catch (_e) { /* storage blocked: the tour shows again at the next sign-in */ }
+}
+
+/** The demo case's recipe, as `scripts/bootstrap.py` and the installer's
+ *  closing card give it. The owner is the signed-in address when that is
+ *  a plain address, and the placeholder YOU otherwise: a value pasted into
+ *  a shell is never taken from anywhere that could hold a metacharacter. */
+const TOUR_SAFE_EMAIL = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$/;
+
+function tourDemoCommand(email) {
+  const owner = TOUR_SAFE_EMAIL.test(email || '') ? email : 'YOU';
+  return '.venv/bin/python scripts/bootstrap.py demo-network --owner-email '
+    + owner + ' --code OP-SHOWCASE-26 --classification CLEAR';
+}
+
+/** What the steps may depend on, read when a step is drawn. */
+function tourContext() {
+  return {
+    hasCases: Array.isArray(state.cases) && state.cases.length > 0,
+    inCase: !!state.caseId,
+    email: SESSION.email || '',
+  };
+}
+
+/* A block is [kind, value]: 'p' a paragraph; 'dl' a list of [term,
+   meaning]; 'ol' a list of [lead, rest]; 'code' a command to copy. */
+const TOUR_STEPS = [
+  {
+    title: 'What NocTORnal is',
+    spot: [],
+    blocks: () => [
+      ['p', 'NocTORnal is a case system for cybercrime investigators. It '
+        + 'keeps a graph of entities such as handles, groups and people, '
+        + 'and the trust between them.'],
+      ['p', 'Every line on that graph comes from a claim. A claim names its '
+        + 'source, carries a grade you stated, and should point at an '
+        + 'exhibit: the capture, file or document that backs it.'],
+    ],
+  },
+  {
+    title: 'This is a beta',
+    spot: [],
+    blocks: () => [
+      ['p', 'This build is a public beta. Use it on synthetic data, or on '
+        + 'published reporting that contains no personal data.'],
+      ['p', 'Real case material needs legal review first. That means '
+        + 'anything about real people, real victims or real infrastructure '
+        + 'that is not already public. The software refuses some operations '
+        + 'until a declaration is recorded, but it cannot tell whether the '
+        + 'declaration is true.'],
+      ['p', 'The README says which five decisions, L1 to L5, stand between '
+        + 'this software and real material, and who has to make them.'],
+    ],
+  },
+  {
+    title: 'Your first case',
+    spot: ['#case-form', '#btn-case-edit'],
+    blocks: (ctx) => {
+      if (ctx.hasCases) {
+        return [
+          ['p', 'Your cases are on the case list. Click a row to open one.'],
+          ['p', 'With a case open, Case… in the top bar shows its '
+            + 'record: lawful basis, authority, retention and review. All '
+            + 'cases takes you back to the list.'],
+          ['p', 'To start another, fill in New case beside the list.'],
+        ];
+      }
+      return [
+        ['p', 'No case is open to you yet. To make one, fill in New case on '
+          + 'the case list: a code, a title, a lawful basis, and the '
+          + 'retention and review dates. Then choose Create case. If it '
+          + 'refuses, ask an administrator whether your account may open '
+          + 'cases.'],
+        ['p', 'To look around on synthetic data first, ask whoever runs '
+          + 'this install to load the demo case. In the install folder, on '
+          + 'the server, the command is:'],
+        ['code', tourDemoCommand(ctx.email)],
+        ['p', 'The owner must be an account that already exists. On Windows, '
+          + 'QUICKSTART.md shows the .venv\\Scripts\\python form.'],
+      ];
+    },
+  },
+  {
+    title: 'The map of the console',
+    spot: ['.rail'],
+    blocks: () => [
+      ['p', 'Open a case and the rail appears down the left. One line for '
+        + 'each pane you will use first:'],
+      ['dl', [
+        ['Graph', 'the sociogram: entities and the relationships between '
+          + 'them.'],
+        ['Entities', 'every entity in the case, as a list you can filter.'],
+        ['Evidence', 'exhibits and their chain of custody.'],
+        ['Triage', 'machine suggestions waiting for your review.'],
+        ['Report', 'build a redacted report, then check whether it may '
+          + 'leave.'],
+        ['Admin', 'accounts, roles and the Readiness check.'],
+      ]],
+      ['p', 'Add entity and Add link, at the foot of the rail, are where '
+        + 'claims are entered. Press ? for the keyboard map.'],
+    ],
+  },
+  {
+    title: 'Believing things carefully',
+    spot: [],
+    blocks: () => [
+      ['p', 'Nothing is a fact until an analyst grades it. You grade each '
+        + 'claim yourself: source reliability from A to F, information '
+        + 'credibility from 1 to 6, and your confidence, low, moderate or '
+        + 'high. On the graph, confidence shows as how solid a line looks, '
+        + 'and a dashed line is inferred, not asserted.'],
+      ['p', 'Machines only propose. A suggestion in Triage joins the case '
+        + 'only when you accept it: machines propose, you dispose.'],
+      ['p', 'A handle is not a person. A Persona is what you observe and an '
+        + 'Assessed person is what you conclude. They are joined only by an '
+        + 'attribution you make, and can reverse.'],
+    ],
+  },
+  {
+    title: 'Where help lives',
+    spot: ['#tab-admin', '#btn-admin', '#btn-help'],
+    blocks: () => [
+      ['p', 'The analyst manual, release/MANUAL.md in the install folder, '
+        + 'says what each pane is for and what its numbers mean.'],
+      ['p', 'To see what this install can and cannot do right now, open '
+        + 'Admin, then Readiness, and choose Check readiness. It says in '
+        + 'plain words what is configured and what is not. If you are not '
+        + 'an administrator, ask one to read it.'],
+      ['p', 'Help in the top bar brings this tour back, and Getting started '
+        + 'lists the first five things to try.'],
+    ],
+  },
+];
+
+/** The Help view: the first five things to try. */
+const GETTING_STARTED = {
+  title: 'Getting started',
+  intro: 'Five things to try, in order. Use synthetic data only: this is a '
+    + 'beta.',
+  items: [
+    ['Open a case.', 'Click a row on the case list, or fill in New case '
+      + 'and choose Create case.'],
+    ['Lodge an exhibit.', 'In Evidence, choose a file, give it a title and '
+      + 'choose Upload exhibit. Your claims will cite it.'],
+    ['Add two entities.', 'Use Add entity for each: a type, a label and an '
+      + 'assertion you grade yourself. Record a handle as a Persona and a '
+      + 'human as an Assessed person, never one as the other.'],
+    ['Link them.', 'Use Add link: pick the Source entity and the Target '
+      + 'entity, cite the exhibit and grade the claim.'],
+    ['Read it back.', 'Open Graph and click the line to see its claims. '
+      + 'Then open Admin, then Readiness, to see what this install has not '
+      + 'set up.'],
+  ],
+};
+
+/** The counter the dialog shows and a screen reader is told. */
+function tourCounter(index, total) {
+  return 'Step ' + (index + 1) + ' of ' + total;
+}
+
+/** One block as DOM, through textContent only. */
+function tourBlock(block) {
+  const kind = block[0];
+  const value = block[1];
+  if (kind === 'dl') {
+    const dl = el('dl', 'tour-map');
+    for (const pair of value) {
+      dl.appendChild(el('dt', null, pair[0]));
+      dl.appendChild(el('dd', null, pair[1]));
+    }
+    return dl;
+  }
+  if (kind === 'ol') {
+    const list = el('ol', 'tour-list');
+    for (const item of value) {
+      const li = el('li');
+      li.appendChild(el('strong', null, item[0]));
+      li.appendChild(document.createTextNode(' ' + item[1]));
+      list.appendChild(li);
+    }
+    return list;
+  }
+  if (kind === 'code') return el('pre', 'tour-code mono', value);
+  return el('p', null, value);
+}
+
+/** The first of a step's targets that is on the screen, or null. */
+function tourSpotTarget(selectors) {
+  for (const selector of selectors || []) {
+    let node = null;
+    try { node = document.querySelector(selector); }
+    catch (_e) { node = null; }
+    if (node && node.getClientRects().length) return node;
+  }
+  return null;
+}
+
+function clearTourSpot() {
+  for (const node of document.querySelectorAll('.tour-spot')) {
+    node.classList.remove('tour-spot');
+  }
+  const scrim = $('tour-scrim');
+  if (scrim) scrim.classList.remove('tour-spotlit');
+}
+
+function paintTourSpot(selectors) {
+  const node = tourSpotTarget(selectors);
+  if (!node) return;          // nothing to point at: the step reads alone
+  node.classList.add('tour-spot');
+  $('tour-scrim').classList.add('tour-spotlit');
+  if (typeof node.scrollIntoView === 'function') {
+    node.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+}
+
+const TOUR = { view: 'tour', index: 0, opener: null };
+
+function paintTour() {
+  const tour = TOUR.view === 'tour';
+  const total = TOUR_STEPS.length;
+  const step = TOUR_STEPS[TOUR.index];
+  const body = $('tour-body');
+  clear(body);
+  clearTourSpot();
+  const title = tour ? step.title : GETTING_STARTED.title;
+  $('tour-title').textContent = title;
+  $('tour-step').textContent = tour ? tourCounter(TOUR.index, total) : '';
+  show($('tour-step'), tour);
+  if (tour) {
+    for (const block of step.blocks(tourContext())) {
+      body.appendChild(tourBlock(block));
+    }
+  } else {
+    body.appendChild(el('p', null, GETTING_STARTED.intro));
+    body.appendChild(tourBlock(['ol', GETTING_STARTED.items]));
+  }
+  const last = TOUR.index === total - 1;
+  show($('tour-skip'), tour && !last);
+  show($('tour-back'), tour && TOUR.index > 0);
+  show($('tour-next'), tour);
+  $('tour-next').textContent = last ? 'Done' : 'Next';
+  show($('tour-take'), !tour);
+  /* Said once per step, to a screen reader, without moving the focus: the
+     keyboard user pressing Next goes on pressing it. */
+  $('tour-live').textContent = tour
+    ? tourCounter(TOUR.index, total) + '. ' + title : title;
+  $('tour-sheet').scrollTop = 0;
+  if (tour) paintTourSpot(step.spot);
+  /* A button that has just gone (Back on the first step, Skip on the
+     last) must not strand the focus on <body>. */
+  const held = document.activeElement;
+  if (held && held !== document.body && held.closest
+      && held.closest('[hidden]')) {
+    $(tour ? 'tour-next' : 'tour-take').focus();
+  }
+}
+
+function openTourDialog(view) {
+  const scrim = $('tour-scrim');
+  if (!scrim) return;
+  if (scrim.hidden) {
+    const from = document.activeElement;
+    TOUR.opener = from && from !== document.body ? from : null;
+  }
+  TOUR.view = view;
+  TOUR.index = 0;
+  show(scrim, true);
+  paintTour();
+  /* The heading, as the case record does: the dialog is read from its
+     top, and the buttons are a Tab away. */
+  $('tour-title').focus();
+}
+
+/** Closing by any road counts as seen, unless `remember` is false (the
+ *  session ending under it says nothing about whether it was read, and
+ *  the focus is not this dialog's to move then). */
+function closeTour(remember) {
+  const scrim = $('tour-scrim');
+  if (!scrim || scrim.hidden) return;
+  show(scrim, false);
+  clearTourSpot();
+  const back = TOUR.opener;
+  TOUR.opener = null;
+  /* Closed by the session ending: the sign-in sheet has the focus now. */
+  if (remember === false) return;
+  rememberTour();
+  const target = back && typeof back.focus === 'function'
+    && document.contains(back) && !back.closest('[hidden]')
+    ? back : $('btn-help');
+  if (target && typeof target.focus === 'function') target.focus();
+}
+
+function tourMove(delta) {
+  const next = TOUR.index + delta;
+  if (next < 0) return;
+  if (next >= TOUR_STEPS.length) { closeTour(); return; }
+  TOUR.index = next;
+  paintTour();
+}
+
+/** At the end of `startApp`: the tour, once, to someone who has not seen
+ *  it in this browser. Never lets a failure here undo a sign-in. */
+function maybeShowWelcomeTour() {
+  if (tourAutoShown || tourSeen()) return;
+  tourAutoShown = true;
+  try { openTourDialog('tour'); }
+  catch (err) { console.error('welcome tour failed', err); }
+}
+
+function wireTour() {
+  const btn = $('btn-help');
+  if (!btn || !$('tour-scrim')) return;
+  btn.addEventListener('click', () => openTourDialog('help'));
+  $('tour-take').addEventListener('click', () => {
+    TOUR.view = 'tour';
+    TOUR.index = 0;
+    paintTour();
+    $('tour-next').focus();
+  });
+  $('tour-next').addEventListener('click', () => tourMove(1));
+  $('tour-back').addEventListener('click', () => tourMove(-1));
+  $('tour-skip').addEventListener('click', () => closeTour());
+  $('tour-close').addEventListener('click', () => closeTour());
+  holdDialogKeys('tour-scrim', closeTour);
+}
+
 /* ── notifications ────────────────────────────────────────────────────
  *
  * Phase 5. Two things about this panel are load-bearing rather than
@@ -14937,6 +15309,7 @@ function wire() {
   initCaseRouting();    // F7 and F15.3
   wireAssumptions();
   wireCaseActions();
+  wireTour();
   initCanvas();
   initPalette();
   opts($('case-class'), TLP.map((t) => [t, t]), 'AMBER');
@@ -40871,6 +41244,7 @@ function sessionLapsed(info) {
   disconnectLive();
   closePalette();
   show($('keys-scrim'), false);
+  closeTour(false);
   /* Account is hidden, not cleared: a set of recovery codes on it that
      the analyst was still copying out comes back with the sheet after
      the in-place sign-in (`sessionRenewed`). */
@@ -41591,6 +41965,7 @@ function topSessionSheet() {
 function closeOverSheets() {
   closePalette();
   show($('keys-scrim'), false);
+  closeTour(false);
 }
 
 /** The idle warning shares the keyboard with Account: it is about this
