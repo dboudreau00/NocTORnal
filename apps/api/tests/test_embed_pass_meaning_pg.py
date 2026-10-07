@@ -246,7 +246,7 @@ def test_outside_this_host_without_authority_nothing_at_all_is_sent(conn, stub):
     svc = _service(conn, stub, local=False)
     _doc(conn, "anything")
     # Before and after, not "== 0": a row another suite left is not this
-    # pass's write (beta gate, 2026-10-07).
+    # pass's write (2026-10-07).
     before = conn.execute("SELECT count(*) FROM collect.document_embedding").fetchone()[0]
     result = svc.run_pass("MEANING", max_seconds=0)
     assert result.refused == "no_authority"

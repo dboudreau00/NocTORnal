@@ -406,7 +406,7 @@ def test_the_docs_name_the_services_that_check_the_key_and_not_every_service():
     """Only the services that run the application's code, the egress proxy
     and the migration job refuse to start holding the persona key; the
     database, the object store and Redis read secrets.env and check nothing,
-    and Caddy reads caddy.env alone (corrected at the Beta 1 deployment gate,
+    and Caddy reads caddy.env alone (corrected on
     2026-10-07: the migration job reads migrate.env and refuses the key). A
     document that says every other service refuses is wrong about the one
     place the key must never be put."""

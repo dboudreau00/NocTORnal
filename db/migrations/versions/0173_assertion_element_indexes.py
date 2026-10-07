@@ -1,5 +1,5 @@
 """Indexes that find every claim about an element or an exhibit, live or not
-(G62 load gate, 2026-10-07).
+(2026-10-07).
 
 ## What was wrong
 

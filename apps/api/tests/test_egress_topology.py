@@ -344,7 +344,7 @@ def test_the_reader_fails_closed_on_what_it_does_not_read():
 
 
 def test_the_readme_names_every_place_that_carries_a_movable_subnet():
-    """Beta 1 deployment gate (2026-10-07): the README's answer to `Pool
+    """2026-10-07: the README's answer to `Pool
     overlaps` said to change the subnet in two places, and five more keys
     (the egress address and the internal networks, on six services) carry it.
     A move done as written left the proxy listening on an address its network

@@ -249,8 +249,7 @@ def invalid_names_fail_fast(monkeypatch):
     """A name under `.invalid` fails to resolve at once, as RFC 6761 asks of
     a resolver, instead of through the host's: on the development machine
     that asked upstream and answered after 11 seconds, and a test that
-    "does not touch the network" sent a DNS query out (beta gate,
-    2026-10-07). Every other name resolves as before."""
+    "does not touch the network" sent a DNS query out (2026-10-07). Every other name resolves as before."""
     import socket
 
     real = socket.getaddrinfo

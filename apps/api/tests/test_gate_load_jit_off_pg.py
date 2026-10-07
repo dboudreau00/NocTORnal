@@ -1,5 +1,5 @@
-"""Application connections are opened with JIT off (G62 load gate,
-2026-10-07, `db.SESSION_OPTIONS`).
+"""Application connections are opened with JIT off (2026-10-07,
+`db.SESSION_OPTIONS`).
 
 On a 1,000,000-claim database the request role's reads paid for JIT
 compilation they never repaid: row security's policies push the planner's

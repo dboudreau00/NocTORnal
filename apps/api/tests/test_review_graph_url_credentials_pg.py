@@ -493,7 +493,7 @@ def test_the_scrub_writes_audit_events_that_name_no_value(owner):
 
 
 def test_the_scrub_finds_a_credential_in_a_context_window_that_cut_its_link(owner):
-    """Upgrade gate, 2026-10-07, on an Alpha 7a estate: the extractor's context
+    """2026-10-07, on an Alpha 7a estate: the extractor's context
     window (45 characters either side) cut links before their scheme, and what
     was left in the rationale was no URL to the text redaction, so a token in
     a query, a fragment or a path parameter, and a `//user:pass@` authority,

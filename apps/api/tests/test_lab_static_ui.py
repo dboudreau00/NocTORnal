@@ -103,7 +103,7 @@ def test_no_inline_style_and_no_style_from_script():
 def test_the_handling_pane_says_what_runs_and_calls_nothing_unbuilt():
     """The pane told analysts that archive expansion, screening and the
     sandbox were "not built yet" below the bullets describing two of them;
-    all three ship (beta gate, 2026-10-07)."""
+    all three ship (2026-10-07)."""
     html = _html()
     pane = html[html.index('id="smp-handling-pane"'):html.index('id="smp-rules-pane"')]
     flat = " ".join(pane.split())

@@ -503,7 +503,7 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
     its origin, as `egress_routes.enforce_production_egress` recognises it.
     Neither is refused for an outbound integration with no proxy: both read
     secrets.env, where the operator turns lookups and the sandbox on for the
-    processes that send them (Beta 1 deployment gate, 2026-10-07: until then
+    processes that send them (2026-10-07: until then
     turning either on stopped the sample origin from starting and every
     static triage pass).
 
@@ -679,7 +679,7 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
             "the sample bucket (docs/11).")
     # The preservation store falls back to SAMPLE_SECURE when its own is
     # unset (samples.PreservationStorage), so only a value SET and not
-    # "true" is refused (Beta 1 deployment gate, 2026-10-07).
+    # "true" is refused (2026-10-07).
     preserve_secure = env.get("PRESERVE_SECURE")
     if preserve_secure and preserve_secure.lower() != "true":
         problems.append(

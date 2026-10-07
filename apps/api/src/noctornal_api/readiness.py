@@ -3128,7 +3128,7 @@ def _sample_static_analysis(conn: psycopg.Connection) -> Check:
                      "report this: the child's environment must hold no "
                      "credential")
     # Any finished run proves a drainer ran: only lab_triage ends a run,
-    # SKIPPED and FAILED as much as DONE (beta gate, 2026-10-07).
+    # SKIPPED and FAILED as much as DONE (2026-10-07).
     depth, oldest, last_done = conn.execute(
         """SELECT count(*) FILTER (WHERE status = 'QUEUED'),
                   min(queued_at) FILTER (WHERE status = 'QUEUED'),

@@ -129,7 +129,7 @@ def test_preflight_checks_the_compose_floor(tmp_path):
 
 
 def test_preflight_in_the_image_takes_the_hosts_compose_version(tmp_path):
-    """Beta 1 deployment gate (2026-10-07): a production host has no python
+    """2026-10-07: a production host has no python
     with this tree's dependencies, and inside the image there is no docker
     to ask. The README runs preflight in the image and passes the host's
     `docker compose version --short`, which the floor is still held to."""

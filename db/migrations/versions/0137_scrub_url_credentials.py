@@ -32,7 +32,7 @@ here and frozen: a migration does not import application code).
   a proposal, in every state. A rationale's context window may have cut a
   link before its scheme; the credential-bearing pairs of its query,
   fragment or path, and a `//user:pass@` authority, are found there too
-  (upgrade gate, 2026-10-07, on an Alpha 7a estate).
+  (found on 2026-10-07, upgrading an Alpha 7a estate).
 - `collect.extraction`: `raw_value` and `norm_value` of URL rows.
 - `core.assertion.prior_value` (0136): the label or `attrs.raw_value` a
   correction replaced, when it carried a credential. 0136 copied them from the
@@ -285,8 +285,8 @@ def _redact_text(text, depth=0):
     return _URL_IN_TEXT.sub(one, text)
 
 
-#: A context window the extractor cut before a link's scheme (upgrade gate,
-#: 2026-10-07): what is left is no URL to `_redact_text`, but its query,
+#: A context window the extractor cut before a link's scheme
+#: (2026-10-07): what is left is no URL to `_redact_text`, but its query,
 #: fragment and path-parameter pairs, and a `//user:pass@` authority, still
 #: read as such. A window cut inside the userinfo itself has no shape left.
 _CUT_PAIR = re.compile(r"(?<=[?&#;])([^=&#;?\s]+)=([^&#;\s]+)")

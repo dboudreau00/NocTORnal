@@ -1,5 +1,5 @@
 """Every claim about an element or an exhibit is found by an index, live or
-not (G62 load gate, 2026-10-07, migration assertion_element_indexes).
+not (2026-10-07, migration assertion_element_indexes).
 
 `core.assertion`'s indexes on `node_id` and `edge_id` are partial, live
 claims only, and `evidence_id` had none; `core.evidence_link` had none on

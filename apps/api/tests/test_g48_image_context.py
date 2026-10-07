@@ -256,7 +256,7 @@ def test_every_service_drops_all_capabilities_and_keeps_only_what_is_listed():
 
 
 def test_one_service_builds_the_application_image_and_none_pulls_it():
-    """Beta 1 deployment gate (2026-10-07): with a `build:` on every service
+    """2026-10-07: with a `build:` on every service
     of the application image, Compose 2.40 on Docker 29's containerd image
     store exported the one tag from several bake targets, and the first
     `up -d --build` of a fresh host failed with `image ... already exists`.
@@ -276,7 +276,7 @@ def test_one_service_builds_the_application_image_and_none_pulls_it():
 
 
 def test_every_container_log_is_bounded():
-    """Beta 1 deployment gate (2026-10-07): Docker's json-file driver keeps
+    """2026-10-07: Docker's json-file driver keeps
     a container's output without limit by default, and nothing on the host
     set one, so a deployment left alone filled its disk with loop and slow
     statement logs."""
@@ -320,7 +320,7 @@ def _site_blocks() -> dict[str, str]:
 
 
 def test_caddy_keeps_the_csrf_and_setup_tokens_out_of_its_log():
-    """Beta 1 deployment gate (2026-10-07): on a 502 Caddy logs the request's
+    """2026-10-07: on a 502 Caddy logs the request's
     headers, redacting Cookie and Authorization alone, so X-Csrf-Token and
     X-Setup-Token reached `docker logs` verbatim. The global block's log
     filter deletes both (shown against the pinned Caddy, 2.11.4)."""
@@ -603,7 +603,7 @@ def test_minio_init_still_fails_and_says_why_when_an_account_cannot_be_created(t
     ("PRESERVE_ACCESS_KEY", "q" * 2),
 ])
 def test_minio_init_names_a_service_account_key_minio_would_refuse(tmp_path, name, value):
-    """Beta 1 deployment gate (2026-10-07): MinIO takes a service account's
+    """2026-10-07: MinIO takes a service account's
     access key at 3 to 20 characters and its secret key at 8 to 40, and its
     refusal named neither variable. minio-init stops before any account is
     asked for, names the variable and its length, and never prints it."""
@@ -623,7 +623,7 @@ def test_minio_init_accepts_service_account_keys_at_minios_bounds(tmp_path):
 
 
 def test_the_readme_has_the_egress_files_written_before_the_first_up_in_the_image():
-    """Beta 1 deployment gate (2026-10-07): followed in order, the README
+    """2026-10-07: followed in order, the README
     reached `up` with no egress files (the API refused, the proxy restarted in
     a loop, `up` exited 1), and its `python scripts/egress_setup.py keygen`
     and `preflight` ran on a host python with none of the application's

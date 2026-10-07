@@ -335,7 +335,7 @@ def test_the_deny_list_never_eats_code_the_image_runs():
 
 
 def test_the_api_test_suite_never_reaches_the_image():
-    """Beta 1 deployment gate (2026-10-07): the image carried all of
+    """2026-10-07: the image carried all of
     apps/api/tests, PGP test keys with private blocks among them, into
     every container of the deployment."""
     for path in ("apps/api/tests/test_pgp_keys.py", "apps/api/tests/conftest.py",

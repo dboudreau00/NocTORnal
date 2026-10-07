@@ -74,7 +74,7 @@
 # HTTP/3 is off. 443/udp is not published (compose.yml), so advertising it
 # in Alt-Svc sent browsers to a port nothing answers on.
 #
-# ## The log (Beta 1 deployment gate, 2026-10-07)
+# ## The log (2026-10-07)
 #
 # Caddy writes no access log here, but on an upstream failure (a 502 while
 # the API restarts) it logs the request with its headers. It redacts Cookie

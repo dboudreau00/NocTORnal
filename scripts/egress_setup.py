@@ -377,7 +377,7 @@ def _parser() -> argparse.ArgumentParser:
     # Run inside the application image (a production host has no python with
     # this tree's dependencies), where there is no docker to ask: the host's
     # shell asks it and passes the answer, `$(docker compose version --short)`
-    # (Beta 1 deployment gate, 2026-10-07).
+    # (2026-10-07).
     pre.add_argument("--compose-version")
 
     def policy_options(p):

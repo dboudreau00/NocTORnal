@@ -575,7 +575,7 @@ def test_every_spelling_of_a_size_the_reader_accepts_is_accepted(value):
 
 # --- an outbound switch and the processes that send nothing (2026-10-07) -------
 #
-# Beta 1 deployment gate: secrets.env.example says to turn outbound lookups
+# 2026-10-07: secrets.env.example says to turn outbound lookups
 # and the sandbox on in secrets.env, which the sample origin and the static
 # triage loop read too. Neither is given the egress proxy, and both refused
 # for want of one: the sample origin would not start and every triage pass
@@ -630,7 +630,7 @@ def test_static_triage_is_not_refused_for_an_outbound_switch_it_never_sends(swit
     ("false", True), (" ", True), ("TRUE", False), ("true", False), ("", False), (None, False),
 ])
 def test_a_preservation_store_without_tls_is_refused(value, refused):
-    """Beta 1 deployment gate (2026-10-07): PRESERVE_SECURE overrides
+    """2026-10-07: PRESERVE_SECURE overrides
     SAMPLE_SECURE for the preservation bucket when it is set to anything
     (samples.PreservationStorage), and nothing refused a value that turned
     TLS off there."""

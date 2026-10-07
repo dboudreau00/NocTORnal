@@ -437,7 +437,7 @@ def test_0130_goes_down_refuses_over_a_bad_row_and_comes_back_up(conn):
         assert "typed chat id (c:<id> or g:<id>)" in text and "Correct each by hand" in text
         assert "(es)" not in text and "—" not in text and " -- " not in text
         # The operator is told which rows, and that the run stopped at 0129
-        # (upgrade gate, 2026-10-07: the count alone sent them hunting).
+        # (2026-10-07: the count alone sent them hunting).
         bad = [str(r[0]) for r in conn.execute(
             "SELECT id FROM collect.watch WHERE upper(target_kind) = 'TELEGRAM_CHAT' "
             "AND name = %s ORDER BY id", (f"{PF}chk",)).fetchall()]

@@ -117,7 +117,7 @@ def test_a_run_that_ended_otherwise_within_the_hour_is_a_drainer_too(queue, stat
     """Only lab_triage ends a run, so a run it FAILED, SKIPPED or ABANDONED
     within the hour proves a drainer ran as much as a DONE one; the check
     used to read only DONE and told an operator whose drainer was working
-    through refusals to schedule one (beta gate, 2026-10-07)."""
+    through refusals to schedule one (2026-10-07)."""
     conn = queue
     who = make_user(conn, PREFIX)
     s = _sample(conn, who)

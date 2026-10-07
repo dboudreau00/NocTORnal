@@ -107,7 +107,7 @@ def test_redis_and_python_agree_request_for_request(key):
     """The test that matters. One algorithm, two implementations, one
     decision sequence, asserted at the boundaries.
 
-    Both sides run on ONE injected clock (beta gate, 2026-10-07). Until then
+    Both sides run on ONE injected clock (2026-10-07). Until then
     each read its own wall clock, every Redis round trip added elapsed time
     to the Redis side only, and on a loaded machine the two drifted across
     a boundary the other had not reached: the test failed with nothing

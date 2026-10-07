@@ -26,7 +26,7 @@ A row that already says TELEGRAM_CHAT (in any spelling) and does not name a
 typed chat id cannot be made valid by this migration without choosing what it
 meant, and a migration does not rewrite what it cannot be sure of. The
 upgrade counts them first and stops with a sentence that says how many,
-names up to five by id, and what to do (upgrade gate, 2026-10-07: the count
+names up to five by id, and what to do (2026-10-07: the count
 alone left the operator to find the rows). None can exist from the application: nothing in this tree
 creates a watch, and the kind was not recognised before this revision, so
 the count is of rows somebody wrote by hand.

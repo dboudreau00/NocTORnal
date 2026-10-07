@@ -94,7 +94,7 @@ def conn():
         # The triage queue is a queue, not a ledger: the static runs of a
         # sample that custody pins stayed QUEUED, went stale over a long
         # run and failed the readiness tests that read the whole queue
-        # (beta gate, 2026-10-07). A deleted sample takes its own along.
+        # (2026-10-07). A deleted sample takes its own along.
         c.execute(f"DELETE FROM lab.static_run WHERE status = 'QUEUED' AND "
                   f"sample_id IN (SELECT id FROM lab.sample WHERE submitted_by IN {sub})")
         c.execute(f"DELETE FROM lab.sample WHERE submitted_by IN {sub} "

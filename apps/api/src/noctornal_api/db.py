@@ -63,8 +63,7 @@ def connect() -> psycopg.Connection:
                            options=session_options(url))
 
 
-#: Server settings every application connection is opened with (G62 load
-#: gate, 2026-10-07). JIT compiles a query's expressions once the planner's
+#: Server settings every application connection is opened with (2026-10-07). JIT compiles a query's expressions once the planner's
 #: cost estimate passes `jit_above_cost`, and row security's policies inflate
 #: that estimate on every case read: on a 1,000,000-claim database the search,
 #: the triage queue and the graph view each spent 1.5 to 2.4 s compiling for

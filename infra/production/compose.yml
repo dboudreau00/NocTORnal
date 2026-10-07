@@ -101,7 +101,7 @@ x-caddy-ip: &caddy_ip "172.31.243.10"
 x-egress-ip: &egress_ip "172.31.243.11"
 
 # --------------------------------------------------------------------------
-# Every container's log, bounded (Beta 1 deployment gate, 2026-10-07).
+# Every container's log, bounded (2026-10-07).
 #
 # Docker keeps what a container prints in a json-file per container, and
 # its default has no size limit: the loops print every few minutes, Postgres
@@ -122,8 +122,8 @@ x-logging: &logging
 # Everything that runs the application image.
 #
 # ONE service builds it (`migrate`, below) and every other service runs the
-# tag it builds with `pull_policy: never` (Beta 1 deployment gate,
-# 2026-10-07). This used to put the build on every service, on the belief
+# tag it builds with `pull_policy: never` (2026-10-07).
+# This used to put the build on every service, on the belief
 # that compose builds a given tag once and the rest hit the cache. On Docker
 # Engine 29 with its default containerd image store and Compose 2.40, which
 # builds through bake, each service with a `build:` is a target of its own
@@ -730,8 +730,8 @@ services:
   # the whole init container down on every restart.
   #
   # MinIO takes a service account's access key at 3 to 20 characters and its
-  # secret key at 8 to 40 (measured against the pinned release on 2026-10-07,
-  # Beta 1 deployment gate). The README's password recipe, token_urlsafe(32),
+  # secret key at 8 to 40 (measured against the pinned release on
+  # 2026-10-07). The README's password recipe, token_urlsafe(32),
   # is 43 characters, and `svcacct add` refused it with a sentence naming
   # neither variable, so minio-init exited 1 and nothing that waits on it
   # started. `keylen` checks all four first, by name, before anything else.
