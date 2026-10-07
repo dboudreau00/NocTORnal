@@ -8,6 +8,7 @@ answerable.
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -67,13 +68,30 @@ class LoginBody(BaseModel):
 AUDIT_EMAIL_CHARS = 64
 
 
+#: What an address looks like, and no more: one `@`, no whitespace, and a
+#: dot in the domain with something on each side of it. A shape test, not
+#: a validator; it exists to tell an address from something typed into the
+#: wrong box.
+_ADDRESS_SHAPE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+
+
 def _audit_email(email: str) -> dict:
     """The submitted address as a failed sign-in records it: verbatim up
-    to AUDIT_EMAIL_CHARS, and past that the head, the length and a
-    sha256 prefix, so the officer can still tell repeated submissions
-    apart. Until 2026-10-03 the whole string went into the append-only
-    log, and with no body ceiling one unauthenticated request made a
-    permanent multi-megabyte row (http_ui-006)."""
+    to AUDIT_EMAIL_CHARS when it is shaped like an address, and past that
+    the head, the length and a sha256 prefix, so the officer can still tell
+    repeated submissions apart. Until 2026-10-03 the whole string went into
+    the append-only log, and with no body ceiling one unauthenticated
+    request made a permanent multi-megabyte row (http_ui-006).
+
+    A value that is not shaped like an address records only its length and
+    the prefix (Beta 1 verification, G5): the sign-in box is where people
+    type a password by mistake, and for an unknown account the row would
+    otherwise keep it in clear in a log nothing can delete from. An
+    address-shaped password (`Hunter2@home.net`) is not told apart from an
+    address and is the residual docs/17 records."""
+    if not _ADDRESS_SHAPE.fullmatch(email):
+        return {"email_length": len(email),
+                "email_sha256": hashlib.sha256(email.encode()).hexdigest()[:16]}
     if len(email) <= AUDIT_EMAIL_CHARS:
         return {"email": email}
     return {"email": email[:AUDIT_EMAIL_CHARS], "email_length": len(email),

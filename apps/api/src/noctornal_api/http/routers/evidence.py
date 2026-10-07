@@ -41,6 +41,7 @@ from noctornal_api.http.deps import (
     require,
     user_ceiling,
 )
+from noctornal_api.http.body_ceiling import credential_in_body
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import BodyCappedRoute, body_cap, rate_limit
 # The Lab's own door policy for the sample origin, shared by the exhibit
@@ -1144,6 +1145,7 @@ def _production_presented(request: Request) -> None:
 @router.post("/{evidence_id}/download",
              dependencies=[Depends(_meter_download)])
 @body_cap(_TICKET_BODY_CAP, what="a production ticket")
+@credential_in_body
 def produce(
     case_id: UUID, evidence_id: UUID, request: Request,
     #: In the FORM BODY, never the URL, and form-encoded so the console's

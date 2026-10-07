@@ -278,13 +278,20 @@ def test_the_demo_command_is_the_one_bootstrap_and_the_installer_give():
     assert '_TLP_NAMES = ("CLEAR",' in boot
     assert ("'.venv/bin/python scripts/bootstrap.py demo-network "
             "--owner-email '") in block
-    assert "' --code OP-SHOWCASE-26 --classification CLEAR'" in block
+    assert "' --code OP-LATTICEWORK-26 --classification CLEAR'" in block
     installer = ROOT / "release" / "install.sh"
     if installer.is_file():
+        # The installer's closing card gives the code it loaded the demo
+        # under (`--code %s`, DEMO_CODE_NAME), which is the code the tour
+        # prints and the one `bootstrap.py demo-network` creates when it is
+        # given none. OP-SHOWCASE-26 is the README's larger showcase, a
+        # different recipe (Beta 1 verification, G6).
         card = installer.read_text(encoding="utf-8")
+        assert 'DEMO_CODE_NAME="OP-LATTICEWORK-26"' in card
         assert (".venv/bin/python scripts/bootstrap.py demo-network "
-                "--owner-email %s --code OP-SHOWCASE-26 "
+                "--owner-email %s --code %s "
                 "--classification CLEAR") in card
+        assert 'args.code or "OP-LATTICEWORK-26"' in boot
 
 
 # ---------------------------------------------------------------------------
@@ -518,7 +525,7 @@ const some = stepText();
 console.log(JSON.stringify({ empty, named, unsafe, some }));
 """))
     base = (".venv/bin/python scripts/bootstrap.py demo-network "
-            "--owner-email {} --code OP-SHOWCASE-26 --classification CLEAR")
+            "--owner-email {} --code OP-LATTICEWORK-26 --classification CLEAR")
     assert out["empty"]["code"] == [base.format("YOU")]
     assert out["named"]["code"] == [base.format("ana@example.org")]
     assert out["unsafe"]["code"] == [base.format("YOU")]

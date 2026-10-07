@@ -645,3 +645,252 @@ def test_no_router_takes_a_limit_above_1000_except_the_two_recorded_exceptions()
             if int(m.group(1).replace("_", "")) > 1000:
                 found.append((path.name, int(m.group(1).replace("_", ""))))
     assert sorted(found) == [("graphview.py", 5000), ("read.py", 2000)], found
+
+
+# ---------------------------------------------------------------------------
+# Beta 1 verification, Group G (2026-10-07)
+# ---------------------------------------------------------------------------
+
+BS = "\\"
+
+
+def _json_with(basis: str) -> bytes:
+    """An assumption body whose `basis` holds `basis` as the JSON TEXT given
+    (escapes included), so a lone surrogate reaches the server as the six
+    characters a peer would type, which `json=` cannot send."""
+    return ('{"statement":"ok","basis":"' + basis + '"}').encode("ascii")
+
+
+LONE_SURROGATES = [
+    ("low alone", BS + "udc00"),
+    ("high alone", BS + "ud800"),
+    ("high then text", BS + "ud800x"),
+    ("high then a non-surrogate escape", BS + "ud800" + BS + "u0041"),
+    ("reversed pair", BS + "udc00" + BS + "ud800"),
+    ("two highs", BS + "ud800" + BS + "ud800"),
+    ("upper case hex", BS + "uDBFF"),
+    ("after an escaped backslash pair", BS * 4 + BS + "udfff"),
+]
+
+
+@pytest.mark.parametrize("name,basis", LONE_SURROGATES, ids=[n for n, _ in LONE_SURROGATES])
+def test_a_lone_surrogate_escape_is_a_422_not_a_500(client, world, name, basis):
+    """G1 (verifier u4): `{"statement":"ok","basis":"\\udc00"}` reached
+    Postgres as text no encoding can hold and answered 500 with a logged
+    UnicodeEncodeError. Fields with a length bound happened to answer 422."""
+    r = client.post(f"/api/v1/cases/{world['case']}/assumptions",
+                    headers={**world["headers"], "content-type": "application/json"},
+                    content=_json_with(basis))
+    assert r.status_code == 422, (name, r.status_code, r.text)
+    assert "surrogate" in r.json()["detail"]
+    assert r.headers["content-type"].startswith("application/problem+json")
+
+
+def test_a_lone_surrogate_in_a_key_or_a_constrained_field_is_a_422_too(client, world):
+    h = {**world["headers"], "content-type": "application/json"}
+    url = f"/api/v1/cases/{world['case']}/assumptions"
+    assert client.post(url, headers=h, content=(
+        '{"statement":"ok","' + BS + 'ud800":1}').encode()).status_code == 422
+    assert client.post(url, headers=h, content=(
+        '{"statement":"' + BS + 'udc00"}').encode()).status_code == 422
+
+
+@pytest.mark.parametrize("basis", [
+    BS + "ud83d" + BS + "ude00",            # a properly paired emoji
+    BS + "uD83D" + BS + "uDE00 and text",   # upper case, then more text
+    BS * 2 + "ud800",                       # a literal backslash, then text
+    BS * 2 + BS + "ud83d" + BS + "ude00",   # a literal backslash, then a pair
+    "plain text, nothing odd",
+], ids=["pair", "pair_upper", "escaped_backslash", "backslash_then_pair", "plain"])
+def test_a_properly_paired_surrogate_and_an_escaped_backslash_are_still_accepted(
+        client, world, basis):
+    r = client.post(f"/api/v1/cases/{world['case']}/assumptions",
+                    headers={**world["headers"], "content-type": "application/json"},
+                    content=_json_with(basis))
+    assert r.status_code == 201, (basis, r.status_code, r.text)
+
+
+def test_a_lone_surrogate_in_a_body_the_middleware_cannot_read_is_still_a_422(client, world):
+    """The second line, as the DataError handler is for a NUL: a JSON body
+    sent as UTF-16 hides the escape from the byte scan, and the handler
+    for the encoding failure answers it."""
+    body = _json_with(BS + "ud800").decode("ascii").encode("utf-16")
+    r = client.post(f"/api/v1/cases/{world['case']}/assumptions",
+                    headers={**world["headers"], "content-type": "application/json"},
+                    content=body)
+    assert r.status_code == 422, (r.status_code, r.text)
+    assert r.headers["content-type"].startswith("application/problem+json")
+
+
+def _multipart_head(boundary: str = "x") -> bytes:
+    return (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+            f"filename=\"a.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+            ).encode()
+
+
+def _capped_routes():
+    """Every (method, concrete path, endpoint) whose endpoint carries a
+    `@body_cap`, read off the router modules so a route added later is
+    covered. The paths are driven through the app below, so a router that
+    is not mounted answers 404 and fails there."""
+    import importlib
+    import pkgutil
+
+    from fastapi.routing import APIRoute
+
+    from noctornal_api.http import routers
+    from noctornal_api.http.app import API_PREFIX
+    found = {}
+    for info in pkgutil.iter_modules(routers.__path__):
+        module = importlib.import_module(f"noctornal_api.http.routers.{info.name}")
+        for route in getattr(getattr(module, "router", None), "routes", ()):
+            endpoint = getattr(route, "endpoint", None)
+            if not isinstance(route, APIRoute) or not getattr(endpoint, "__body_cap__", None):
+                continue
+            path = API_PREFIX + re.sub(r"\{[^}]+\}", lambda _m: str(uuid4()), route.path)
+            found[(sorted(route.methods)[0], path)] = endpoint
+    return [(m, p, e) for (m, p), e in found.items()]
+
+
+def test_the_capped_upload_routes_are_found():
+    names = {endpoint.__name__ for _m, _p, endpoint in _capped_routes()}
+    assert {"upload", "submit", "upload_email", "add_version", "verify",
+            "import_pgp_key", "import_screening_list", "similar_by_value",
+            "search_documents_similar", "download", "produce"} <= names, names
+
+
+def test_an_unauthenticated_upload_is_refused_before_a_byte_is_read(app, client):
+    """G2 (verifier u4): FastAPI parses a form before any dependency runs,
+    and Starlette spools the parse to disk, so 300 MiB streamed at
+    `POST /cases/{id}/evidence` with no credential was read up to the
+    route's 256 MiB cap before the 401 (the API container has no tmpfs
+    /tmp and the proxy sets no body limit). The refusal is now the middleware's,
+    ahead of the first read, and says what the route's own 401 says."""
+    own = client.get(f"/api/v1/cases/{uuid4()}")
+    assert own.status_code == 401
+    mp = b"multipart/form-data; boundary=x"
+    for method, path, endpoint in _capped_routes():
+        if getattr(endpoint, "__body_credential__", False):
+            continue
+        got = _asgi(app, method, path, first=_multipart_head() + b"a" * CHUNK,
+                    chunk=b"a" * CHUNK, chunks=4800, content_type=mp)   # 300 MiB on offer
+        assert got["status"] == 401, (path, got["status"])
+        assert got["consumed"] == 0, (path, got["consumed"], "an unauthenticated body was read")
+        assert json.loads(got["body"]) == own.json(), (path, got["body"])
+        assert got["headers"]["content-type"].startswith("application/problem+json")
+        assert got["headers"]["x-content-type-options"] == "nosniff"
+
+
+def test_the_refusal_is_the_route_own_401_for_every_way_of_presenting_nothing(app):
+    path = f"/api/v1/cases/{uuid4()}/evidence"
+    mp = b"multipart/form-data; boundary=x"
+    for headers in ([], [("authorization", "Basic YTpi")], [("authorization", "Bearer ")],
+                    [("authorization", "Bearer    ")], [("cookie", "other=1")],
+                    [("cookie", "__Host-session=")]):
+        got = _asgi(app, "POST", path, first=_multipart_head(), chunk=b"a" * CHUNK,
+                    chunks=64, content_type=mp, headers=headers)
+        assert got["status"] == 401 and got["consumed"] == 0, (headers, got["status"],
+                                                               got["consumed"])
+        assert json.loads(got["body"])["detail"] == "no session token"
+
+
+def test_a_request_that_presents_any_credential_reads_as_it_always_did(app):
+    """The pre-read check is only about presenting NOTHING: a bearer or the
+    session cookie is read by the route and judged there (the rest of this
+    suite and test_body_caps_http_pg cover what comes after)."""
+    path = f"/api/v1/cases/{uuid4()}/evidence"
+    mp = b"multipart/form-data; boundary=x"
+    for headers in ([("authorization", f"Bearer {uuid4().hex}")],
+                    [("cookie", f"__Host-session={uuid4().hex}")]):
+        got = _asgi(app, "POST", path, first=_multipart_head(), chunk=b"a" * CHUNK,
+                    chunks=8, content_type=mp, headers=headers)
+        assert got["status"] in (401, 403), (headers, got["status"])
+        assert got["consumed"] > 0, (headers, "the body was refused unread")
+
+
+def test_the_two_ticket_routes_take_their_credential_from_the_body_and_are_left_alone(app):
+    """A one-shot ticket in the form body IS the credential of a sample or
+    exhibit download on the sample origin, where no session exists: the
+    pre-read check must not turn a ticket away as an unauthenticated upload."""
+    tickets = [(m, p, e) for m, p, e in _capped_routes()
+               if getattr(e, "__body_credential__", False)]
+    assert {e.__name__ for _m, _p, e in tickets} == {"download", "produce"}
+    for method, path, _endpoint in tickets:
+        got = _asgi(app, method, path, first=b"ticket=not-a-real-ticket",
+                    content_type=b"application/x-www-form-urlencoded")
+        assert got["consumed"] > 0, (path, "the ticket was never read")
+        assert got["status"] in (401, 409), (path, got["status"])
+        assert b"no session token" not in got["body"], path
+
+
+def test_an_unauthenticated_declared_length_over_the_cap_is_still_the_413(app):
+    """Unchanged order: a declared length over the cap is answered before a
+    byte is read, whoever asks; the 401 is for a body that fits."""
+    from noctornal_api.http.routers.evidence import MAX_EVIDENCE_BYTES
+    got = _asgi(app, "POST", f"/api/v1/cases/{uuid4()}/evidence",
+                content_type=b"multipart/form-data; boundary=x",
+                declared=MAX_EVIDENCE_BYTES + 1, first=b"--x--")
+    assert got["status"] == 413 and got["consumed"] == 0
+
+
+def _failed_login_by_hash(conn, digest: str):
+    return conn.execute(
+        "SELECT detail, outcome FROM audit.event WHERE action = 'AUTH_FAILED' "
+        "AND detail->>'email_sha256' = %s ORDER BY seq DESC LIMIT 1", (digest,)).fetchone()
+
+
+def test_a_password_typed_into_the_email_box_is_not_stored(owner, client):
+    """G5 (verifier u4, http_ui-006): the 'email' of a failed sign-in was
+    kept verbatim up to 64 characters, so a password typed into the wrong
+    box for an unknown account sat in the append-only log in clear."""
+    typed = f"g45http-pw-{uuid4().hex[:6]}-Hunter2-typed-in-email-box"
+    assert len(typed) <= 64
+    r = client.post("/api/v1/auth/login", json={"email": typed, "password": "x"})
+    assert r.status_code == 401
+    digest = hashlib.sha256(typed.encode()).hexdigest()[:16]
+    detail, outcome = _failed_login_by_hash(owner, digest)
+    assert "email" not in detail and typed not in json.dumps(detail)
+    assert detail["email_length"] == len(typed) and detail["email_sha256"] == digest
+    assert detail["reason"] == "unknown_user" and outcome == "DENIED"
+    # An address still names its officer: kept as typed.
+    real = f"g45http-{uuid4().hex[:8]}@example.test"
+    client.post("/api/v1/auth/login", json={"email": real, "password": "x"})
+    detail, _outcome, _size = _failed_login_row(owner, real[:20])
+    assert detail["email"] == real and "email_sha256" not in detail
+
+
+@pytest.mark.parametrize("value,kept", [
+    ("analyst@agency.example.org", True),
+    ("a.b+tag@sub.example.test", True),
+    ("Hunter2 is my password", False),
+    ("correct-horse-battery-staple", False),
+    ("two@signs@example.test", False),
+    ("nodomain@localhost", False),
+    ("spaced out@example.test", False),
+    ("trailing@example.test ", False),
+    ("new\nline@example.test", False),
+    ("@example.test", False),
+    ("x@.", False),
+    ("", False),
+], ids=lambda v: repr(v)[:30])
+def test_only_an_address_shaped_value_is_recorded_as_typed(value, kept):
+    from noctornal_api.http.routers.auth import _audit_email
+    got = _audit_email(value)
+    if kept:
+        assert got == {"email": value}
+    else:
+        assert "email" not in got
+        assert got == {"email_length": len(value),
+                       "email_sha256": hashlib.sha256(value.encode()).hexdigest()[:16]}
+
+
+def test_a_long_address_keeps_its_head_and_a_long_non_address_keeps_nothing():
+    from noctornal_api.http.routers.auth import AUDIT_EMAIL_CHARS, _audit_email
+    long_address = "a" * 70 + "@example.test"
+    got = _audit_email(long_address)
+    assert got["email"] == long_address[:AUDIT_EMAIL_CHARS]
+    assert got["email_length"] == len(long_address)
+    secret = "pw" * 40
+    got = _audit_email(secret)
+    assert "email" not in got and got["email_length"] == 80
+    assert secret[:8] not in json.dumps(got)

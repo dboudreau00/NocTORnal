@@ -1118,4 +1118,4 @@ if [[ "$OPEN_DECISION" == "open" ]]; then
   open_when_up "http://127.0.0.1:$PORT/ui/" >/dev/null 2>&1 &
 fi
 exec "$VENV/bin/uvicorn" noctornal_api.http.app:app \
-     --host 127.0.0.1 --port "$PORT"
+     --host 127.0.0.1 --port "$PORT" --ws-max-size 8192

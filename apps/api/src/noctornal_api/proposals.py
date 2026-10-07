@@ -339,7 +339,7 @@ class SourceLabels:
     compartments: frozenset[str]
 
 
-def announce(conn: psycopg.Connection, case_id: UUID) -> None:
+def announce(conn: psycopg.Connection, case_id: UUID, proposal_id: UUID) -> None:
     """Tell the live channel this case's triage queue changed.
 
     ux08-triage:stale-badges-and-list (2026-09-23). The Triage badge is
@@ -352,11 +352,24 @@ def announce(conn: psycopg.Connection, case_id: UUID) -> None:
     the gated route. Inside a transaction Postgres folds identical
     notifications into one, which is why a capture raises its proposals
     in one.
+
+    The hint names the labels of the proposal that changed (G3, Beta 1
+    verification, as 0146 does for a node or an edge): its read label and
+    the compartments of what it came from, the same expressions the queue
+    filters on. The live channel drops the hint for a reader who could not
+    read that proposal, so a case reader is not woken when a proposal above
+    their labels is queued: a timing channel, though a content-free one.
+    The labels are for that decision and never reach a client. One
+    statement, so a capture still pays one round trip per proposal.
     """
     conn.execute(
-        "SELECT pg_notify(%s, json_build_object('case_id', %s::uuid, "
-        "'kind', 'proposal', 'op', 'CHANGE')::text)",
-        (CHANGE_CHANNEL, case_id))
+        "SELECT pg_notify(%(channel)s, json_build_object("
+        "'case_id', p.case_id, 'kind', 'proposal', 'op', 'CHANGE', "
+        "'labels', json_build_array(json_build_array(" + _READ_LABEL + "::text, "
+        "ARRAY(SELECT DISTINCT k FROM unnest(" + _SOURCE_COMPARTMENTS + ") AS k "
+        "ORDER BY k))))::text)" + _SOURCE_FROM
+        + " WHERE p.id = %(id)s AND p.case_id = %(case)s",
+        {"channel": CHANGE_CHANNEL, "id": proposal_id, "case": case_id})
 
 
 class ProposalStore:
@@ -410,7 +423,7 @@ class ProposalStore:
             ).fetchone()[0]
         except psycopg.Error as exc:
             raise ProposalError(str(exc)) from exc
-        announce(self._c, case_id)
+        announce(self._c, case_id, made)
         return made
 
     def queue(self, case_id: UUID, *, state: str = STATE_PROPOSED,
@@ -926,7 +939,7 @@ class ProposalReview:
                              "edge_id": str(edge_id) if edge_id else None,
                              "classification": written_at,
                              "compartments": extra})
-                announce(self._c, row.case_id)
+                announce(self._c, row.case_id, proposal_id)
         except KeyError as exc:
             raise ProposalError(
                 f"proposal payload is missing {exc} for kind {row.kind}") from exc
@@ -1062,7 +1075,7 @@ class ProposalReview:
             )
             self._audit(row.case_id, proposal_id, reviewed_by, action,
                         {"kind": row.kind, "origin": row.origin, "note": note})
-            announce(self._c, row.case_id)
+            announce(self._c, row.case_id, proposal_id)
         return self.get_for_update(proposal_id)
 
     def _audit(self, case_id: UUID, proposal_id: UUID, actor_id: UUID,

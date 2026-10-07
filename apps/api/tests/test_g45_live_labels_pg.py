@@ -18,7 +18,9 @@ Accounts carry the prefix `g45live-`, unique to this file.
 from __future__ import annotations
 
 import json
+import os
 import time
+from uuid import uuid4
 
 import pytest
 
@@ -36,6 +38,11 @@ COMPARTMENTS = tuple(f"G45-LIVE-{i:02d}" for i in range(11))
 def owner():
     c = s.owner_conn()
     yield c
+    cases = ("(SELECT id FROM core.\"case\" WHERE owner_user_id IN "
+             f"(SELECT id FROM iam.app_user WHERE email LIKE '{PREFIX}%@noctornal.test'))")
+    c.execute(f"DELETE FROM collect.proposal WHERE case_id IN {cases}")
+    c.execute(f"DELETE FROM collect.document WHERE title LIKE '{PREFIX}%'")
+    c.execute(f"DELETE FROM collect.source WHERE name LIKE '{PREFIX}%'")
     s.cleanup(c, prefix=PREFIX)
     c.close()
 
@@ -467,3 +474,142 @@ def test_a_good_hello_is_unchanged(owner, world, live):
         with client.websocket_connect("/api/v1/live") as ws:
             ws.send_json({"token": token, "case_id": None})
             assert ws.receive_json() == {"type": "ready", "case_id": None}
+
+
+# ---------------------------------------------------------------------------
+# Beta 1 verification, Group G: a token that cannot be one (G1)
+# ---------------------------------------------------------------------------
+
+BS = "\\"
+
+
+@pytest.mark.parametrize("frame", [
+    '{"token":"' + BS + 'ud800","case_id":null}',
+    '{"token":"' + BS + 'udc00x","case_id":null}',
+    '{"token":"t' + BS + 'u00f6k' + BS + 'u00e9n","case_id":null}',
+    '{"token":"' + "a" * 513 + '","case_id":null}',
+], ids=["lone_high_surrogate", "lone_low_surrogate", "non_ascii", "over_512"])
+def test_a_token_that_cannot_be_a_session_token_is_a_policy_close_not_a_traceback(
+        live, frame, caplog):
+    """G1 (verifier u4): `{"token":"\\ud800","case_id":null}` from a peer
+    with no session reached `hash_token`, whose UTF-8 encode raised, so the
+    handshake logged a traceback and closed 1011."""
+    import logging
+
+    from fastapi.testclient import TestClient
+    with TestClient(_app(), client=(PEER, 41010)) as client:
+        with caplog.at_level(logging.ERROR):
+            outcome = _close_of(client, frame, raw=True)
+        assert outcome == ("close", 1008, "no credentials"), outcome
+        assert live._pending.count == 0
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR], (
+        "the handshake logged an error for a peer that proved nothing")
+
+
+def test_a_token_of_the_longest_allowed_shape_still_reaches_the_session_check(live):
+    from fastapi.testclient import TestClient
+    assert live._TOKEN_MAX_CHARS == 512
+    with TestClient(_app(), client=(PEER, 41011)) as client:
+        assert _close_of(client, '{"token":"' + "a" * 512 + '","case_id":null}',
+                         raw=True) == ("close", 1008, "no such case")
+        assert _close_of(client, '{"token":"' + "a" * 513 + '","case_id":null}',
+                         raw=True) == ("close", 1008, "no credentials")
+
+
+# ---------------------------------------------------------------------------
+# Beta 1 verification, Group G: a proposal hint carries its labels (G3)
+# ---------------------------------------------------------------------------
+
+def _document(owner, *, classification="AMBER", keys=()):
+    source = owner.execute(
+        "INSERT INTO collect.source (kind, name, default_reliability, classification) "
+        "VALUES ('PASTE'::collect.source_kind, %s, 'F', %s) RETURNING id",
+        (f"{PREFIX}{uuid4().hex[:8]}", classification)).fetchone()[0]
+    return owner.execute(
+        "INSERT INTO collect.document (source_id, title, body_text, content_sha256, "
+        "classification, compartments) VALUES (%s, %s, %s, %s, %s, %s) RETURNING id",
+        (source, f"{PREFIX}{uuid4().hex[:6]}", "a thread", os.urandom(32),
+         classification, list(keys))).fetchone()[0]
+
+
+def _propose(owner, case_id, classification="AMBER", document_id=None):
+    from noctornal_api.proposals import ProposalStore
+    return ProposalStore(owner).propose(
+        case_id=case_id, kind="NODE", origin="g45live/1",
+        rationale="a signal worth a look", document_id=document_id,
+        payload={"node_type": "IDENTITY", "label": f"{PREFIX}{uuid4().hex[:6]}",
+                 "classification": classification})
+
+
+def test_a_proposal_hint_names_the_labels_of_the_proposal(owner, world):
+    case_id = world["case"]
+    doc = _document(owner, keys=(COMPARTMENTS[0],))
+    listener = _listener()
+    try:
+        _propose(owner, case_id, "RED")
+        _propose(owner, case_id, "AMBER")
+        _propose(owner, case_id, "AMBER", document_id=doc)
+        events = [e for e in _heard(listener, case_id) if e["kind"] == "proposal"]
+    finally:
+        listener.close()
+    assert [_labels(e) for e in events] == [
+        {("RED", ())}, {("AMBER", ())}, {("AMBER", (COMPARTMENTS[0],))}]
+    assert all(e["op"] == "CHANGE" for e in events)
+
+
+def test_accepting_and_rejecting_a_proposal_announce_its_labels_too(owner, world):
+    from noctornal_api.proposals import ProposalReview
+    case_id, lead = world["case"], world["lead"]
+    refused = _propose(owner, case_id, "RED")
+    taken = _propose(owner, case_id, "AMBER")
+    listener = _listener()
+    try:
+        ProposalReview(owner).reject(refused, reviewed_by=lead, note="not this one")
+        ProposalReview(owner).accept(taken, reviewed_by=lead)
+        events = [e for e in _heard(listener, case_id) if e["kind"] == "proposal"]
+    finally:
+        listener.close()
+    assert [_labels(e) for e in events] == [{("RED", ())}, {("AMBER", ())}]
+
+
+def test_the_delivery_verdict_drops_a_proposal_hint_above_the_subscriber(owner, world):
+    from noctornal_api.http.routers.live import _delivery_verdict
+    case_id, analyst, cleared = world["case"], world["analyst"], world["cleared"]
+
+    def verdict(user, labels, *, present=True):
+        payload = {"case_id": str(case_id), "kind": "proposal", "op": "CHANGE"}
+        if present:
+            payload["labels"] = labels
+        return _delivery_verdict(user, case_id, None, payload)
+
+    assert verdict(analyst, [["AMBER", []]]) == "send"
+    assert verdict(analyst, [["RED", []]]) == "drop"
+    assert verdict(analyst, [["AMBER", [COMPARTMENTS[0]]]]) == "drop"
+    assert verdict(cleared, [["RED", [COMPARTMENTS[0]]]]) == "send"
+    # A hint that names no labels cannot be placed, so it is not announced.
+    assert verdict(analyst, None, present=False) == "drop"
+    assert verdict(analyst, []) == "drop"
+    # The kinds that carry no labels are still delivered on the case alone.
+    assert _delivery_verdict(analyst, case_id, None,
+                             {"case_id": str(case_id), "kind": "notification"}) == "send"
+
+
+def test_the_socket_wakes_a_reader_for_a_proposal_they_may_read_and_not_above(owner, world, live):
+    from fastapi.testclient import TestClient
+    case_id, analyst = world["case"], world["analyst"]
+    _sid, token = s.session(owner, analyst)
+    with TestClient(_app(), client=(PEER, 41012)) as client:
+        with client.websocket_connect("/api/v1/live") as ws:
+            ws.send_json({"token": token, "case_id": str(case_id)})
+            assert ws.receive_json()["type"] == "ready"
+            time.sleep(1.0)      # the hub's LISTEN registers after `ready`
+            _propose(owner, case_id, "RED")
+            _propose(owner, case_id, "AMBER", document_id=_document(
+                owner, keys=(COMPARTMENTS[0],)))
+            late = [ws.receive_json() for _ in range(15)]
+            assert [m["type"] for m in late] == ["ping"] * 15, (
+                "a proposal above the subscriber woke their console")
+            _propose(owner, case_id, "AMBER")
+            change = _until_change(ws)
+            assert change == {"type": "change", "kind": "proposal", "op": "CHANGE"}
+            assert "labels" not in change

@@ -268,6 +268,25 @@ def install_error_handlers(app) -> None:
             f"a value in the request cannot be stored, for example text "
             f"containing a NUL character or a number out of range (ref {cid})")
 
+    @app.exception_handler(UnicodeEncodeError)
+    async def _unencodable_text(request: Request, exc: UnicodeEncodeError):
+        """Text no UTF-8 encoder will take (Beta 1 verification, G1): a lone
+        surrogate in a string the caller sent, which the driver refuses
+        before a statement leaves the process. The caller's input, so a 422
+        and not a 500 with a logged traceback. `body_ceiling.py` refuses the
+        commonest case (an unpaired surrogate escape in a UTF-8 JSON body)
+        before a route parses it; this is what remains (a JSON body sent in
+        another encoding, which the byte scan cannot read). Any other
+        encoding failure is the server's own and stays the 500."""
+        if "surrogates not allowed" not in exc.reason:
+            return await _unhandled(request, exc)
+        cid = uuid.uuid4().hex[:12]
+        log.warning("unencodable text %s: %s", cid, exc)
+        return problem_response(
+            422, "Validation failed",
+            f"a text value in the request holds an unpaired surrogate "
+            f"character, which is not text and cannot be stored (ref {cid})")
+
     @app.exception_handler(SystemContextUnavailable)
     async def _no_system_connection(_: Request, exc: Exception):
         log.error("system connection unavailable: %s", exc)

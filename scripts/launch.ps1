@@ -700,5 +700,5 @@ Write-Host ''
 # Uvicorn logs to stderr. Run it bare - not piped, not redirected - so the log
 # reaches the console as plain text and Ctrl+C reaches the process.
 $ErrorActionPreference = 'Continue'
-& $Python -m uvicorn 'noctornal_api.http.app:app' --host 127.0.0.1 --port $Port
+& $Python -m uvicorn 'noctornal_api.http.app:app' --host 127.0.0.1 --port $Port --ws-max-size 8192
 exit $LASTEXITCODE
