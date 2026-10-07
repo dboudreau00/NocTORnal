@@ -679,12 +679,11 @@ def test_the_tier_reaches_the_wire_on_exactly_the_four(conn, client):
 
 @needs_db
 def test_the_two_new_checks_answer_with_evidence(conn):
-    """Both are new on 2026-09-10 and neither had ever run against a real
-    database. `app_db_role_not_owner` in particular is EXPECTED to fail
-    here -- the suites own the tables so they can disable the append-only
-    triggers -- and what is asserted is that it names the connected role
-    either way, because "the role is wrong" without saying which role is
-    not something an operator can act on."""
+    """Both are new on 2026-09-10. `app_db_role_not_owner` in particular is
+    EXPECTED to fail here -- the suites own the tables so they can disable
+    the append-only triggers -- and what is asserted is that it names the
+    connected role either way, because "the role is wrong" without saying
+    which role is not something an operator can act on."""
     # The two probes directly rather than `run_checks`, which would also
     # PING Redis and round-trip the object store to answer a question
     # about neither.

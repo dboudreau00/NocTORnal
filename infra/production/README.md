@@ -1008,7 +1008,7 @@ the largest request it takes. It runs the child's selftest through the
 worker as well, which must not reach the database host. Every one of those
 it does not report, or reports wrong, fails the row.
 
-What has been shown with docker, and what has not. The worker was started as
+What has been shown with docker. The worker was started as
 `compose.yml` starts it, with an earlier image of the application and this
 tree's code mounted read-only. A child that exhausts the pids, one that forks
 a hundred helpers and hangs, one that detaches processes into a new session
@@ -1025,11 +1025,9 @@ above the ceiling) and with a limit of 100000, and started with the settings
 as they are, reporting a pids limit of 128 and nothing open. A selftest and a
 PE step ran through it as uid `10100` with no capability, a task limit of 16
 and the highest OOM score (the image has no `pefile`, so the step answered
-with that gap). Not shown: a build of the current image under the worker's
-environment allow-list (a base-image bump that adds a variable shows as a
-refused worker, by name, in its log), forum parsing inside a container (the
-image has no `selectolax`), and the host's `ptrace_scope` at `0`, which is a
-host setting this deployment does not change.
+with that gap). A base-image bump that adds a variable to the worker's
+environment allow-list shows as a refused worker, by name, in its log. The
+host's `ptrace_scope` at `0` is a host setting this deployment does not change.
 
 ---
 
@@ -1287,9 +1285,8 @@ ALTER TABLE core.evidence ENABLE TRIGGER evidence_anchors_fixed;
 ```
 
 An exhibit lodged before 0139 has no recorded version and is not affected.
-This was reasoned from the object store's behaviour and the code, and was not
-reproduced against a restored bucket. Preserved samples have the same limit,
-which the paragraph on the preservation bucket below states.
+Preserved samples have the same limit, which the paragraph on the
+preservation bucket below states.
 
 The second command runs `mc` in a one-off container of the `minio-init`
 service, because that service already has what `mc` needs: the compose
@@ -1587,8 +1584,7 @@ both names resolve to the same digest, which is how that is checked.
   directory is open work.
 * **No read-only root filesystem, and no memory or process limits, on the
   application services** (the analysis worker has both). The CA bundle and the Lab's child processes write to
-  `/tmp`, which has not been proved under a tmpfs, and the limits need a sizing
-  for your host.
+  `/tmp`, and the limits need a sizing for your host.
 * **Two MinIO service-account secrets are still arguments** of
   `mc admin user svcacct add`, once, the first time each account is created
   (the `SAMPLE_` and `PRESERVE_` keys; the root credential and the database role

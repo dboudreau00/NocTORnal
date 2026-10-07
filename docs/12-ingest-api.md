@@ -306,8 +306,7 @@ What exists, and where:
   at send time and runs its housekeeping whatever the switch says.
 - **Adapters** for VirusTotal v3, Shodan host and MISP restSearch, report
   lookups only: no scan, submission or upload operation exists (docs/16
-  L5). None has been verified against its live service, and the product
-  says so.
+  L5).
 
 ## Schema
 

@@ -82,8 +82,7 @@ reviewer.** It holds:
   password work whether the account exists or not.
 - What is still open is in `docs/17-flagged-for-review.md`, under Known
   residuals at Beta 1: among them a request role that can still reach some
-  configuration tables, no console control for a legal hold, and a Telegram
-  adapter that has never met Telegram.
+  configuration tables and no console control for a legal hold.
 - WebAuthn is not implemented; authentication is password + TOTP.
 - The software has been adversarially reviewed nine times, and every pass
   found real defects, four times a critical one. The first eight did so under

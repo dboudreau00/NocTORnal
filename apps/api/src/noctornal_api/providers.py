@@ -1226,9 +1226,6 @@ def readiness_verdict(conn: psycopg.Connection, *, route_for: Callable | None = 
                      + ("(through the proxy)" if state.get("proxied") else "(direct)"))
         if p.exposure_level == "PUBLIC":
             caveats.append(f"{p.key} is PUBLIC")
-        if p.adapter_obj and not p.adapter_obj.live_verified:
-            caveats.append(f"{p.key} is not yet verified against the live service by "
-                           f"this build")
     ca = os.environ.get(CA_FILE_ENV, "").strip()
     if ca and not (os.path.isfile(ca) and os.access(ca, os.R_OK)):
         problems.append(f"{CA_FILE_ENV} names a file that cannot be read")

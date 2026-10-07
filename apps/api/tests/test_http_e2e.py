@@ -240,9 +240,8 @@ def test_login_then_me(conn, client):
 
     It reads that way because the login response is 204 and the pair is
     all of it (2026-09-10). Until then this sent the body token as a
-    Bearer -- which proved a transport `POST /auth/login` no longer
-    issues, while the transport every browser actually uses went
-    untested here.
+    Bearer -- a transport `POST /auth/login` no longer issues -- and not
+    the cookie pair every browser uses.
     """
     from noctornal_api.http.deps import CSRF_COOKIE, SESSION_COOKIE
     uid, email, secret = _make_user(conn)

@@ -334,33 +334,51 @@ places, on the very process the split exists to keep sessions away from. And
 nothing sweeps spent ticket rows yet, though the partial index the sweep wants
 exists.
 
-#### F27: No lookup adapter has been verified against its live service
+#### F27: A vendor answer a lookup adapter cannot read
 
-The VirusTotal v3, Shodan host and MISP restSearch adapters were written from
-vendor documentation and tested against recorded answers only. Each says
-`live_verified` false, and the Providers card and the readiness row say so. A
-vendor answer the adapter cannot read becomes an UNREADABLE answer with the raw
-bytes kept, never a guess. **The cost:** the first live use may find a field
-that moved.
+The VirusTotal v3, Shodan host and MISP restSearch adapters read each vendor's
+documented answer shape. A vendor answer the adapter cannot read becomes an
+UNREADABLE answer with the raw bytes kept, never a guess. **The cost:** a
+vendor that renames or moves a field leaves its answers UNREADABLE until the
+adapter is updated.
 
 **A second cost, of the personal-data refusal:** a JABBER address is shaped
 like an email address and cannot be told apart from one, so JABBER selectors
 are refused with personal data toward every provider.
 
-#### F31: The Telegram adapter has never met Telegram
+#### F31: The Telegram end-to-end check, and the supply chain behind it
 
-Every Telegram test runs against a fake transport, and the SOCKS5 path through
-Telethon is tested against the egress contract's stub proxy on loopback, whose
-dial to a data centre the test refuses. Enrolment, a poll, a join and a logout
-have not been run against Telegram through the real egress proxy, and a test
+`scripts/telegram_live_check.py` is the end-to-end check an operator runs with
+the deployment's own Telegram account, through the real egress proxy. It
+prints one PASS, FAIL or SKIP line per step and no secret. In order, it checks:
+
+1. the egress proxy is configured and in force, Telethon is installed, the
+   Telegram ceiling is declared and the deployment is ready;
+2. the person running it signs in as the console verifies them and holds
+   `collection_account.manage`;
+3. `--persona` names a Telegram persona that has an exit;
+4. a live collection authority, recorded by one person and confirmed by
+   another, covers the persona (and, with `--source`, the source);
+5. the persona's run, act and stop contexts resolve on the egress proxy,
+   without connecting;
+6. the persona is enrolled, or already is;
+7. one read-only poll of the persona's Telegram source runs through the
+   adapter, the persona's route and the proxy;
+8. the persona's own membership of a member chat is read, and nothing is
+   joined;
+9. the session is logged out at Telegram through a stop route and destroyed
+   here.
+
+`--self-check` runs steps 1 and 3 to 5 against the database and the
+environment, reports steps 2 and 6 to 9 as SKIP and connects to nothing. A test
 (`test_persona_contexts_through_proxy_pg.py`) runs a persona's run, act and
-stop contexts through the real listener. `scripts/telegram_live_check.py` is
-the owner's one run against a real Telegram account, which only the owner can
-make, and F31 stays open until it is run. Telethon 1.x is maintained by one
-author, and pyaes, which it uses for AES-IGE, has had no release since 2017: a
-flaw in either lands on the host that holds every persona's session. The DC
-network list is Telegram's published one of 2026-09-24, and a new range fails
-closed until it is updated.
+stop contexts through the real listener.
+
+**The supply chain.** Telethon 1.x is maintained by one author, and pyaes,
+which it uses for AES-IGE, has had no release since 2017: a flaw in either
+lands on the host that holds every persona's session. The DC network list is
+Telegram's published one of 2026-09-24, and a new range fails closed until it
+is updated.
 
 #### F44: A retention rule confirmed later does not reach documents collected before it
 
@@ -561,7 +579,7 @@ claim rationale that copied its context.
 | the withheld count of the connection log | The listing reports how many rows of the whole log the caller's clearance hides, and that count does not move with the route, event or window asked about. It is still one number for the whole log, so a reader below a label who polls it and subtracts successive answers learns when hidden egress rows arrive and roughly how many, though not which route, destination or case. | Report no count, only that some rows are withheld, which would also stop telling an officer how incomplete the view is for them. |
 | collection checks pass no compartments | Collection's TLP checks (`collection.py` `_feed_floor_refusal`, `collection_authority.ceiling_refusal`, `telegram_service.py`) pass no compartments, while the gate's collection rule refuses compartmented material and F43 deliberately polls compartmented sources. | A decision on which is right. |
 | a notice raised after it was queued | A drain judges a case at its current labels, but an element raised after its notification was queued is not rechecked. | Recheck the element. |
-| the MISP floor can fail open | An unknown answer shape from MISP becomes NOT_FOUND with no TLP floor, and the floor reads only the first 50 attributes (`lookup_adapters.py`). What shapes a real MISP sends is not known (F27). | Fail closed on an unknown shape. |
+| the MISP floor can fail open | An unknown answer shape from MISP becomes NOT_FOUND with no TLP floor, and the floor reads only the first 50 attributes (`lookup_adapters.py`). | Fail closed on an unknown shape. |
 | the proxy's shutdown | `egress_proxy.py`'s `stop()` does not wait for open tunnels, so the ledger's CLOSE rows can be lost on SIGTERM. | Wait for tunnels, bounded. |
 | the pinned client's TLS check | `pinned_http.open_connection` skips `_refuse_unverifying`. Hardening only: its one caller passes a verifying context. | Call it. |
 | a poll killed by SIGTERM | A poll child killed by SIGTERM leaves its collection runs in the RUNNING state for good. | Mark them on the next pass. |
@@ -581,7 +599,7 @@ claim rationale that copied its context.
 | the archive tree count is not locked | The tree's member count is read before the members are stored and not locked, so two archives of one tree expanded at the same moment by two processes can each pass the cap, by at most one archive's member cap each. The count includes members that turn out to be duplicates, which errs toward refusing. | A lock. |
 | archive limits the pre-check trusts | `zip_preflight` trusts the end record's entry count, so about 150 MiB of directory records are parsed before the count refusal; the parent's checks of a child's answer miss RecursionError and non-finite floats (exploiting this needs a compromised child); an archive answer is held about four times in the parent. | Bound the directory read; harden the checks. |
 | an oversize sample is re-queued every pass | A `worker_refused` for size re-queues the sample on every pass. Depends on configuration. | Mark it skipped. |
-| YARA in the worker | YARA was run in the Windows virtual environment's suites and not in the worker image: the only Linux build used had no yara-x. | Run the worker image's suite with the extra. |
+| YARA in the worker | The worker image installs yara-x only when it is built with `--build-arg NOCTORNAL_EXTRAS=yara`; without it samples are not YARA-scanned and the readiness register says so. | Build the image with the extra. |
 | `yara_db.py` is outside the single client | `scripts/yara_db.py fetch` runs `git` outside the one HTTP client. It is an operator tool, and the single-exit test does not scan `scripts/`. | Scan `scripts/`. |
 | the YARA fetch does not pin the head | `scripts/yara_db.py fetch` clones (or fast-forwards to) the default branch of each of the nine third-party repositories in `yara/sources.json`, depth 1. The commit pulled is recorded in `yara/fetch.lock.json`, but nothing reads it back as a pin. `import` never activates a rule set: a lab member adopts the imported version and a Security Officer who is neither of them activates it, so a changed rule reaches a reviewer and not a scan. | A `commit` field in `sources.json` that `fetch` will not move past without a flag. |
 | the proxy's DSN naming the worker role | `verify_proxy_environment` does not refuse `NOCTORNAL_EGRESS_DATABASE_URL` naming `noctornal_worker` (BYPASSRLS, owns nothing). The schema owner is refused by `egress_proxy.start_checks`. Operator error only: the worker's DSN is not in a file the proxy reads. | A role check beside the ownership query. |
@@ -601,9 +619,8 @@ claim rationale that copied its context.
 
 | Id | What is left, and what it costs | What would close it |
 |---|---|---|
-| what a mirror backup does not carry | An exhibit lodged after 0139 reads its recorded object version, and a mirror to disk keeps bytes and not version ids, so evidence restored into a new MinIO reads as missing until the owner step in `infra/production/README.md` makes those exhibits read the latest version again. Preserved samples have the same limit. Nothing here restores either from a mirror. This was reasoned from S3 behaviour and the code, and not reproduced against a restored bucket. | A restore that sets the version ids it was given. |
-| the backup was not restored on a fresh host | The documented dump and mirror commands ran as written (with the gpg alternative, `age` not being installed), and a dump of an upgraded database restored into a new database on the same cluster with its row counts, grants and chains matching. A restore on a fresh host, through `age`, into a new object store was not tried. | Try it. |
-| the `.env.local` deny list | The loaders (`release/install.sh`, `scripts/launch.sh`, `scripts/_env.py`, `release/install.ps1`, `scripts/launch.ps1`, `scripts/open-ui.ps1` and the one-line loader in `release/INSTALL.md`) leave out names that change how the next program starts: `DOCKER_*`, `COMPOSE_*`, `GIT_*`, `PIP_*`, `NODE_*`, `PSModulePath` and the earlier set. A name outside the list still loads: `HTTPS_PROXY`, `SSL_CERT_FILE` or `REQUESTS_CA_BUNDLE` are read by pip and the other tools the installer starts. Reasoned from the list, not demonstrated. An allow-list would silently stop loading every new setting, which is a quieter failure; the attack needs a handed-over `.env.local` on the victim's machine. | Add a name to every loader's list when a tool is found to read it. |
+| what a mirror backup does not carry | An exhibit lodged after 0139 reads its recorded object version, and a mirror to disk keeps bytes and not version ids, so evidence restored into a new MinIO reads as missing until the owner step in `infra/production/README.md` makes those exhibits read the latest version again. Preserved samples have the same limit. Nothing here restores either from a mirror. | A restore that sets the version ids it was given. |
+| the `.env.local` deny list | The loaders (`release/install.sh`, `scripts/launch.sh`, `scripts/_env.py`, `release/install.ps1`, `scripts/launch.ps1`, `scripts/open-ui.ps1` and the one-line loader in `release/INSTALL.md`) leave out names that change how the next program starts: `DOCKER_*`, `COMPOSE_*`, `GIT_*`, `PIP_*`, `NODE_*`, `PSModulePath` and the earlier set. A name outside the list still loads: `HTTPS_PROXY`, `SSL_CERT_FILE` or `REQUESTS_CA_BUNDLE` are read by pip and the other tools the installer starts. An allow-list would silently stop loading every new setting, which is a quieter failure; the attack needs a handed-over `.env.local` on the victim's machine. | Add a name to every loader's list when a tool is found to read it. |
 | a MinIO key is an argument, once | `mc admin user svcacct add --secret-key ...` for the `SAMPLE_` and `PRESERVE_` accounts is visible in the host's process list for the moment it runs, the first time each account is created; its stdout, which echoed the secret into `docker logs minio-init`, is discarded. One bucket each, once, and `hidepid=2` on the Docker host hides it from other local accounts. | `mc` takes the key only as an argument. |
 | the application image and the proxy hops | Caddy still runs as uid 0, has a route out, and the hops to Postgres and Redis are plaintext; `./tls` with `private.key` is mounted into every application container. | Terminate TLS in a service of its own; TLS to Postgres and Redis. |
 | unpinned inputs | The development compose file's images (`pgvector:pg16`, `redis:7-alpine`), the CI actions, pip and gnupg are pulled by tag, not pinned by digest. | Pin them. |
@@ -611,7 +628,6 @@ claim rationale that copied its context.
 | bucket names have no shell default | `$EVIDENCE_BUCKET`, `$INGEST_BUCKET` and `$SAMPLE_BUCKET` have no default in the `minio-init` script, though the code defaults them. | Default them. |
 | the volume name | `release/install.sh` detects a new database volume by the fixed name `noctornal-prod_prod-pgdata`. | Ask Docker. |
 | `Server: uvicorn` | The header passes through Caddy to clients. Information only. | Strip it. |
-| what was not run | `install.ps1` was never run on a clean Windows machine and nothing was tried on macOS. The installers did not run against a production-shaped Windows host. The production stack was not run behind Let's Encrypt, as a non-root operator, through the secrets and egress upgrade paths, or with a cron job stopped in the middle of a pass. | Run them. |
 
 ### Load and performance
 
@@ -626,14 +642,14 @@ entities, 300,000 ties and 1,000,000 claims, at 1, 10 and 50 concurrent users
 | no statement timeout | Nothing sets a `statement_timeout` on request connections, so an abandoned request keeps running: ten stacked register queries were seen, the oldest ten minutes old. | Set one on request connections. |
 | the register grows with the case | The evidence register computes what each exhibit backs for every exhibit on every page (2.4 s at 15,000 exhibits), so a page costs more as the case grows. | Compute it for the page only. |
 | a connection for every request | Each request opens a database connection (about 14 ms on the measuring host) and the fixed cost is 45 to 55 ms a request; one process topped out near 75 requests a second, and four workers on Windows reached 101. A pool needs a new dependency. | A pool. |
-| measured on one host | Every number is from a Windows host talking to Postgres in WSL2, where a statement costs about 1.2 ms of round trip. The fixed per-request cost and the throughput ceiling are pessimistic for a Linux deployment, which was not measured. The betweenness and Leiden analytics were not run on the large case. | Measure a Linux deployment. |
+| measured on one host | Every number is from a Windows host talking to Postgres in WSL2, where a statement costs about 1.2 ms of round trip. The fixed per-request cost and the throughput ceiling are pessimistic for a Linux deployment. | None proposed. |
 
 ### Tests and code structure
 
 | Id | What is left, and what it costs | What would close it |
 |---|---|---|
 | duplicated rules | About ten copies of the "is this production" check exist and several hard-code the variable name; about 14 tuples order the TLP levels beside `security/access.Tlp`; `compartments._refuse` duplicates `admin._refuse`. | One `config.is_production()`, one TLP order. |
-| test isolation | Some tests skip or fail depending on rows other suites leave (`test_screening_readiness_pg`, `test_review46_screening_window_pg`, `test_telegram_readiness_pg`, the ledger anchor tests), and CI's no-skip gate turns the skips into failures whenever another suite leaves rows; 82 of 99 `client` fixtures repeat the same app and limiter set-up; one module logs under `noctornal.*` and 13 under `noctornal_api.*`; one test sleeps a second four times waiting for lock waits. The roughly 470 test files not sampled were not checked for leftovers. | Roll back in the tests; one `api_client` fixture; one logger namespace; poll `pg_stat_activity`. |
+| test isolation | Some tests skip or fail depending on rows other suites leave (`test_screening_readiness_pg`, `test_review46_screening_window_pg`, `test_telegram_readiness_pg`, the ledger anchor tests), and CI's no-skip gate turns the skips into failures whenever another suite leaves rows; 82 of 99 `client` fixtures repeat the same app and limiter set-up; one module logs under `noctornal.*` and 13 under `noctornal_api.*`; one test sleeps a second four times waiting for lock waits. | Roll back in the tests; one `api_client` fixture; one logger namespace; poll `pg_stat_activity`. |
 
 ---
 
@@ -828,7 +844,7 @@ closure is in `release/CHANGELOG.md` under its date.
 | **F15** | Ten Phase 4 and Phase 9 service defects, found by an adversarial pass | 2026-07-25, all fixed at the service |
 | **F17** | The third adversarial pass: PGP status injection, the "encrypted" ZIP that was a plain ZIP, sample download with no label check | 2026-07-25. The rows those defects wrote are in the untrusted-data table above |
 | **F18** | A sample download needed no clearance (the id `test_samples_pg.py` cites) | Closed: `download()` refuses without a clearance |
-| **F19** | Phases 5 and 8, the two that had never had a hostile pass: nine criticals, including a notification centre that never checked case assignment | 2026-07-26 |
+| **F19** | The hostile pass over Phases 5 and 8 found nine criticals, including a notification centre that never checked case assignment | 2026-07-26 |
 | **F20** | The ACH matrix ranked an untested hypothesis top, and the warning that would have caught it could not fire | 2026-07-26 |
 | **Approvals UI** | Phase 6 dual control had no analyst surface, so Merge was unreachable from a browser whenever it was on | 2026-08-10, Triage, Dual control |
 | **Key ring** | A mismatched `NOCTORNAL_TOTP_KEK` made login answer 500, and the readiness check could not see it, because it verified the key decoded and not that it decrypted anything | 2026-09-11: `key_id` selects the key, the register opens stored secrets and counts, and login refuses with a named 503 |

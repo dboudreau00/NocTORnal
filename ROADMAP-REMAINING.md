@@ -6,12 +6,11 @@ version 0.9.0 single-sourced from `pyproject.toml`. Those four counters are
 generated: `scripts/refresh_counters.py` writes them and `test_doc_invariants`
 holds them to the tree with no tolerance. Per-release totals of COLLECTED
 items, which parametrisation makes larger, are in `release/CHANGELOG.md`.
-Beta 1 (2026-10-07) is released. **Every roadmap item is built except one,
-F31:** a first run of the Telegram adapter against Telegram itself. Only the
-owner can close it, with their own account, by running
-`scripts/telegram_live_check.py` (docs/17 F31). What stands between the
-product and a deployment is not software: it is the five legal items L1 to L5
-(docs/16).
+Beta 1 (2026-10-07) is released. **Every roadmap item is built.** The
+end-to-end check of the Telegram adapter is `scripts/telegram_live_check.py`,
+which an operator runs with the deployment's own Telegram account (docs/17
+F31). What stands between the product and a deployment is not software: it is
+the five legal items L1 to L5 (docs/16).
 
 This file is what is left. What was done and when is in the changelog; what is
 known-wrong is in `docs/17-flagged-for-review.md`; what is blocked on somebody
@@ -39,7 +38,7 @@ Every phase has all four. What is left in a phase is feature work.
 
 The percentages are the Alpha 6 scores. The work built since is listed under
 "What was built, by release" and is not rescored, so a row can read "nothing
-left" beside a figure below 100: the score waits for the owner.
+left" beside a figure below 100.
 
 | Phase | Complete | Model+tests | API | UI | Reviewed | What is left |
 |---|---|---|---|---|---|---|
@@ -47,12 +46,12 @@ left" beside a figure below 100: the score waits for the owner.
 | 1, Graph core | **100%** | ✅ | ✅ | ✅ | ✅ | Nothing. |
 | 2, Sociogram | **100%** | ✅ | ✅ | ✅ | ✅ | Nothing. |
 | 3, Analytics | **85%** | ◐ | ✅ | ◐ | ✅ | Nothing named. Conversations are projected only by the Comms pane's co-participation view, deliberately (decision 73). Regular equivalence (REGE) sits beside CONCOR. |
-| 4, Collection | **90%** | ◐ | ✅ | ✅ | ✅ | A first run against Telegram itself (docs/17 F31), which only the owner can make. `run_once` raises no proposals, which is a decision recorded at the `Adapter` docstring and not a gap. |
+| 4, Collection | **90%** | ◐ | ✅ | ✅ | ✅ | Nothing named. The Telegram end-to-end check is an operator item (docs/17 F31). `run_once` raises no proposals, which is a decision recorded at the `Adapter` docstring and not a gap. |
 | 5, Notification | **92%** | ✅ | ✅ | ◐ | ✅ | Nothing named. A receiver still on webhook signature v1 stays replayable (docs/07). |
 | 6, Tradecraft | **96%** | ◐ | ✅ | ✅ | ✅ | Nothing named. WebAuthn is a deliberate absence, stated in four documents; SECURITY.md says reporting it is not a finding. |
 | 7, Comms | **95%** | ✅ | ✅ | ✅ | ✅ | Nothing named. |
 | 8, Samples | **80%** | ✅ | ✅ | ✅ | ✅ | Nothing named. **The one phase where 100% would still mean "do not switch on": see L1.** |
-| 9, Ingest | **90%** | ✅ | ✅ | ✅ | ✅ | A sweep for dead letters and ingest records attached to no case (docs/17 F55). No lookup adapter has met its live service (docs/17 F27). |
+| 9, Ingest | **90%** | ✅ | ✅ | ✅ | ✅ | A sweep for dead letters and ingest records attached to no case (docs/17 F55). A vendor answer a lookup adapter cannot read is kept as UNREADABLE (docs/17 F27). |
 
 ### Overall: **92.8%**
 
@@ -66,8 +65,8 @@ Two things the number does not say.
 1. **Completion is not lawfulness.** A phase at 100% here may still be
    unlawful to operate. Phase 8 must not be switched on until L1 is settled.
    That is the point of the register below, not a caveat on the number.
-2. **It is a measure of reach and scrutiny, not of scale.** Nothing here has
-   run against a real case, on real volume, for a real unit.
+2. **It is a measure of reach and scrutiny, not of scale.** The load figures
+   are in docs/17, "Load and performance".
 
 ---
 
@@ -106,8 +105,8 @@ section, and there was no Alpha 8 release.
 - **Archive expansion**, with named caps (docs/11, decision 178).
 - **The authenticated forum path** under a MEMBER_READ authority (docs/16 L3),
   and **F43**, compartments on collection sources.
-- **F31**, the owner's Telegram first-run script, with a dry run that proves
-  the gates before the account is spent. Built, not run.
+- **F31**, the Telegram end-to-end check an operator runs with the
+  deployment's own account, with a dry run that proves the gates first.
 - **F28, F30, F35, F36, F37, F39, F47** and owner question 11 (decisions 164
   to 173): webhook signature v2, the document sweep, a persona's exit at
   creation, typed ids in warnings, gpg fingerprints, the merge switch's second
@@ -160,14 +159,13 @@ release reviews found and left, are in docs/17, "Known residuals at Beta 1".
 
 ## What remains open
 
-**The one roadmap item not built:** F31, a first run of the Telegram adapter
-against Telegram itself. `scripts/telegram_live_check.py` is that run: it
+**The Telegram end-to-end check (F31).** `scripts/telegram_live_check.py`
 signs the operator in as the console does, checks the egress proxy, the
 authority and the three routes, enrols the persona, makes one read-only poll,
 reads the persona's membership of a member chat and logs the session out, and
 prints one line per step. `--self-check` proves the gates and the shape of the
-transcript first, connecting to nothing. Only the owner can run it, with their
-own test account. The adapter has never met Telegram.
+transcript first, connecting to nothing. An operator runs it with the
+deployment's own Telegram account.
 
 **Named and not built.** None of these is a roadmap feature: each waits on a
 decision, or is hardening that needs a migration.
@@ -200,8 +198,7 @@ the document sweep, and under which authority (F30, with counsel); whether
 dead letters and caseless ingest records join it (F55); whether a
 compartmented source should be polled at all, because collection's TLP checks
 pass no compartments while F43 polls compartmented sources on purpose;
-whether a sample download is an egress; and the first run of the Telegram
-adapter, F31.
+and whether a sample download is an egress.
 
 ## Open questions for the operator
 

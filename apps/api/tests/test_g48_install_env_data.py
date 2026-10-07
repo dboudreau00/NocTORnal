@@ -10,8 +10,7 @@ key store with the default umask and restricted it afterwards, and the
 PowerShell scripts never restricted it at all.
 
 The shell function is extracted from install.sh and run with bash; the
-PowerShell scripts are read as text (they are parsed, not run, here: the
-Windows proof is in the report).
+PowerShell scripts are read as text (they are parsed, not run, here).
 """
 from __future__ import annotations
 

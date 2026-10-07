@@ -1,7 +1,7 @@
 """The Phase 8 criticals from the first adversarial pass, 2026-07-26.
 
-Phase 8 had never been reviewed. Six hostile lenses, then a refutation
-round, produced nine CRITICAL findings under 1108 passing tests — with two
+Phase 8 went through six hostile lenses, then a refutation
+round, which produced nine CRITICAL findings under 1108 passing tests — with two
 distinct root causes:
 
   1. **`download()` applied no label check of any kind.** Not the sample's

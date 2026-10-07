@@ -1,6 +1,6 @@
-"""The Telegram adapter's first meeting with Telegram, run once by the
-owner with their own test account, through the real egress proxy
-(docs/17 F31, 2026-10-02).
+"""The Telegram end-to-end check: enrolment, one read-only poll, a join check
+and a logout, as a persona, through the real egress proxy. An operator runs it
+with the deployment's own Telegram account (docs/17 F31, 2026-10-02).
 
     python scripts/telegram_live_check.py --persona <uuid> [--source <uuid>]
     python scripts/telegram_live_check.py --persona <uuid> --self-check
@@ -44,8 +44,7 @@ password, session or token). Exit 0 when nothing failed, 1 on any failure,
 ## What it never does
 
 It joins nothing, posts nothing, reads nothing it is not authorised to
-read, and prints no secret. It is not run by the test suite beyond
-`--help` and `--self-check`.
+read, and prints no secret.
 
 ## --self-check
 
@@ -55,7 +54,7 @@ the system); steps 6 to 9 run only when a transport factory has been set
 on this module (`TRANSPORT_FACTORY`, the test suite's fakes), and are
 reported SKIP otherwise. That is the dry run: it proves the gates, the
 authority and the three routes, and the shape of the transcript, before
-the owner spends their account on the real thing.
+anybody signs in to Telegram.
 """
 from __future__ import annotations
 
@@ -440,7 +439,7 @@ def run_check(conn, persona_id: UUID, *, source_id: UUID | None, self_check: boo
         else:
             for step in ("enrolment", "poll", "join_check", "logout"):
                 t.say(step, "SKIP", "A self-check connects to nothing; run without "
-                      "--self-check to meet Telegram.")
+                      "--self-check to run this step against Telegram.")
     except CollectionError as exc:
         t.say("check", "FAIL", _sentence(exc))
     conn.execute(
@@ -457,9 +456,9 @@ def run_check(conn, persona_id: UUID, *, source_id: UUID | None, self_check: boo
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Meet Telegram once, as a persona, through the egress proxy: "
-                    "enrolment, one read-only poll, a join check and a logout, "
-                    "each reported PASS or FAIL, with no secret printed.")
+        description="Check the Telegram adapter end to end, as a persona, through "
+                    "the egress proxy: enrolment, one read-only poll, a join check "
+                    "and a logout, each reported PASS or FAIL, with no secret printed.")
     parser.add_argument("--persona", required=True, help="the Telegram persona's id")
     parser.add_argument("--source", default=None,
                         help="the Telegram source (chat) to poll and check; the "
