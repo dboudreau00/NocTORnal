@@ -14,6 +14,13 @@
 
 ---
 
+## The quick path
+
+**[START-HERE.md](START-HERE.md) is the one page to follow first.** It says
+what you need, gives the three install steps for each system, explains the
+first sign-in, and lists the five commonest problems with their fixes. This
+document is the detail behind it.
+
 ## The short version
 
 **Windows (PowerShell):**
@@ -34,14 +41,32 @@ zip additionally carries Mark-of-the-Web; bare `.\install.ps1` is
 blocked either way. A `.sh` out of a zip has no execute bit, so `./` fails
 with "permission denied" before bash ever sees it.
 
-That is the whole thing. It checks what it needs, installs the Python
-packages into a virtual environment of its own, starts the services,
-creates the database, makes you an account (on Windows it prints the
-command that does, see step 6 below), starts the API and prints the
-console URL. It does not open a browser.
+That is the whole thing. It is a wizard of eight numbered steps ("Step 3
+of 8"). Step 1 looks at your computer and prints what it found (system,
+Python, Docker, the API's port) before anything is changed. Then it installs
+the Python packages into a virtual environment of its own, starts the
+services, creates the database, makes you an account (on both systems, and
+before the API starts), offers a fictional demo case, starts the API and
+prints a closing card with the console URL. When a terminal and a desktop
+are present it offers to open the page in your browser; `--open` (`-Open`
+on Windows) does so without asking.
 
 Re-running it is safe. Every step checks before it acts and reports what
-it found.
+it found. If a step fails it says in one sentence what to do.
+
+Two questions are asked of a person at the keyboard and never otherwise.
+When standard input is not a terminal (a pipe, cron, CI, a test harness) the
+only input it reads is the email and then the display name for the account,
+and the demo case loads only if you ask for it:
+
+| Flag | Windows | Effect |
+|---|---|---|
+| `--demo` | `-Demo` | load the fictional demo case without asking |
+| `--no-demo` | `-NoDemo` | do not load it and do not ask |
+| `--open` | `-Open` | open the console in your browser once it is up |
+
+The demo case is the synthetic network `bootstrap.py demo-network` makes,
+marked TLP:CLEAR. All of it is fictional.
 
 ---
 
@@ -86,9 +111,11 @@ and newer only, so on macOS 13 leave `--with-yara` off.
 
 Nothing hidden, in this order:
 
-1. **Checks Python and Docker.** Stops with a specific instruction if
-   either is missing or too old, if Python cannot build a virtual
-   environment, or if the Docker engine is not reachable.
+1. **Checks your computer, and changes nothing.** Prints the system,
+   Python and Docker versions and whether the API's port is free. Stops with
+   a specific instruction if Python or Docker is missing or too old, if
+   Python cannot build a virtual environment, if the Docker engine is not
+   reachable, or if the port is taken.
 2. **Creates a virtual environment** at `.venv` and installs the API and
    the ontology package into it.
 3. **Generates secrets** into `.env.local`, a TOTP key-encryption key and
@@ -100,13 +127,16 @@ Nothing hidden, in this order:
 4. **Starts the containers** and waits for Postgres to report healthy.
 5. **Applies the database migrations** (`alembic upgrade head`).
 6. **Creates your account** if no user exists, and prints the password
-   once with the enrolment QR for your authenticator.
+   once with the enrolment QR for your authenticator. When a terminal is
+   attached it then waits until you press Enter, so you have saved the
+   password before anything else is printed.
 
-   > **Windows note (R8).** `install.ps1` hands off to `launch.ps1`, which
-   > prints a banner telling you to run `create-user` in a second terminal,
-   > and then starts uvicorn, whose log scrolls that banner off the
-   > screen within seconds. If you reach the sign-in page with no
-   > credentials, that is why. Run:
+   > **Windows note (R8, fixed).** `install.ps1` used to hand off to
+   > `launch.ps1`, whose server log scrolled the password and the QR code
+   > off the screen within seconds, so a new user reached the sign-in page
+   > with no credentials. It now makes the account before it starts the
+   > API, as `install.sh` does, and waits for you. If you installed with an
+   > older copy and have no credentials, run:
    >
    > ```powershell
    > .venv\Scripts\python scripts\bootstrap.py create-user --email you@example.org --name "Your Name"
@@ -115,9 +145,13 @@ Nothing hidden, in this order:
    > It works in a fresh terminal with no exports: `bootstrap.py` reads
    > `.env.local` itself.
 
-7. **Starts the API** on 127.0.0.1 and prints the console URL. If the
-   port is already taken it stops and says so instead (see
-   Troubleshooting).
+7. **Offers the demo case**, a fictional one, so there is something to
+   explore (see the flags above).
+8. **Starts the API** on 127.0.0.1 and prints the closing card: the console
+   URL, the email to sign in with, how to start it again, how to stop it and
+   where the help is. The port is checked in step 1, so if it is already
+   taken the installer stops there and says so, before it builds anything
+   (see Troubleshooting).
 
 Every one of those is idempotent. Stopping it half way and running it
 again does the right thing.
@@ -248,9 +282,14 @@ working on a broken host, not as the normal way in.
 # stop the containers:
 docker compose -f infra/docker-compose.yml down
 
-# start everything again:
-./release/install.sh          # or: powershell -ExecutionPolicy Bypass -File .\release\install.ps1
+# start everything again (the start scripts run scripts/launch.sh and
+# scripts/launch.ps1 and nothing else):
+bash release/start.sh         # or: powershell -ExecutionPolicy Bypass -File .\release\start.ps1
 ```
+
+Re-running the installer starts everything too, and is how you pick up a new
+release. `start.cmd` in the project folder does the same on Windows when you
+double-click it.
 
 Data lives in Docker volumes and survives `down`. To destroy it
 completely, add `-v`, which deletes every case, exhibit and audit row,
@@ -333,7 +372,7 @@ upgrade step by step, with the way back.
 
 **"port 8000 is already in use"**: an earlier copy of the API is still
 running, or something else holds the port. Both installers stop with this
-before starting the API. If it is an earlier copy, the stack is already
+in step 1, before they build anything. If it is an earlier copy, the stack is already
 up at <http://127.0.0.1:8000/ui/>. Otherwise stop what holds the port, or
 pass `--port 8001` (`-Port 8001` on Windows).
 
