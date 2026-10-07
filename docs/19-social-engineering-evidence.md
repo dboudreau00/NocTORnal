@@ -1,21 +1,20 @@
 # 19. Social-engineering evidence: phishing, vishing, BEC
 
-Status: **decided**, implemented in migrations 0046-0050.
-Supersedes nothing. Extends docs/01 (domain model), docs/11 (malware
+Status: **built** (migrations 0046-0050). Supersedes nothing. Extends docs/01 (domain model), docs/11 (malware
 handling) and docs/16 (legal) into the social-engineering domain.
 
 ---
 
 ## 0) The question this answers
 
-> Can we add phishing / vishing evidence? Screenshots of phishing pages
+> Can phishing / vishing evidence be held? Screenshots of phishing pages
 > and URLs, records of phone calls or SIP trunks, BEC emails?
 
 Yes. Most of the graph model already fits, `EMAIL`, `PHONE`, `DOMAIN`,
 `URL` selectors, `VICTIM` / `ORGANISATION` / `INFRA` / `CAMPAIGN` nodes,
-WORM evidence with custody. What is missing is not node types. It is
+WORM evidence with custody. What was missing is not node types. It is
 **provenance structure**: the three things an analyst needs to prove are
-each a *tuple*, and this system had nowhere to put the tuple.
+each a *tuple*, and the tuple needs a home.
 
 | Claim | The evidence is actually… |
 |---|---|
@@ -51,7 +50,7 @@ Three consequences, enforced not documented:
    409 and audit the refusal (`EVIDENCE_EGRESS_REFUSED`, reason
    `hostile_markup`).
 
-   **Producing one** (Alpha 6, migration 0068). The exhibit's card offers
+   **Producing one** (migration 0068). The exhibit's card offers
    "Produce through the sample origin", which takes the Lab download's two
    legs. The console mints a one-shot ticket on the application origin,
    `POST /cases/{id}/evidence/{eid}/production-ticket`, under the gate
@@ -227,7 +226,7 @@ constraint sits only on the content.
 `CONVENTIONS.md` says ask before adding a node or edge type that duplicates an
 existing one. Most of this domain already has a home: a phishing host is
 `INFRA`, a kit is `TOOL`, a victim is `VICTIM`, a call is an `EVENT`, a
-campaign is a `CAMPAIGN`. Two things had none.
+campaign is a `CAMPAIGN`. Two things have none.
 
 **`LURE`** (node), the pretext itself: the fake O365 login, the
 invoice-redirect story, the "IT support" script. Distinct from `TOOL` (the
@@ -307,7 +306,7 @@ The same reasoning is why `deception.capture.egress_profile_id` exists.
 Fetching attacker infrastructure from the office egress IP tells the actor
 they are being watched.
 
-It is also why a vendor key lookup (F10c, 2026-09-24) reaches only the Web
+It is also why a vendor key lookup (F10c) reaches only the Web
 Key Directories an administrator named on the integration route `wkd`, is
 approved by a second person, and sends nothing but the hash: a directory
 on a domain the actor runs would learn that the address was looked up
