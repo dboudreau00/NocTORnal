@@ -1562,7 +1562,19 @@ class RssAdapter(Adapter):
                                                       route=route)
         if status == 304 or not body:
             return FetchResult(items=[], etag=etag, http_status=status)
-        return FetchResult(items=parse_rss(body), etag=new_etag,
+        items, no_id, over_cap = read_feed(body)
+        warnings = []
+        if no_id:
+            warnings.append(RunWarning(ITEM_SKIPPED, (
+                f"{count_of(no_id, 'item', 'items')} of the feed carried no guid, "
+                f"id, link or title to tell {agree(no_id, 'it', 'them')} apart, "
+                f"and {agree(no_id, 'was', 'were')} skipped.")))
+        if over_cap:
+            warnings.append(RunWarning(ITEM_SKIPPED, (
+                f"{count_of(over_cap, 'item was', 'items were')} past the "
+                f"{MAX_FEED_ITEMS} a feed is read for, and "
+                f"{agree(over_cap, 'was', 'were')} skipped.")))
+        return FetchResult(items=items, etag=new_etag, warnings=warnings,
                            last_modified=last_modified, http_status=status)
 
 
@@ -1822,6 +1834,20 @@ def parse_rss(body: bytes) -> list[Item]:
     An XXE in a feed you did not write is a file-read primitive on the
     collector, which is the host holding every persona credential.
     """
+    return read_feed(body)[0]
+
+
+#: The most items one poll of a feed reads (beta 1 gate 6, 2026-10-07). A
+#: feed is a window of the newest few dozen; a 16 MiB one of bare items is
+#: some 600,000 documents in one transaction, every poll. A forum page is
+#: held to forum_parse.MAX_POSTS the same way.
+MAX_FEED_ITEMS = 500
+
+
+def read_feed(body: bytes) -> tuple[list[Item], int, int]:
+    """`parse_rss`, with what it did not keep counted, so the run can say so
+    (invariant 12): `(items, items with nothing to tell them apart, items
+    past MAX_FEED_ITEMS)`. Both used to be dropped without a word."""
     from xml.etree import ElementTree
 
     # CP1 (2026-07-26) closed an 8 KiB window; the finding of 2026-10-03
@@ -1837,9 +1863,13 @@ def parse_rss(body: bytes) -> list[Item]:
         raise CollectionError(f"feed did not parse: {type(exc).__name__}") from exc
 
     items: list[Item] = []
+    no_id = over_cap = 0
     for element in root.iter():
         tag = element.tag.rsplit("}", 1)[-1].lower()
         if tag not in {"item", "entry"}:
+            continue
+        if len(items) >= MAX_FEED_ITEMS:
+            over_cap += 1
             continue
         fields: dict[str, str] = {}
         for child in element:
@@ -1851,6 +1881,7 @@ def parse_rss(body: bytes) -> list[Item]:
         external = (fields.get("guid") or fields.get("id")
                     or fields.get("link") or fields.get("title") or "")
         if not external:
+            no_id += 1
             continue
         items.append(Item(
             external_id=external,
@@ -1861,7 +1892,7 @@ def parse_rss(body: bytes) -> list[Item]:
             author_handle=fields.get("author") or fields.get("creator"),
             raw=fields,
         ))
-    return items
+    return items, no_id, over_cap
 
 
 def fetch(url: str, *, etag: str | None = None,
@@ -2299,10 +2330,13 @@ class CollectionService:
         if platform is not None and source.collection_account_id is None:
             return self.CAUSE_BINDING, (
                 "This source is read by a persona, and none is bound to it.")
-        if not requires:
-            return _feed_floor_refusal(source)
+        # Before the feed's own early answer: a deactivated feed was still
+        # fetched by Poll now, because only the authority path asked (beta 1
+        # gate 6, 2026-10-07).
         if not source.is_active:
             return self.CAUSE_INACTIVE, "This source is deactivated."
+        if not requires:
+            return _feed_floor_refusal(source)
         refusal = ceiling_refusal(source)
         if refusal:
             declared, _sentence = source_ceiling(source.kind)

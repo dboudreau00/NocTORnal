@@ -140,8 +140,12 @@ def test_the_exit_code_is_the_return_value_of_main() -> None:
     returns, and the failure is invisible: the counters line still says
     `failed=3` and cron still reports success. Both scripts wire it the
     same way."""
+    # `main(sys.argv[1:])` is the same wiring for a script whose `main()`
+    # reads no arguments unless given them (notify_drain, beta 1 gate 6).
     for path in (SCRIPT, MODEL):
-        assert "raise SystemExit(main())" in ast.unparse(_tree(path)), (
+        text = ast.unparse(_tree(path))
+        assert ("raise SystemExit(main())" in text
+                or "raise SystemExit(main(sys.argv[1:]))" in text), (
             f"{path.name} does not turn main()'s return value into the "
             f"process exit code")
 

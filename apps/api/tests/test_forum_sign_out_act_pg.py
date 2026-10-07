@@ -120,6 +120,49 @@ def test_the_collector_signs_the_persona_out_and_the_request_never_opens_the_ses
         w["board"].close()
 
 
+def test_a_red_readiness_register_does_not_hold_back_the_sign_out_of_a_stop(
+        conn, stub, monkeypatch):
+    """A stop is always allowed (F38) and its route asks no readiness, so
+    the sign-out it queues is not refused by the collector for a blocking
+    check that turned red either (beta 1 gate 6, 2026-10-07): a burnt
+    persona's board session must not stay open because, say, the security
+    officer's account was deactivated."""
+    from noctornal_api import persona_acts
+    from noctornal_api.db import SystemPurpose, connect_system
+    from noctornal_api.http.routers import collection as router
+
+    monkeypatch.setenv("NOCTORNAL_ACT_WAIT_SECONDS", "25")
+    w = _world(conn, stub, "xenforo")
+    client, _app = h.client()
+    _uid, email = h.user(conn, P, roles=("COLLECTOR",))
+    collector_conn = connect_system(SystemPurpose.PERSONA_ACTS)
+
+    def collector():
+        deadline = time.monotonic() + 25
+        while time.monotonic() < deadline:
+            if persona_acts.drain(collector_conn, instance="collector:test-fmbr",
+                                  adapters=registry(), limit=5)["claimed"]:
+                return
+            time.sleep(0.1)
+
+    thread = threading.Thread(target=collector, daemon=True)
+    try:
+        assert _svc(conn).run_once(w["source"], actor_id=None).status == "OK"
+        monkeypatch.setattr(router, "blocking_failures",
+                            lambda _c: ["security_officer_present"])
+        thread.start()
+        answer = _stop(client, conn, w["persona"], email)
+        thread.join(30)
+        assert answer.status_code == 200, answer.text
+        assert "signed out of its forum" in answer.json()["forum_sign_out"], answer.json()
+        assert w["board"].logouts == 1
+        assert [(a[0], a[1]) for a in _acts(conn, w["persona"])] == [
+            ("FORUM_SIGN_OUT", "DONE")]
+    finally:
+        collector_conn.close()
+        w["board"].close()
+
+
 def test_with_no_collector_the_stop_clears_the_session_and_says_the_board_was_not_reached(
         conn, stub, monkeypatch):
     monkeypatch.setenv("NOCTORNAL_ACT_WAIT_SECONDS", "0")

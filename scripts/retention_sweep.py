@@ -38,9 +38,12 @@ that left nothing it could destroy); 1 when a real run left documents it could
 have destroyed (a store refused their markup, or the pass limit was reached),
 so run it again after reading the warnings; 2 when it refused to run: a missing
 or placeholder authority, no named account, no store for collected markup, or,
-under NOCTORNAL_ENV=production, a credential in the environment that carries a
-published value. Nothing was destroyed on a 2 before any pass began, and what a
-pass destroyed before a refusal stays destroyed and is on its tombstone.
+under NOCTORNAL_ENV=production and for a dry run as well, an environment every
+job refuses (`config.refuse_unsafe_job_environment`: a credential that carries a
+published value, the schema owner's password or DSN, or the persona key), one
+line per variable on stderr led by `retention_sweep: refusing to run:`. Nothing
+was destroyed on a 2 before any pass began, and what a pass destroyed before a
+refusal stays destroyed and is on its tombstone.
 """
 from __future__ import annotations
 
@@ -99,12 +102,23 @@ def main(argv: list[str] | None = None, *, conn=None,
     args = parser.parse_args(argv)
 
     from noctornal_api import retention_sweep as rs
-    from noctornal_api.config import ENV_VAR, PRODUCTION, published_credentials
+    from noctornal_api.config import JOB_REFUSAL_EXIT, refuse_unsafe_job_environment
     from noctornal_api.db import SystemPurpose, connect_system
 
     max_passes = args.max_passes if args.max_passes is not None else rs.DEFAULT_MAX_PASSES
     if max_passes < 1:
         parser.error("--max-passes must be at least 1")
+
+    # The one refusal every job makes first, before anything is connected to
+    # (config.refuse_unsafe_job_environment): a published credential, the
+    # schema owner's, or the persona key only the collector holds. Until the
+    # beta 1 gates (2026-10-07) this script asked for the first alone, and
+    # only on --apply, so a dry run, or a real run holding the owner's DSN
+    # or the persona key, started where every other job refused.
+    refusals = refuse_unsafe_job_environment("retention_sweep")
+    if refusals:
+        print("\n".join(refusals), file=sys.stderr)
+        return JOB_REFUSAL_EXIT
 
     authority = None
     if args.apply:
@@ -112,12 +126,6 @@ def main(argv: list[str] | None = None, *, conn=None,
             authority = rs.declared_authority()
         except rs.SweepRefused as exc:
             return _refuse(str(exc))
-        if os.environ.get(ENV_VAR, "").strip().lower() == PRODUCTION:
-            published = published_credentials()
-            if published:
-                names = ", ".join(sorted({p.variable for p in published}))
-                return _refuse(f"{names} carry a published value, so this "
-                               f"deployment is not run")
 
     own = conn is None
     # The system role: on the request role under row-level security a sweep

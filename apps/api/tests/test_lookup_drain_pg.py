@@ -118,6 +118,59 @@ def test_the_drain_refuses_what_the_provider_now_exposes_differently(conn):
     assert _states(conn, w) == {"REFUSED": 3} and not w.fetcher.calls
 
 
+def test_an_exposure_raised_while_the_drain_runs_stops_the_sends_it_had_not_made(
+        conn, monkeypatch):
+    """The drain reads a provider once per pass, and a pass may run for
+    minutes. An administrator who raises the provider's exposure after the
+    first send must not see the rest of the queue go out under the old one
+    (beta 1 gate 6, 2026-10-07)."""
+    from noctornal_api import lookups, providers
+    w = _queued(conn)
+    svc = w.service(conn)
+    real_send = svc._send
+    raised = []
+
+    def send_then_raise(*args, **kwargs):
+        outcome = real_send(*args, **kwargs)
+        if not raised:
+            reg = providers.ProviderRegistry(conn, route_for=w.route_for)
+            reg.update(w.provider.id, {"exposure_level": "VENDOR",
+                                       "exposure_basis": "It moved to the vendor's cloud."},
+                       actor_id=w.admin)
+            raised.append(True)
+        return outcome
+
+    monkeypatch.setattr(svc, "_send", send_then_raise)
+    lookups.drain(conn, service=svc)
+    assert len(w.fetcher.calls) == 1
+    assert _states(conn, w) == {"ANSWERED": 1, "REFUSED": 2}
+
+
+def test_a_lookup_cancelled_while_the_drain_runs_is_not_sent_and_the_pass_goes_on(
+        conn, monkeypatch):
+    from noctornal_api import lookups
+    w = _queued(conn)
+    svc = w.service(conn)
+    real_gates = svc.gates
+    cancelled = []
+
+    def gates_then_cancel(subject, provider, operation, **kwargs):
+        if not cancelled:
+            cancelled.append(conn.execute(
+                """UPDATE ingest.lookup SET state = 'CANCELLED', refusal = 'cancelled'
+                    WHERE id = (SELECT id FROM ingest.lookup WHERE case_id = %s
+                                   AND state = 'QUEUED'
+                                 ORDER BY not_before NULLS FIRST, requested_at LIMIT 1)
+                    RETURNING id""", (w.case_id,)).fetchone()[0])
+        return real_gates(subject, provider, operation, **kwargs)
+
+    monkeypatch.setattr(svc, "gates", gates_then_cancel)
+    report = lookups.drain(conn, service=svc)
+    assert report["providers"][w.provider.key]["skipped"] == 1
+    assert _states(conn, w) == {"CANCELLED": 1, "ANSWERED": 2}
+    assert len(w.fetcher.calls) == 2
+
+
 def test_a_provider_with_no_route_is_reported_and_sends_nothing(conn):
     from noctornal_api import lookups
     w = _queued(conn)

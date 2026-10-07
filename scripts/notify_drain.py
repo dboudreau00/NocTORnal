@@ -49,6 +49,7 @@ already means a delivery failed in a pass that ran.
 """
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 
@@ -77,7 +78,13 @@ def connect():
     return connect_system(SystemPurpose.NOTIFY)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    # It takes no options, and says so: with no parser, `--help` was not
+    # read and ran a drain, sending the outbox (beta 1 gate 6, 2026-10-07).
+    argparse.ArgumentParser(
+        description="Drain the notification outbox once: the outbox, the "
+                    "review-due sweep and the escalation of unacknowledged "
+                    "priority-1 notifications.").parse_args(argv or [])
     # First, before anything is connected to (docs/17 F52 and infra-12,
     # 2026-10-02 and 2026-10-03): under NOCTORNAL_ENV=production a published
     # credential, the schema owner's or a persona key (the cron loop holds
@@ -102,4 +109,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

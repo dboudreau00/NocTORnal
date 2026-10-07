@@ -208,6 +208,31 @@ def test_an_archive_expands_into_members_that_are_samples_of_the_same_material(c
         assert imphash == imphash_of("KERNEL32.dll", "ExitProcess")
 
 
+def test_a_zip_link_or_device_entry_carrying_a_payload_is_expanded_as_a_member(
+        conn, store):
+    """In a zip a link or a device is a mode bit on an entry that carries
+    bytes, which Windows and most extractors write out as an ordinary file.
+    Refused as content-free, a payload marked so was neither expanded nor
+    screened and the card said every member was compared (beta 1 gate 6,
+    2026-10-07). An entry that holds more than a link target is read as the
+    file it is; a real link stays a content-free refusal."""
+    owner = make_user(conn, PREFIX, roles=("CASE_OWNER",))
+    case = make_case(conn, owner, classification="AMBER")
+    link = zipfile.ZipInfo("invoice.exe")
+    link.external_attr = 0o120777 << 16
+    dev = zipfile.ZipInfo("tool.exe")
+    dev.external_attr = 0o020644 << 16
+    real = zipfile.ZipInfo("latest")
+    real.external_attr = 0o120777 << 16
+    parent = _submit(conn, store, owner, zip_of([
+        (link, member_bytes("link") + bytes(4096)), (dev, member_bytes("dev")),
+        (real, b"invoice.exe"), ("ok.exe", member_bytes("ok"))]), case_id=case)
+    _run_parent(conn, store, parent)
+    findings = _finding(conn, parent.id)[0]
+    assert [m["path"] for m in findings["members"]] == ["invoice.exe", "tool.exe", "ok.exe"]
+    assert findings["counts"]["refused"] == 1 and findings["counts"]["unscreened"] == 0
+
+
 def test_a_member_is_never_labelled_below_its_archive(conn, store):
     owner = make_user(conn, PREFIX, roles=("CASE_OWNER",), compartments=("ARCH2",))
     case = make_case(conn, owner, classification="AMBER", compartments=("ARCH2",))

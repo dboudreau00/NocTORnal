@@ -160,8 +160,16 @@ def run(jobs: dict[str, list[str]], *, argv: list[str] | None = None,
                 stdout_cap=STDOUT_CAP, argv=argv or CHILD_ARGV,
                 kind=CHILD_KIND)
             if not result.ok:
-                out.failed[pattern] = (LIMIT, _LIMIT_SENTENCES.get(
-                    result.failure or "crashed", _LIMIT_SENTENCES["crashed"]))
+                # The sandbox's own state (no worker, a busy one, an answer
+                # that is not one) says nothing about the pattern, and is
+                # never told as a crashed matcher (beta 1 gate 6, 2026-10-07).
+                sentence = (f"{lab_triage.CHILD_FAILURES[result.failure]}, so it "
+                            f"was not matched on this run"
+                            if result.failure in lab_triage.CHILD_FAILURES
+                            and result.failure not in _LIMIT_SENTENCES
+                            else _LIMIT_SENTENCES.get(result.failure or "crashed",
+                                                      _LIMIT_SENTENCES["crashed"]))
+                out.failed[pattern] = (LIMIT, sentence)
                 break
             try:
                 answer = json.loads(result.output.decode("utf-8"))

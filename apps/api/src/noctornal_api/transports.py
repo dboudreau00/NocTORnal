@@ -693,12 +693,16 @@ def send_smtp(message: EmailMessage, *, route) -> None:
                     pass
     except TransportError:
         raise
+    # These run after `secret_in_scope` has ended, so the password is named
+    # to `redact` again: a relay that echoes it (an AUTH reply quoting the
+    # base64 of the credential) would otherwise reach the delivery ledger
+    # and the log (beta 1 gate 6, 2026-10-07).
     except pinned_http.OutboundError as exc:
-        raise TransportError("SMTP relay unreachable: "
-                             + pinned_http.redact(str(exc))) from None
+        raise TransportError("SMTP relay unreachable: " + pinned_http.redact(
+            str(exc), secrets=tuple(v for v in (password,) if v))) from None
     except (smtplib.SMTPException, OSError) as exc:
-        raise TransportError("SMTP send failed: "
-                             + pinned_http.redact(str(exc))) from None
+        raise TransportError("SMTP send failed: " + pinned_http.redact(
+            str(exc), secrets=tuple(v for v in (password,) if v))) from None
 
 
 def send_webhook(url: str, payload: dict, secret: str | None, *, route,

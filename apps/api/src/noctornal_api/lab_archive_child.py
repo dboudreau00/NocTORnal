@@ -65,9 +65,12 @@ by its class alone, as `lab_static` reports one.
 """
 from __future__ import annotations
 
+import bz2
+import gzip
 import hashlib
 import io
 import json
+import lzma
 import re
 import struct
 import sys
@@ -343,15 +346,27 @@ def zip_preflight(data: bytes, max_members: int) -> int:
     return total
 
 
+#: The most a zip entry marked as a symbolic link may hold and still be one:
+#: its bytes are the link's target, a path.
+MAX_LINK_TARGET = 1024
+
+
 def _zip_kind(info: zipfile.ZipInfo) -> str | None:
     """A refusal code for a zip entry that is not a plain file, read from
-    the Unix mode in the external attributes, else None."""
+    the Unix mode in the external attributes, else None.
+
+    In a zip that mode is a bit beside an entry that carries bytes, which
+    Windows and most extractors write out as an ordinary file. So an entry
+    marked as a device that holds any bytes, or as a link that holds more
+    than a link target, is read as the file it is: refused as content-free,
+    it hid a payload from expansion and screening (beta 1 gate 6,
+    2026-10-07)."""
     if info.is_dir():
         return "directory"
     mode = (info.external_attr >> 16) & 0xF000
-    if mode == 0xA000:
+    if mode == 0xA000 and info.file_size <= MAX_LINK_TARGET:
         return "symlink"
-    if mode in (0x2000, 0x6000, 0x1000, 0xC000):
+    if mode in (0x2000, 0x6000, 0x1000, 0xC000) and info.file_size == 0:
         return "device"
     return None
 
@@ -366,6 +381,14 @@ def walk_zip(data: bytes, walk: _Walk) -> None:
         infos = zf.infolist()
         if len(infos) > walk.max_members:
             raise Refused("member_count", entries=len(infos), cap=walk.max_members)
+        # The bytes open with a local header (`family_of`), so the first
+        # member the central directory names must start there. zipfile reads
+        # the LAST end record and shifts every offset past whatever precedes
+        # it, so a zip appended to another one listed only the second, and
+        # the first one's members went unexpanded and unscreened with nothing
+        # refused (beta 1 gate 6, 2026-10-07).
+        if infos and min(i.header_offset for i in infos) != 0:
+            raise Refused("corrupt", error="bytes_before_first_member")
         for info in infos:
             walk.count()
             kind = _zip_kind(info)
@@ -445,19 +468,75 @@ def _tar_kind(member: tarfile.TarInfo) -> str | None:
     return None
 
 
+def _tar_stream(data: bytes):
+    """The tar's bytes as a stream, decompressed by the library's own file
+    readers, which read EVERY stream of a multi-stream gzip, bzip2 or xz file
+    as `tar xzf` does. tarfile's own `r|*` decompressor stops at the end of
+    the first stream, so a second stream's members were neither expanded nor
+    refused (beta 1 gate 6, 2026-10-07)."""
+    raw = io.BytesIO(data)
+    if data[:2] == b"\x1f\x8b":
+        return gzip.GzipFile(fileobj=raw, mode="rb")
+    if data[:3] == b"BZh":
+        return bz2.BZ2File(raw, mode="rb")
+    if data[:6] == b"\xfd7zXZ\x00":
+        return lzma.LZMAFile(raw, mode="rb")
+    return raw
+
+
+#: Trailing NULs after a tar's last member that cost nothing against the
+#: caps: a writer's record padding (GNU tar's largest blocking factor is a
+#: little under 64 KiB).
+PADDING_FREE = 1 << 20
+
+#: What a decompressing stream raises on bytes that are not what they claim.
+_STREAM_ERRORS = (EOFError, OSError, ValueError, OverflowError, zlib.error,
+                  lzma.LZMAError)
+
+
+def _rest_is_padding(tf: tarfile.TarFile, walk: _Walk) -> bool:
+    """Whether everything after the walk's last member is NUL padding. The
+    walk ends at the end-of-archive blocks, and also, silently, at a header
+    after the first that does not parse; members behind either were read by
+    nothing (GNU tar skips the bad header and reads on). Read in pieces; the
+    first PADDING_FREE bytes are a writer's record padding (a 32 KiB record
+    of NULs compresses to almost nothing, so counting it would refuse a tiny
+    honest archive by ratio), and past them every byte counts against the
+    total and the ratio, as a skip does."""
+    seen = 0
+    while True:
+        chunk = tf.fileobj.read(CHUNK)
+        if not chunk:
+            return True
+        if chunk.count(0) != len(chunk):
+            return False
+        counted = max(0, seen + len(chunk) - PADDING_FREE) - max(0, seen - PADDING_FREE)
+        seen += len(chunk)
+        if not counted:
+            continue
+        walk.skipped += counted
+        held = walk.total + walk.skipped
+        if held > walk.max_total:
+            raise Refused("total_bytes", total=held, cap=walk.max_total)
+        if held / walk.archive_len > walk.max_ratio:
+            raise Refused("ratio", ratio=round(held / walk.archive_len, 1),
+                          cap=walk.max_ratio)
+
+
 def walk_tar(data: bytes, walk: _Walk) -> None:
-    """A streaming read (`r|*`): gzip, bzip2 and xz are decompressed as
-    the members are read, never into one buffer first, so a compressed
-    bomb is stopped by the total cap having cost that much and no more.
-    A member over the per-member cap is refused by name and drained in
+    """A streaming read (`r|`) over `_tar_stream`: gzip, bzip2 and xz are
+    decompressed as the members are read, never into one buffer first, so a
+    compressed bomb is stopped by the total cap having cost that much and no
+    more. A member over the per-member cap is refused by name and drained in
     pieces that count against the total and the ratio
-    (`_Walk.skip_over_cap`): the skip is a decompression too."""
+    (`_Walk.skip_over_cap`): the skip is a decompression too. Anything but
+    padding after the last member read refuses the whole archive."""
     try:
-        tf = tarfile.open(fileobj=io.BytesIO(data), mode="r|*")
+        tf = tarfile.open(fileobj=_tar_stream(data), mode="r|")
     except tarfile.ReadError:
         raise Refused("not_tar" if data[:2] in (b"\x1f\x8b", b"BZ", b"\xfd7")
                       else "corrupt") from None
-    except (EOFError, OSError, ValueError):
+    except _STREAM_ERRORS:
         raise Refused("corrupt") from None
     with tf:
         try:
@@ -467,6 +546,14 @@ def walk_tar(data: bytes, walk: _Walk) -> None:
                 if kind is not None:
                     path, _code = safe_path(member.name)
                     walk.refuse(path or escaped(member.name), kind)
+                    stream = (tf.extractfile(member)
+                              if kind == "corrupt_member" and member.size > 0 else None)
+                    if stream is not None:
+                        # A member of a type nothing reads still has its
+                        # declared bytes before the next header, and tarfile's
+                        # own skip decompresses them uncounted.
+                        with stream:
+                            walk.skip_over_cap(stream, member.size)
                     continue
                 path = walk.name(member.name)
                 if path is None:
@@ -488,9 +575,11 @@ def walk_tar(data: bytes, walk: _Walk) -> None:
                 if body is None:
                     continue
                 walk.keep(path, body, compressed=None)
+            if not _rest_is_padding(tf, walk):
+                raise Refused("corrupt", error="data_after_last_member")
         except tarfile.ReadError as exc:
             raise Refused("truncated", error=type(exc).__name__) from None
-        except (EOFError, OSError, ValueError, OverflowError) as exc:
+        except _STREAM_ERRORS as exc:
             raise Refused("corrupt", error=type(exc).__name__) from None
 
 

@@ -454,7 +454,9 @@ def test_published_credentials_refuse_a_real_run_in_production(conn, actor, stor
     monkeypatch.setenv("NOCTORNAL_ENV", "production")
     monkeypatch.setenv("NOCTORNAL_INGEST_PEPPER", "replace-me-pepper")
     code, out, err = _run(conn, store, email, "--apply", capsys=capsys)
-    assert code == 2 and "published value" in err
+    assert code == 2 and err.startswith("retention_sweep: refusing to run: ")
+    assert "refusing to run: NOCTORNAL_INGEST_PEPPER" in err
+    assert "replace-me-pepper" not in err
     _untouched(conn, doc)
 
 

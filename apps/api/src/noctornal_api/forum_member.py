@@ -103,7 +103,7 @@ from noctornal_api.forum_adapters import (
     direct_reads_allowed,
     sandbox_sentence,
 )
-from noctornal_api.pinned_http import REDIRECT_CODES, scrub_live_secrets, secret_in_scope
+from noctornal_api.pinned_http import REDIRECT_CODES, redact, scrub_live_secrets, secret_in_scope
 
 log = logging.getLogger("noctornal.forum_member")
 
@@ -761,7 +761,11 @@ def sign_out_persona(conn: psycopg.Connection, persona_id: UUID, *,
                         with context, session:
                             reached = session.sign_out()
                 except CollectionError as exc:
-                    out["notes"].append(f"source {sid}: {exc}")
+                    # Redacted with the jar named again: the scope that made
+                    # its cookies live has ended, and the note goes into the
+                    # audit log, which no label gates (beta 1 gate 6).
+                    out["notes"].append(f"source {sid}: " + redact(
+                        str(exc), secrets=tuple(v for v in jar.values() if v)))
                     continue
                 out["signed_out"].append({"source_id": str(sid),
                                           "reached": reached})

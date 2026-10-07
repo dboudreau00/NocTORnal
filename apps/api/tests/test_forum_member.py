@@ -568,6 +568,40 @@ def test_a_stop_signs_the_persona_out_through_its_route_and_clears_the_session(
         board.close()
 
 
+def test_a_sign_out_that_fails_with_the_cookie_in_its_error_does_not_audit_it(
+        conn, stub, monkeypatch):
+    """The failed sign-out's note is written to the audit log, which no label
+    gates, after the scope that made the jar's cookies live has ended: an
+    error that quotes a cookie (a redirect to a URL carrying it) was audited
+    as it stood (beta 1 gate 6, 2026-10-07)."""
+    from noctornal_api import forum_member, forum_session
+    from noctornal_api.collection import CollectionError
+
+    w = _world(conn, stub, "xenforo")
+    board = w["board"]
+    try:
+        assert _svc(conn).run_once(w["source"], actor_id=None).status == "OK"
+        jars = forum_session.open_sessions(conn, w["persona"])
+        cookies = [v for jar in jars.values() for v in jar.values() if len(v) >= 6]
+        assert cookies
+
+        def refusing(self):
+            raise CollectionError(f"redirect to https://elsewhere.example/?s={cookies[0]} "
+                                  f"was refused")
+
+        monkeypatch.setattr(forum_member.MemberSession, "sign_out", refusing)
+        out = forum_member.sign_out_persona(conn, w["persona"], actor_id=w["recorder"],
+                                            clearance="RED")
+        assert out["notes"] and out["cleared"] is True
+        audited = conn.execute(
+            "SELECT detail::text FROM audit.event WHERE action = 'PERSONA_FORUM_SIGNED_OUT' "
+            "AND object_id = %s", (w["persona"],)).fetchone()[0]
+        assert "was refused" in audited
+        assert all(c not in audited for c in cookies)
+    finally:
+        board.close()
+
+
 def test_the_forum_detail_route_says_the_post_was_read_as_a_member(conn, stub):
     from noctornal_api.forum_adapters import forum_details
 

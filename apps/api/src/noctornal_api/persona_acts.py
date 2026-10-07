@@ -132,6 +132,9 @@ KINDS: dict[str, ActKind] = {
                               (("collection_account.manage", False),)),
 }
 
+#: The acts that are a stop: never held to the readiness register.
+STOP_KINDS = frozenset({"FORUM_SIGN_OUT"})
+
 SESSION_ENDED = ("The session that asked for this act ended before the collector "
                  "ran it, so it was not run. Sign in and ask again.")
 LABEL_ABOVE = ("This act is held above your clearance now, so it was not run.")
@@ -519,20 +522,25 @@ def _recheck(conn, act: dict) -> tuple[str, frozenset[str]]:
     # Every expiry SessionService.validate enforces, the idle one included
     # (verify:g38, 2026-10-03): NOCTORNAL_ACT_TTL_SECONDS reaches an hour,
     # and an act must not run for a session the console would already 401.
-    live = act["session_id"] is not None and conn.execute(
-        """SELECT 1 FROM iam.session
+    # The second factor's time is the SESSION's, which only a sign-in writes
+    # (0144), never the act row's copy: the request role writes that row, so
+    # a forged copy would have passed the step-up (beta 1 gate 6, 2026-10-07).
+    session = act["session_id"] is not None and conn.execute(
+        """SELECT mfa_satisfied_at FROM iam.session
             WHERE id = %s AND user_id = %s AND revoked_at IS NULL
               AND expires_at > clock_timestamp()
               AND last_seen_at > clock_timestamp() - %s::interval""",
-        (act["session_id"], act["requested_by"], IDLE_TIMEOUT)).fetchone() is not None
-    if not live:
+        (act["session_id"], act["requested_by"], IDLE_TIMEOUT)).fetchone()
+    if not session:
         raise _Refusal(403, "Forbidden", SESSION_ENDED)
-    user = CurrentUser(act["requested_by"], act["session_id"],
-                       act["mfa_satisfied_at"])
+    user = CurrentUser(act["requested_by"], act["session_id"], session[0])
     try:
         for permission, force in KINDS[act["kind"]].permissions:
             authorize_global(conn, user, permission, force_step_up=force)
-        refuse_unready(conn)
+        # A stop is always allowed (F38): the stop route asks no readiness,
+        # so the sign-out it queues is not held to it either (beta 1 gate 6).
+        if act["kind"] not in STOP_KINDS:
+            refuse_unready(conn)
         clearance, held = user_ceiling(conn, act["requested_by"])
     except Problem as exc:
         raise _Refusal(exc.status, exc.title, exc.detail) from None

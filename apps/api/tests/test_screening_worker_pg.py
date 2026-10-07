@@ -61,7 +61,11 @@ def conn():
 
 
 @pytest.mark.parametrize("name", ["sample_screen", "sandbox_dispatch"])
-def test_the_worker_refuses_a_bad_production_environment_before_any_connection(name, monkeypatch):
+def test_the_worker_refuses_a_bad_production_environment_before_any_connection(
+        name, monkeypatch, capsys):
+    """A refusal is the job's exit 2 with one line per problem on stderr, as
+    every job gives it (87b4af0, Beta 1 verification: it was a RuntimeError,
+    exit 1 with a traceback, and this test still asked for that)."""
     import noctornal_api.db as db
     module = _script(name)
     monkeypatch.setenv("NOCTORNAL_ENV", "production")
@@ -71,8 +75,10 @@ def test_the_worker_refuses_a_bad_production_environment_before_any_connection(n
         raise AssertionError("connected before the environment check")
 
     monkeypatch.setattr(db, "connect", no)
-    with pytest.raises(RuntimeError, match="NOCTORNAL_ENV=production"):
-        module.main([])
+    monkeypatch.setattr(db, "connect_system", no)
+    assert module.main([]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith(f"{name}: refusing to run: ") and "Traceback" not in err
 
 
 def _list_file(tmp_path, *blobs):
