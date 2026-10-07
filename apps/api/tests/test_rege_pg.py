@@ -161,7 +161,7 @@ def test_the_blocks_density_tied_and_regular_marks_are_stored_and_served(world):
     send both ways to each other), so against a view density of 7 in 20 both
     blocks are tied, and every hub sends and every leaf receives, so both are
     regular. Computed, served from the cache and read back as the latest run
-    all say the same (g34 review item 2, 2026-10-02: no test outside the pure
+    all say the same (2026-10-02: no test outside the pure
     file read a block)."""
     expected = {"alpha": {"positive": 0.35},
                 "density": {"positive": [[0.0, 0.0], [pytest.approx(5 / 6, abs=1e-6), 1.0]]},
@@ -184,7 +184,7 @@ def test_tied_blocks_that_are_not_regular_are_stored_as_such(conn):
     chain of five cut into interior, source and sink has three blocks holding
     a third of the ties they could (more than the view's 0.2, so tied) and
     none regular, whatever ids the database gave the entities: the cut does
-    not move here (g34 review item 2, 2026-10-02)."""
+    not move here (2026-10-02)."""
     w = World(conn)
     names = ["a", "b", "c", "d", "e"]
     for label in names:
@@ -210,7 +210,7 @@ def test_a_block_exactly_as_dense_as_the_view_is_stored_as_tied(conn):
     """A directed ring of four is one role holding a third of its ordered
     pairs, which is the view's own density: tied counts the equal case, which
     a strict comparison would drop, through the database as well as the pure
-    path (g34 review item 2, 2026-10-02)."""
+    path (2026-10-02)."""
     w = World(conn)
     ring = ["a", "b", "c", "d"]
     for label in ring:
@@ -227,7 +227,7 @@ def test_a_block_exactly_as_dense_as_the_view_is_stored_as_tied(conn):
 def test_a_rege_run_is_recorded_as_approximate_on_its_row_and_in_its_audit_event(world):
     """The service reads the payload's top-level flag: REGE nested its own, so
     the row and the ANALYTICS_RUN event both said exact for an analysis the
-    card calls an approximation (g34 review item 3, 2026-10-02)."""
+    card calls an approximation (2026-10-02)."""
     run = _rege(world)
     assert world.conn.execute(
         "SELECT is_approximate FROM analytics.metric_run WHERE id = %s",
@@ -337,7 +337,7 @@ def test_an_accepted_only_rege_run_counts_nothing_unaccepted(conn):
 
 
 def test_a_close_knit_crew_over_shared_forums_is_admitted_through_the_real_projection(conn):
-    """The g34 verifier's view, end to end (g34 verify item, 2026-10-03): every
+    """The view measured on 2026-10-03, end to end: every
     identity posts on every forum and the one-mode projection makes one derived
     tie per pair and forum, so the rows (and the old slot count, twice them)
     far exceed the ties cap while the tie directions, the cells the matrices

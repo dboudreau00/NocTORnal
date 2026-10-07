@@ -744,8 +744,7 @@ def test_a_grant_cannot_be_born_already_dead(conn, client):
 
 def test_a_liaison_grant_must_end(conn, client):
     """docs/05: an external liaison is time-boxed, `expires_at` required.
-    The route accepted a LIAISON grant with no end until the Beta 1
-    authorization gate (2026-10-07)."""
+    The route accepted a LIAISON grant with no end until 2026-10-07."""
     _, owner_email, _ = _make_user(conn, global_roles=("CASE_OWNER",))
     owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)

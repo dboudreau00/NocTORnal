@@ -654,7 +654,7 @@ def test_a_production_api_holding_the_key_is_red_on_the_register(conn, monkeypat
     assert os.environ["NOCTORNAL_PERSONA_KEK"] not in held.evidence + held.action
 
 
-# --- the idempotency key names the source (verify:g38 blocker, 2026-10-03) ---------
+# --- the idempotency key names the source (2026-10-03) ---------
 
 def test_the_dedupe_key_names_the_source_the_kind_and_the_parameters():
     from noctornal_api.persona_acts import dedupe_key
@@ -731,7 +731,7 @@ def test_poll_now_of_another_source_is_its_own_act(conn, api, world):
     assert again.json()["act"]["id"] == ids[0]
 
 
-# --- what is refused at the door and never queued (verify:g38 major) ---------------
+# --- what is refused at the door and never queued (2026-10-03) ---------------
 
 INVITE = "AbCdEfGhIjKlMnOpQrSt"
 
@@ -825,7 +825,7 @@ def test_only_the_reference_as_understood_is_queued_and_asked_again_it_is_one_ac
         assert parse_chat_reference(normal_reference(parsed)) == parsed, typed
 
 
-# --- an act is its own twin only while it is live (verify:g38 minor) --------------
+# --- an act is its own twin only while it is live (2026-10-03) --------------
 
 def test_an_expired_act_is_not_the_answer_to_the_same_ask_again(conn, api, world):
     from noctornal_api.persona_acts import dedupe_key
@@ -874,7 +874,7 @@ def test_a_double_click_while_the_first_act_is_live_is_still_one_act_in_a_race(
     assert one["id"] == two["id"]
 
 
-# --- what the collector asks again, once more (verify:g38 vacuous tests) ----------
+# --- what the collector asks again, once more (2026-10-03) ----------
 
 def test_an_act_for_a_session_idle_past_its_timeout_is_not_run(conn, api, world):
     from noctornal_api import persona_acts
@@ -969,7 +969,7 @@ def test_a_forged_future_dated_act_is_not_claimed_before_its_time(conn, api, wor
     assert _act(conn, ahead)["status"] == "PENDING"
 
 
-# --- the collector's loop, its stop and its heartbeat (verify:g38) ----------------
+# --- the collector's loop, its stop and its heartbeat (2026-10-03) ----------------
 
 class _Child:
     """A poll child: never exits by itself; a stop terminates it, and one
@@ -1186,7 +1186,7 @@ def test_a_credential_under_the_totp_ring_is_never_opened_with_it(conn, world,
 
 def test_the_rewrap_script_without_the_totp_key_refuses_by_name_and_does_not_crash(
         conn, world, monkeypatch, capsys):
-    """verify:g38: with a row still sealed before the split and no TOTP key,
+    """2026-10-03: with a row still sealed before the split and no TOTP key,
     --persona used to die in the inventory with a RuntimeError traceback
     and exit 1; the refusal is exit 2 and names the ring."""
     from noctornal_api.security import envelope
@@ -1210,7 +1210,7 @@ def test_the_rewrap_script_without_the_totp_key_refuses_by_name_and_does_not_cra
 
 
 def test_an_act_the_sweep_already_failed_is_not_audited_finished_twice(conn, api, world):
-    """verify:g38 minor (2026-10-03): the stale sweep failed an act that was
+    """(2026-10-03): the stale sweep failed an act that was
     still executing; when it came back, `_finish` matched no row yet wrote a
     FINISHED event with the outcome it computed, so the log said DONE where
     the row said FAILED."""
@@ -1332,7 +1332,7 @@ def test_a_stop_during_an_act_claims_no_second_one_in_the_collectors_own_pass(
     assert "PENDING" in states and len(states) == 2, states
 
 
-# --- mutants the first round's tests let live (verify:g38, 2026-10-03) ----------
+# --- mutants the earlier tests let live (2026-10-03) ----------
 #
 # Dropping the session ownership pin, and adding the parameters to what an
 # act shows, each left every test above green. These two, and the forged
@@ -1389,7 +1389,7 @@ def test_a_forged_second_factor_on_the_act_row_does_not_pass_the_step_up(
     """The request role writes the act row, `mfa_satisfied_at` included, and
     nothing pins that copy. A join (a step-up act) queued with a fresh copy
     for a session whose own second factor is stale is refused: the collector
-    reads the session's time, which only a sign-in writes (beta 1 gate 6)."""
+    reads the session's time, which only a sign-in writes (2026-10-07)."""
     ch = _member_chat(conn, world, peer_type="MEGAGROUP", username="auto",
                       access_hash=55)
     api.telegram(tp.fixture_for(ch["spec"], world["uid"]), allow_join=True)
@@ -1469,7 +1469,7 @@ _REPLACEMENT = chr(0xFFFD)
 
 def test_a_nul_in_free_text_is_a_422_and_never_a_500(conn, api, world):
     """U+0000 in a join note or a member reason reached the act's INSERT and
-    raised UntranslatableCharacter, so the route answered 500 (verify:g38
+    raised UntranslatableCharacter, so the route answered 500 (2026-10-03
     minor, 2026-10-03). Since the merge with the request-layer gate
     (http_ui-014, 2026-10-03, `http/body_ceiling.py`) a JSON body carrying
     one is refused with the same 422 every other route gives, before the

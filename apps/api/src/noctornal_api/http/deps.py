@@ -126,7 +126,7 @@ def _bearer(authorization: str | None) -> str | None:
 #: The 401 for a request that presents no session credential at all. One
 #: sentence in one place: `session_token` raises it and
 #: `http/body_ceiling.py` answers an unauthenticated upload with it before
-#: reading a byte (Beta 1 verification, G2), and the two must agree.
+#: reading a byte (2026-10-07), and the two must agree.
 NO_SESSION_DETAIL = "no session token"
 
 

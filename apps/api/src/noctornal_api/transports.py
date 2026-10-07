@@ -696,7 +696,7 @@ def send_smtp(message: EmailMessage, *, route) -> None:
     # These run after `secret_in_scope` has ended, so the password is named
     # to `redact` again: a relay that echoes it (an AUTH reply quoting the
     # base64 of the credential) would otherwise reach the delivery ledger
-    # and the log (beta 1 gate 6, 2026-10-07).
+    # and the log (2026-10-07).
     except pinned_http.OutboundError as exc:
         raise TransportError("SMTP relay unreachable: " + pinned_http.redact(
             str(exc), secrets=tuple(v for v in (password,) if v))) from None
@@ -789,7 +789,7 @@ def send_webhook(url: str, payload: dict, secret: str | None, *, route,
 #: them. The notification's own were fixed when it was raised, so a case
 #: raised to RED, or given a compartment, while a delivery waited (a digest,
 #: quiet hours, a retry) had its code and summary sent under the old marking
-#: (Beta 1 gate 64).
+#: (2026-10-07).
 CASE_LABELS_SQL = """greatest(n.classification, coalesce(c.classification, n.classification)),
        n.compartments || coalesce(c.compartments, '{}'::text[])"""
 

@@ -308,8 +308,8 @@ if (Test-Path -LiteralPath $EnvLocal) {
         $value = $trimmed.Substring($split + 1).Trim().Trim('"').Trim("'")
         if (-not $name) { continue }
 
-        # A name that changes how programs start is left out (g48
-        # verification, 2026-10-03). This loop is data, not script, but it
+        # A name that changes how programs start is left out (2026-10-03). This loop is
+        # data, not script, but it
         # still set any name, so `PATH`, `PYTHONPATH` or `COMSPEC` in a
         # handed-over file redirected the next program this script starts.
         # Not an allow-list on purpose: a new setting would silently stop

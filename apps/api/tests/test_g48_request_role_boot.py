@@ -46,8 +46,7 @@ def test_a_request_dsn_naming_the_migration_dsns_role_is_refused():
 def test_the_refusal_says_what_to_do_when_the_least_privilege_role_does_not_exist_yet():
     """It used to say only 'point it at noctornal_app', which on a volume
     initialised without NOCTORNAL_APP_DB_PASSWORD is a role that does not
-    exist, with nothing in the refusal or the README to say what then (g48
-    verification, 2026-10-03)."""
+    exist, with nothing in the refusal or the README to say what then (2026-10-03)."""
     env = _production()
     env["NOCTORNAL_MIGRATION_DATABASE_URL"] = OWNER_DSN
     env["DATABASE_URL"] = OWNER_DSN

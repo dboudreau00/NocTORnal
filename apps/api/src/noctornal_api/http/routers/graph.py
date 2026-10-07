@@ -1114,7 +1114,7 @@ def update_node(
         # whatever label it now carries, so nothing is lost either way.
         #
         # The survivor's id only when the caller may read the survivor
-        # (graph-merged-into-pointer, 2026-10-03, second round): an AMBER
+        # (graph-merged-into-pointer, 2026-10-03): an AMBER
         # entity folded into a RED one is an alias of it, and the merge is
         # withheld from the ledger and the approvals for exactly that reason.
         # The pointer was the one place it was still said.

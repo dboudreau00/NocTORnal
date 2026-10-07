@@ -1,5 +1,4 @@
-"""An exhibit above the caller's labels answers as a missing one (Beta 1
-authorization gate, 2026-10-07).
+"""An exhibit above the caller's labels answers as a missing one (2026-10-07).
 
 The exhibit routes gated the exhibit's own labels with `authorize_object`
 and let its 403 through, so an AMBER analyst holding the id of a RED exhibit

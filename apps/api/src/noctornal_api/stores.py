@@ -369,8 +369,8 @@ class PgAccessResolver:
         # a request the gate then refused (no such permission on the case
         # role, a compartment the caller is not read into, no assignment at
         # all under a global grant) still added to `action_count` and wrote
-        # a BREAK_GLASS_ACTION row for access that never happened (final
-        # review U19, 2026-09-23). `evaluate()` is pure, so asking it here
+        # a BREAK_GLASS_ACTION row for access that never happened (2026-09-23). `evaluate()`
+        # is pure, so asking it here
         # is the same decision every caller then makes.
         if use_of is not None and count_use and evaluate(ctx).allowed:
             from noctornal_api.break_glass import BreakGlassService

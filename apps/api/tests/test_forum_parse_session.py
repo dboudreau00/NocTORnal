@@ -227,7 +227,7 @@ def test_the_sign_in_and_sign_out_addresses_follow_the_install_path():
 
 
 # ---------------------------------------------------------------------------
-# A poster's words are not the board's word (g40 verify major 7, 2026-10-03)
+# A poster's words are not the board's word (2026-10-03)
 # ---------------------------------------------------------------------------
 
 XF_MEMBER = fh.page("xenforo/thread_page1.html").replace(

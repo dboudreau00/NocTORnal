@@ -739,7 +739,7 @@ class CollectionAuthorityService:
     def _walled(self, authority_ids: list[UUID], clearance: str | None,
                 compartments=None) -> set[UUID]:
         """The authorities with a target under a compartment the reader does
-        not hold (g40 verify major 5e, 2026-10-03). Such an authority is
+        not hold (2026-10-03). Such an authority is
         withheld whole, like one above the reader's ceiling: its free text
         (what it covers, its member reference, its persona) names what the
         compartment protects, and hiding only the targets array left that

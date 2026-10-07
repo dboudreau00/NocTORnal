@@ -1,6 +1,6 @@
 """A persona's run, act and stop contexts through the REAL egress listener,
 from the persona gate and the shipped route provider (F31 part A, docs/17
-F31; written 2026-10-03 after the g40 round left it undelivered).
+F31; written 2026-10-03, after the authenticated forum build left it undelivered).
 
 test_egress_proxy_pg.py drives the real listener with raw CONNECTs whose user
 names the TEST builds, and test_forum_member.py drives the real adapter and

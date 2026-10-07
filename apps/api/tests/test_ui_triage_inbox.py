@@ -481,7 +481,7 @@ console.log(JSON.stringify(rows.map((n) => {
     assert got[1][:2] == ["Open Triage", "triage"]
     assert got[2][:2] == ["Open the exhibit", "evidence"]
     assert got[3][:2] == ["Open the merge", "graph"]
-    # The rail's caption, Records, not the old Lifecycle (u23, 2026-09-24).
+    # The rail's caption, Records, not the old Lifecycle (2026-09-24).
     assert got[4][:2] == ["Open Records", "governance"]
     assert got[5][:2] == ["Open Break-glass", "governance"]
     assert got[6] == ["Open Oversight", None, "Open Oversight"]

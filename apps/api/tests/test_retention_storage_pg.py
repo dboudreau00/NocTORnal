@@ -608,7 +608,7 @@ def test_one_refusal_in_a_batch_of_three_counts_one_row_not_its_versions(conn):
     assert _purged_at(conn, gone_a) is not None
     assert _purged_at(conn, gone_b) is not None
     assert _purged_at(conn, refused) is None
-    # One tombstone per outcome since Beta 1 gate 64 (this asserted a single
+    # One tombstone per outcome since 2026-10-07 (this asserted a single
     # LOCKED tombstone for the batch, the destroyed two included).
     assert _outcomes(conn, case_id) == [(STORAGE_DELETED, 2), (STORAGE_LOCKED, 1)]
 
@@ -619,7 +619,7 @@ def _outcomes(conn, case_id) -> list[tuple[str, int]]:
 
 
 def test_each_storage_outcome_gets_its_own_tombstone(conn):
-    """Beta 1 gate 64. The batch wrote ONE tombstone carrying its worst
+    """2026-10-07. The batch wrote ONE tombstone carrying its worst
     outcome and counting every exhibit, so a sweep that destroyed two
     exhibits and was refused on a third recorded three LOCKED and no
     destruction at all; the sweep that later destroyed the third recorded
@@ -650,7 +650,7 @@ def test_each_storage_outcome_gets_its_own_tombstone(conn):
 
 
 def test_a_destroyed_exhibit_says_so_in_its_own_custody_trail(conn):
-    """Beta 1 gate 64: an exhibit's custody trail ended at its last read,
+    """2026-10-07: an exhibit's custody trail ended at its last read,
     so the record that goes to court did not say who destroyed it, when or
     under what rule; only `purged_at` did. A refused one is not destroyed,
     and its trail says nothing of the kind."""

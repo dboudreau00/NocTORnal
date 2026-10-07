@@ -482,7 +482,7 @@ def test_spending_an_approval_needs_the_merger_to_still_read_both_entities(
                   (w.boss,))
     body = {"approval_request_id": request_id}
     refused = client.post(w.url("/merges"), headers=w.headers(w.boss), json=body)
-    # The sentence for an approval that is not there (second round): a
+    # The sentence for an approval that is not there (2026-10-03): a
     # request naming entities above the caller is not theirs to have seen.
     assert g.answer(refused) == (404, "no such approval request in this case")
     assert owner.execute("SELECT state FROM core.approval_request WHERE id = %s",
@@ -498,7 +498,7 @@ def test_spending_an_approval_needs_the_merger_to_still_read_both_entities(
 
 def test_a_hidden_merge_requests_id_is_the_missing_requests_answer_whoever_asks(
         owner, client):
-    """Second round (graph-merge-approval-hidden): a caller without the
+    """graph-merge-approval-hidden (2026-10-03): a caller without the
     signer permission was told 403 for a request naming entities above them
     and 404 for a random id, and spending such a request answered
     "no such node" where a random id answered "no such approval request"."""
@@ -529,7 +529,7 @@ def test_a_hidden_merge_requests_id_is_the_missing_requests_answer_whoever_asks(
                          (request_id,)).fetchone()[0] == "PENDING"
 
 
-# --- the redirect pointer (graph-merged-into-pointer, second round) -----------
+# --- the redirect pointer (graph-merged-into-pointer) -----------
 
 def _merged_into(client, w, uid, node):
     """What PATCH on a merged-away entity and the working set's listing say

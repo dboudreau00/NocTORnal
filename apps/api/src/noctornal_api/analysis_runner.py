@@ -523,7 +523,7 @@ FRAME_HEADER_CAP = 64 * 1024
 #: it reads an archive from stdin and answers its members, with no path
 #: written, under the same limits and failure kinds as the others.
 #: `watch_regex` is a watch's regular expressions, matched against collected
-#: text (watch_regex.py): until the beta 1 verification (2026-10-07) it was
+#: text (watch_regex.py): until 2026-10-07 it was
 #: sent as `lab_static`, which the worker answers `bad_header`, so in
 #: production every pattern was reported failed and none ever matched.
 KINDS = ("lab_static", "forum_parse", "lab_archive_child", "watch_regex")

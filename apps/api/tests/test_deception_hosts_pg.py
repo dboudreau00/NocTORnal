@@ -1,4 +1,4 @@
-"""Hosts the sender chose, served defanged (final review U17, 2026-09-23).
+"""Hosts the sender chose, served defanged (2026-09-23).
 
 The email row and the Received chain drew the HELO name, each hop's `from`
 and `by`, and the Message-ID's domain verbatim. None of them is constrained

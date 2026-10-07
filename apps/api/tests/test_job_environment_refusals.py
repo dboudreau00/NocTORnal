@@ -28,7 +28,7 @@ password and DSN with no check at all. Held here:
   published one and the rest of that list the way every other job does: one
   line per problem on stderr led by the job's name, exit 2 and no traceback.
   They called `enforce_environment`, whose RuntimeError was exit 1 with a
-  traceback (Beta 1 verification, 2026-10-07).
+  traceback (2026-10-07).
 
 No database: every script is stopped before it could connect, and the test
 fails if it tries.

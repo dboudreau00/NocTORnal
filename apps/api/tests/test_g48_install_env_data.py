@@ -254,7 +254,7 @@ def test_load_env_local_still_does_what_it_did(tmp_path, monkeypatch):
         "1", "two", "", "shell")
 
 
-# --- names that change how programs start (g48 verification, 2026-10-03) ------
+# --- names that change how programs start (2026-10-03) ------
 #
 # Reading `.env.local` as data stops it running as shell syntax, but the
 # loaders still exported any identifier in it, and install.sh lets the file's
@@ -269,7 +269,7 @@ DANGEROUS = (
     b"LD_LIBRARY_PATH=./evil\nDYLD_INSERT_LIBRARIES=./evil.dylib\nBASH_ENV=./evil.sh\nENV=./evil.sh\n"
     b"IFS=x\nPS4=$(touch PWNED-PS4)\nPROMPT_COMMAND=touch PWNED-PC\nSHELLOPTS=xtrace\nCOMSPEC=evil.exe\n"
     b"Path=./evilbin\nHOME=./evilhome\n"
-    # The tools the scripts start next (Beta 1 verification, 2026-10-07):
+    # The tools the scripts start next (2026-10-07):
     # DOCKER_CONFIG held a fake cli-plugins/docker-compose that `docker compose`
     # ran as root. Mixed case on purpose: Windows names are case-insensitive.
     b"DOCKER_CONFIG=./evil\nDOCKER_HOST=tcp://203.0.113.9:2375\nCOMPOSE_FILE=./evil.yml\n"
@@ -368,8 +368,8 @@ def test_launch_sh_leaves_the_same_names_out(tmp_path):
 def test_launch_sh_does_not_evaluate_a_subscript_in_a_name(tmp_path):
     """`${!name+x}` evaluates an array subscript, so a name like `x[$(cmd)]` ran
     `cmd` as the launching user: the sibling of infra-9 that install.sh closed
-    with an identifier check and launch.sh did not (Beta 1 verification,
-    2026-10-07; `release/start.sh` execs `launch.sh`). The real loop runs on the
+    with an identifier check and launch.sh did not (2026-10-07; `release/start.sh` execs
+    `launch.sh`). The real loop runs on the
     hostile lines. `>file` is a command with no spaces, because the loop strips
     them from a name."""
     bash = _bash()

@@ -289,7 +289,7 @@ def _row_busy() -> SampleError:
     Raise it `from None`, never from the LockNotAvailable: the router's
     `safe_detail` replaces the whole message of an error chained to a
     psycopg one, so the analyst was shown "the request could not be
-    completed" instead of this (final review verifier on U5, 2026-09-23).
+    completed" instead of this (2026-09-23).
     The lock timeout's own text adds nothing this does not say."""
     return SampleError(
         f"another change to this sample is still in progress (most likely "
@@ -306,8 +306,8 @@ def _db_error_in(exc: BaseException) -> psycopg.Error | None:
     whose cause chain holds a psycopg error, which is right, since a
     psycopg error's text is raw PQ output. So such a refusal is raised
     `from None`, names the database error by its class only, and logs it
-    against a ref the message carries (final review verifier on U4,
-    2026-09-23). Bounded and cycle-guarded, like `safe_detail`'s walk.
+    against a ref the message carries (2026-09-23). Bounded and cycle-guarded, like
+    `safe_detail`'s walk.
     """
     seen: set[int] = set()
     todo: list[BaseException | None] = [exc]
@@ -986,8 +986,7 @@ def _archive_members_gap(gaps: list[dict], triage_gaps,
     entries were refused with bytes behind them.
 
     Dropped only when the expansion finished and left nothing uncompared;
-    reworded to a count when it left some; kept as it is otherwise (g40
-    verify major 3, 2026-10-03)."""
+    reworded to a count when it left some; kept as it is otherwise (2026-10-03)."""
     pending = any(isinstance(g, dict) and g.get("step") == "archive_expansion"
                   for g in triage_gaps or [])
     if pending or unscreened is False or unscreened is None:
@@ -1465,8 +1464,8 @@ class PreservationStorage:
         """The newest version at `key`, if the store holds one under a hold.
 
         For a rejection whose working copy is already gone because an
-        earlier attempt deleted it and then failed to record (final review
-        U4, 2026-09-23): the retry adopts the held copy instead of steering
+        earlier attempt deleted it and then failed to record (2026-09-23): the retry adopts
+        the held copy instead of steering
         the analyst to a record-only rejection that would leave it named by
         no row. A plain HEAD and a hold read, which the preservation
         account's policy already allows; listing versions it may not do.
@@ -1883,7 +1882,7 @@ class SampleService:
           and defeat it in substance (0063 makes that a CHECK). What moves
           is exactly what was stored; the only decryption on this path is
           the in-memory proof a retry makes before adopting a held copy
-          (U4, below), the same check a retrieval makes.
+          (the proof below), the same check a retrieval makes.
         - `destroy`, the behaviour until that day: the object is deleted
           and the data key zeroed.
 
@@ -1910,7 +1909,7 @@ class SampleService:
         A retry whose working copy is gone does not steer to a record-only
         rejection: if the preservation store holds a held copy at this
         sample's key and the kept data key opens it to this sample's
-        SHA-256, the retry records THAT copy (final review U4, 2026-09-23).
+        SHA-256, the retry records THAT copy (2026-09-23).
         Until then a failure between the working-copy delete and COMMIT
         told the analyst the working copy was still in place, the retry
         answered "nothing to preserve", and the record-only rejection it
@@ -1926,7 +1925,7 @@ class SampleService:
         rejections of one sample cannot both copy: the second waits for
         the first (up to `REJECT_LOCK_TIMEOUT`), reads REJECTED and
         refuses having copied nothing. The record-only and destroy paths
-        take the same lock (final review U5, 2026-09-23): without it a
+        take the same lock (2026-09-23): without it a
         record-only rejection that started during a preserving one waited
         on the row, then overwrote its reason and appended a second,
         contradictory REJECTED custody row.
@@ -2047,7 +2046,7 @@ class SampleService:
         refuse if it is already REJECTED or its case is read-only.
 
         Every rejection path takes this lock before it changes anything
-        (final review U5, 2026-09-23). The preserving path took it alone,
+        (2026-09-23). The preserving path took it alone,
         so a record-only rejection that started while a preserving one was
         copying passed the unlocked pre-check in `reject`, waited on its
         UPDATE, and then, READ COMMITTED re-reading a row that still
@@ -2086,11 +2085,11 @@ class SampleService:
 
         Under the row lock, with the hold read again under it, so neither a
         concurrent rejection nor a hold placed since `reject` looked can be
-        destroyed through (U5). There is no audit append here, so the
+        destroyed through. There is no audit append here, so the
         delete holding the row lock holds up only this sample.
 
-        The sample's CASE row is held FOR SHARE for the whole of it (Beta 1
-        verification, group C, C4). The row lock covers the sample and a case
+        The sample's CASE row is held FOR SHARE for the whole of it (2026-10-07). The row
+        lock covers the sample and a case
         hold writes the case, so the reread alone could not see a hold
         committed during the store's delete: the sample was left REJECTED,
         its bytes gone and the case held. `set_case_legal_hold` takes the case
@@ -2152,7 +2151,7 @@ class SampleService:
                         reason: str) -> Sample:
         """`purge_bytes=False`: the rejection and its reason, recorded, and
         nothing disposed of. The bytes and the key stay where they were.
-        Under the row lock, like every rejection (U5)."""
+        Under the row lock, like every rejection."""
         try:
             with self._c.transaction():
                 self._lock_unrejected(sample_id, nothing="Nothing was "
@@ -2206,7 +2205,7 @@ class SampleService:
         # may exist and its version is not known (C8).
         unconfirmed: PreservationUnconfirmed | None = None
         # Whether the working copy is gone: deleted by this attempt, or
-        # already missing when a retry adopted the held copy (U4).
+        # already missing when a retry adopted the held copy.
         working_gone = False
         # Set as the delete is sent: a delete that raised may still have
         # removed the object, and the refusal must not say otherwise.
@@ -2309,7 +2308,7 @@ class SampleService:
             # that follow it. Chained, `safe_detail` threw the whole message
             # away and the analyst read "the request could not be completed
             # (ref ...)" instead of where the only copy of the sample now is
-            # (final review verifier on U4, 2026-09-23). The database error
+            # (2026-09-23). The database error
             # is logged against the ref the message carries.
             raise refusal from (None if _db_error_in(exc) else exc)
         return _record(row)
@@ -2321,7 +2320,7 @@ class SampleService:
         attempt left, proven to be this sample's, or a refusal that says
         which of four things is true.
 
-        Final review U4, 2026-09-23. An attempt that deleted the working
+        2026-09-23. An attempt that deleted the working
         copy and then failed before COMMIT used to leave the next attempt
         here with nothing to read, answering "nothing to preserve" and
         pointing at a record-only rejection, which recorded the sample as
@@ -2378,7 +2377,7 @@ class SampleService:
                 "WHERE id = %s", (current.id,)).fetchone()
             # Both refused as a SampleError naming what was found, so a key
             # ring or a store that fails here answers the router's 409 and
-            # not a bare 500 (final review verifier on U4, 2026-09-23: a
+            # not a bare 500 (2026-09-23: a
             # missing working object had always been a 409 before adoption
             # added these two calls).
             try:
@@ -2427,7 +2426,7 @@ class SampleService:
         copy existed (or may have), and a record of it that outlives the
         rolled-back transaction.
 
-        Final review C8 and U4, 2026-09-23. The message names the copy,
+        2026-09-23. The message names the copy,
         says truthfully whether the working copy is gone, and says what a
         retry will do. It never says "legal hold" or `purge_bytes`: the
         console reads either as "offer the record-only rejection", which
@@ -2440,7 +2439,7 @@ class SampleService:
         output, which the HTTP layer must not return), and logged in full
         against a ref the message and the audit row both carry. The caller
         raises the result unchained in that case, so the message survives
-        `safe_detail` (final review verifier on U4, 2026-09-23).
+        `safe_detail` (2026-09-23).
         """
         db = _db_error_in(cause)
         ref = None
@@ -2722,7 +2721,7 @@ class SampleService:
             raise _row_busy() from None
         if cascade:
             # On EVERY call, including one that found the sample already
-            # isolated (g40 verify blocker 1, 2026-10-03): the cascade is
+            # isolated (2026-10-03): the cascade is
             # idempotent, and a first call that committed this row and then
             # met a busy sibling must be finishable by the next call. The
             # earlier "only the first time" skip left the archive and the
@@ -3892,7 +3891,7 @@ class SampleService:
         """The Security Officer's list: every preserved sample the officer's
         labels reach, with its authorisations, and NOTHING of its content.
 
-        Final review U3, 2026-09-23. The officer's half of the two-person
+        2026-09-23. The officer's half of the two-person
         retrieval lived only in the Lab's sample card, which needs
         `sample.read`, and SECURITY_OFFICER holds no `sample.read` (nor may
         it: Security Officers read no case content). So the one role that
@@ -4844,7 +4843,7 @@ class SampleService:
         screened says nothing was compared; screened says exact hashes
         only; a container says its members were not compared.
 
-        Phase 8 (2026-10-02), corrected 2026-10-03 (g40 verify major 3):
+        Phase 8 (2026-10-02), corrected 2026-10-03:
         once an archive is expanded its members are samples, each screened
         on its own, so "members were not compared" stops being true FOR
         THOSE MEMBERS. It stays true for an entry that was refused with

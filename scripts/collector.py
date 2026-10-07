@@ -50,7 +50,7 @@ exited non-zero, 2 when this process may not run as the collector (the
 persona key or the mark missing in production, an unusable ring). Without
 `--once` it runs until stopped.
 
-## Stopping, and the heartbeat (verify:g38, 2026-10-03)
+## Stopping, and the heartbeat (2026-10-03)
 
 SIGTERM finishes the act in hand and claims no other: the stop flag is asked
 before EVERY claim, not once per pass of twenty, so compose's
@@ -60,7 +60,7 @@ never leaves an act RUNNING for a sweep to fail as "outcome unknown". The
 poll child is sent SIGTERM and scripts/collection_poll.py installs no handler
 for it, so a scheduled poll pass in progress ends at once and is not
 finished; the 30 seconds only matter to a child that does not stop, which is
-then killed (verify:g38 minor, 2026-10-03).
+then killed (2026-10-03).
 
 Started, it writes a heartbeat row (migration 0157) with the ring verdict it
 reached: how many persona credentials it sampled and how many its key ring

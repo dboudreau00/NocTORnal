@@ -128,8 +128,7 @@ def _sentence(exc: BaseException) -> str:
     if answer is not None:
         return answer[1]
     # The class only: a library's own text can quote a phone number or an
-    # address with a user name, and the redactor does not mask either (g40
-    # verify minor, 2026-10-03).
+    # address with a user name, and the redactor does not mask either (2026-10-03).
     return f"{type(exc).__name__} (the exception's own text is not printed)"
 
 

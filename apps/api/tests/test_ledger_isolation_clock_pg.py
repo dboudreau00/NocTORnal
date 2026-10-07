@@ -1,5 +1,5 @@
 """The ledgers refuse a stale tail, stamp the append and keep their sequences
-to the trigger (F51, 2026-10-03: verify:g37 tail-read-isolation, the time half
+to the trigger (F51, 2026-10-03: tail-read-isolation, the time half
 of evidence-ledger-actor-time-forgeable, and the sequence side channel).
 
 `audit.event` and `core.evidence_custody` hash-chain every row to the previous

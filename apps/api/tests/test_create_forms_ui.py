@@ -234,7 +234,7 @@ def test_the_inspector_hook_chooses_one_end_and_nothing_else():
 
 
 def test_the_inspector_hook_offers_an_entity_beyond_the_entity_page():
-    """Final review U12, 2026-09-23. The pickers were built from
+    """2026-09-23. The pickers were built from
     `state.nodes`, the newest 1000, while the canvas draws the oldest 800,
     so "Link from this..." on an older entity in a large case opened on
     "Choose the source entity" without a word, and the entity could not be

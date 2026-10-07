@@ -528,8 +528,8 @@ def test_a_column_confined_table_is_updatable_in_exactly_its_columns(conn):
     assert not wrong, wrong
 
 
-#: Reference vocabulary nothing writes at run time (0172, Beta 1
-#: authorization gate, 2026-10-07): the ontology, the comms catalogue and the
+#: Reference vocabulary nothing writes at run time (0172, 2026-10-07): the ontology, the
+#: comms catalogue and the
 #: ingest categories. A row here decides which identifier is a merge lead
 #: and which one a platform is indexed on, for every case at once.
 VOCABULARY = ("core.node_type", "core.edge_type", "core.selector_type",

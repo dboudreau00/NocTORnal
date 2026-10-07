@@ -91,7 +91,7 @@ MAX_REDIRECTS = 5
 #: path whose memory use is chosen by a monitored source.
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 #: A body is read this much at a time, so what one read holds beside the
-#: body itself is bounded whatever the chunking (beta 1 gate 6, 2026-10-07).
+#: body itself is bounded whatever the chunking (2026-10-07).
 READ_PIECE = 64 * 1024
 
 #: The whole of one call, by the wall clock, when the caller names no
@@ -402,7 +402,7 @@ def scrub_live_secrets(text: str | None, *, markup: bool = False) -> str:
     a secret this process holds is removed, in each form `redact` knows and,
     with `markup`, the HTML-escaped forms a page spells it in. A board that
     reflects the persona's password or session cookie back into a page
-    otherwise gets it stored (beta 1 verification, 2026-10-07)."""
+    otherwise gets it stored (2026-10-07)."""
     if not text:
         return text or ""
     out = text
@@ -1319,8 +1319,8 @@ def _one_exchange(hop: Hop, *, route: EgressRoute, method: str,
             # `deadline`, whose watchdog ends this read wherever it has got
             # to (c2, 2026-09-24). In pieces: one read of a chunked body
             # holds an object per chunk until the end, so 16 MiB served as
-            # two-byte chunks cost a gigabyte in one call (beta 1 gate 6,
-            # 2026-10-07); a piece holds at most READ_PIECE of them.
+            # two-byte chunks cost a gigabyte in one call (2026-10-07); a piece holds at
+            # most READ_PIECE of them.
             held = bytearray()
             while len(held) <= max_bytes:
                 piece = response.read(min(READ_PIECE, max_bytes + 1 - len(held)))

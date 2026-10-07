@@ -6,11 +6,11 @@ held from the shipped files (final review of the Alpha 6 candidate,
   only Tab and Escape, so Ctrl+K, ? and Alt+digit acted on the page behind
   them and one Escape closed the palette and the dialog together, taking a
   typed correction with it;
-- u18: the tab title carried the case code and its TLP marking into the
+- the tab title carried the case code and its TLP marking into the
   browser's history, which Log out cannot clear;
-- u24: the tag picker's prompt had no value, so Tag posted the prompt's
+- the tag picker's prompt had no value, so Tag posted the prompt's
   text as a tag id;
-- u26: Share's "Access ends" was typed and read in the browser's zone, the
+- Share's "Access ends" was typed and read in the browser's zone, the
   one time in the console that was not UTC.
 
 Pure, like test_ui_invariants.py beside it: static assets, and the real
@@ -190,7 +190,7 @@ console.log(JSON.stringify(out));
 
 
 # ---------------------------------------------------------------------------
-# u18: the tab title names no case and no marking
+# the tab title names no case and no marking
 # ---------------------------------------------------------------------------
 
 def test_the_tab_title_carries_neither_the_case_code_nor_its_marking():
@@ -205,7 +205,7 @@ console.log(JSON.stringify(caseTitle({ code: 'OP-HALCYON-25', classification: 'R
 
 
 # ---------------------------------------------------------------------------
-# u24: the tag picker's prompt is never sent as a tag
+# the tag picker's prompt is never sent as a tag
 # ---------------------------------------------------------------------------
 
 def test_tag_with_the_prompt_still_chosen_sends_nothing():
@@ -249,7 +249,7 @@ console.log(JSON.stringify(calls));
 
 
 # ---------------------------------------------------------------------------
-# u26: Share's end time is UTC, as every other time in the console
+# Share's end time is UTC, as every other time in the console
 # ---------------------------------------------------------------------------
 
 def test_share_access_ends_is_typed_and_sent_as_utc():

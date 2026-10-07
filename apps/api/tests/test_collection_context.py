@@ -544,7 +544,7 @@ def test_item_validation():
 
 @pytest.mark.parametrize("method", ["PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "get", ""])
 def test_a_method_the_seam_does_not_allow_is_refused_before_anything_is_sent(method):
-    """g40 verify minor, 2026-10-03: the seam took any pinned_http method for
+    """2026-10-03: the seam took any pinned_http method for
     every adapter, so only a regex over one module held "nothing posts,
     replies, reacts, messages or buys"."""
     fetcher = Fetcher()

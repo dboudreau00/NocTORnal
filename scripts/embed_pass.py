@@ -114,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
     # owner's credential still in secrets.env, it ran beside an API that
     # refused. Under NOCTORNAL_ENV=production a published credential or the
     # owner's refuses the pass, and so does a persona key (A collector
-    # process, 2026-10-02, verify:g38: this Lab worker holds none and the
+    # process, 2026-10-02 and 2026-10-03: this Lab worker holds none and the
     # vault guard alone stood between it and one), all through the one helper
     # every job calls (config.py). See "Exit code" above for 2.
     refusals = refuse_unsafe_job_environment("embed_pass")

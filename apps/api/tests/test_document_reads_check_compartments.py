@@ -99,7 +99,7 @@ EXEMPT: dict[str, str] = {
         "cannot read returns no text (row security, CUSTOM_DOCUMENT) and "
         "the check then has nothing to compare against, as its docstring "
         "says"),
-    # g39: F30, 2026-10-02.
+    # F30, 2026-10-02.
     "retention:RetentionService.document_backlog": (
         "the sweep's and the readiness row's count of documents past their "
         "clock, and the oldest deadline among those no hold keeps: numbers "

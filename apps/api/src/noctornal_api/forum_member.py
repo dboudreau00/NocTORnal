@@ -25,18 +25,18 @@ more is asked:
 - the session cookies the board answers with are a credential too: sealed
   in the vault's storage between runs (`forum_session`) as one jar PER
   ORIGIN, so a persona that reads two boards never carries the first
-  board's session to the second (g40 verify blocker 2, 2026-10-03), in
+  board's session to the second (2026-10-03), in
   memory only for the run, registered for redaction, never in a run row, a
   warning, a document or a response; cleared by a sign-out, and by every
   stop of the persona (`PersonaVault`);
 - a board that reflects the password or a session cookie back into a page
   (a debug echo, a hostile board) does not get it stored: both are removed,
   exactly, from every item's text, side data and raw markup while they are
-  still live secrets (`_scrub_item`, beta 1 verification, 2026-10-07);
+  still live secrets (`_scrub_item`, 2026-10-07);
 - the sign-in and the session travel over https, or over plain http to an
   onion address only (Tor encrypts that hop): a clearnet address that
   would carry the persona's password and cookie in clear is refused by
-  name before a request is made (g40 verify major 6, 2026-10-03);
+  name before a request is made (2026-10-03);
 - the pages read are the authority's targets' own (the source's thread or
   board and what its walk reaches), under the source's pacing and the
   persona's gap;
@@ -613,7 +613,7 @@ class MemberForumAdapter(ForumAdapter):
                     # The run's own outcome stopped the persona (a credential
                     # the board refused locks it): nothing is sealed for a
                     # stopped persona, whatever cookies the board handed out
-                    # on its way to refusing it (g40 verify major 1).
+                    # on its way to refusing it (2026-10-03).
                     forum_session.clear_session(conn, persona_id)
                 else:
                     forum_session.seal_session(conn, persona_id, origin, jar)
@@ -698,7 +698,7 @@ def sign_out_persona(conn: psycopg.Connection, persona_id: UUID, *,
     gate's stopping path: visible, on a forum platform, with an exit; no
     authority, no hours, no usability), through the persona's own route
     in a `stop` context. Each board is signed out with that board's OWN
-    cookies, once per origin (g40 verify blocker 2, 2026-10-03). The
+    cookies, once per origin (2026-10-03). The
     sessions are cleared whatever the boards answer: a cookie this product
     no longer holds is not one it can present again.
 
@@ -706,7 +706,7 @@ def sign_out_persona(conn: psycopg.Connection, persona_id: UUID, *,
     persona's stop route (`POST /collection/personas/{id}/status` to LOCKED
     or BURNED) queues and waits for; `PersonaVault` clears the sealed
     sessions itself on every stop, so a stop that does not reach a board
-    still leaves nothing sealed (g40 verify major 1). The notes name no
+    still leaves nothing sealed (2026-10-03). The notes name no
     source: the caller's labels are the persona's gate, not each source's."""
     from noctornal_api.collection import PersonaContext, PersonaGate, _source_row
     from noctornal_api.collection_context import RunContext
@@ -763,7 +763,7 @@ def sign_out_persona(conn: psycopg.Connection, persona_id: UUID, *,
                 except CollectionError as exc:
                     # Redacted with the jar named again: the scope that made
                     # its cookies live has ended, and the note goes into the
-                    # audit log, which no label gates (beta 1 gate 6).
+                    # audit log, which no label gates (2026-10-07).
                     out["notes"].append(f"source {sid}: " + redact(
                         str(exc), secrets=tuple(v for v in jar.values() if v)))
                     continue

@@ -167,7 +167,7 @@ def test_a_revoked_compartment_hides_them_too(conn, svc):
 
 
 def test_a_case_raised_above_the_recipient_hides_its_notifications(conn, svc):
-    """Beta 1 gate 64: the filter read only the labels the notification was
+    """2026-10-07: the filter read only the labels the notification was
     raised with, so an AMBER analyst shut out of a case raised to RED still
     read its notices in the centre, and the outbox still sent them. Read
     against the case as it stands, as a lowered clearance is."""
@@ -513,7 +513,7 @@ def _smtp_row(conn, recipient):
 
 
 def test_a_case_raised_after_queueing_is_gated_at_its_new_label(conn, svc):
-    """Beta 1 gate 64: the drain judged a delivery by the labels the
+    """2026-10-07: the drain judged a delivery by the labels the
     notification was raised with, so a case raised to RED between the queue
     and the drain (a digest, quiet hours, a retry) sent its code and summary
     out marked TLP:AMBER. The case's labels are composed in as they stand at

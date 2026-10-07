@@ -111,7 +111,7 @@ BASIS_SELECTOR_REFUSAL = "basis_selector_id does not name a selector of this cas
 def check_basis_selector(conn: psycopg.Connection, user: CurrentUser, *,
                          case_id: UUID, selector_id: UUID | None) -> None:
     """A merge's basis selector is a row of this case the merger may read
-    (graph-merge-basis-selector, 2026-10-03, second round). The id went
+    (graph-merge-basis-selector, 2026-10-03). The id went
     straight into a foreign key, so a random one was a 500 'unexpected
     failure', another case's row was accepted and recorded on this case's
     merge, and a row above the merger was cited (and so confirmed to exist)

@@ -292,7 +292,7 @@ def test_every_installer_and_launcher_gives_a_dev_install_its_persona_key(path):
     """Each place that WRITES the key draws it from a 32 byte generator (the
     one before the write is read, not any in the file), writes the inline
     mode beside it, and the header no longer counts two secrets where
-    three are written (verify:g38 minor, 2026-10-03)."""
+    three are written (2026-10-03)."""
     text = (ROOT / path).read_text(encoding="utf-8")
     writes = [m.start() for m in _PERSONA_KEY_WRITE.finditer(text)]
     assert writes, f"{path} never writes the persona key"
@@ -326,7 +326,7 @@ def test_the_key_a_dev_install_writes_is_one_the_persona_ring_accepts(ring):
     assert persona_envelope.decrypt(blob, key_id=key_id) == "tg-session"
 
 
-# --- the scripts that must not start without it (verify:g38) ------------------------
+# --- the scripts that must not start without it (2026-10-03) ------------------------
 
 def test_telegram_enrolment_refuses_before_asking_anybody_when_there_is_no_key(
         ring, capsys):
@@ -385,7 +385,7 @@ def test_the_test_suites_key_is_not_the_totp_one():
     assert os.environ["NOCTORNAL_PERSONA_KEK"] != os.environ["NOCTORNAL_TOTP_KEK"]
 
 
-# --- claims the deployment files and docs may make (verify:g38, 2026-10-03) ----------
+# --- claims the deployment files and docs may make (2026-10-03) ----------
 
 def test_the_collectors_wait_needs_the_psycopg_the_project_asks_for():
     """scripts/collector.py waits with Connection.notifies(timeout=,

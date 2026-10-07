@@ -6,14 +6,14 @@ it names:
 - C6: the sole Security Officer could invoke break-glass, and the grant
   could never be reviewed (`review()` refuses your own) nor was anybody
   alerted (notifications never tell you what you just did);
-- C11 (and its duplicate U1): a grant scoped to one case raised the
+- C11: a grant scoped to one case raised the
   ceiling on the collected documents and sources an assertion names, which
   belong to no case;
-- U2: a verdict on a LIVE grant took it out of the only queue and away
+- a verdict on a LIVE grant took it out of the only queue and away
   from the only revoke control while the raise ran on;
-- U19: `action_count` counted requests the gate then refused, and counted
+- `action_count` counted requests the gate then refused, and counted
   the question-form probe behind every inspector open as a second use;
-- U23: a deception capture or message opened by id above the analyst's
+- a deception capture or message opened by id above the analyst's
   clearance under a grant was never counted.
 
 The last three came from the verifier of the first pass, and each fails
@@ -226,7 +226,7 @@ def test_the_sole_officer_cannot_invoke_what_nobody_else_could_review(
 
 
 # ---------------------------------------------------------------------------
-# C11 / U1: a case grant does not raise deployment-wide collection names
+# C11: a case grant does not raise deployment-wide collection names
 # ---------------------------------------------------------------------------
 
 def _source(conn, level):
@@ -285,7 +285,7 @@ def test_a_case_grant_does_not_name_a_red_document_or_forum(conn, client):
 
 
 # ---------------------------------------------------------------------------
-# U2: a live grant cannot be reviewed
+# a live grant cannot be reviewed
 # ---------------------------------------------------------------------------
 
 def test_a_live_grant_cannot_be_reviewed_until_it_ends(conn, client):
@@ -337,7 +337,7 @@ def test_the_database_clock_decides_whether_a_grant_has_ended(
 
 
 # ---------------------------------------------------------------------------
-# U19: a use is a request the gate ALLOWED, once
+# a use is a request the gate ALLOWED, once
 # ---------------------------------------------------------------------------
 
 def test_a_refused_request_is_not_a_use_of_the_grant(conn, client):
@@ -395,7 +395,7 @@ def test_an_inspector_open_is_one_use_not_two(conn, client):
 
 
 # ---------------------------------------------------------------------------
-# U23: a deception item opened by id above clearance is counted
+# a deception item opened by id above clearance is counted
 # ---------------------------------------------------------------------------
 
 def _exhibit(conn, case_id, owner, level):

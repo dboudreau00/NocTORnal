@@ -304,7 +304,7 @@ def _merge_under_dual_control(conn, case_id: UUID, body: MergeBody,
     # is spent, as when it was raised (2026-10-03): the payload's ids run on
     # the system connection otherwise. Before the consume, so a refusal
     # leaves the approval unspent. The sentence is the one for an approval
-    # that is not there (graph-merge-approval-hidden, second round): a
+    # that is not there (graph-merge-approval-hidden, 2026-10-03): a
     # request that names entities above the caller is not theirs to see, and
     # a different 404 for it than for a random id would say it exists.
     _gate_merge_nodes(conn, user, case_id, "graph.merge",

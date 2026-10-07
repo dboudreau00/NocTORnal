@@ -96,7 +96,7 @@ SCREENING_REJECT_REASON = (
 EXACT_HASH_SENTENCE = (
     "Screening compares exact hashes against the lists this deployment "
     "imported. No match does not mean the material is lawful to hold.")
-#: Corrected 2026-10-03 (g40 verify major 3): a zip or tar archive the Lab
+#: Corrected 2026-10-03: a zip or tar archive the Lab
 #: expands has each member screened as a sample of its own; what is still
 #: not compared is a RAR or 7-Zip archive's members and any entry the
 #: expansion refused with bytes behind it.
@@ -867,8 +867,8 @@ class ScreeningService:
         # Archive trees whose isolation stopped half way (a sibling locked
         # past the timeout, a crash after the matched row committed): the
         # matched sample is no longer a candidate above, so the retry the
-        # log line promises is made here, from the database alone (g40
-        # verify blocker 1, 2026-10-03). Runs even with no active list.
+        # log line promises is made here, from the database alone (2026-10-03). Runs even
+        # with no active list.
         from noctornal_api.lab_archive import complete_isolations
         trees = complete_isolations(self._samples, ends=ends)
         counters["trees_completed"] = trees["completed"]

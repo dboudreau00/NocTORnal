@@ -398,7 +398,7 @@ def test_the_dev_addresses_name_127_0_0_1_not_localhost(path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Beta 1 verification, G4: a transport bound on the live socket's first frame
+# 2026-10-07: a transport bound on the live socket's first frame
 # ---------------------------------------------------------------------------
 
 def _api_start_commands() -> list[tuple[Path, str]]:

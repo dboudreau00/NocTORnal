@@ -64,7 +64,7 @@ def env_local_path() -> Path:
 
 
 #: Names that decide which program or library the NEXT process starts, not
-#: what a NocTORnal setting is (g48 verification, 2026-10-03). Reading
+#: what a NocTORnal setting is (2026-10-03). Reading
 #: `.env.local` as data (infra-9) stops the file running as shell syntax, but
 #: it still exported any identifier in it: `PYTHONPATH=./evil` with a
 #: sitecustomize.py, `PATH=./evilbin`, `LD_PRELOAD=./evil.so` or
@@ -79,8 +79,8 @@ def env_local_path() -> Path:
 #: (and release/INSTALL.md's one-line loader). Matched without regard to case, because
 #: Windows treats `Path` and `PATH` as one name.
 #:
-#: The tools these scripts start next are on the list too (Beta 1 verification,
-#: 2026-10-07): `DOCKER_CONFIG` pointed `docker compose` at a fake
+#: The tools these scripts start next are on the list too (2026-10-07): `DOCKER_CONFIG`
+#: pointed `docker compose` at a fake
 #: `cli-plugins/docker-compose` that ran as the installing user, and `DOCKER_HOST`,
 #: `COMPOSE_*`, `GIT_*`, `PIP_*`, `NODE_OPTIONS` and PowerShell's `PSModulePath`
 #: redirect a program the same way.

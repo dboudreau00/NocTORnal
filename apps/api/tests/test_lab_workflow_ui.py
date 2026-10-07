@@ -1,7 +1,7 @@
-"""The Lab pane's second round of fixes (review of 2026-09-22, closed on
+"""The Lab pane's later fixes (review of 2026-09-22, closed on
 2026-09-23), held by reading the shipped console and the sample router.
 
-Beside `test_lab_ui_invariants.py`, which holds the first round. Each test
+Beside `test_lab_ui_invariants.py`, which holds the earlier fixes. Each test
 names the finding it holds. Pure: no database, no browser.
 """
 from __future__ import annotations

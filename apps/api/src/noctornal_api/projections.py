@@ -385,7 +385,7 @@ class Subgraph:
     one_mode: dict | None = None
     #: The union of the compartments of every node and edge in this
     #: projection, which the caller is read into (the projection filters on
-    #: it). Beta 1 verification, group C, C1: a report built from this
+    #: it). 2026-10-07: a report built from this
     #: carried the header's and the exhibits' compartments but not these, so
     #: a compartmented entity went out through the egress gate unmarked. It
     #: is not a key on any row, and a Subgraph built from another one's
@@ -539,7 +539,7 @@ class GraphService:
                       -- LIVE provenance, as for nodes above (decision 24).
                       -- Retracting the only assertion behind a tie must
                       -- dissolve the tie from the live graph, superseded
-                      -- rows included (final review U11, 2026-09-23).
+                      -- rows included (2026-09-23).
                       AND EXISTS (SELECT 1 FROM core.assertion a
                                    WHERE a.edge_id = e.id
                                      AND a.retracted_at IS NULL

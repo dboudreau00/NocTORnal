@@ -54,7 +54,7 @@ load_env_local()
 
 def main(argv: list[str] | None = None) -> int:
     # It takes no options, and says so: `argv` was never read, so `--help`
-    # sent the queued detonations (beta 1 gate 6, 2026-10-07).
+    # sent the queued detonations (2026-10-07).
     argparse.ArgumentParser(
         description="Send the queued detonations to the configured sandbox, "
                     "once, and record the reports of those already sent."

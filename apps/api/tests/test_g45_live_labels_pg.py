@@ -249,8 +249,8 @@ def _app():
 
 def _until_change(ws, seconds=20.0):
     """The next change message, or None after `seconds` of wall time. A
-    wall-clock window and not a count of pings (g45 verification,
-    2026-10-03): the pings come every 0.2 s here, so a count of forty was an
+    wall-clock window and not a count of pings (2026-10-03): the pings come every 0.2 s
+    here, so a count of forty was an
     eight second window that a loaded machine could spend on slow session
     checks, and the socket test failed intermittently."""
     deadline = time.monotonic() + seconds
@@ -357,8 +357,8 @@ def test_a_json_null_hello_and_an_empty_one_still_close_for_want_of_credentials(
         assert _close_of(client, "{not json", raw=True) == ("close", 1008, "no credentials")
 
 
-# Why these are separate from the list above (g45 verification,
-# 2026-10-03): they are not shapes of JSON. The first fix closed every hello
+# Why these are separate from the list above (2026-10-03): they are not shapes of JSON. The
+# first fix closed every hello
 # that DECODES to the wrong thing, and left a binary frame (KeyError out of
 # Starlette's receive_json) and JSON nested past the interpreter's limit
 # (RecursionError) raising out of the handshake, a logged traceback per
@@ -477,7 +477,7 @@ def test_a_good_hello_is_unchanged(owner, world, live):
 
 
 # ---------------------------------------------------------------------------
-# Beta 1 verification, Group G: a token that cannot be one (G1)
+# 2026-10-07: a token that cannot be one (G1)
 # ---------------------------------------------------------------------------
 
 BS = "\\"
@@ -491,7 +491,7 @@ BS = "\\"
 ], ids=["lone_high_surrogate", "lone_low_surrogate", "non_ascii", "over_512"])
 def test_a_token_that_cannot_be_a_session_token_is_a_policy_close_not_a_traceback(
         live, frame, caplog):
-    """G1 (verifier u4): `{"token":"\\ud800","case_id":null}` from a peer
+    """`{"token":"\\ud800","case_id":null}` from a peer
     with no session reached `hash_token`, whose UTF-8 encode raised, so the
     handshake logged a traceback and closed 1011."""
     import logging
@@ -517,7 +517,7 @@ def test_a_token_of_the_longest_allowed_shape_still_reaches_the_session_check(li
 
 
 # ---------------------------------------------------------------------------
-# Beta 1 verification, Group G: a proposal hint carries its labels (G3)
+# 2026-10-07: a proposal hint carries its labels (G3)
 # ---------------------------------------------------------------------------
 
 def _document(owner, *, classification="AMBER", keys=()):

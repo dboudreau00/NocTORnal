@@ -730,7 +730,7 @@ def test_a_bare_host_whose_query_carries_a_url_is_bracketed_itself():
 
 
 def test_a_helo_name_or_message_id_with_a_path_is_served_defanged():
-    """Final review U17, 2026-09-23. `_RECEIVED_FROM` and `_domain_of` keep
+    """2026-09-23. `_RECEIVED_FROM` and `_domain_of` keep
     `/`, `?` and `#`, so EHLO `pay.evil.example/verify` and Message-ID
     `<a@pay.evil.example/verify>` gave a "host" that is a URL, and the
     email row drew both live. The service now serves a defanged form of

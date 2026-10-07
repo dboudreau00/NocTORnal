@@ -42,13 +42,13 @@ traceback. Routes that cap their own body are left to their own rules
 here too (the ingest dead-letters what it cannot parse).
 
 The same goes for a lone surrogate escape (`\\ud800` to `\\udfff` not
-paired with its other half), refused with a 422 (Beta 1 verification, G1):
+paired with its other half), refused with a 422 (2026-10-07):
 it decodes to a string no UTF-8 encoder will take, so Postgres' driver
 raised `UnicodeEncodeError` and an unconstrained text field answered 500.
 
 And a `body_cap` route is refused with its own 401 before a byte is read
-when the request presents no session credential at all (Beta 1
-verification, G2). FastAPI parses a multipart form before it resolves a
+when the request presents no session credential at all (2026-10-07). FastAPI parses a
+multipart form before it resolves a
 single dependency and Starlette spools the parse to disk, so an upload
 route with a 256 MiB cap wrote up to 256 MiB for a caller that was never
 going to be let in, and nothing in front of the API bounds a body. This
@@ -93,7 +93,7 @@ NUL_DETAIL = ("a text field contains a NUL character (U+0000), which "
 #: body that matches is parsed and its strings tried (`_lone_surrogate`).
 _SURROGATE_ESCAPE = re.compile(rb"(?<!\\)(?:\\\\)*\\u[dD][89a-fA-F][0-9a-fA-F]{2}")
 
-#: The 422 for text that is not text (Beta 1 verification, G1). An unpaired
+#: The 422 for text that is not text (2026-10-07). An unpaired
 #: surrogate decodes to a string no UTF-8 encoder accepts, so it can be
 #: neither stored nor logged; paired escapes are accepted.
 SURROGATE_DETAIL = ("a text field contains an unpaired surrogate escape "

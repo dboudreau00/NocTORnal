@@ -232,7 +232,7 @@ def test_the_live_refusal_is_recognised_as_a_lock_by_the_classifier(
 
 def test_a_second_exhibit_of_the_same_bytes_has_a_key_the_store_lists(
         storage, locked_bucket):
-    """Beta 1 gate 64. The second exhibit of bytes another exhibit holds
+    """2026-10-07. The second exhibit of bytes another exhibit holds
     (another label, or a lost race) was stored at `plain/<evidence id>`, and
     MinIO does not list an object whose name continues another object's past
     a "/": `delete_all_versions` saw no version, so the purge reported "no

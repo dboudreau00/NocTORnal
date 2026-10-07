@@ -97,7 +97,7 @@ def test_a_lead_cleared_below_an_exhibit_cannot_lift_its_hold(conn, client):
 
 
 def test_placing_holds_does_not_spend_the_destruction_meter(conn):
-    """Beta 1 gate 64: every hold route spent `retention.destroy` (a burst
+    """2026-10-07: every hold route spent `retention.destroy` (a burst
     of three, ten an hour), so the fourth hold an officer placed inside a few
     minutes was refused. With the REAL limits: five placements in a row
     succeed, and lifting still meets the tight meter."""
@@ -234,7 +234,7 @@ def _document_held(conn, doc):
 
 
 def test_a_lead_below_a_cited_document_places_the_case_hold_and_cannot_lift_it(conn, client):
-    """g44-case-hold-lift-documents: the lift gate counted exhibits, records,
+    """case-hold-lift-documents: the lift gate counted exhibits, records,
     samples and lookups and not the collected documents the case cites, so an
     AMBER lead released a hold that was all that kept a RED document from the
     deployment-wide document sweep."""
@@ -303,7 +303,7 @@ def test_the_due_list_shows_nothing_of_an_exhibit_above_the_caller(conn, client)
 
 
 def test_the_due_list_leaves_out_a_compartmented_record_to_somebody_not_read_in(conn, client):
-    """g44-due-labelled-records: a partner's record carries labels of its own,
+    """due-labelled-records: a partner's record carries labels of its own,
     and its id, deadline and category (a stealer log) went to every
     retention.read holder of the case whatever its compartment."""
     boss = g.user(conn, "RED", ("STEALER-2026",), roles=("CASE_OWNER",))
@@ -489,7 +489,7 @@ def test_every_release_destination_is_a_gate_destination_that_crosses_the_bounda
     assert Destination.IN_APP not in RELEASE_DESTINATIONS
 
 
-# --- Beta 1 verification, group C, C7 ---------------------------------------
+# --- 2026-10-07 ---------------------------------------
 #
 # Two answers told a lead below some material that it exists, whatever the
 # case's withheld-disclosure setting (0030): a refused case-hold lift said the

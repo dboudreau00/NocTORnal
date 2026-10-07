@@ -170,7 +170,7 @@ def _gitignored(path: str) -> bool:
     "secrets.env.backup-20261002T120000Z",
     # The helper's temporary file, which holds a whole new secrets file for
     # the instant before the rename and survives a kill or a power cut
-    # (g32 verify of 2026-10-03: it was ignored by nothing).
+    # (2026-10-03: it was ignored by nothing).
     ".secrets.env.tmp-4242", ".postgres-init.env.tmp-17", ".migrate.env.tmp-9",
 ])
 def test_the_helpers_files_and_its_temporaries_are_ignored_by_git(name):
@@ -187,8 +187,8 @@ def test_the_gitignore_reader_is_not_vacuous():
 def test_no_upgrade_note_copies_a_template_over_an_existing_postgres_init_env():
     """Since F52 postgres-init.env holds the schema owner's password, so a
     note that copies its template unconditionally puts a placeholder over
-    it for an operator who has already run the secrets step (g32 verify of
-    2026-10-03: release/egress-upgrade/README.md still did)."""
+    it for an operator who has already run the secrets step (2026-10-03:
+    release/egress-upgrade/README.md still did)."""
     notes = [*ROOT.glob("*.md"), *(ROOT / "release").rglob("*.md"),
              *(ROOT / "infra").rglob("*.md"), *(ROOT / "docs").glob("*.md")]
     assert any(n.name == "README.md" and n.parent.name == "egress-upgrade" for n in notes)

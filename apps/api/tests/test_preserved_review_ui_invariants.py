@@ -1,4 +1,4 @@
-"""Final review U3, 2026-09-23: the Security Officer can reach the officer's
+"""2026-09-23: the Security Officer can reach the officer's
 half of a preserved-sample retrieval, held by reading the shipped console
 and router.
 

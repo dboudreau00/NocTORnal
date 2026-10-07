@@ -121,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # First, before anything is connected to: the API's whole production list,
     # through the one helper every job calls (config.py), exit 2 and no
-    # traceback (Beta 1 verification, 2026-10-07; it was `enforce_environment()`
+    # traceback (2026-10-07; it was `enforce_environment()`
     # and exit 1).
     from noctornal_api.config import JOB_REFUSAL_EXIT, refuse_unsafe_job_environment
     refusals = refuse_unsafe_job_environment("sample_screen", whole_environment=True)
@@ -186,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
     if "skipped" in counters:
         return 0
     # An archive tree left half isolated is as unfinished as a behind pass
-    # (g40 verify blocker 1, 2026-10-03).
+    # (2026-10-03).
     return 1 if (counters.get("pending", 0) or counters.get("behind", 0)
                  or counters.get("trees_open", 0)) else 0
 

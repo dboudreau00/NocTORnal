@@ -1948,8 +1948,7 @@ class IngestService:
           period is a destruction decision, which belongs to retention and
           purge where a legal hold is checked, not to a relabel. A record
           with NO expiry (NULL, which retention reads as never due) keeps
-          none: giving it a date is the same decision (g31 verification 2,
-          2026-10-03).
+          none: giving it a date is the same decision (2026-10-03).
         """
         category = (category or "").strip().upper()
         if category not in CATEGORIES:
@@ -1976,7 +1975,7 @@ class IngestService:
         # (F51, 2026-10-02): under row-level security a record raised above
         # the caller since `_record_row` read it is one this UPDATE silently
         # misses. The expiry is the greater of the STORED one and the rule's,
-        # decided in the statement (g31 verification 2, 2026-10-03): a
+        # decided in the statement (2026-10-03): a
         # concurrent correction may have extended it since `_record_row`
         # read it, and 0155's guard judges a write against the current row,
         # so a value computed from the earlier read raised a raw 42501 the

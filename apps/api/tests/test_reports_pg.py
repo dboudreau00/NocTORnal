@@ -241,7 +241,7 @@ def test_the_evidence_register_identifies_exhibits_by_hash(conn, builder):
     report = builder.build(case_id, target_tlp="AMBER", generated_by=owner)
     assert report.evidence[0]["sha256"] == digest.hex()
     assert report.evidence[0]["blake3"] == digest.hex()
-    # The WHOLE digest (Beta 1 gate 64): the released file printed its first
+    # The WHOLE digest (2026-10-07): the released file printed its first
     # 32 hex characters and an ellipsis, so the document that leaves could
     # not be checked against a digest recomputed from the exhibit.
     assert f"`{digest.hex()}`" in render_markdown(report)
@@ -263,8 +263,8 @@ def test_exhibits_above_the_target_are_withheld_and_counted(conn, builder):
     titles = [e["title"] for e in report.evidence]
     assert titles == ["open"]
     # The default setting is PRESENCE: the document says some exhibits are
-    # above the ceiling and not how many (group C, C2; this asserted the
-    # exact figure under the default before, which is what C2 closed).
+    # above the ceiling and not how many (2026-10-07; this asserted the
+    # exact figure under the default before).
     assert report.redaction.evidence_some_withheld
     assert report.redaction.evidence_withheld == 0
     conn.execute('UPDATE core."case" SET withheld_disclosure = %s '
@@ -377,7 +377,7 @@ def _tie(conn, case_id, actor, src, dst, **kw):
 def test_a_compartmented_entity_makes_the_document_compartmented(conn, builder):
     """The egress gate judges the DOCUMENT's compartments, and the builder
     unioned the header's, the exhibits' and the matrix's but not the
-    entities' or the ties' (Beta 1 verification, group C, C1). A node
+    entities' or the ties' (2026-10-07). A node
     carrying a compartment, read by a requester cleared for it, went out to
     `export` and `smtp` with its label in the document and
     `DENY_COMPARTMENTED` never fired."""
@@ -462,7 +462,7 @@ def _exhibits(conn, case_id, owner, *classifications):
 def test_the_hidden_exhibit_figure_follows_the_cases_disclosure_setting(
         conn, builder, mode, count, some):
     """The report stated the exact number of exhibits above the ceiling
-    whatever `withheld_disclosure` said (Beta 1 verification, group C, C2):
+    whatever `withheld_disclosure` said (2026-10-07):
     a case set to NONE has an analyst's register showing 0 and the report
     saying "2 exhibits are above that level". NONE says nothing, PRESENCE
     says there are some, and only COUNT gives the figure."""

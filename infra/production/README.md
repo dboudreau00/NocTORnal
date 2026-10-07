@@ -1257,6 +1257,54 @@ The dump is in custom format, so it is restored with `pg_restore`, not
 `psql`. Nothing here verifies a backup: restore one on a scratch host before
 you rely on it.
 
+**Restoring.** A restore is a database restore and a bucket restore, and each
+has a trap the commands above do not show.
+
+*The three runtime roles must exist before `pg_restore` runs.* `noctornal_app`,
+`noctornal_worker` and `noctornal_egress` belong to the cluster and not to the
+database, so a dump does not carry them. When they are missing `pg_restore`
+reports each failed GRANT and carries on, which leaves the runtime roles with
+no privilege on anything, and nothing says so until a request fails. The
+stack's own `postgres` creates them at initdb (`db/init/10-app-role.sh` and
+`db/init/20-egress-role.sh`); a cluster of your own needs those scripts run
+first. Then restore as the schema owner into an empty database, and verify:
+
+```sh
+# on the host that holds the age private key; /srv/noctornal-backup is the 0700
+# directory made above, outside the checkout, so the plaintext file stays private
+age -d -i "$BACKUP_IDENTITY" /srv/noctornal-backup/noctornal-STAMP.dump.age \
+  > /srv/noctornal-backup/restore.dump
+docker compose -p noctornal-prod -f infra/production/compose.yml exec -T postgres \
+  sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" pg_restore -h 127.0.0.1 -U noctornal -d RESTORED_DATABASE' \
+  < /srv/noctornal-backup/restore.dump
+```
+
+If it printed a `role ... does not exist`, run `scripts/runtime_roles.py ensure
+--production` as step 2 shows, which replays every grant and revoke in chain
+order. Then run `scripts/audit_verify.py`: both chains must be INTACT.
+
+*The evidence mirror does not carry the object version of an exhibit.* From
+Alembic 0139 every exhibit lodged after that revision records the
+object-store version it was written as, and every read asks for exactly that
+version. `mc mirror` keeps bytes, not version ids, and an upload cannot choose
+its version id, so evidence restored into a new MinIO from that mirror reads
+as **missing**: every such exhibit raises an integrity alarm until the
+database stops asking for a version. The recovery is an owner step that keeps
+every hash fixed and makes those exhibits read the latest version of their
+key again, each read still verifying the SHA-256 it was lodged with. Run it as
+the schema owner, once, after the bucket is restored:
+
+```sql
+ALTER TABLE core.evidence DISABLE TRIGGER evidence_anchors_fixed;
+UPDATE core.evidence SET storage_version_id = NULL WHERE storage_version_id IS NOT NULL;
+ALTER TABLE core.evidence ENABLE TRIGGER evidence_anchors_fixed;
+```
+
+An exhibit lodged before 0139 has no recorded version and is not affected.
+This was reasoned from the object store's behaviour and the code, and was not
+reproduced against a restored bucket. Preserved samples have the same limit,
+which the paragraph on the preservation bucket below states.
+
 The second command runs `mc` in a one-off container of the `minio-init`
 service, because that service already has what `mc` needs: the compose
 network (MinIO publishes no port), the root credentials and bucket names

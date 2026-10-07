@@ -239,7 +239,7 @@ def decrypt(blob: bytes, *, key_id: str | None) -> str:
 
 def refusal_sentence(exc: BaseException, key_id: str | None) -> str:
     """One sentence for a persona credential that would not open: what
-    happened, and the way out, never a byte of it (verify:g38, 2026-10-03:
+    happened, and the way out, never a byte of it (2026-10-03:
     a key that changed under its id surfaced as a generic 500 and a class
     name in a log). Called with a member of `UNOPENABLE` or a
     `PersonaKeyError`."""

@@ -102,7 +102,7 @@ usually means the analyst found another way, and the emergency was not one.
 the queue. An expired grant with no review is an open item forever; it does
 not age out, because ageing out is how a review requirement becomes a
 formality. The review is POST-HOC: a grant that is still live cannot be
-reviewed (final review U2, 2026-09-23). The queue lists only unreviewed
+reviewed (2026-09-23). The queue lists only unreviewed
 grants and the console's End it now sits on those cards, so a verdict on a
 live grant took it out of every list while the analyst kept the raised
 clearance for the rest of its hours, and every access after it was counted
@@ -493,8 +493,7 @@ class BreakGlassService:
 
         Nor may the grant still be live. See property 5 in the module
         docstring: a verdict on a live grant removed it from the only list
-        and the only revoke control while the raise went on (final review
-        U2, 2026-09-23).
+        and the only revoke control while the raise went on (2026-09-23).
         """
         if outcome not in {"JUSTIFIED", "UNJUSTIFIED", "INCONCLUSIVE"}:
             raise BreakGlassError(
@@ -558,7 +557,7 @@ class BreakGlassService:
             (actor_id, action, grant_id, case_id, Json(detail)))
 
 
-#: The refusal for a verdict on a live grant (final review U2, 2026-09-23).
+#: The refusal for a verdict on a live grant (2026-09-23).
 _STILL_LIVE = (
     "this grant is still live, so it cannot be reviewed yet: end it now, or "
     "wait for it to expire, then review it. A review judges everything done "

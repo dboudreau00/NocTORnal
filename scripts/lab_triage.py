@@ -91,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     # through the one helper every job calls (config.py). It was
     # `enforce_environment()`, whose RuntimeError made a refusal exit 1 with a
     # traceback; 2 is what every other job gives, and 1 here means a pass ran
-    # and failed (Beta 1 verification, 2026-10-07).
+    # and failed (2026-10-07).
     from noctornal_api.config import JOB_REFUSAL_EXIT, refuse_unsafe_job_environment
     # outbound=False: this loop sends nothing out and compose gives it no
     # egress proxy, so lookups or a sandbox switched on in secrets.env, which

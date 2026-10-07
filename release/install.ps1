@@ -246,8 +246,8 @@ function Invoke-Live {
 }
 
 # .env.local is read as DATA, never run: one line, one NAME=value, and a name
-# that changes how programs start is left out and named (g48 verification,
-# 2026-10-03). The same list is in scripts/_env.py, release/install.sh,
+# that changes how programs start is left out and named (2026-10-03). The same list is in
+# scripts/_env.py, release/install.sh,
 # scripts/launch.sh, scripts/launch.ps1 and scripts/open-ui.ps1, and a test
 # holds them to each other. The file's value wins over the environment, as it
 # does in install.sh: this installer migrates and seeds whatever the file

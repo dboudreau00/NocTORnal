@@ -4,7 +4,7 @@ lists and none writes (L1, L2 and L5, 2026-09-24).
 Four kinds, each listed by `scripts/legacy_records.py` on the server and
 counted on the readiness register:
 
-- **Undated Triage claims.** Since final review u6 (2026-09-24) an accept
+- **Undated Triage claims.** Since 2026-09-24 an accept
   dates its claim from the cited document. Claims accepted earlier carry
   no `observed_at`, so First seen and Last seen ignore them. Invariant 5
   (CONVENTIONS.md) says a claim's own columns are never written again, and

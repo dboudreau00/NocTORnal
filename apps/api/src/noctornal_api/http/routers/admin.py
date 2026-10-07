@@ -233,7 +233,7 @@ def list_users(
 
 # Its own meter, `admin.credentials`, not the recovery-code one: sharing
 # that bucket let a fresh install's operator add two colleagues before a
-# 429 (final review U18, 2026-09-23; see the catalogue in ratelimit.py).
+# 429 (2026-09-23; see the catalogue in ratelimit.py).
 @router.post("/users", response_model=dict, status_code=201,
              dependencies=[Depends(rate_limit("admin.credentials"))])
 def create_user(

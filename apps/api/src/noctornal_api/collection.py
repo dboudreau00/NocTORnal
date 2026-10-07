@@ -313,8 +313,8 @@ PERSONA_USABLE_SQL = (
 #: A persona is VISIBLE to a caller when no source it is registered on or
 #: bound to sits above the caller's ceiling (2026-09-24). The old
 #: predicate looked at the venue only, so an AMBER holder could burn, lock
-#: or unlock a persona whose chats or boards are RED. Since F43 (g40
-#: verify, 2026-10-03) a source's COMPARTMENTS count too: a persona bound
+#: or unlock a persona whose chats or boards are RED. Since F43 (2026-10-03) a source's
+#: COMPARTMENTS count too: a persona bound
 #: to a source the caller does not hold every key of is as hidden as one
 #: bound above their ceiling, so it is not listed with its venue's name and
 #: address, cannot be locked, burnt or used, and answers as a missing one.
@@ -627,8 +627,8 @@ class PersonaVault:
 
     def _drop_forum_session(self, persona_id: UUID, actor_id: UUID | None,
                             why: str) -> None:
-        """A stopped persona holds no sealed forum session (g40 verify major
-        1, 2026-10-03). A session cookie is a credential (invariant 7's
+        """A stopped persona holds no sealed forum session (2026-10-03). A session cookie is
+        a credential (invariant 7's
         shape, `forum_session`), so every way a persona STOPS clears it in
         the same breath: a destroyed credential, a burn, a lock by a person
         or by the platform. Database only and always possible: the board's
@@ -711,7 +711,7 @@ class PersonaVault:
         # production), a credential still sealed under the TOTP ring (named,
         # never opened with it), a key id this ring lacks, a key that
         # changed under its id, and bytes that are no envelope
-        # (verify:g38, 2026-10-03: the last three were a generic 500).
+        # (2026-10-03: the last three were a generic 500).
         try:
             secret = persona_envelope.decrypt(read_at_entry, key_id=row[1])
         except (persona_envelope.PersonaKeyError,
@@ -722,7 +722,7 @@ class PersonaVault:
         # it, so the use is on record before any use is made, and a poll
         # refused for want of a usable key (every five minutes per source,
         # until the move or the key is fixed) writes no event for a use that
-        # never happened (verify:g38, 2026-10-03).
+        # never happened (2026-10-03).
         self._audit(actor_id, "PERSONA_USED", persona_id,
                     {"purpose": purpose,
                      "run_id": str(run_id) if run_id else None,
@@ -1780,7 +1780,7 @@ def _feed_text(body: bytes) -> str:
     # that does not open with `<?` falls to UTF-8 above and keeps its NULs:
     # the scan below then reads no declaration, and the parser, given the
     # same text, re-detects the wide encoding and expands the DTD it never
-    # saw (beta 1 verification, 2026-10-07). Refused here, for any codec.
+    # saw (2026-10-07). Refused here, for any codec.
     if "\x00" in text:
         raise CollectionError(
             "feed did not parse: it holds a NUL, which is no XML character "
@@ -1837,7 +1837,7 @@ def parse_rss(body: bytes) -> list[Item]:
     return read_feed(body)[0]
 
 
-#: The most items one poll of a feed reads (beta 1 gate 6, 2026-10-07). A
+#: The most items one poll of a feed reads (2026-10-07). A
 #: feed is a window of the newest few dozen; a 16 MiB one of bare items is
 #: some 600,000 documents in one transaction, every poll. A forum page is
 #: held to forum_parse.MAX_POSTS the same way.
@@ -2331,8 +2331,7 @@ class CollectionService:
             return self.CAUSE_BINDING, (
                 "This source is read by a persona, and none is bound to it.")
         # Before the feed's own early answer: a deactivated feed was still
-        # fetched by Poll now, because only the authority path asked (beta 1
-        # gate 6, 2026-10-07).
+        # fetched by Poll now, because only the authority path asked (2026-10-07).
         if not source.is_active:
             return self.CAUSE_INACTIVE, "This source is deactivated."
         if not requires:
@@ -3986,7 +3985,7 @@ class CollectionService:
         `clearance` as in `due_sources`: None is the worker and filters
         nothing; a TLP name hides sources labelled above it, and a source
         filed under a compartment the reader does not hold is hidden too
-        (g40 verify blocker 3, 2026-10-03: this list named a compartmented
+        (2026-10-03: this list named a compartmented
         source and, once it failed, its blocked reason, to a reader without
         the key).
         """
@@ -4020,7 +4019,7 @@ class CollectionService:
 
         `clearance` as in `due_sources`: None filters nothing, a TLP name
         hides sources labelled above it, and so does a compartment the
-        reader does not hold (g40 verify blocker 3, 2026-10-03).
+        reader does not hold (2026-10-03).
         """
         rows = self._c.execute(
             f"""SELECT s.id, s.name, s.kind, s.created_at,

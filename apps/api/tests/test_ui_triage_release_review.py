@@ -10,8 +10,8 @@ fails on d0faa34 and names the finding it holds:
   name it.
 - c1: a card whose Accept the server refuses said TLP:RED and offered it.
 - c15: the capture form offered every level, reset to AMBER on every case.
-- u2: a read-only case badged proposals and feed records nobody may clear.
-- u11: the Undo was offered to a REVIEWER, whose role cannot retire.
+- a read-only case badged proposals and feed records nobody may clear.
+- the Undo was offered to a REVIEWER, whose role cannot retire.
 """
 from __future__ import annotations
 
@@ -304,7 +304,7 @@ console.log(JSON.stringify([
 
 
 # ---------------------------------------------------------------------------
-# u2: a read-only case waits for nobody
+# a read-only case waits for nobody
 # ---------------------------------------------------------------------------
 
 @needs_node
@@ -342,7 +342,7 @@ console.log(JSON.stringify(out));
 
 
 # ---------------------------------------------------------------------------
-# u11: the Undo is offered only to a role that can retire
+# the Undo is offered only to a role that can retire
 # ---------------------------------------------------------------------------
 
 @needs_node

@@ -673,7 +673,7 @@ def persona_suspended(conn: psycopg.Connection, *, persona_id: UUID,
     visibility predicate reads), AMBER when there is none, so a manager that
     predicate hides from the persona is never told about it: the
     notification service refuses a recipient below the label (suppression
-    2). Since F43 (g40 verify major 5d, 2026-10-03) the union of those
+    2). Since F43 (2026-10-03) the union of those
     sources' compartments is on it too, so a manager who does not hold every
     key of a source the persona reads is not told about it either. One
     unacknowledged notification per persona at a time, the integrity

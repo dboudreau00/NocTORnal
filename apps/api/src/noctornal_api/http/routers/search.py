@@ -65,7 +65,7 @@ class SelectorViaOut(BaseModel):
 class HitOut(BaseModel):
     """`merged_name` is the label of a record merged into this entity
     whose name matched when the entity's own did not, or matched less well
-    (final review U10, 2026-09-23), so the pane can say why a name it does
+    (2026-09-23), so the pane can say why a name it does
     not show is here. Null otherwise.
 
     `attribute` is the key of the entity's own attribute that matched,
@@ -154,7 +154,7 @@ def _allowed_on_case(conn, user: CurrentUser, case_id: UUID,
             object_classification=eff_cls, object_compartments=eff_comp,
             mfa_satisfied_at=user.session_mfa_at,
             # A question, not an access: the request it serves was counted
-            # at its own gate (final review U19, 2026-09-23, g02).
+            # at its own gate (2026-09-23).
             count_use=False)
     except AccessResolutionError:
         return False

@@ -117,8 +117,7 @@ def test_an_act_row_says_what_and_how_it_ended_and_a_pending_one_can_be_cancelle
 def test_the_acts_help_text_names_the_operators_time_limit():
     """An act not started in time is not run, and the time is the
     operator's to set (NOCTORNAL_ACT_TTL_SECONDS, one minute to an hour):
-    the help text must not promise a flat fifteen (verify:g38 minor,
-    2026-10-03)."""
+    the help text must not promise a flat fifteen (2026-10-03)."""
     html = re.sub(r"\s+", " ", _html())
     block = html[html.index("Persona acts</h2>"):][:900]
     assert "fifteen minutes, unless your operator set another limit" in block

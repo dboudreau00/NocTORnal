@@ -61,8 +61,8 @@ def owner(monkeypatch):
 
 
 def _drop_reviewer_role(c) -> None:
-    """The custom role the break-glass queue test makes (verify:g37,
-    2026-10-03: it was left behind, holding break_glass.review, on every
+    """The custom role the break-glass queue test makes (2026-10-03: it was left behind,
+    holding break_glass.review, on every
     reused database). The accounts that held it are gone by now."""
     c.execute("DELETE FROM iam.user_role WHERE role_key = %s", (REVIEWER_ROLE,))
     c.execute("DELETE FROM iam.role_permission WHERE role_key = %s", (REVIEWER_ROLE,))
@@ -336,7 +336,7 @@ def test_concurrent_appends_by_every_role_form_one_chain(owner):
     draws `seq`, then reads the tail (0149), so the rows form ONE linked list
     off the old tail: every predecessor a real row, none claimed twice. It
     failed 9 times in 15 where the draw came first and two writers could take
-    the lock in the opposite order to their seqs (verify:g37, 2026-10-03), and
+    the lock in the opposite order to their seqs (2026-10-03), and
     is held to 20 passes in 20 runs (`test_ledger_chain_g49_pg.py` holds the
     same for every role over 20 rounds, and `test_ledger_isolation_clock_pg.py`
     holds the order itself, without a race)."""
@@ -559,7 +559,7 @@ def test_an_attached_record_keeps_its_triage_and_category_for_the_case_team(
 
 
 # ---------------------------------------------------------------------------
-# Records attached BEFORE 0168 (verify:g37, 2026-10-03)
+# Records attached BEFORE 0168 (2026-10-03)
 # ---------------------------------------------------------------------------
 
 def _migration(prefix: str):
@@ -697,7 +697,7 @@ def test_the_upgrade_carries_the_state_of_records_attached_before_it(owner, clie
 
 def test_a_failed_carry_leaves_the_record_in_quarantine(owner, monkeypatch):
     """The attach, its audit row and the carried state are one transaction
-    (verify:g37, 2026-10-03). A carry that fails after the UPDATE used to
+    (2026-10-03). A carry that fails after the UPDATE used to
     leave the record attached with no state, and a retry was refused because
     the record is no longer in quarantine."""
     from noctornal_api.ingest import IngestService
@@ -733,7 +733,7 @@ def test_a_failed_carry_leaves_the_record_in_quarantine(owner, monkeypatch):
 
 def test_the_role_the_queue_test_makes_does_not_outlive_it(owner):
     """Last in the file, after the break-glass queue test and its teardown
-    (verify:g37, 2026-10-03: the role it makes was left holding
+    (2026-10-03: the role it makes was left holding
     break_glass.review on every reused database). A leftover from an earlier
     run fails it too."""
     assert s.count(owner, "SELECT count(*) FROM iam.role_permission "

@@ -697,7 +697,7 @@ class CommsService:
                 f"conversation nobody in it consented to is not something "
                 f"this system will record without one")
         # As `bind` asks it: an unknown key was the foreign key's violation
-        # and a 500 (Beta 1 gate 61).
+        # and a 500 (2026-10-07).
         exists = self._c.execute(
             "SELECT 1 FROM comms.platform WHERE key = %s", (platform_key,)
         ).fetchone()
@@ -796,7 +796,7 @@ class CommsService:
         cheap; discovering afterwards that nobody did is not.
 
         False when no participant of the conversation has that handle, so a
-        mistyped handle is not reported as flagged (Beta 1 gate 61).
+        mistyped handle is not reported as flagged (2026-10-07).
         """
         cur = self._c.execute(
             """UPDATE comms.participant SET is_incidental = %s

@@ -45,8 +45,8 @@
 # development volume from a production one. PRODUCTION is not that: since
 # 2026-10-03 (infra-4) a production process whose DATABASE_URL names the owner
 # or a superuser refuses to start, so a production volume initialised without
-# the password has no usable runtime role until one is made (g48 verification,
-# 2026-10-03: this text and the message below used to call connecting as the
+# the password has no usable runtime role until one is made (2026-10-03: this text and the
+# message below used to call connecting as the
 # owner a silent, supported state).
 
 set -e

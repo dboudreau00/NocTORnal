@@ -344,7 +344,7 @@ _TELEGRAM_BOT_API = re.compile(r"-\d+")
 
 #: Normalisers whose every rewrite beyond case is, by the ontology's own
 #: rules, the SAME identifier written another way, and which rewrite only
-#: a value of their own shape (final review U8, 2026-09-23):
+#: a value of their own shape (2026-09-23):
 #:
 #: - email_norm drops a Gmail "+tag" and maps googlemail.com to gmail.com,
 #:   and only for an address at one of those two domains;
@@ -515,7 +515,7 @@ class SearchHit:
     via: SelectorVia | None = None
     #: The label of a record merged into this entity whose NAME matched,
     #: when the entity's own name and attributes did not, or matched less
-    #: well (final review U10, 2026-09-23). The pane already printed a
+    #: well (2026-09-23). The pane already printed a
     #: merged record's name as "held by merged record old_alias", and
     #: searching that name answered "No entities match", which reads as
     #: "not in this case".
@@ -638,7 +638,7 @@ def _params(*, case_id: UUID, query: str, limit: int, clearance: str,
 # test_a_hidden_record_merged_into_a_visible_one_does_not_lend_it_its_selectors).
 #
 # The matching selectors are a UNION of one SELECT per way to match, not
-# one WHERE joined by OR (final review U9, 2026-09-23). Postgres builds a
+# one WHERE joined by OR (2026-09-23). Postgres builds a
 # BitmapOr only when every arm of an OR can use an index, and the arm
 # `(selector_type, norm_value) IN (SELECT ... unnest ...)` is a sublink,
 # which under an OR stays a hashed SubPlan that no index serves. So the
@@ -829,8 +829,8 @@ class SearchService:
 
         A merged record matched by its own name or attributes is resolved
         to its live survivor, as a merged record's selectors are, through
-        the same gated chain, and the hit names it as `merged_name` (final
-        review U10, 2026-09-23). Until then the name arms were dropped by
+        the same gated chain, and the hit names it as `merged_name` (2026-09-23). Until then
+        the name arms were dropped by
         `merged_into_id IS NULL` with no survivor put in their place, so
         "old_alias", printed on screen as the record holding a wallet,
         answered "No entities match". The rank on screen is the reason on

@@ -398,7 +398,7 @@ def verify_custody_chain(
     )
     -- Only the rows that do not verify leave the database, beside the
     -- count and the span of what was checked, as `audit_verify` does it
-    -- (Beta 1 gate 64). One summary row always, even with nothing wrong.
+    -- (2026-10-07). One summary row always, even with nothing wrong.
     SELECT j.checked, j.first_id, j.last_id,
            f.id, f.evidence_id, f.action, f.actor_id, f.occurred_at,
            f.link_broken, f.forked, f.fresh_fork, f.content_broken

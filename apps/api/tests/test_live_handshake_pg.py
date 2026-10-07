@@ -360,7 +360,7 @@ def test_a_hostile_peer_holds_nothing_past_the_budget(monkeypatch):
 
 def test_a_first_frame_over_the_transport_bound_is_closed_1009_before_the_hello_is_read(
         monkeypatch):
-    """G4 (verifier u4): the hello's own 4096-character check runs after
+    """The hello's own 4096-character check runs after
     `receive()` has buffered the frame, and uvicorn's default limit is
     16 MiB, so eight silent-then-huge sockets held about 800 MiB. With the
     `--ws-max-size` every launch line passes (`live.WS_MAX_SIZE`) the server

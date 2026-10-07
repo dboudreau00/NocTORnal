@@ -1,6 +1,6 @@
 """The deception pane draws a host the sender chose only defanged.
 
-Final review U17, 2026-09-23. The email row's "sending host" and
+2026-09-23. The email row's "sending host" and
 "message-id host" and the detail card's Received chain rendered the raw
 `host`, `message_id_domain`, `from_host` and `by_host`. None of them is
 constrained to a hostname, so EHLO `pay.evil.example/verify` reached the

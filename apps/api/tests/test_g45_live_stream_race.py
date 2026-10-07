@@ -1,4 +1,4 @@
-"""A change hint must not be lost while the stream is idle-pinging (g45 verification, 2026-10-03).
+"""A change hint must not be lost while the stream is idle-pinging (2026-10-03).
 
 `_stream` waits on the socket and on the hub queue at once, with a timeout
 that is the ping interval. When the timeout fires neither is done and the

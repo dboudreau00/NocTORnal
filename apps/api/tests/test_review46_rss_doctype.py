@@ -176,7 +176,7 @@ def test_the_old_utf8_refusal_still_holds_and_names_the_same_cause():
         parse_rss(_feed().encode())
 
 
-# Beta 1 verification, group F1: a BOM-less UTF-16 feed that does not begin
+# 2026-10-07: a BOM-less UTF-16 feed that does not begin
 # with `<?` fell to the UTF-8 branch. The decoded text kept its NULs, the
 # prolog walk saw no declaration, and the parser then re-detected UTF-16 and
 # expanded the DTD (a 1 MB feed became 45 M characters). A NUL is not a legal

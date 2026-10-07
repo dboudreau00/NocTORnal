@@ -1,6 +1,6 @@
 """Break-glass uses on the exhibit export and the ingest routes, and the
-dead-letter replay that could move a fragment between cases (final review
-r2, 2026-09-24: c4, c5, c6, c19 and u1).
+dead-letter replay that could move a fragment between cases (2026-09-24: c4, c5, c6, c19
+and the category correction).
 
 `test_breakglass_count_once_pg.py` holds the rule: one request under a
 grant is one use on the officer's card, never two and never none, and a
@@ -8,7 +8,7 @@ gate asked as a question counts nothing. These routes broke it:
 
 - c4: `POST /cases/{id}/evidence/{ev}/export` gated twice with counting
   on, so an export on a case above the caller's clearance counted two;
-- u1: `POST /ingest/records/{id}/category` gated `ingest.read` and then
+- `POST /ingest/records/{id}/category` gated `ingest.read` and then
   `ingest.replay` at the same labels, both counting: two;
 - c6: `POST /ingest/records/rescore` let a case in through an uncounted
   question and wrote the whole queue's priorities: none;
@@ -276,7 +276,7 @@ def test_an_export_within_clearance_counts_only_an_exhibit_above_it(
 
 
 # ---------------------------------------------------------------------------
-# u1: a category correction is one use
+# a category correction is one use
 # ---------------------------------------------------------------------------
 
 def test_a_category_correction_on_a_case_above_clearance_is_one_use(

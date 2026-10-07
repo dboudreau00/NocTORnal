@@ -880,7 +880,7 @@ class RetentionService:
             # evidence-case-hold-unreachable, 2026-10-03). Per case and not
             # only for the case a caller named, so a sweep that names none
             # does not destroy what a hold committed since `due()` read
-            # (Beta 1 verification, group C, C8). The exhibits were claimed
+            # (2026-10-07). The exhibits were claimed
             # above, each reading its case's hold under its own locks.
             by_case = {i.object_id: i.case_id for i in actionable}
             clocked = (record_ids + lookup_ids + result_ids + batch_ids
@@ -995,7 +995,7 @@ class RetentionService:
         failure anywhere after a delete (a later exhibit, a later leg, the
         tombstone, the commit) left objects destroyed, their rows unmarked,
         an integrity alarm on each of them and every later sweep reporting
-        "no object found" (Beta 1 verification, group C, C5). And a case hold
+        "no object found" (2026-10-07). And a case hold
         entered during the first delete waited for ALL of it and then landed
         on destroyed exhibits with no word (C6): now it waits for the exhibit
         in flight, and every exhibit after that reads it and is kept."""
@@ -1140,7 +1140,7 @@ class RetentionService:
         exhibits that had it: DELETED, then LOCKED_UNTIL_RETENTION, then
         FAILED, and none for an outcome no exhibit had.
 
-        Beta 1 gate 64. One tombstone per batch carried the WORST outcome and
+        2026-10-07. One tombstone per batch carried the WORST outcome and
         counted the whole batch, which was right while a batch was all or
         nothing. Since each exhibit is destroyed on its own answer, a sweep in
         which some locks had ended and some had not (the usual case: a lock
@@ -1689,7 +1689,7 @@ class RetentionService:
                 (destroyed_ids,))
             if actor_id is not None:
                 # The exhibit's own custody trail ends with its destruction,
-                # in the transaction that marks it (Beta 1 gate 64): it ended
+                # in the transaction that marks it (2026-10-07): it ended
                 # at the last read, so "who touched this exhibit, and when"
                 # did not say who destroyed it, and the only per-exhibit
                 # record was a column. The tombstone counts the batch; this
@@ -1734,7 +1734,7 @@ class RetentionService:
         on every exhibit the sweep has not reached, and is honoured there; it
         waits only on the exhibit in flight. So does a case hold, which
         takes the case row FOR UPDATE: it is read by every exhibit after the
-        one being destroyed (Beta 1 verification, group C, C6).
+        one being destroyed (2026-10-07).
 
         Out-of-schedule purge (`refuse_held` True): every row and case
         locked first, in the same order, and the whole batch refused if any
@@ -2143,7 +2143,7 @@ class RetentionService:
         of its own, holding the case row FOR SHARE) and every exhibit after
         that is read as held and kept. The exhibit already being destroyed
         is destroyed: a hold cannot reach back into a delete in flight
-        (Beta 1 verification, group C, C6).
+        (2026-10-07).
 
         PLACING a hold is open to whoever holds `retention.manage` on the
         case: preservation never waits for a clearance. LIFTING one is what
@@ -2156,7 +2156,7 @@ class RetentionService:
         itself. The refusal says the same thing whatever lies above the
         lifter, and names nothing of it.
 
-        g44-case-hold-lift-documents (2026-10-03): the collected documents
+        case-hold-lift-documents (2026-10-03): the collected documents
         the case cites are held only through the case, and carry labels of
         their own, so they count too. `document_ceiling` is the lifter's
         ceiling OUTSIDE this case (no case-scoped break-glass grant): a
@@ -2192,7 +2192,7 @@ class RetentionService:
             # Recorded, as an exhibit's lift below its label is (the gate's
             # AUTHZ_DENIED row): an attempt to release a hold over material
             # above the lifter is what an officer looks for, and it left no
-            # row at all (Beta 1 gate 64). Names nothing above the lifter.
+            # row at all (2026-10-07). Names nothing above the lifter.
             self._audit(case_id, actor_id, "LEGAL_HOLD_LIFT_REFUSED",
                         {"case_id": str(case_id), "scope": "case",
                          "reason": reason}, outcome="DENIED")
@@ -2204,7 +2204,7 @@ class RetentionService:
         """What a refused lift says. Under NONE (0030) it says nothing about
         why: "cleared for everything the case holds" tells a lead that
         something above them exists, which that case has chosen not to say
-        (Beta 1 verification, group C, C7). Under PRESENCE and COUNT the
+        (2026-10-07). Under PRESENCE and COUNT the
         sentence is the one it always was. A mode that cannot be read is
         NONE."""
         row = self._c.execute(
@@ -2228,7 +2228,7 @@ class RetentionService:
         service runs on, which is a system connection: the point is to see
         what is above the lifter. No ceiling is False (fail closed).
 
-        g44-case-hold-lift-documents (2026-10-03): the documents were left
+        case-hold-lift-documents (2026-10-03): the documents were left
         out ("held through the case that cites them, not by labels here"),
         so a lead cleared below a RED document lifted the case hold alone and
         the deployment-wide document sweep could then destroy it. A document

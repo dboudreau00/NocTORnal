@@ -336,7 +336,7 @@ def _retention_rules_confirmed(conn: psycopg.Connection) -> Check:
     # 2026-09-23): Records, Retention has had a Confirm rule form since
     # the day this action sent operators to curl, and `ui_target` below
     # makes it a link. The route stays, second, for a scripted deployment.
-    # "Records", not "Lifecycle" (u23, 2026-09-24): the rail tab was
+    # "Records", not "Lifecycle" (2026-09-24): the rail tab was
     # renamed in the same pass this sentence was written, so it sent
     # operators to a tab that no longer exists, one line above the
     # console's own "open any case, then Records, Retention".
@@ -1649,7 +1649,7 @@ def _tidy_canaries(client, bucket: str, *, keep: str,
     for five seconds at most, so a reset connection, a read timeout or a
     proxy's HTML answer (urllib3 errors, minio's InvalidResponseError and
     ServerError, none of them an S3Error) is ordinary here. Until the final
-    review (U6, 2026-09-23) only S3Error was caught, and one of those after
+    review (2026-09-23) only S3Error was caught, and one of those after
     a passed proof turned the row red with "start the object store".
     """
     from minio.error import S3Error

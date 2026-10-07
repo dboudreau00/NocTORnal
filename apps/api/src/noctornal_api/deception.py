@@ -1808,7 +1808,7 @@ class DeceptionService:
              # The forms the console draws. `from` is whatever the sender
              # said in HELO, and every line above the boundary is the
              # sender's outright, so either can be `pay.evil.example/verify`
-             # (final review U17, 2026-09-23). A plain hostname comes back
+             # (2026-09-23). A plain hostname comes back
              # unchanged; only a URL-shaped one is defanged.
              "from_host_defanged": _defanged_str(h[1]),
              "by_host_defanged": _defanged_str(h[3])}
@@ -2337,7 +2337,7 @@ def _sending_host(hop) -> dict | None:
         # The host is the HELO name the sender chose, recorded faithfully
         # by the relay, and `_RECEIVED_FROM` keeps a `/` in it: EHLO
         # `pay.evil.example/verify` was drawn live under "What the
-        # infrastructure proved" (final review U17, 2026-09-23).
+        # infrastructure proved" (2026-09-23).
         "host_defanged": _defanged_str(host),
         "observed_by_defanged": _defanged_str(by_host),
         "received_at": received_at.isoformat() if received_at else None,
@@ -2357,8 +2357,8 @@ def _email_row(r) -> dict:
         # an identity (`selector_candidates_for_email` offers it weak).
         "message_id_domain": _domain_of(r[3]),
         # `_domain_of` keeps everything after the last `@`, so the kit's
-        # `<a@pay.evil.example/verify>` gives a URL, not a domain (final
-        # review U17, 2026-09-23). The console shows this form only.
+        # `<a@pay.evil.example/verify>` gives a URL, not a domain (2026-09-23). The console
+        # shows this form only.
         "message_id_domain_defanged": _defanged_str(_domain_of(r[3])),
         "header_from": r[5], "header_from_display": r[6],
         # The display name and subject are the sender's prose, and a lure

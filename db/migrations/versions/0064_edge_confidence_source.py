@@ -111,7 +111,7 @@ failure instead of waiting on a changed row, which fails closed.
 
 ## A tie no live claim grades
 
-It takes LOW, the ungraded value (final review U11, 2026-09-23). The
+It takes LOW, the ungraded value (2026-09-23). The
 first version of this revision kept the value the tie last had, on the
 reasoning that inventing a grade would be worse. The value it kept was
 not neutral, though: it was the grade of a claim that had just been

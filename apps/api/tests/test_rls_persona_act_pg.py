@@ -101,7 +101,7 @@ def test_the_request_role_enqueues_only_its_own_pending_act_within_its_ceiling(c
 
 
 def test_the_request_role_cannot_queue_an_act_that_never_expires(conn):
-    """verify:g38 minor (2026-10-03): the INSERT policy pinned the requester,
+    """(2026-10-03): the INSERT policy pinned the requester,
     the label and PENDING, and left expires_at to the request role, so a
     compromised API could queue an act the collector would run in ten
     years. persona_act_window caps it at an hour from requested_at,
@@ -131,7 +131,7 @@ def test_the_request_role_cannot_queue_an_act_that_never_expires(conn):
 
 
 def test_the_request_role_queues_a_fresh_act_and_cannot_pre_fill_the_collectors_columns(conn):
-    """verify:g38 minor (2026-10-03): the request role could also write
+    """(2026-10-03): the request role could also write
     attempts, claimed_by, claimed_at and result on its own PENDING row."""
     from psycopg.types.json import Jsonb
 

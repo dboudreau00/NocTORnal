@@ -3,17 +3,17 @@
 
 - c8: the creation card says the issued password is replaced at the
   account's first sign-in;
-- u5: a one-time password typed into the lapse sheet asks for the new
+- a one-time password typed into the lapse sheet asks for the new
   password IN the sheet and carries on through `sessionRenewed`, instead
   of ending the session and discarding the screen the sheet had promised
   to keep;
-- u19: after an account action succeeds, the focus goes back into the
+- after an account action succeeds, the focus goes back into the
   redrawn card (into a <details> the redraw built closed, too) and the
   outcome is said through a status region that stays on the page;
-- u20: a stale step-up asks for the sign-in in place, and is never said as
+- a stale step-up asks for the sign-in in place, and is never said as
   a missing System administrator role or as "sign out"; the registry,
   which is not a step-up read, still shows while the accounts wait;
-- u21: registering a compartment reloads the Rename or retire list too.
+- registering a compartment reloads the Rename or retire list too.
 
 The `needs_node` tests run the shipped functions under Node over a stub
 DOM; the rest read the shipped source. Pure: no database.
@@ -94,7 +94,7 @@ def test_the_creation_card_says_the_password_is_replaced_at_first_sign_in():
 
 
 # ---------------------------------------------------------------------------
-# u5: the new password, inside the sheet
+# the new password, inside the sheet
 # ---------------------------------------------------------------------------
 
 def test_the_sheet_no_longer_ends_the_session_for_a_one_time_password():
@@ -145,7 +145,7 @@ const state = {};
 
 @needs_node
 def test_a_one_time_password_in_the_lapse_sheet_keeps_the_screen(tmp_path):
-    """u5, driven: the 403 turns the sheet into the new-password stage, a
+    """Driven: the 403 turns the sheet into the new-password stage, a
     mismatch is said before anything is sent, and the change goes out as
     ONE sign-in carrying the one-time password held in memory, and ends in
     `sessionRenewed` with nothing torn down."""
@@ -206,7 +206,7 @@ const ev = { preventDefault() {} };
 
 
 # ---------------------------------------------------------------------------
-# u19: focus and the announcement after a success
+# focus and the announcement after a success
 # ---------------------------------------------------------------------------
 
 _ADMIN = r"""
@@ -366,7 +366,7 @@ def test_the_status_region_stays_on_the_page():
 
 
 # ---------------------------------------------------------------------------
-# u20: a stale step-up, in place
+# a stale step-up, in place
 # ---------------------------------------------------------------------------
 
 @needs_node

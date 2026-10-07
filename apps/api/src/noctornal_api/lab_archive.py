@@ -99,8 +99,8 @@ MEMBER_ENV = "NOCTORNAL_ARCHIVE_MAX_MEMBER_BYTES"
 RATIO_ENV = "NOCTORNAL_ARCHIVE_MAX_RATIO"
 DEPTH_ENV = "NOCTORNAL_ARCHIVE_MAX_DEPTH"
 WALL_ENV = "NOCTORNAL_ARCHIVE_WALL_S"
-#: The members of a whole archive tree, the root excluded (beta 1
-#: verification, 2026-10-07): MEMBERS_ENV bounds one archive, and depth 2
+#: The members of a whole archive tree, the root excluded (2026-10-07): MEMBERS_ENV bounds
+#: one archive, and depth 2
 #: expands two levels, so one small upload made about 200 + 200 x 200 samples.
 TREE_ENV = "NOCTORNAL_ARCHIVE_MAX_TREE_MEMBERS"
 SETTINGS_ENV = (MEMBERS_ENV, TOTAL_ENV, MEMBER_ENV, RATIO_ENV, DEPTH_ENV, WALL_ENV,
@@ -278,13 +278,13 @@ ANSWER_REASON = ("the expansion process's answer did not match its own bytes; "
 RECORD_REASON = "the expansion's record could not be written"
 #: An expansion that raised part way (the object store, the database, a
 #: restart) leaves the members stored so far standing; the gap says so and
-#: how to go on, because a later run resumes it (g40 verify major 2,
-#: 2026-10-03) instead of reading the partial tree as a finished one.
+#: how to go on, because a later run resumes it (2026-10-03) instead of reading the partial
+#: tree as a finished one.
 INTERRUPTED_REASON = ("the expansion stopped before it finished; the members "
                       "stored so far stand and running static triage on the "
                       "archive again continues it")
 #: A child that did not finish: named by the setting that bounded it, not
-#: the generic static-triage sentence (g40 verify major 9, 2026-10-03; the
+#: the generic static-triage sentence (2026-10-03; the
 #: brief wants every limit named).
 CHILD_SENTENCES = {
     "timeout": ("the expansion did not finish within the {wall} seconds "
@@ -301,7 +301,7 @@ TREE_TRIGGER = "ARCHIVE_MEMBER"
 ALREADY_HELD_SENTENCE = ("a sample with this content is already held in the "
                          "Lab; it was not stored twice")
 #: A duplicate the archive's own readers could not see is not named as one
-#: (g40 verify minor, 2026-10-03; F19's oracle rule): the record says no more
+#: (2026-10-03; F19's oracle rule): the record says no more
 #: than that no sample of its own was made.
 NOT_STORED_SENTENCE = "this member was not stored as a sample of its own"
 
@@ -629,7 +629,7 @@ def isolate_tree(svc, sample_id: UUID, *, verdict, trigger: str,
     good and its bytes go the preserved way. Returns what was isolated.
 
     Idempotent, and it never stops at the first sample it cannot isolate
-    (g40 verify blocker 1, 2026-10-03): a sibling locked for the lock
+    (2026-10-03): a sibling locked for the lock
     timeout, or a deadlock, is counted, the rest of the tree is still
     isolated, and a `SampleError` naming the count is raised at the end so
     the caller knows the tree is not finished. Finishing it is the
@@ -720,8 +720,8 @@ def match_verdict(conn: psycopg.Connection, sample_id: UUID):
 
 
 def complete_isolations(svc, *, ends: float | None = None) -> dict:
-    """Finish every archive tree whose isolation stopped half way (g40
-    verify blocker 1, 2026-10-03): a tree holding an isolated sample and a
+    """Finish every archive tree whose isolation stopped half way (2026-10-03): a tree
+    holding an isolated sample and a
     sample that is not is isolated whole, from the database alone, so it
     does not matter whether the first attempt met a locked sibling, lost
     its process or raised after the matched row committed. Called by every
@@ -902,8 +902,7 @@ def _expand(conn, storage, c, data: bytes, analysis,
         return None
     # Members with no ARCHIVE finding are a half-finished expansion (it
     # raised, or the process ended, after some members were stored): it is
-    # RESUMED below, never declared complete (g40 verify major 2,
-    # 2026-10-03; invariant 12, nothing silently dropped).
+    # RESUMED below, never declared complete (2026-10-03; invariant 12, nothing silently dropped).
     if file_type in UNSUPPORTED:
         _set_gap(conn, c.sample_id, {"status": "unavailable",
                                      "reason": UNSUPPORTED[file_type]})
@@ -954,8 +953,8 @@ def _expand(conn, storage, c, data: bytes, analysis,
     have = {r[0]: (r[1], bytes(r[2])) for r in conn.execute(
         "SELECT archive_path, id, sha256 FROM lab.sample "
         "WHERE parent_sample_id = %s", (c.sample_id,)).fetchall()}
-    # One roof over the whole tree, every level of it (beta 1 verification,
-    # 2026-10-07): the per-archive cap alone let a small upload make
+    # One roof over the whole tree, every level of it (2026-10-07): the per-archive cap
+    # alone let a small upload make
     # thousands of samples, each with an encrypted object and a triage run.
     # Only what this run has still to store is counted; a duplicate it will
     # find is counted too, which errs toward refusing. Two archives of one
@@ -980,8 +979,8 @@ def _expand(conn, storage, c, data: bytes, analysis,
     stored: list[dict] = []
     refused = [{"path": r["path"], "reason": r["reason"]} for r in expansion.refused]
     # Entries refused with bytes behind them were not compared by anything;
-    # the derived "members were not compared" gap says so (g40 verify
-    # major 3, 2026-10-03). A link, a device, a directory and an empty
+    # the derived "members were not compared" gap says so (2026-10-03). A link, a device, a
+    # directory and an empty
     # entry hold no content (a zip entry marked as one that carries more than
     # a link target is read as a member: lab_archive_child._zip_kind).
     unscreened = sum(1 for r in expansion.refused
@@ -1006,8 +1005,7 @@ def _expand(conn, storage, c, data: bytes, analysis,
             # Identical bytes to a sample that matched a list the deployment
             # has since retired: a match stays a match, so the archive that
             # carries them is isolated whole, as for a live match, instead of
-            # the member being refused as a quiet duplicate (g40 verify,
-            # 2026-10-03).
+            # the member being refused as a quiet duplicate (2026-10-03).
             found = match_verdict(conn, twin[0])
             if found is not None:
                 stopped = (twin[0], found[1], m.path)
@@ -1078,7 +1076,7 @@ def _expand(conn, storage, c, data: bytes, analysis,
         # Rooted at THIS archive, not at the row found by hash: that row can
         # be an earlier upload of the same bytes outside this tree, and
         # isolating its tree would leave the archive that carried the
-        # material visible (g40 verify blocker 1, 2026-10-03). A failure is
+        # material visible (2026-10-03). A failure is
         # logged and left to the screening pass (`complete_isolations`),
         # which finds the half-isolated tree from the database; it is not
         # allowed to read as "the expansion's record could not be written".

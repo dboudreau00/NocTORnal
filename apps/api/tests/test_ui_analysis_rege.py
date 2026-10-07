@@ -76,8 +76,7 @@ def test_opening_the_pane_on_a_stale_stored_run_shows_it_and_computes_nothing():
     """The stored run no longer matches the graph: opening the pane still
     shows it, flagged stale, and never computes (a metered run) or reports
     that nothing was stored. Only the 404 case was held before, so reading
-    the stored run as missing, or computing over it, passed (g34 review item
-    3, 2026-10-02)."""
+    the stored run as missing, or computing over it, passed (2026-10-02)."""
     got = _run(_loader() + r"""
 (async () => {
   loadRege(true); await tick();

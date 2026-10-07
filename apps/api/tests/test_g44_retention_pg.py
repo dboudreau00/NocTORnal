@@ -461,7 +461,7 @@ def test_a_case_hold_is_lifted_only_by_somebody_cleared_for_all_of_it(conn):
                                     reason="released by order", lifter_ceiling=ceiling)
     assert conn.execute('SELECT legal_hold FROM core."case" WHERE id = %s',
                         (case_id,)).fetchone()[0] is True
-    # Each refusal is recorded (Beta 1 gate 64: it left no row at all), and
+    # Each refusal is recorded (2026-10-07: it left no row at all), and
     # the row names nothing above the lifter.
     refused = conn.execute(
         """SELECT outcome, detail FROM audit.event
@@ -509,7 +509,7 @@ def test_a_lift_with_an_unknown_clearance_refuses(conn):
                         (case_id,)).fetchone()[0] is True
 
 
-# --- g44-case-hold-lift-documents -------------------------------------------
+# --- case-hold-lift-documents -------------------------------------------
 #
 # The case-hold lift gate counted exhibits, records, samples and lookups above
 # the lifter and not the collected documents the case cites, which are held
@@ -772,7 +772,7 @@ def test_a_purged_cases_sample_is_not_handed_out(conn, lab):
         svc._downloadable(sample.id, clearance="RED")
 
 
-# --- Beta 1 verification, group C (2026-10-07) ------------------------------
+# --- 2026-10-07 ------------------------------
 #
 # C4: a case hold committed while a destroying rejection deletes the sample's
 #     bytes was missed, because the hold was reread with a plain read.

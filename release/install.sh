@@ -747,13 +747,13 @@ fi
 # receive them. The tests extract this function and run it
 # (apps/api/tests/test_g48_install_env_data.py).
 #
-# A name that changes how programs start is left out (g48 verification,
-# 2026-10-03). Reading the file as data stops it running as shell syntax, but
+# A name that changes how programs start is left out (2026-10-03). Reading the file as data
+# stops it running as shell syntax, but
 # the loop still exported any identifier in it, and the file's value wins over
 # the environment here: `PYTHONPATH=./evil` (with a sitecustomize.py),
 # `PATH=./evilbin`, `LD_PRELOAD=./evil.so` or `BASH_ENV=./evil.sh` ran code as
 # the installing user in the next python or shell the installer starts. So did
-# the tools it starts (Beta 1 verification, 2026-10-07): `DOCKER_CONFIG` held a
+# the tools it starts (2026-10-07): `DOCKER_CONFIG` held a
 # fake `cli-plugins/docker-compose` that `docker compose` ran as root, hence
 # `DOCKER_`, `COMPOSE_`, `GIT_`, `PIP_`, `NODE_` and `PSModulePath` as well. Not an
 # allow-list on purpose: a new setting would silently stop loading. The same

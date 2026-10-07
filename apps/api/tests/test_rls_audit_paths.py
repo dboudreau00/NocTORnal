@@ -30,7 +30,7 @@ SCRIPTS = ROOT / "scripts"
 #: A statement that reads the log: SQL (a SELECT, in any case) naming it in
 #: a FROM or a JOIN. Prose that mentions the table is not a reader, and
 #: docstrings are prose: they are skipped (`_statements`). Case-insensitive
-#: since 2026-10-03 (verify:g37): the first draft matched an upper-case
+#: since 2026-10-03: the first draft matched an upper-case
 #: SELECT only, so `select ... from audit.event` passed unclassified.
 _READS = re.compile(r"(?is)\b(?:from|join)\s+audit\.event\b")
 _SQL = re.compile(r"(?i)\bselect\b")
@@ -176,8 +176,7 @@ def _audit_alias(text: str) -> str | None:
 def test_a_case_reader_is_held_to_one_case():
     """The predicate is on the log's own case column, by the alias the
     statement gives it: an unrelated `case_id = %s` elsewhere in the text
-    (another table's) does not hold a reader to a case (verify:g37,
-    2026-10-03)."""
+    (another table's) does not hold a reader to a case (2026-10-03)."""
     for (rel, scope), treatment in _READERS.items():
         if treatment != "CASE":
             continue

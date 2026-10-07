@@ -1,4 +1,4 @@
-"""The console's side of the Beta 1 release gate 61 sweep (2026-10-07).
+"""The console's side of the 2026-10-07 sweep (2026-10-07).
 
 A reader or a liaison opening a case had the console ask for three things
 their role cannot have, on every case open: the projection metrics

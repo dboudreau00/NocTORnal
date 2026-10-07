@@ -47,14 +47,14 @@ secrets.env is written LAST, after the files its lines move into, and each
 file is replaced whole (written beside it, then renamed). A write that
 fails part way therefore leaves secrets.env as it was, with the moved lines
 in it, and running this again finishes the job: it finds the same value in
-both places, which is agreement (g32 verify of 2026-10-03).
+both places, which is agreement (2026-10-03).
 
 A file it cannot read or write, which is what the root-owned, mode 600
 files the README asks for are to anybody but root, is one sentence naming
 the file and the fix (run it with sudo), never a traceback (review of
 2026-10-02). A file that is not UTF-8 text, a comment saved as Windows-1252
 for one, is refused in one sentence naming it and the byte's position,
-nothing written (g32 verify of 2026-10-03).
+nothing written (2026-10-03).
 
 Comments the pre-2026-10-02 template put above a line it moves or rewrites
 go with the line, or are replaced by the current template's, so an old
@@ -145,7 +145,7 @@ class EnvFile:
         try:
             text = raw.decode("utf-8-sig")
         except UnicodeDecodeError as exc:
-            # A comment saved as Windows-1252 (g32 verify of 2026-10-03): one
+            # A comment saved as Windows-1252 (2026-10-03): one
             # sentence, not a traceback. Where the byte is, never what it is.
             raise Refused(f"{path.name} in {path.parent} is not UTF-8 text "
                           f"({exc.reason}, at byte {exc.start}); save it as UTF-8 "
@@ -239,7 +239,7 @@ def _write_private(path: Path, data: bytes) -> None:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
-        # Before the replace, not after it (g32 verify of 2026-10-03): the
+        # Before the replace, not after it (2026-10-03): the
         # last step is then the one that cannot half-succeed, so the file
         # at `path` is the old one or the finished new one, and apply()'s
         # "secrets.env is written last, so it still holds every line" is
@@ -452,7 +452,7 @@ def apply(directory: Path, *, new_database: bool = False, out=print,
     stamp = stamp or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     changed = [f for f in files.values() if f.changed]
     # The files the owner's lines move INTO first, secrets.env, which they
-    # leave, last (g32 verify of 2026-10-03). Written the other way round,
+    # leave, last (2026-10-03). Written the other way round,
     # a failure on the second file left the lines gone from secrets.env and
     # not yet anywhere else: a re-run then found nothing to move, made
     # migrate.env from its template and sent the operator after a mismatch

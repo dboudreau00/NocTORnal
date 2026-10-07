@@ -1,5 +1,5 @@
 """The job scripts read what they are given and refuse what every job
-refuses (beta 1 gate 6, 2026-10-07).
+refuses (2026-10-07).
 
 - `notify_drain.py --help` and `sandbox_dispatch.py --help` used to run the
   job: neither read its arguments, so asking for help sent the outbox, or the
@@ -33,7 +33,7 @@ def _boom(*_a, **_kw):
 
 
 def _load(name: str):
-    spec = importlib.util.spec_from_file_location(f"gate65_{name}",
+    spec = importlib.util.spec_from_file_location(f"job_script_{name}",
                                                   ROOT / "scripts" / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

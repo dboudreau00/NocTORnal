@@ -120,7 +120,7 @@ class RingVerdict:
 def ring_verdict(conn: psycopg.Connection, *,
                  sample: int = SAMPLE_ROWS) -> RingVerdict:
     """The readiness probe the persona column lost when it left the TOTP
-    inventory (verify:g38, 2026-10-03), run where the key is: the
+    inventory (2026-10-03), run where the key is: the
     collector, at start. Up to `sample` blobs per persona key id, opened
     with this process's persona ring, as `sealed.inventory` opens the TOTP
     ring's. A key changed under its id (a wrong or restored collector.env)

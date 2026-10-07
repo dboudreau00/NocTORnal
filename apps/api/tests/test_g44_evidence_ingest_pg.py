@@ -109,7 +109,7 @@ def test_the_bytes_of_a_hidden_exhibit_are_lodged_as_a_new_exhibit(conn, store, 
     assert len(rows) == 2
     assert {r[1] for r in rows} == {hidden_key, rows[1][1]} and rows[1][1] != hidden_key
     assert rows[1][2] == "AMBER"
-    # Beside the hidden exhibit's key, never under it (Beta 1 gate 64: the
+    # Beside the hidden exhibit's key, never under it (2026-10-07: the
     # store does not list a key nested under another object, so the purge
     # could not destroy it; test_evidence_lock_live_pg measures that).
     from noctornal_api.evidence import own_key
@@ -157,14 +157,14 @@ def test_an_exhibit_the_uploader_may_see_is_still_deduplicated(conn, store, clie
 
 
 def test_the_same_bytes_at_other_labels_are_an_exhibit_of_their_own(conn, store, client):
-    """Beta 1 verification, group C, C3: the lookup ignored the labels the
+    """2026-10-07: the lookup ignored the labels the
     uploader asked for, so AMBER bytes and then the same bytes as RED came
     back 201 `deduplicated: true` with the AMBER exhibit, and the RED request
     was dropped without a word. 0141 allows one exhibit per labels."""
     boss = g.user(conn, "RED", roles=("CASE_OWNER",))
     case_id = g.case(conn, boss)
     headers = g.token(conn, boss)
-    data = b"g56-labels-" + uuid4().hex.encode()
+    data = b"labels-" + uuid4().hex.encode()
     amber = _upload(client, headers, case_id, data, classification="AMBER")
     red = _upload(client, headers, case_id, data, classification="RED")
     assert amber.status_code == 201 and red.status_code == 201, (amber.text, red.text)
@@ -185,18 +185,18 @@ def test_the_same_bytes_at_other_labels_are_an_exhibit_of_their_own(conn, store,
 
 
 def test_the_same_bytes_in_another_compartment_are_an_exhibit_of_their_own(conn, store):
-    boss = g.user(conn, "RED", compartments=("G56-C3",))
+    boss = g.user(conn, "RED", compartments=("LABELS-C3",))
     case_id = g.case(conn, boss)
     first, data = g.lodge(conn, store, case_id, boss, classification="AMBER",
-                          reader_ceiling=("RED", frozenset({"G56-C3"})))
+                          reader_ceiling=("RED", frozenset({"LABELS-C3"})))
     second, _ = g.lodge(conn, store, case_id, boss, data=data,
-                        classification="AMBER", compartments=["G56-C3"],
-                        reader_ceiling=("RED", frozenset({"G56-C3"})))
+                        classification="AMBER", compartments=["LABELS-C3"],
+                        reader_ceiling=("RED", frozenset({"LABELS-C3"})))
     assert second.deduplicated is False
     assert second.evidence_id != first.evidence_id
     third, _ = g.lodge(conn, store, case_id, boss, data=data,
-                       classification="AMBER", compartments=["G56-C3"],
-                       reader_ceiling=("RED", frozenset({"G56-C3"})))
+                       classification="AMBER", compartments=["LABELS-C3"],
+                       reader_ceiling=("RED", frozenset({"LABELS-C3"})))
     assert third.deduplicated is True and third.evidence_id == second.evidence_id
     assert len(_rows_for(conn, case_id, data)) == 2
 
@@ -523,7 +523,7 @@ def test_blake3_is_checked_on_every_read(conn, store):
     assert alarm and alarm[0][0]["blake3_ok"] is False
 
 
-# --- g44-verify-destroyed-exhibit ------------------------------------------
+# --- verify-destroyed-exhibit ------------------------------------------
 #
 # `a missing object is an integrity alarm` also fired for an exhibit retention
 # destroyed on purpose: a verify or a content read of it wrote a failed
@@ -655,7 +655,7 @@ def test_an_exhibit_a_purge_is_destroying_now_is_not_called_tampered_with(conn, 
     assert seen["verify_integrity"] == BEING_DESTROYED_DETAIL
     assert seen["view"] == BEING_DESTROYED_DETAIL
     # The reads wrote nothing; the purge itself ends the trail with its
-    # DESTROYED row (Beta 1 gate 64).
+    # DESTROYED row (2026-10-07).
     after = (before[0], before[1], before[2] + 1)
     assert _alarm_state(conn, evidence_id) == after
     assert conn.execute(
@@ -684,7 +684,7 @@ def test_a_live_exhibit_whose_object_is_gone_is_still_an_alarm(conn, store):
     assert len(alarms) == 2 and all(a[0]["object_missing"] for a in alarms)
 
 
-# --- g44-unique-after-put ---------------------------------------------------
+# --- unique-after-put ---------------------------------------------------
 
 @pytest.mark.parametrize("error", [
     psycopg.errors.UniqueViolation, psycopg.errors.OperationalError, RuntimeError])

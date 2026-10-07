@@ -104,8 +104,7 @@ HELD = `(SELECT iam.rls_compartments())`:
   readable case, dated at the moment it is made; counted only by its
   grantee, on a live, unrevoked row. The grant is the GLOBAL half of the
   route's gate: the case half (the permission read off the grantor's one
-  role on that case) is not asked at the database (docs/17, g31
-  verification 2, 2026-10-03).
+  role on that case) is not asked at the database (docs/17, 2026-10-03).
 - CUSTOM_ACT (a persona act, 0156, 2026-10-02): the requester's own
   (`requested_by = (SELECT iam.rls_actor())`) and its label within CLR, a
   SELECT policy and an INSERT policy that admits only a fresh PENDING row
@@ -352,7 +351,7 @@ EXEMPT: dict[str, str] = {
     "lab.screening_list": _CONFIG + " (the officer's label-free view, F13)",
     "lab.screening_hash": _CONFIG + " (read only by the screening worker)",
     "lab.yara_compile_job": _CONFIG + " (a queue the triage worker drains)",
-    # 0157 (verify:g38, 2026-10-03): when each collector was last seen and
+    # 0157 (2026-10-03): when each collector was last seen and
     # whether its persona key ring opened what it sampled; key ids and
     # counts, never key material, a person or a source.
     "collect.collector_heartbeat": _CONFIG + " (the collector's heartbeat, "

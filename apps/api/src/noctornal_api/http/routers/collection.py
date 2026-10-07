@@ -311,7 +311,7 @@ def unhealthy(
     """
     clearance, held = user_ceiling(conn, user.user_id)
     svc = CollectionService(conn)
-    # The reader's compartments too (g40 verify blocker 3, 2026-10-03):
+    # The reader's compartments too (2026-10-03):
     # these two lists named a compartmented source to a reader without the key.
     rows = svc.unhealthy_sources(clearance=clearance.name, compartments=held)
     never = svc.never_polled_sources(clearance=clearance.name,
@@ -622,7 +622,7 @@ def set_persona_status(
                 if body.cooldown_hours else None)
     # A STOP of a forum persona signs it out of its boards first, through
     # its own route in a stop context, run by the collector as a persona act
-    # (g40 verify major 1, 2026-10-03; the vault split). The sign-out is the
+    # (2026-10-03; the vault split). The sign-out is the
     # courtesy and may not be reached; the clearing of what this product
     # holds sealed is the guarantee, and `PersonaVault` makes it on every
     # stop whatever happens here.
@@ -1031,7 +1031,7 @@ class ReasonBody(BaseModel):
 
 def _set_active(source_id: UUID, body: ReasonBody, user: CurrentUser,
                 conn: psycopg.Connection, active: bool) -> dict:
-    # The holder's own compartments (g40 verify major 5a, 2026-10-03): this
+    # The holder's own compartments (2026-10-03): this
     # passed none, so the key holder who created a compartmented source met
     # a 404 on the one control that stops it.
     clearance, held = user_ceiling(conn, user.user_id)

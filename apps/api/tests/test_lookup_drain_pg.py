@@ -123,7 +123,7 @@ def test_an_exposure_raised_while_the_drain_runs_stops_the_sends_it_had_not_made
     """The drain reads a provider once per pass, and a pass may run for
     minutes. An administrator who raises the provider's exposure after the
     first send must not see the rest of the queue go out under the old one
-    (beta 1 gate 6, 2026-10-07)."""
+    (2026-10-07)."""
     from noctornal_api import lookups, providers
     w = _queued(conn)
     svc = w.service(conn)

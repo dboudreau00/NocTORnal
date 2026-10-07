@@ -79,7 +79,7 @@ GUARDED_TABLES = {
 #: The longest an act may wait to start, in seconds: persona_acts.MAX_TTL_S,
 #: which test_persona_act_queue_pg holds equal. The window CHECK caps
 #: expires_at by it from requested_at, because the request role writes both
-#: (verify:g38, 2026-10-03: an INSERT could otherwise ask for an act that
+#: (2026-10-03: an INSERT could otherwise ask for an act that
 #: never expires; the collector's claim caps requested_at by it too).
 MAX_ACT_WINDOW_S = 3600
 
@@ -88,7 +88,7 @@ _ACTOR = "(SELECT iam.rls_actor())"
 
 #: The read and enqueue policies, frozen text.
 POLICY_SELECT = f"requested_by = {_ACTOR} AND classification <= {_CLR}"
-#: A fresh act only (verify:g38, 2026-10-03): PENDING, never claimed, never
+#: A fresh act only (2026-10-03): PENDING, never claimed, never
 #: attempted, no outcome. The request role writes the row, so the columns
 #: the collector owns are pinned to what an unclaimed act holds.
 POLICY_INSERT = (f"requested_by = {_ACTOR} AND classification <= {_CLR} "

@@ -585,7 +585,7 @@ def test_marking_a_member_chat_needs_a_fresh_second_factor(conn, api, world):
                         (ch["source"],)).fetchone()[0] == "PUBLIC_READ"
 
 
-# --- F43: a chat filed under a compartment (g40 verify major 5b, 2026-10-03) ----
+# --- F43: a chat filed under a compartment (2026-10-03) ----
 
 def test_a_chat_filed_under_a_compartment_is_its_holders_to_create_act_on_and_stop(
         conn, api, world):

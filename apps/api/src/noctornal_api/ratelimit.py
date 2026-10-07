@@ -693,7 +693,7 @@ LIMITS: dict[str, Limit] = {
     # pairs, 5,000 tie directions) on the build host with every core busy, 0.3 to 1.5 s
     # for a view counted as present (rege.py's REGE_MAX_PAIRS has the
     # measurements; the first calibration said 2.1 s for a view that took 7.5
-    # to 8.3, g34 review item 1). At this quota one user can queue about 21 s
+    # to 8.3). At this quota one user can queue about 21 s
     # of CPU on the one API process in five minutes, 8 s of it in a burst of
     # four. CONCOR's numbers and its own bucket, so the second role card
     # cannot spend the first's, and closed when the backend cannot count.

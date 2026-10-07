@@ -221,7 +221,7 @@ def install_error_handlers(app) -> None:
     @app.exception_handler(ExhibitUnavailable)
     async def _exhibit_unavailable(_: Request, exc: Exception):
         # Retention destroyed the bytes, or is destroying them now: a plain
-        # answer, and never a tamper alarm (g44-verify-destroyed-exhibit,
+        # answer, and never a tamper alarm (verify-destroyed-exhibit,
         # 2026-10-03). The sentence is fixed text, not the exception's cause.
         return problem_response(409, "Exhibit unavailable", str(exc))
 
@@ -270,7 +270,7 @@ def install_error_handlers(app) -> None:
 
     @app.exception_handler(UnicodeEncodeError)
     async def _unencodable_text(request: Request, exc: UnicodeEncodeError):
-        """Text no UTF-8 encoder will take (Beta 1 verification, G1): a lone
+        """Text no UTF-8 encoder will take (2026-10-07): a lone
         surrogate in a string the caller sent, which the driver refuses
         before a statement leaves the process. The caller's input, so a 422
         and not a 500 with a logged traceback. `body_ceiling.py` refuses the

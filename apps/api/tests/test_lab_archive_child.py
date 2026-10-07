@@ -356,7 +356,7 @@ def test_bytes_skipped_over_the_member_cap_count_against_the_total():
     assert [m["path"] for m in report["members"]] == ["tail.bin"]
 
 
-# --- members a reader would never have seen (beta 1 gate 6, 2026-10-07) -------
+# --- members a reader would never have seen (2026-10-07) -------
 #
 # Each of these left members of the archive unexpanded and unscreened with
 # nothing refused, so the archive's card said every member was compared.
@@ -557,8 +557,8 @@ def test_a_child_over_the_wall_clock_is_killed(tmp_path, settings, analysis, mon
     monkeypatch.setattr(lab_archive, "wall_s", lambda *_a, **_k: 1.5)
     out = lab_archive._clean(lab_archive._expand_child(b"PK", settings, analysis),
                              settings)
-    # Names the setting that bounded it and its value (g40 verify major 9,
-    # 2026-10-03), not the generic static-triage sentence.
+    # Names the setting that bounded it and its value (2026-10-03), not the generic
+    # static-triage sentence.
     assert out.failure != lab_triage.CHILD_FAILURES["timeout"]
     assert lab_archive.WALL_ENV in out.failure
     assert f"{settings.wall_s} seconds" in out.failure
@@ -642,7 +642,7 @@ def test_the_settings_have_one_reader_and_production_refuses_a_problem():
 
 
 def test_the_tree_cap_is_one_setting_with_a_default_and_never_under_the_archive_cap():
-    """Beta 1 verification, group F3: the caps were per archive, so one 4 MB
+    """2026-10-07: the caps were per archive, so one 4 MB
     upload at depth 2 made about 40,200 samples. A cap over the whole tree is
     the roof, 1000 unless set, and never lower than one archive may hold."""
     s, problem = lab_archive.archive_settings({})

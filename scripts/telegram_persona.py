@@ -253,7 +253,7 @@ def _clearance(conn, user_id) -> str:
 def _held(conn, user_id) -> frozenset:
     """The operator's own compartments: a persona bound to a source filed
     under a key they do not hold is as missing to them as one above their
-    ceiling (F43; g40 verify major 5, 2026-10-03)."""
+    ceiling (F43; 2026-10-03)."""
     from noctornal_api.http.deps import user_ceiling
 
     return user_ceiling(conn, user_id)[1]
@@ -491,7 +491,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     # The boundary above does nothing outside production, so the ring is
     # read here too, everywhere, before anybody is asked to sign in
-    # (verify:g38, 2026-10-03): without NOCTORNAL_PERSONA_KEK a development
+    # (2026-10-03): without NOCTORNAL_PERSONA_KEK a development
     # machine upgraded without its launcher used to take the whole Telegram
     # login, burn a code, and only then fail storing the session with a
     # traceback. All three commands open or seal a session with this key.

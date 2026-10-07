@@ -202,7 +202,7 @@ def test_a_verdict_is_confirmed_and_carries_a_note():
 
 
 def test_a_live_grant_offers_no_verdict():
-    """Final review U2, 2026-09-23: the server refuses a verdict on a live
+    """2026-09-23: the server refuses a verdict on a live
     grant, so the card must not offer one; it offers End it now, and the
     live branch returns before any verdict button is built."""
     card = _code(_fn("glassRow"))
@@ -220,7 +220,7 @@ def _js_string(expr: str) -> str:
 
 
 def test_every_glass_text_counts_what_the_server_counts():
-    """Final review U19, 2026-09-23: the invoke pane and the cards said
+    """2026-09-23: the invoke pane and the cards said
     "each exhibit it opens" while captures, messages and entity changes
     were counted too. One constant, word for word the server's."""
     js = _js()
@@ -238,7 +238,7 @@ def test_every_glass_text_counts_what_the_server_counts():
 
 
 def test_the_roster_says_when_emergency_access_ends():
-    """Final review U22, 2026-09-23: the server sends the end of the grant
+    """2026-09-23: the server sends the end of the grant
     a colleague opens the case through; the Share panel shows it."""
     assert "u.emergency_access_until" in _fn("shareRow")
     cases = (SRC / "http" / "routers" / "cases.py").read_text(encoding="utf-8")
@@ -246,7 +246,7 @@ def test_the_roster_says_when_emergency_access_ends():
 
 
 def test_the_officer_view_is_named_for_both_its_queues():
-    """Final review U3, 2026-09-23: an officer-only account's view holds
+    """2026-09-23: an officer-only account's view holds
     the break-glass queue and the preserved-sample authorisations."""
     name = _fn("adminViewName")
     assert "'Oversight'" in name and "'Break-glass review'" not in name

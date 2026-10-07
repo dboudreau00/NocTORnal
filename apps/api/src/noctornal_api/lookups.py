@@ -849,7 +849,7 @@ class LookupService:
         # The clock is read once the provider is locked: read before it, a
         # reservation that waited on the lock counted the windows up to a
         # moment earlier than the attempt the holder had just written, missed
-        # it, and sent past a full quota (beta 1 gate 6, 2026-10-07).
+        # it, and sent past a full quota (2026-10-07).
         now = now or self._c.execute("SELECT clock_timestamp()").fetchone()[0]
         if provider.cooldown_until and provider.cooldown_until > now:
             raise CoolingDown("cooling_down", "The provider asked to slow down; it is "
@@ -2073,7 +2073,7 @@ def _drain_one(conn, svc: LookupService, lookup_id: UUID, provider, *,
     # The provider was read once for the pass, and a pass may run for minutes:
     # an exposure raised, a provider disabled or a lookup cancelled since then
     # is read again here, under the locks the reservation takes, so nothing is
-    # sent on a stale reading (beta 1 gate 6, 2026-10-07).
+    # sent on a stale reading (2026-10-07).
     live = conn.execute(
         """SELECT l.state, p.enabled AND p.retired_at IS NULL, p.exposure_level::text
              FROM ingest.lookup l JOIN ingest.provider p ON p.id = l.provider_id

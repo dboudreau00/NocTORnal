@@ -89,7 +89,7 @@ def test_the_gate_reads_a_record_and_a_batch_as_facts():
 
 
 def test_the_selector_hit_notice_is_raised_from_the_scoring_pass_alone():
-    """g31 verification, 2026-10-02: the notice reads the record and its
+    """2026-10-02: the notice reads the record and its
     case on whatever connection it is handed, and only the INGEST one
     `score_records` opens sees them for a scorer off the case. So it is
     called from `_score_records` and from nowhere else."""
@@ -118,7 +118,7 @@ def test_a_write_that_changed_no_row_is_refused():
 
 
 def test_a_correction_decides_the_expiry_in_its_statement_and_the_console_says_so():
-    """g31 verification 2 (2026-10-03): the correction writes the greater of
+    """2026-10-03: the correction writes the greater of
     the stored expiry and its rule's, in the statement, and leaves a NULL one
     NULL (greatest() skips NULL and would date the record); the console must
     not print 'The expiry stays not recorded' for a record with none."""

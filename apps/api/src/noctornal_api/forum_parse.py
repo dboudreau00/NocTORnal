@@ -1307,8 +1307,8 @@ _LOGOUT_KEY = re.compile(r"(?:[?&](?:amp;)?logoutkey=)([A-Za-z0-9]{1,64})")
 #: Where other people's words live on each platform's pages: a post and its
 #: author block, a signature, a thread title and its preview in a listing, a
 #: profile's blurb. The session reader decides what a page says about the
-#: persona's sign-in from the board's own chrome ONLY (g40 verify major 7,
-#: 2026-10-03): a post that reads "my password has expired", mentions a
+#: persona's sign-in from the board's own chrome ONLY (2026-10-03): a post that reads "my
+#: password has expired", mentions a
 #: CAPTCHA or an authenticator app, or links to /logout/ was making a
 #: signed-in page read as a forced password change and a guest page read as a
 #: signed-in one (a dead session then passed the probe and the run was

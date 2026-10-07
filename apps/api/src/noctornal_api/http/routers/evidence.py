@@ -109,7 +109,7 @@ def _authorize_exhibit(
 
     An exhibit above the caller's labels answers as a missing one, the
     same 404 and sentence (`element_gate.authorize_element`, http_ui-016):
-    it answered the gate's 403 until the Beta 1 authorization gate
+    it answered the gate's 403 until 2026-10-07
     (2026-10-07), so a leaked id told an exhibit the caller may not see
     from one that does not exist. The AUTHZ_DENIED row is still written.
     """
