@@ -99,7 +99,12 @@ MEMBER_ENV = "NOCTORNAL_ARCHIVE_MAX_MEMBER_BYTES"
 RATIO_ENV = "NOCTORNAL_ARCHIVE_MAX_RATIO"
 DEPTH_ENV = "NOCTORNAL_ARCHIVE_MAX_DEPTH"
 WALL_ENV = "NOCTORNAL_ARCHIVE_WALL_S"
-SETTINGS_ENV = (MEMBERS_ENV, TOTAL_ENV, MEMBER_ENV, RATIO_ENV, DEPTH_ENV, WALL_ENV)
+#: The members of a whole archive tree, the root excluded (beta 1
+#: verification, 2026-10-07): MEMBERS_ENV bounds one archive, and depth 2
+#: expands two levels, so one small upload made about 200 + 200 x 200 samples.
+TREE_ENV = "NOCTORNAL_ARCHIVE_MAX_TREE_MEMBERS"
+SETTINGS_ENV = (MEMBERS_ENV, TOTAL_ENV, MEMBER_ENV, RATIO_ENV, DEPTH_ENV, WALL_ENV,
+                TREE_ENV)
 
 DEFAULT_MEMBERS = 200
 DEFAULT_TOTAL = 256 * MIB
@@ -107,6 +112,7 @@ DEFAULT_MEMBER = 64 * MIB
 DEFAULT_RATIO = 100
 DEFAULT_DEPTH = 2
 DEFAULT_WALL_S = 60
+DEFAULT_TREE_MEMBERS = 1000
 
 
 @dataclass(frozen=True)
@@ -117,6 +123,8 @@ class ArchiveSettings:
     max_ratio: int
     max_depth: int
     wall_s: int
+    #: Last, and defaulted, so a settings value built without it still reads.
+    max_tree_members: int = DEFAULT_TREE_MEMBERS
 
 
 def _size(env, name: str) -> tuple[int | None, str | None]:
@@ -190,7 +198,17 @@ def archive_settings(env=None) -> tuple[ArchiveSettings | None, str | None]:
     wall, problem = _whole(env, WALL_ENV, 10, 600, DEFAULT_WALL_S, "of seconds")
     if problem:
         return None, problem
-    settings = ArchiveSettings(members, total, member, ratio, depth, wall)
+    # Unset, the roof is the default or the archive cap, whichever is higher,
+    # so a deployment that raised MEMBERS_ENV keeps a roof it can reach. Set
+    # under one archive's cap it could never be reached: refused, by name.
+    tree, problem = _whole(env, TREE_ENV, 1, 100_000,
+                           max(DEFAULT_TREE_MEMBERS, members), "of members")
+    if problem:
+        return None, problem
+    if tree < members:
+        return None, (f"{TREE_ENV} is below {MEMBERS_ENV}, so an archive "
+                      f"within its own cap could never be expanded")
+    settings = ArchiveSettings(members, total, member, ratio, depth, wall, tree)
     if stdout_cap(settings) > analysis_runner.MAX_OUTPUT_BYTES:
         # The isolated worker refuses a request whose output cap is above
         # its own ceiling, and a refusal is read as the sandbox's state:
@@ -216,7 +234,7 @@ def limits_words(settings: ArchiveSettings) -> dict:
             "total_bytes": settings.max_total_bytes,
             "member_bytes": settings.max_member_bytes,
             "ratio": settings.max_ratio, "depth": settings.max_depth,
-            "wall_s": settings.wall_s}
+            "wall_s": settings.wall_s, "tree_members": settings.max_tree_members}
 
 
 def wall_s(settings: ArchiveSettings | None = None) -> float:
@@ -247,6 +265,11 @@ NOT_ARCHIVE_REASON = "not an archive of a kind this build expands"
 DEPTH_REASON = ("nested {depth} levels deep, at the {cap} levels "
                 f"{DEPTH_ENV} allows; its members were not expanded")
 ALREADY_REASON = "already expanded; its members are child samples"
+#: A whole archive refused because its tree would pass the one cap over every
+#: level: nothing of it is stored, and the numbers are named.
+TREE_SENTENCE = ("its members would take the archive tree to {total} samples, "
+                 "over the {cap} that " + TREE_ENV + " allows ({held} are held "
+                 "already and {new} would be added); nothing was expanded")
 STOPPED_REASON = ("a member matched a prohibited-content hash list; the "
                   "archive and every member stored were isolated, and the "
                   "members after it were not stored")
@@ -926,6 +949,34 @@ def _expand(conn, storage, c, data: bytes, analysis,
         _record(conn, svc, c, findings,
                 {"status": "skipped", "reason": expansion.refusal})
         return findings
+    # Members an interrupted run of this expansion already stored (major 2):
+    # kept as they are, not submitted a second time.
+    have = {r[0]: (r[1], bytes(r[2])) for r in conn.execute(
+        "SELECT archive_path, id, sha256 FROM lab.sample "
+        "WHERE parent_sample_id = %s", (c.sample_id,)).fetchall()}
+    # One roof over the whole tree, every level of it (beta 1 verification,
+    # 2026-10-07): the per-archive cap alone let a small upload make
+    # thousands of samples, each with an encrypted object and a triage run.
+    # Only what this run has still to store is counted; a duplicate it will
+    # find is counted too, which errs toward refusing. Two archives of one
+    # tree expanded in the same moment by two processes may each pass this
+    # read, by at most one archive's cap each (docs/17).
+    held_now = len(tree_ids(conn, root_of(conn, c.sample_id))) - 1
+    new = sum(1 for m in expansion.members
+              if (have.get(m.path) or (None, None))[1]
+              != hashlib.sha256(m.data).digest())
+    if new and held_now + new > settings.max_tree_members:
+        reason = TREE_SENTENCE.format(total=held_now + new,
+                                      cap=settings.max_tree_members,
+                                      held=held_now, new=new)
+        findings = {"family": expansion.family, "limits": limits,
+                    "refusal": reason, "members": [],
+                    "refused": [{"path": r["path"], "reason": r["reason"]}
+                                for r in expansion.refused],
+                    "counts": {**expansion.counts, "stored": 0}, "depth": depth,
+                    "timing_ms": timing}
+        _record(conn, svc, c, findings, {"status": "skipped", "reason": reason})
+        return findings
     stored: list[dict] = []
     refused = [{"path": r["path"], "reason": r["reason"]} for r in expansion.refused]
     # Entries refused with bytes behind them were not compared by anything;
@@ -935,11 +986,6 @@ def _expand(conn, storage, c, data: bytes, analysis,
     unscreened = sum(1 for r in expansion.refused
                      if r["code"] not in CONTENT_FREE_REFUSALS)
     stopped: tuple | None = None
-    # Members an interrupted run of this expansion already stored (major 2):
-    # kept as they are, not submitted a second time.
-    have = {r[0]: (r[1], bytes(r[2])) for r in conn.execute(
-        "SELECT archive_path, id, sha256 FROM lab.sample "
-        "WHERE parent_sample_id = %s", (c.sample_id,)).fetchall()}
     for i, m in enumerate(expansion.members):
         prior = have.get(m.path)
         if prior is not None and prior[1] == hashlib.sha256(m.data).digest():
@@ -1115,7 +1161,8 @@ __all__ = [
     "ARCHIVE_SENTENCES", "ARCHIVE_TOOL", "ArchiveSettings", "CHILD_ARGV",
     "CHILD_KIND", "DEPTH_ENV", "EXPANDABLE", "MEMBERS_ENV", "MEMBER_ENV",
     "MEMBER_SENTENCES", "PENDING_REASON", "RATIO_ENV", "SETTINGS_ENV",
-    "TOTAL_ENV", "TREE_TRIGGER", "UNSUPPORTED", "WALL_ENV",
+    "TOTAL_ENV", "TREE_ENV", "TREE_SENTENCE", "TREE_TRIGGER", "UNSUPPORTED",
+    "WALL_ENV",
     "archive_settings", "complete_isolations", "depth_of",
     "expand_after_triage", "isolate_tree",
     "limits_words", "root_of", "settings_or_default", "tree_for", "tree_ids",

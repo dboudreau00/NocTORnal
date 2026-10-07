@@ -393,6 +393,91 @@ def test_a_whole_archive_refusal_names_its_limit_and_stores_nothing(conn, store,
     assert findings["limits"]["members"] == 2
 
 
+def test_a_tree_is_held_to_one_cap_not_one_per_archive(conn, store, monkeypatch):
+    """Beta 1 verification, group F3. The caps were per archive and depth 2
+    expands two levels, so one upload could make (cap + cap x cap) samples,
+    each with an encrypted object and a queued triage run. The whole tree,
+    root excluded, is now held to NOCTORNAL_ARCHIVE_MAX_TREE_MEMBERS: an
+    archive that would pass it is refused whole, by name, with the count, and
+    nothing of it is stored."""
+    from noctornal_api import lab_archive
+    monkeypatch.setenv("NOCTORNAL_ARCHIVE_MAX_MEMBERS", "6")
+    monkeypatch.setenv("NOCTORNAL_ARCHIVE_MAX_TREE_MEMBERS", "8")
+    owner = make_user(conn, PREFIX, roles=("CASE_OWNER",))
+    inner_a = zip_of([(f"a{i}.exe", member_bytes(f"a{i}")) for i in range(2)])
+    inner_b = zip_of([(f"b{i}.exe", member_bytes(f"b{i}")) for i in range(2)])
+    outer = _submit(conn, store, owner, zip_of(
+        [("inner_a.zip", inner_a), ("inner_b.zip", inner_b)]
+        + [(f"p{i}.exe", member_bytes(f"p{i}")) for i in range(4)]))
+    _run_parent(conn, store, outer)
+    rows = {r[1]: r for r in _members(conn, outer.id)}
+    assert len(rows) == 6  # the tree holds 6 of its 8
+    for name in ("inner_a.zip", "inner_b.zip"):
+        assert _members(conn, rows[name][0]) == []
+
+    def expand(name):
+        run = conn.execute("SELECT id FROM lab.static_run WHERE sample_id = %s "
+                           "AND status = 'QUEUED'", (rows[name][0],)).fetchone()[0]
+        assert drain(conn, store, run_id=run) == ["DONE"]
+
+    expand("inner_a.zip")
+    assert [r[1] for r in _members(conn, rows["inner_a.zip"][0])] == ["a0.exe", "a1.exe"]
+    assert _gap(conn, rows["inner_a.zip"][0]) is None  # 8 of 8: it fits exactly
+    # The next archive would take the tree to 10 of 8.
+    expand("inner_b.zip")
+    assert _members(conn, rows["inner_b.zip"][0]) == []
+    gap = _gap(conn, rows["inner_b.zip"][0])
+    assert gap["status"] == "skipped"
+    assert "NOCTORNAL_ARCHIVE_MAX_TREE_MEMBERS" in gap["reason"]
+    assert all(n in gap["reason"] for n in ("10", "8", "2"))
+    assert "nothing was expanded" in gap["reason"]
+    findings = _finding(conn, rows["inner_b.zip"][0])[0]
+    assert findings["refusal"] == gap["reason"] and findings["members"] == []
+    assert findings["counts"]["stored"] == 0
+    assert findings["limits"]["tree_members"] == 8
+    # Every sample of the tree is still the one root's: 6 + 2, and no more.
+    assert len(lab_archive.tree_ids(conn, outer.id)) == 1 + 8
+    assert conn.execute("SELECT count(*) FROM lab.sample WHERE sha256 = %s",
+                        (hashlib.sha256(
+                            zipfile.ZipFile(io.BytesIO(inner_b)).read("b0.exe")
+                        ).digest(),)).fetchone()[0] == 0
+
+
+def test_a_resumed_expansion_counts_only_the_members_it_has_still_to_store(
+        conn, store, monkeypatch):
+    """An expansion an earlier run left half done (two of five members
+    stored) is resumed by the next run. Its own stored members are already
+    in the tree: they are not counted again, or a tree of exactly its cap
+    could never be finished."""
+    from noctornal_api import lab_archive, lab_triage
+    from noctornal_api.samples import SampleService
+    monkeypatch.setenv("NOCTORNAL_ARCHIVE_MAX_MEMBERS", "5")
+    monkeypatch.setenv("NOCTORNAL_ARCHIVE_MAX_TREE_MEMBERS", "5")
+    owner = make_user(conn, PREFIX, roles=("CASE_OWNER",))
+    parent = _submit(conn, store, owner, zip_of(
+        [(f"m{i}.exe", member_bytes(f"t{i}")) for i in range(5)]))
+    real = SampleService.submit
+    calls = {"n": 0}
+
+    def flaky(self, data, **kw):
+        if kw.get("parent_sample_id") is not None:
+            calls["n"] += 1
+            if calls["n"] == 3:
+                raise RuntimeError("object store unavailable")
+        return real(self, data, **kw)
+
+    monkeypatch.setattr(SampleService, "submit", flaky)
+    _run_parent(conn, store, parent)
+    assert [r[1] for r in _members(conn, parent.id)] == ["m0.exe", "m1.exe"]
+    monkeypatch.setattr(SampleService, "submit", real)
+    lab_triage.enqueue(conn, parent.id, trigger="ON_DEMAND", requested_by=owner)
+    _run_parent(conn, store, parent)
+    assert len(_members(conn, parent.id)) == 5
+    findings = _finding(conn, parent.id)[0]
+    assert findings["refusal"] is None and findings["counts"]["stored"] == 5
+    assert len(lab_archive.tree_ids(conn, parent.id)) == 1 + 5
+
+
 def test_the_archives_own_legal_hold_reaches_its_members(conn, store):
     owner = make_user(conn, PREFIX, roles=("CASE_OWNER",))
     parent = _submit(conn, store, owner, zip_of([("a.exe", member_bytes("a"))]))

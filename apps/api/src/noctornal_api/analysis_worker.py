@@ -224,6 +224,9 @@ KIND_ARGV: dict[str, list[str]] = {
     # path, so the worker's tmpfs of one MiB and its read-only root are all
     # it needs.
     "lab_archive_child": [sys.executable, "-m", "noctornal_api.lab_archive_child"],
+    # A watch's regular expressions (watch_regex): text in, one boolean per
+    # text out, no path, no network.
+    "watch_regex": [sys.executable, "-m", "noctornal_api.watch_regex"],
 }
 
 

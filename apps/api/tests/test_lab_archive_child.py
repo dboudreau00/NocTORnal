@@ -548,6 +548,41 @@ def test_the_settings_have_one_reader_and_production_refuses_a_problem():
                for p in problems), problems
 
 
+def test_the_tree_cap_is_one_setting_with_a_default_and_never_under_the_archive_cap():
+    """Beta 1 verification, group F3: the caps were per archive, so one 4 MB
+    upload at depth 2 made about 40,200 samples. A cap over the whole tree is
+    the roof, 1000 unless set, and never lower than one archive may hold."""
+    s, problem = lab_archive.archive_settings({})
+    assert problem is None and s.max_tree_members == 1000
+    s, problem = lab_archive.archive_settings({lab_archive.TREE_ENV: "50",
+                                               lab_archive.MEMBERS_ENV: "20"})
+    assert problem is None and s.max_tree_members == 50
+    # A deployment that raised the archive cap above the default roof keeps
+    # a roof it can use; nothing refuses it at boot for a setting it never made.
+    s, problem = lab_archive.archive_settings({lab_archive.MEMBERS_ENV: "3000"})
+    assert problem is None and s.max_tree_members == 3000
+    for value in ("0", "many", "-1", "1000001", "1.5"):
+        _s, problem = lab_archive.archive_settings({lab_archive.TREE_ENV: value})
+        assert problem and lab_archive.TREE_ENV in problem
+        assert "many" not in problem  # the problem names the variable, not its value
+    # Set under the one-archive cap, it could never be reached: refused, by name.
+    _s, problem = lab_archive.archive_settings({lab_archive.TREE_ENV: "100"})
+    assert problem and lab_archive.TREE_ENV in problem and lab_archive.MEMBERS_ENV in problem
+    env = {"NOCTORNAL_ENV": "production", lab_archive.TREE_ENV: "many"}
+    from noctornal_api.config import verify_environment
+    assert any(lab_archive.TREE_ENV in p and "archive expansion" in p
+               for p in verify_environment(env))
+    assert lab_archive.limits_words(lab_archive.archive_settings({})[0])["tree_members"] == 1000
+
+
+def test_the_tree_sentence_names_its_limit_and_its_numbers():
+    text = lab_archive.TREE_SENTENCE.format(total=1100, cap=1000, held=900, new=200)
+    assert lab_archive.TREE_ENV in text
+    for number in ("1100", "1000", "900", "200"):
+        assert number in text
+    assert "\u2014" not in text and "\u2013" not in text and " -- " not in text
+
+
 def test_the_run_budget_counts_the_expansion_child():
     analysis = lab_triage.analysis_settings({})[0]
     assert lab_triage.run_worst_s(analysis, 0) == pytest.approx(

@@ -29,6 +29,10 @@ more is asked:
   memory only for the run, registered for redaction, never in a run row, a
   warning, a document or a response; cleared by a sign-out, and by every
   stop of the persona (`PersonaVault`);
+- a board that reflects the password or a session cookie back into a page
+  (a debug echo, a hostile board) does not get it stored: both are removed,
+  exactly, from every item's text, side data and raw markup while they are
+  still live secrets (`_scrub_item`, beta 1 verification, 2026-10-07);
 - the sign-in and the session travel over https, or over plain http to an
   onion address only (Tor encrypts that hop): a clearnet address that
   would carry the persona's password and cookie in clear is refused by
@@ -99,7 +103,7 @@ from noctornal_api.forum_adapters import (
     direct_reads_allowed,
     sandbox_sentence,
 )
-from noctornal_api.pinned_http import REDIRECT_CODES, secret_in_scope
+from noctornal_api.pinned_http import REDIRECT_CODES, scrub_live_secrets, secret_in_scope
 
 log = logging.getLogger("noctornal.forum_member")
 
@@ -435,6 +439,35 @@ class _WithCookies:
         return getattr(self._ctx, name)
 
 
+def _scrub_value(value):
+    """`value` with the live secrets removed from every string in it."""
+    if isinstance(value, str):
+        return scrub_live_secrets(value)
+    if isinstance(value, dict):
+        return {_scrub_value(k): _scrub_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_scrub_value(v) for v in value)
+    return value
+
+
+def _scrub_item(item) -> None:
+    """Remove the persona's password and session cookie from what the board
+    said, wherever an item keeps it: its text, its side data and its raw
+    markup. The ids and the address are built from integers by the adapter
+    and carry no board text. Only an exact secret is removed (never a word
+    that merely looks like one), so a post stays the post."""
+    item.title = _scrub_value(item.title)
+    item.body = _scrub_value(item.body)
+    item.author_handle = _scrub_value(item.author_handle)
+    item.meta = _scrub_value(item.meta)
+    item.raw = _scrub_value(item.raw)
+    if item.raw_html:
+        text = bytes(item.raw_html).decode("utf-8", "surrogateescape")
+        clean = scrub_live_secrets(text, markup=True)
+        if clean != text:
+            item.raw_html = clean.encode("utf-8", "surrogateescape")
+
+
 class _MemberWalk(_Walk):
     """The public walk over the member's view. A sign-in wall met during
     the walk is the board ending the session: the persona signs in once
@@ -478,6 +511,10 @@ class _MemberWalk(_Walk):
         persona = self.session.ctx.persona
         authority = getattr(persona, "authority", None)
         for item in result.items:
+            # While the password and the session are still live secrets: a
+            # board that reflects them into a page would otherwise have them
+            # stored as the post's text, its markup and its side rows.
+            _scrub_item(item)
             forum = item.meta.setdefault("forum", {})
             forum["provenance"] = PROVENANCE_MEMBER
             forum["persona_id"] = str(persona.persona_id)
