@@ -7,7 +7,7 @@ types, edge types, selector types, and the per-selector normalisers.
 src/noctornal_ontology/definition.py    THE definition (edit this)
 src/noctornal_ontology/normalisers.py   canonical matching forms (edit this)
 src/noctornal_ontology/generate.py      emits generated/ (never edit outputs)
-generated/ontology.ts                   TypeScript types for apps/web
+generated/ontology.ts                   TypeScript types (nothing in the tree uses them)
 generated/seed_ontology.sql             SQL seed (ontology tables only)
 ```
 
@@ -27,15 +27,17 @@ generated/seed_ontology.sql             SQL seed (ontology tables only)
   identifiers (Telegram @usernames, the 76-hex Tox ID, handles) are
   never `is_strong`.
 
-## Known normaliser limits (deliberate, revisit when the app layer lands)
+## Known normaliser limits (deliberate)
 
 - `e164`: cannot complete a bare national number to E.164 without a
-  country hint; full inference belongs to libphonenumber in the app.
+  country hint; full inference would take libphonenumber, which is not a
+  dependency.
 - `eip55`: canonical matching form is `0x` + lowercase hex. EIP-55
-  checksum *validation* needs keccak256 and belongs to the validator/UI
-  layer.
-- `punycode_lower`: stdlib IDNA (2003); UTS-46 edge cases (emoji
-  domains) fall back to lowercase Unicode.
+  checksum *validation* needs keccak256 and belongs to a validator layer,
+  which does not exist.
+- `punycode_lower`: IDNA2008/UTS-46 through the `idna` library; a label the
+  library refuses (emoji domains, for example) is kept as observed, in
+  lowercase.
 
 ## Tests
 

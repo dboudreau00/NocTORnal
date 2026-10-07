@@ -6,16 +6,11 @@
 > error model, the layout worker) and that one where it wants the shape of
 > the system as it stands.
 >
-> **Rewritten 2026-09-09.** The first version was the 2026-07 sketch:
-> three network trust zones, a message queue, an external authorisation
-> engine, a JavaScript-framework front end and a GPU-rendered sociogram.
-> None of it was built, the tree went a different way in its first week,
-> and the sketch stayed here describing a program that did not exist while
-> `ARCHITECTURE.md` described the one that did. An external review of
-> Alpha 4 found the two disagreeing on every point it checked. What was
-> superseded is named as such in the last section rather than deleted,
-> because `docs/00` records those decisions and a decision record should
-> not lose its history.
+> The 2026-07 sketch specified three network trust zones, a message queue, an
+> external authorisation engine, a JavaScript-framework front end and a
+> GPU-rendered sociogram. None of it was built as drawn. What the sketch said
+> and what shipped instead are named in the last section, because `docs/00`
+> records those decisions and a decision record should not lose its history.
 
 ## Topology
 
@@ -23,7 +18,7 @@ One API process. `noctornal_api.http.app:app` (FastAPI under uvicorn)
 serves the REST API under `/api/v1`, the analyst console under `/ui` and
 the `/api/v1/live` WebSocket, and runs the analytics, the notification
 drain and the polls of feeds no persona reads in-process. It talks to four
-services. Since 2026-10-02 a second process, the collector
+services. A second process, the collector
 (`scripts/collector.py`), holds the persona key and runs everything that
 needs a persona credential: the persona acts the API queues in
 `collect.persona_act` and the scheduled collection polls. Postgres is the
@@ -43,21 +38,20 @@ Development and Windows run persona acts inline in the API process
          │                │                 │                  │
    Postgres 16         Redis 7           MinIO            Mailpit (dev)
    + pgvector          rate-limit       object lock       SMTP sink
-   10 schemas,         meter (GCRA      evidence / raw /
-   58 revisions        in Lua), cache   samples buckets
+   10 schemas          meter (GCRA      evidence / raw /
+   built by Alembic    in Lua), cache   samples buckets
 ```
 
 **The collector is a second process, not a separate collection zone.** The
 2026-07 sketch put the collectors in their own network segment, holding
 persona credentials and no database credentials, so that a burnt persona
 could not become a route into the case file. The tree has the first half
-of that, built on 2026-10-02 (A collector process): the persona key,
-`NOCTORNAL_PERSONA_KEK`, is held by the collector service alone, and
-every other process that runs the application's code, and the egress proxy,
-refuses to start holding it. It does not
-have the second half. The collector reads `secrets.env` like every
-application service, so it also holds the TOTP key ring, the system
-role's DSN and the store credentials; the split is one way (docs/17).
+of that: the persona key, `NOCTORNAL_PERSONA_KEK`, is held by the collector
+service alone, and every other process that runs the application's code,
+and the egress proxy, refuses to start holding it. It does not have the
+second half. The collector reads `secrets.env` like every application
+service, so it also holds the TOTP key ring, the system role's DSN and the
+store credentials; the split is one way (docs/17).
 What is true, and what invariant 7 says:
 
 - persona credentials are envelope-encrypted at rest (AES-256-GCM,
@@ -86,9 +80,7 @@ What is true, and what invariant 7 says:
 The seam is `Adapter` returning `Item`s, never graph elements, with
 `CollectionService.run_once` its only caller. Everything that needs a
 persona credential crosses it in the collector; a feed no persona reads
-(an RSS source) is still polled by the API's own Poll now. Until
-2026-10-02 `docs/00` recorded the split as superseded (decision 9) and
-the vault ran in the API process.
+(an RSS source) is still polled by the API's own Poll now.
 
 ## Stack, with reasoning
 
@@ -247,11 +239,11 @@ decision lives. The names in the first column are the ones
 
 | Sketch (2026-07) | What is in the tree | Where recorded |
 |---|---|---|
-| Three trust zones; collectors with persona credentials and no database access | An API process and one collector process; the persona key is the collector's alone, but the collector also holds database credentials; invariant 7 reworded twice | decision 9 (superseded 2026-09-09, then built on 2026-10-02); docs/17 |
-| A NATS / Redis Streams queue between zones | No broker; persona acts queue in one Postgres table (`collect.persona_act`), everything else is called (`due_sources` / `run_once`) | NATS removed from compose 2026-07-26 (R13); the table, 2026-10-02 |
-| Arq or Celery workers for collection and analytics | No Arq or Celery; analytics synchronous, notifications by `dispatch_due()`; one collector service for everything that needs a persona credential | decision 30 (Arq/NATS marked removed there), decision 46; the collector, 2026-10-02 |
-| OpenFGA or SpiceDB for authorisation | The five-part gate in `security/access.py` over `iam.*` | decision 8 superseded; OpenFGA removed from compose 2026-07-26 (R13) |
+| Three trust zones; collectors with persona credentials and no database access | An API process and one collector process; the persona key is the collector's alone, but the collector also holds database credentials | decision 9 (superseded, then built as decision 174); docs/17 |
+| A NATS / Redis Streams queue between zones | No broker; persona acts queue in one Postgres table (`collect.persona_act`), everything else is called (`due_sources` / `run_once`) | NATS removed from compose (R13); decision 174 |
+| Arq or Celery workers for collection and analytics | No Arq or Celery; analytics synchronous, notifications by `dispatch_due()`; one collector service for everything that needs a persona credential | decision 30 (Arq/NATS marked removed there), decision 46; decision 174 |
+| OpenFGA or SpiceDB for authorisation | The five-part gate in `security/access.py` over `iam.*` | decision 8 superseded; OpenFGA removed from compose (R13) |
 | Next.js 15 / TypeScript / Tailwind front end | Vanilla HTML/CSS/JS, no build step, superseded before a line was written | decision 37, docs/14 U1 |
 | sigma.js + graphology (WebGL) sociogram | Canvas 2D + Barnes-Hut worker; sigma.js is not in the tree and never was | decision 37, docs/09 Phase 2 |
-| UUIDv7 app-side ids | `uuid4()` app-side, `gen_random_uuid()` in the database; `pg_uuidv7` not installed, superseded 2026-09-09 | `CONVENTIONS.md` |
+| UUIDv7 app-side ids | `uuid4()` app-side, `gen_random_uuid()` in the database; `pg_uuidv7` not installed, superseded | `CONVENTIONS.md` |
 | `apps/web`, `apps/collector`, `apps/processor`, `apps/analytics`, `packages/authz`, `packages/crypto` | Never created | this document |
