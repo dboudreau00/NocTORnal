@@ -79,6 +79,7 @@ def test_privilege_for_privilege_it_is_the_request_role_plus_the_iam_plane(conn)
     lockdown = _migration("0109")
     narrowed = _migration("0155")
     sealed = _migration("0143").RUNTIME_COLUMN_SELECTS
+    vocabulary = _migration("0172").RUNTIME_READ_ONLY_TABLES
     tables = [r[0] for r in conn.execute(
         """SELECT n.nspname || '.' || quote_ident(c.relname)
              FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -87,8 +88,11 @@ def test_privilege_for_privilege_it_is_the_request_role_plus_the_iam_plane(conn)
     assert len(tables) >= 100
     differ = {}
     for table in tables:
+        # 0172 (2026-10-07) closed the reference vocabulary to the request
+        # role only; the system role keeps what it held.
         read_only = (table.split(".", 1)[0] in lockdown.RUNTIME_READ_ONLY_SCHEMAS
-                     or table in lockdown.RUNTIME_READ_ONLY_TABLES)
+                     or table in lockdown.RUNTIME_READ_ONLY_TABLES
+                     or table in vocabulary)
         for priv in PRIVILEGES:
             worker = conn.execute("SELECT has_table_privilege(%s, %s, %s)",
                                   (s.WORKER_ROLE, table, priv)).fetchone()[0]

@@ -544,6 +544,8 @@ def test_a_case_compartment_added_after_queueing_keeps_the_summary_in(conn, svc)
     bob = _user(conn)
     case_id = _case(conn, alice)
     _raise(svc, alice, actor_id=bob, case_id=case_id, classification="AMBER")
+    conn.execute("INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+                 "ON CONFLICT (key) DO NOTHING", ("OPERATION-X", "OPERATION-X"))
     conn.execute('UPDATE core."case" SET compartments = %s WHERE id = %s',
                  (["OPERATION-X"], case_id))
     dispatch_due(conn, send_mail=lambda m: None)

@@ -521,6 +521,9 @@ def test_a_token_of_the_longest_allowed_shape_still_reaches_the_session_check(li
 # ---------------------------------------------------------------------------
 
 def _document(owner, *, classification="AMBER", keys=()):
+    for key in keys:
+        owner.execute("INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+                      "ON CONFLICT (key) DO NOTHING", (key, key))
     source = owner.execute(
         "INSERT INTO collect.source (kind, name, default_reliability, classification) "
         "VALUES ('PASTE'::collect.source_kind, %s, 'F', %s) RETURNING id",
