@@ -502,7 +502,10 @@ def run_local(header: dict, payloads: tuple = (), *, wall_s: float,
     if state["over"]:
         return ChildResult(False, failure="output_too_large",
                            returncode=proc.returncode)
-    if timed_out:
+    xcpu = getattr(signal, "SIGXCPU", None)
+    if timed_out or (xcpu is not None and proc.returncode == -xcpu):
+        # The child's own CPU-time limit ending it is a time limit as much as
+        # the wall clock is, never a crash (lab_static.apply_limits).
         return ChildResult(False, failure="timeout", returncode=proc.returncode)
     if proc.returncode != 0:
         return ChildResult(False, out, failure="crashed",

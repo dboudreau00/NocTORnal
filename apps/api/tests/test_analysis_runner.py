@@ -1692,6 +1692,26 @@ def test_the_application_reads_bytes_from_either_runner(monkeypatch, settings):
     assert result.ok and type(result.output) is bytes
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a CPU-time limit is POSIX's")
+def test_a_child_its_own_cpu_limit_stops_is_a_timeout_not_a_crash(tmp_path):
+    """A runaway child meets the CPU-time limit it set itself
+    (`lab_static.apply_limits`) before the wall clock. The kernel ends it
+    with SIGXCPU, which is the time limit it is, never a crash: a
+    catastrophic watch regex was told as a matcher that "stopped without an
+    answer" (2026-10-07). With the soft and hard limits equal the kernel
+    sends SIGKILL instead, which reads like any other kill."""
+    src = str(Path(ar.__file__).resolve().parents[1])
+    argv = _script(tmp_path, "spin.py",
+                   f"import sys\nsys.path.insert(0, {src!r})\n"
+                   "from noctornal_api import lab_static\n"
+                   "sys.stdin.buffer.readline()\n"
+                   "lab_static.apply_limits(1 << 30, 1)\n"
+                   "while True:\n    pass\n")
+    result = ar.run_local({"mode": "pe"}, (b"MZ",), wall_s=30, stdout_cap=1024, argv=argv)
+    assert result.failure == "timeout", result
+    assert result.returncode == -signal.SIGXCPU, result
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="a uid of its own is POSIX's")
 def test_a_child_of_a_uid_of_its_own_is_started_as_that_user_behind_the_launcher(
         tmp_path, monkeypatch):

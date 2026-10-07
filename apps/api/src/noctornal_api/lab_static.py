@@ -147,7 +147,13 @@ def apply_limits(memory_bytes: int, cpu_s: int) -> str:
         soft, hard = resource.getrlimit(which)
         if hard != resource.RLIM_INFINITY and value > hard:
             value = hard
-        resource.setrlimit(which, (value, value))
+        ceiling = value
+        if which == resource.RLIMIT_CPU and (hard == resource.RLIM_INFINITY or value < hard):
+            # One second of headroom: at the soft limit the kernel sends
+            # SIGXCPU, which the runner reads as the time limit; with the two
+            # equal it sends SIGKILL, which reads like any other kill.
+            ceiling = value + 1
+        resource.setrlimit(which, (value, ceiling))
     return kind
 
 
