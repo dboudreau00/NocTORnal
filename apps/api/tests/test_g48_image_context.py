@@ -255,6 +255,39 @@ def test_every_service_drops_all_capabilities_and_keeps_only_what_is_listed():
         assert "no-new-privileges:true" in service.get("security_opt", []), name
 
 
+def test_one_service_builds_the_application_image_and_none_pulls_it():
+    """Beta 1 deployment gate (2026-10-07): with a `build:` on every service
+    of the application image, Compose 2.40 on Docker 29's containerd image
+    store exported the one tag from several bake targets, and the first
+    `up -d --build` of a fresh host failed with `image ... already exists`.
+    One builder, and every other service of that image never pulls it (there
+    is no registry copy of a tag only this host builds)."""
+    services = _services()
+    builders = {name: s for name, s in services.items() if "build" in s}
+    assert set(builders) == {"migrate"}, sorted(builders)
+    assert builders["migrate"]["build"] == {"context": "../..", "dockerfile": "Dockerfile"}
+    assert builders["migrate"].get("pull_policy") == "missing"
+    image = builders["migrate"]["image"]
+    users = {name for name, s in services.items() if s.get("image") == image}
+    assert users == set(APP_ONLY) - {"postgres", "redis", "minio", "minio-init"} \
+        | {"egress-proxy", "analysis-worker"}, sorted(users)
+    for name in users - {"migrate"}:
+        assert services[name].get("pull_policy") == "never", name
+
+
+def test_every_container_log_is_bounded():
+    """Beta 1 deployment gate (2026-10-07): Docker's json-file driver keeps
+    a container's output without limit by default, and nothing on the host
+    set one, so a deployment left alone filled its disk with loop and slow
+    statement logs."""
+    for name, service in _services().items():
+        logging = service.get("logging") or {}
+        assert logging.get("driver") == "json-file", name
+        options = logging.get("options") or {}
+        assert re.fullmatch(r"\d+m", str(options.get("max-size", ""))), name
+        assert 1 <= int(options.get("max-file", 0)) <= 10, name
+
+
 def test_net_raw_is_in_no_service_the_internet_can_reach_first():
     caddy = _services()["caddy"]
     assert "NET_RAW" not in (caddy.get("cap_add") or [])
@@ -284,6 +317,18 @@ def _site_blocks() -> dict[str, str]:
     text = _text(CADDYFILE)
     return {m.group(1): m.group(2)
             for m in re.finditer(r"(?ms)^\{\$(NOCTORNAL_\w*HOSTNAME)\} \{\n(.*?)^\}", text)}
+
+
+def test_caddy_keeps_the_csrf_and_setup_tokens_out_of_its_log():
+    """Beta 1 deployment gate (2026-10-07): on a 502 Caddy logs the request's
+    headers, redacting Cookie and Authorization alone, so X-Csrf-Token and
+    X-Setup-Token reached `docker logs` verbatim. The global block's log
+    filter deletes both (shown against the pinned Caddy, 2.11.4)."""
+    text = _text(CADDYFILE)
+    glob = re.match(r"(?ms)^\{\n(.*?)^\}", text[text.index("\n{\n") + 1:]).group(1)
+    assert re.search(r"log \{\s*format filter \{\s*wrap json\s*fields \{", glob), glob
+    for header in ("X-Csrf-Token", "X-Setup-Token"):
+        assert re.search(rf"(?m)^\s*request>headers>{header} delete$", glob), header
 
 
 def test_both_hostnames_send_hsts_and_speak_tls_13_only():
@@ -320,7 +365,8 @@ _DIGEST = re.compile(r"^[a-z0-9./-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$")
 
 
 def test_every_image_the_production_stack_pulls_is_pinned_by_digest():
-    pulled = {name: s["image"] for name, s in _services().items() if "build" not in s}
+    pulled = {name: s["image"] for name, s in _services().items()
+              if "build" not in s and s.get("pull_policy") != "never"}
     assert set(pulled) == {"caddy", "postgres", "redis", "minio", "minio-init"}, pulled
     unpinned = {n: i for n, i in pulled.items() if not _DIGEST.match(i)}
     assert not unpinned, unpinned
@@ -548,6 +594,50 @@ def test_minio_init_still_fails_and_says_why_when_an_account_cannot_be_created(t
     assert done.returncode != 0, "set -e must still see a failed svcacct add"
     assert "<ERROR> stub refused the account." in done.stderr
     assert "buckets ready" not in done.stdout
+
+
+@pytest.mark.parametrize("name, value", [
+    ("SAMPLE_SECRET_KEY", "s" * 43),      # token_urlsafe(32), the README's recipe
+    ("SAMPLE_ACCESS_KEY", "a" * 21),
+    ("PRESERVE_SECRET_KEY", "p" * 7),
+    ("PRESERVE_ACCESS_KEY", "q" * 2),
+])
+def test_minio_init_names_a_service_account_key_minio_would_refuse(tmp_path, name, value):
+    """Beta 1 deployment gate (2026-10-07): MinIO takes a service account's
+    access key at 3 to 20 characters and its secret key at 8 to 40, and its
+    refusal named neither variable. minio-init stops before any account is
+    asked for, names the variable and its length, and never prints it."""
+    done = _run_minio_init(tmp_path, **{name: value})
+    assert done.returncode != 0
+    assert f"minio-init: {name} is {len(value)} characters" in done.stderr
+    assert "mc: stub stderr line" not in done.stderr, "no account was asked for"
+    assert value not in done.stdout + done.stderr
+    assert "buckets ready" not in done.stdout
+
+
+def test_minio_init_accepts_service_account_keys_at_minios_bounds(tmp_path):
+    done = _run_minio_init(tmp_path, SAMPLE_ACCESS_KEY="a" * 20, SAMPLE_SECRET_KEY="s" * 40,
+                           PRESERVE_ACCESS_KEY="q" * 3, PRESERVE_SECRET_KEY="p" * 8)
+    assert done.returncode == 0, done.stderr
+    assert "buckets ready" in done.stdout
+
+
+def test_the_readme_has_the_egress_files_written_before_the_first_up_in_the_image():
+    """Beta 1 deployment gate (2026-10-07): followed in order, the README
+    reached `up` with no egress files (the API refused, the proxy restarted in
+    a loop, `up` exited 1), and its `python scripts/egress_setup.py keygen`
+    and `preflight` ran on a host python with none of the application's
+    libraries. Step 1 names both files before step 4, and both commands run in
+    the image, preflight told the host's Compose version."""
+    text = _text(README)
+    step1 = text.split("## 1. Write the secrets files", 1)[1].split("## 4. Start it", 1)[0]
+    for name in ("egress-proxy.env", "egress-client.env", "collector.env"):
+        assert name in step1, name
+    assert "compose.yml build" in step1
+    keygen = [b for b in _readme_sh_blocks() if "egress_setup.py keygen" in b]
+    assert keygen and all("run --rm --no-deps -T api" in b for b in keygen)
+    assert "--compose-version \"$(docker compose version --short)\"" in keygen[0]
+    assert not re.search(r"(?m)^python3? scripts/egress_setup\.py", "\n".join(_readme_sh_blocks()))
 
 
 def test_every_svcacct_add_discards_its_stdout_and_keeps_stderr():

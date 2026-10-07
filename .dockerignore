@@ -156,6 +156,12 @@ CLAUDE.local.md
 **/CLAUDE.local.md
 **/.claude/
 
+# The API's test suite (Beta 1 deployment gate, 2026-10-07): 550 files and
+# 11 MB that no service runs, among them test keys with PRIVATE KEY blocks and
+# forum pages written to look like the hostile input they stand for. Nothing
+# under apps/api/src or scripts reads them; the suite runs from a checkout.
+apps/api/tests/
+
 # Build artefacts of a DIFFERENT distribution channel. `release/` is the
 # hand-installer path (install.sh / INSTALL.md), which a container
 # deployment does not use, and the packaged zip is a copy of the whole

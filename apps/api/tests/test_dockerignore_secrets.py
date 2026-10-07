@@ -334,6 +334,17 @@ def test_the_deny_list_never_eats_code_the_image_runs():
         assert not _excluded(needed, PATTERNS), needed
 
 
+def test_the_api_test_suite_never_reaches_the_image():
+    """Beta 1 deployment gate (2026-10-07): the image carried all of
+    apps/api/tests, PGP test keys with private blocks among them, into
+    every container of the deployment."""
+    for path in ("apps/api/tests/test_pgp_keys.py", "apps/api/tests/conftest.py",
+                 "apps/api/tests/fixtures/pgp/detached_data_crlf.txt",
+                 "apps/api/tests/data/fuzzy_vectors.json"):
+        assert _excluded(path, PATTERNS), path
+    assert not _excluded("apps/api/src/noctornal_api/fuzzyhash.py", PATTERNS)
+
+
 def test_the_persona_key_file_never_reaches_the_image():
     """The verify:g38 blocker by name: the API container must not hold the
     persona key on disk, whatever the file is called."""

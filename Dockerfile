@@ -38,7 +38,8 @@ FROM python:3.13-slim@sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb
 # Two known cases, both in opt-in extras (2026-09-24): pyaes, which
 # the telegram extra's Telethon needs, is published only as a pure-Python
 # sdist, so pip builds its wheel with setuptools and no compiler; and
-# yara-x needs glibc 2.28, which this bookworm base (glibc 2.36) has.
+# yara-x needs glibc 2.28, which this Debian 13 (trixie) base (glibc 2.41,
+# measured in the pinned digest on 2026-10-07) has.
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

@@ -571,3 +571,74 @@ def test_every_spelling_of_a_size_the_reader_accepts_is_accepted(value):
     env["NOCTORNAL_MAX_EVIDENCE_BYTES"] = value
     env["NOCTORNAL_MAX_SAMPLE_BYTES"] = value
     assert verify_environment(env) == []
+
+
+# --- an outbound switch and the processes that send nothing (2026-10-07) -------
+#
+# Beta 1 deployment gate: secrets.env.example says to turn outbound lookups
+# and the sandbox on in secrets.env, which the sample origin and the static
+# triage loop read too. Neither is given the egress proxy, and both refused
+# for want of one: the sample origin would not start and every triage pass
+# exited 2. They send nothing out; the processes that do keep the refusal.
+
+_SANDBOX = {
+    "NOCTORNAL_SANDBOX_PROVIDER": "capev2",
+    "NOCTORNAL_SANDBOX_URL": "https://cape.lab.example.gov:8000",
+    "NOCTORNAL_SANDBOX_TOKEN": "Hy6tPq2wZr",
+    "NOCTORNAL_SANDBOX_EXPOSURE": "NONE",
+    "NOCTORNAL_SANDBOX_CEILING": "AMBER",
+}
+_SWITCHES = [{"NOCTORNAL_OUTBOUND_LOOKUPS": "on"}, _SANDBOX]
+
+
+def _as_sample_origin(env: dict[str, str]) -> dict[str, str]:
+    """`env` as compose starts the sample-origin service: its public origin
+    is the sample origin, and the system role's DSN is blanked."""
+    env = dict(env, NOCTORNAL_SAMPLE_ORIGIN="https://samples.example.gov",
+               NOCTORNAL_PUBLIC_ORIGIN="https://samples.example.gov")
+    del env["NOCTORNAL_WORKER_DATABASE_URL"]
+    return env
+
+
+@pytest.mark.parametrize("switch", _SWITCHES)
+def test_an_outbound_switch_with_no_proxy_is_refused_where_it_would_send(switch):
+    _only(verify_environment({**_production(), **switch}), "NOCTORNAL_EGRESS_PROXY_URL")
+
+
+@pytest.mark.parametrize("switch", _SWITCHES)
+def test_the_sample_origin_is_not_refused_for_an_outbound_switch_it_never_sends(switch):
+    assert verify_environment(_as_sample_origin(_production())) == []
+    assert verify_environment({**_as_sample_origin(_production()), **switch}) == []
+
+
+@pytest.mark.parametrize("switch", _SWITCHES)
+def test_static_triage_is_not_refused_for_an_outbound_switch_it_never_sends(switch):
+    from pathlib import Path
+
+    from noctornal_api.config import refuse_unsafe_job_environment
+    env = {**_production(), **switch}
+    assert refuse_unsafe_job_environment("lab_triage", env, whole_environment=True,
+                                         outbound=False) == []
+    # The jobs that do send keep the refusal (sample_screen and
+    # sandbox_dispatch run beside the proxy, in lab-cron).
+    assert refuse_unsafe_job_environment("sandbox_dispatch", env, whole_environment=True)
+    script = Path(__file__).resolve().parents[3] / "scripts" / "lab_triage.py"
+    assert "outbound=False" in script.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("value, refused", [
+    ("false", True), (" ", True), ("TRUE", False), ("true", False), ("", False), (None, False),
+])
+def test_a_preservation_store_without_tls_is_refused(value, refused):
+    """Beta 1 deployment gate (2026-10-07): PRESERVE_SECURE overrides
+    SAMPLE_SECURE for the preservation bucket when it is set to anything
+    (samples.PreservationStorage), and nothing refused a value that turned
+    TLS off there."""
+    env = _production()
+    if value is not None:
+        env["PRESERVE_SECURE"] = value
+    problems = verify_environment(env)
+    if refused:
+        _only(problems, "PRESERVE_SECURE")
+    else:
+        assert problems == []

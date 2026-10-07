@@ -101,12 +101,42 @@ x-caddy-ip: &caddy_ip "172.31.243.10"
 x-egress-ip: &egress_ip "172.31.243.11"
 
 # --------------------------------------------------------------------------
+# Every container's log, bounded (Beta 1 deployment gate, 2026-10-07).
+#
+# Docker keeps what a container prints in a json-file per container, and
+# its default has no size limit: the loops print every few minutes, Postgres
+# logs every statement slower than 250 ms and Caddy every request, for as
+# long as the containers live. A host left alone fills its disk, and the
+# first service to notice is Postgres, which stops. 5 x 10 MiB a container
+# keeps days of the busiest log and caps the whole stack near 750 MiB. A
+# host that ships logs elsewhere (journald, a collector) changes the driver
+# here; `docker compose logs` reads json-file and local only. Merged into
+# every service; a test holds that none is without it.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+# --------------------------------------------------------------------------
 # Everything that runs the application image.
 #
-# All four services carry the build, not just one. Compose builds a given
-# image tag once and the rest hit the cache, and the alternative -- a build
-# on `api` alone -- makes the other three depend on `api` having been built
-# first, which is an ordering nothing in this file enforces.
+# ONE service builds it (`migrate`, below) and every other service runs the
+# tag it builds with `pull_policy: never` (Beta 1 deployment gate,
+# 2026-10-07). This used to put the build on every service, on the belief
+# that compose builds a given tag once and the rest hit the cache. On Docker
+# Engine 29 with its default containerd image store and Compose 2.40, which
+# builds through bake, each service with a `build:` is a target of its own
+# that exports the same tag, and the second export fails with `image
+# "noctornal-api:..." already exists`: the first `up -d --build` of a fresh
+# host stopped there, and a rerun failed or passed by the race. Compose
+# builds every image a command needs before it creates any container, so the
+# ordering a single build seems to need is not one: `up -d --build` builds
+# migrate's image and then starts every service on it. `pull_policy: never`
+# is what stops compose from asking Docker Hub for a `noctornal-api` image
+# that only this host builds. `docker compose run` of a service before the
+# first `up` therefore says "No such image"; build first (`docker compose
+# build`). apps/api/tests/test_g48_image_context.py holds the shape.
 #
 # The tag tracks apps/api/pyproject.toml's version, which is the ONE
 # declaration of it. Note that `up -d` reuses an existing local tag: after
@@ -128,13 +158,12 @@ x-egress-ip: &egress_ip "172.31.243.11"
 # that has not been proved under a tmpfs, so it is left as a stated gap
 # (infra/production/README.md, Hardening).
 x-noctornal-app: &noctornal-app
-  build:
-    context: ../..
-    dockerfile: Dockerfile
   image: noctornal-api:0.7.1
+  pull_policy: never
   env_file: [secrets.env]
   networks: [noctornal]
   restart: unless-stopped
+  logging: *logging
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
   volumes:
@@ -206,6 +235,7 @@ services:
   caddy:
     image: caddy:2-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
     restart: unless-stopped
+    logging: *logging
     env_file: [caddy.env]
     environment:
       <<: *no-owner-credential
@@ -255,6 +285,7 @@ services:
   postgres:
     image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
     restart: unless-stopped
+    logging: *logging
     networks: [noctornal]
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
@@ -404,6 +435,7 @@ services:
   redis:
     image: redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     restart: unless-stopped
+    logging: *logging
     networks: [noctornal]
     env_file: [secrets.env]
     environment:
@@ -584,6 +616,7 @@ services:
     # (docker buildx imagetools inspect on both names).
     image: ghcr.io/dboudreau00/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
     restart: unless-stopped
+    logging: *logging
     networks: [noctornal]
     env_file: [secrets.env]
     environment:
@@ -692,6 +725,13 @@ services:
   # without it `add` would fail on an existing key and, with `set -e`, take
   # the whole init container down on every restart.
   #
+  # MinIO takes a service account's access key at 3 to 20 characters and its
+  # secret key at 8 to 40 (measured against the pinned release on 2026-10-07,
+  # Beta 1 deployment gate). The README's password recipe, token_urlsafe(32),
+  # is 43 characters, and `svcacct add` refused it with a sentence naming
+  # neither variable, so minio-init exited 1 and nothing that waits on it
+  # started. `keylen` checks all four first, by name, before anything else.
+  #
   # ## the folded-scalar trap, and why this block is not folded
   #
   # The dev file writes this as `entrypoint: >`, a YAML FOLDED scalar that
@@ -769,6 +809,7 @@ services:
     environment:
       <<: *no-owner-credential
     restart: "no"
+    logging: *logging
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     volumes:
@@ -779,6 +820,18 @@ services:
       - -c
       - |
         set -e
+        keylen() {
+          if [ "$${#2}" -lt "$$3" ] || [ "$${#2}" -gt "$$4" ]; then
+            echo "minio-init: $$1 is $${#2} characters and MinIO takes $$3 to $$4 for a service account, so the account cannot be created. Choose another in secrets.env (infra/production/README.md, step 1)." >&2
+            return 1
+          fi
+        }
+        keylen SAMPLE_ACCESS_KEY "$${SAMPLE_ACCESS_KEY:-}" 3 20
+        keylen SAMPLE_SECRET_KEY "$${SAMPLE_SECRET_KEY:-}" 8 40
+        if [ -n "$${PRESERVE_ACCESS_KEY:-}" ]; then
+          keylen PRESERVE_ACCESS_KEY "$$PRESERVE_ACCESS_KEY" 3 20
+          keylen PRESERVE_SECRET_KEY "$${PRESERVE_SECRET_KEY:-}" 8 40
+        fi
         . /mc-alias.sh
         mc_setup
         attempts=0
@@ -861,8 +914,17 @@ services:
   #
   # The healthcheck is disabled because this image carries one for the HTTP
   # server (see the Dockerfile) and this container serves no HTTP.
+  #
+  # It is also the one service that BUILDS the application image (the note
+  # above x-noctornal-app says why only one); every other service runs the
+  # tag with `pull_policy: never`. `pull_policy: missing` puts back the
+  # anchor's `never` for this one: a missing image here is built.
   migrate:
     <<: *noctornal-app
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    pull_policy: missing
     env_file:
       - path: migrate.env
         required: false
@@ -1365,9 +1427,9 @@ services:
   # So, unlike every other application service, it does NOT merge
   # x-noctornal-app: that block carries secrets.env, the `noctornal`
   # network and the MinIO certificate, and this service must have none of
-  # them. It repeats the build and the image tag instead (one image, one
-  # dependency set; readiness refuses a worker whose parser versions differ
-  # from the API's).
+  # them. It repeats the image tag and `pull_policy: never` instead, and
+  # runs the image `migrate` builds (one image, one dependency set; readiness
+  # refuses a worker whose parser versions differ from the API's).
   #
   #   * No env_file, and an environment of its own settings only. The
   #     worker refuses to start holding any variable it cannot name, and
@@ -1433,11 +1495,10 @@ services:
   # a caller send more than 512 MiB, and a larger sample cap or a higher
   # concurrency multiplies the figures above, so raise mem_limit with them.
   analysis-worker:
-    build:
-      context: ../..
-      dockerfile: Dockerfile
     image: noctornal-api:0.7.1
+    pull_policy: never
     restart: unless-stopped
+    logging: *logging
     network_mode: none
     init: true
     ipc: none

@@ -128,6 +128,39 @@ def test_preflight_checks_the_compose_floor(tmp_path):
     assert any("could not be read" in p for p in setup.preflight(tmp_path, compose=lambda: None))
 
 
+def test_preflight_in_the_image_takes_the_hosts_compose_version(tmp_path):
+    """Beta 1 deployment gate (2026-10-07): a production host has no python
+    with this tree's dependencies, and inside the image there is no docker
+    to ask. The README runs preflight in the image and passes the host's
+    `docker compose version --short`, which the floor is still held to."""
+    def no_docker():
+        return None
+    _write_env_files(tmp_path)
+    code, text = _run(["preflight", "--dir", str(tmp_path), "--compose-version", "2.40.3+ds1"],
+                      compose=no_docker)
+    assert code == 0, text
+    code, text = _run(["preflight", "--dir", str(tmp_path), "--compose-version", "v2.20.2"],
+                      compose=no_docker)
+    assert code == 1 and "older than 2.24" in text
+    code, text = _run(["preflight", "--dir", str(tmp_path), "--compose-version", ""],
+                      compose=no_docker)
+    assert code == 1 and "could not be read" in text
+    code, text = _run(["preflight", "--dir", str(tmp_path)], compose=no_docker)
+    assert code == 1 and "could not be read" in text
+
+
+def test_keygen_names_every_service_that_reads_the_client_file():
+    from test_egress_topology import COMPOSE, Reader, _env_files
+    services = Reader(COMPOSE.read_text(encoding="utf-8")).document()["services"]
+    readers = {name for name, s in services.items()
+               if any(f == "egress-client.env" for f, _ in _env_files(s))}
+    assert readers == {"api", "cron", "collector", "lab-cron", "embed-pass"}
+    _code, text = _run(["keygen"])
+    line = next(x for x in text.splitlines() if "egress-client.env" in x)
+    for name in sorted(readers - {"collector"}) + ["the collector"]:
+        assert name in line, line
+
+
 def test_preflight_notices_a_public_key_from_another_pair(tmp_path):
     _write_env_files(tmp_path, {("egress-client.env", "NOCTORNAL_EGRESS_SEAL_PUBLIC"):
                                 es.old_seal_public()})

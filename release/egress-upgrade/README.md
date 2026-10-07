@@ -8,6 +8,16 @@ decides each connection by route and records it
 data. It needs keys, three small files, one database role and its routes,
 in this order.
 
+Every `python scripts/egress_setup.py ...` below needs the application's
+own libraries, which a host `python3` does not have, so it runs in the new
+image. Build that first (`git pull`, then `docker compose -p noctornal-prod
+-f infra/production/compose.yml build`) and put `docker compose -p
+noctornal-prod -f infra/production/compose.yml run --rm --no-deps api` in
+front of each command (`-T` as well for `keygen` and `role-sql`, whose
+output you copy). Preflight reads the files from the host and asks the
+host's Compose for its version, so it takes the longer form in
+`infra/production/README.md`, Keys and files.
+
 ## 0. Check Docker Compose
 
 ```sh

@@ -82,7 +82,7 @@ things (the two egress files are in [Egress](#egress-the-only-way-out)):
 
 | File | Read by | Holds |
 |---|---|---|
-| `secrets.env` | every service but Caddy, the migrate job and the egress proxy | everything below that a running process needs |
+| `secrets.env` | every service but Caddy, the migrate job, the egress proxy and the analysis worker | everything below that a running process needs |
 | `caddy.env` | Caddy alone | the two hostnames and the TLS mode |
 | `postgres-init.env` | postgres alone | the passwords initdb takes: the owner's `POSTGRES_PASSWORD`, the system role's, the egress role's |
 | `migrate.env` | the migrate job alone | `NOCTORNAL_MIGRATION_DATABASE_URL`, the owner's DSN |
@@ -118,6 +118,14 @@ DSN into a different, valid-looking one:
 ```sh
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
+
+That makes 43 characters, which is too long for the two MinIO service
+accounts `minio-init` creates. MinIO takes a service account's access key at
+3 to 20 characters and its secret key at 8 to 40, and `minio-init` refuses
+any other length by name, before it creates anything (and with it the API,
+which waits for it). For `SAMPLE_ACCESS_KEY` and `PRESERVE_ACCESS_KEY` use
+`secrets.token_hex(8)` (16 characters), and for `SAMPLE_SECRET_KEY` and
+`PRESERVE_SECRET_KEY` use `secrets.token_urlsafe(24)` (32 characters).
 
 **The TOTP key-encrypting key** is the one value with a shape requirement.
 It must be base64 that decodes to **exactly 32 bytes**. This is the method
@@ -174,11 +182,21 @@ access key, and it refuses a pair with one by name. A password from
 > `docker compose config` prints these files' contents, resolved into each
 > service's environment. Do not paste that output into a ticket.
 
-Write one more file before the first `up`: `collector.env`, which holds the
+Write three more files before the first `up`. `collector.env` holds the
 persona key and is read by the collector service alone (see
 [The collector](#the-collector-the-one-service-that-holds-the-persona-key)).
 Without it the collector refuses to start and **nothing is polled**, feeds
-no persona reads included.
+no persona reads included. `egress-proxy.env` and `egress-client.env` hold
+the egress keys ([Egress](#keys-and-files), which says how to make them).
+Without them the API refuses to start, naming the client and fingerprint
+keys, the egress proxy restarts in a loop, and cron, the collector, lab-cron
+and embed-pass, which wait for the proxy, never start: `up` itself exits 1
+with `dependency failed to start`. The keys are made by the application
+image, so build it first:
+
+```sh
+docker compose -p noctornal-prod -f infra/production/compose.yml build
+```
 
 ---
 
@@ -346,10 +364,33 @@ over someone's shoulder.
 
 `Pool overlaps with other one on this address space` means another Docker
 network on this host already holds `172.31.243.0/24` (or one of the egress
-networks, `172.31.244.0/24` to `172.31.246.0/24`). Pick a free /24 and
-change it in **two** places in `compose.yml`: the `networks:` block at the
-bottom and the `x-caddy-ip` alias at the top. They must agree. The second
-is the address uvicorn is told to trust for `X-Forwarded-For`.
+networks, `172.31.244.0/24` to `172.31.246.0/24`).
+
+`noctornal` (`172.31.243.0/24`) and `edge` (`172.31.244.0/24`) can move.
+Pick a free /24 and change every place in `compose.yml` that names the old
+one, all of them in the same edit:
+
+* the subnet in the `networks:` block at the bottom;
+* for `noctornal`, the `x-caddy-ip` and `x-egress-ip` addresses at the top
+  (the first is the address uvicorn is told to trust for `X-Forwarded-For`),
+  `NOCTORNAL_EGRESS_PROXY_URL` on api, cron, collector, lab-cron and
+  embed-pass, and `NOCTORNAL_EGRESS_LISTEN` on the egress proxy, each of
+  which repeats the egress address because a YAML alias cannot be spliced
+  into a string;
+* for either, `NOCTORNAL_EGRESS_INTERNAL_CIDRS` on those six services. It
+  names the deployment's own networks, which no route may reach. Left naming
+  the old subnet, it would guard a network that is no longer there and leave
+  the new one open to a route.
+
+`grep -n '172\.31\.243\.' infra/production/compose.yml` (or `244`) lists
+them; after the edit it should find nothing outside comments. A Compose
+override file of your own can carry the same changes instead, with `!override`
+on the `ports`, `networks` and `ipam` keys it replaces (Compose 2.24 or later).
+
+`exits` (`172.31.245.0/24`) and `models` (`172.31.246.0/24`) cannot be moved
+by editing this file: the code holds both (`egress_routes.EXITS_NETWORK` and
+`MODELS_NETWORK`), so a sidecar or a model server on a moved network is
+refused. Free those two on the host instead.
 
 ---
 
@@ -445,6 +486,16 @@ process is configured as the application origin and refuses every
 download". Both are correct. That pair of answers is the origin split
 working.
 
+Nobody can sign in at the sample hostname (its login route 404s, and the
+console's cookie belongs to the console's host), so ask it with a session as
+a bearer, `Authorization: Bearer <session>`, which `scripts/bootstrap.py
+session` mints from the server. Read only `sample_origin_configured` there.
+That process holds no system database role (S1), so every row that counts
+across the deployment, `security_officer_present` and `migrations_at_head`
+among them, fails with "this process has no system database connection",
+and `ready` is false. That is the role split working too; the console's
+register is the one that answers for the deployment.
+
 > The sample-origin process serves only the sample download, its preflight,
 > `/healthz` and that readiness endpoint. Everything else 404s there, on
 > purpose: the console, the login form and every case route must not exist
@@ -538,6 +589,28 @@ speaks TLS. That one is configuration rather than a decision, and
 `SMTP_ALLOW_PLAINTEXT` must stay unset. It exists for a development
 Mailpit, and a production deployment carrying it sends case summaries in
 the clear on the day STARTTLS fails.
+
+Three more are red on a fresh stack that is configured correctly (measured
+on 2026-10-07: six red in all, these three, `smtp_configured` and blocking
+items 1 and 2). None of them is blocking, and each row's action says the same:
+
+* **`egress_routes_cover_sources`** and `smtp_configured` again: `SMTP_HOST`
+  is set and no `smtp` route admits it, so mail is held. Create the route
+  (Administration, Egress, or `scripts/egress_setup.py`) with the relay's host
+  and port. Both rows go green together.
+* **`dual_control_policy_changeable`**: changing which operations need two
+  people needs a proposer and a different countersigner, and an account
+  holding `SYS_ADMIN` never countersigns. The account step 5 makes holds
+  both, so until a second person holds `SECURITY_OFFICER` without
+  `SYS_ADMIN`, nobody can change that policy. That is the safe direction:
+  every operation keeps the requirement it has. Grant the role (Admin,
+  Accounts) when there is a second person.
+* **`pgp_verifier`**: the image's gnupg is Debian's `2.4.7-21+deb13u1`, whose
+  version number is below the floor the verifier enforces, so every signature
+  check records `NO_VERIFIER`. Debian carries the fixes under the older number.
+  Once you have checked the package changelog, attest it with
+  `NOCTORNAL_GPG_PATCHED_AS=2.4.9` in `secrets.env` and restart. The row
+  shows the attestation, and every verification records it.
 
 ---
 
@@ -643,11 +716,12 @@ service receives. They are in three files beside it:
 | File | Read by | Holds |
 |---|---|---|
 | `egress-proxy.env` | the egress proxy alone | its database URL, the client key, the seal key, the fingerprint key |
-| `egress-client.env` | api, cron and the collector | the client key, the fingerprint key, the seal key's public half |
+| `egress-client.env` | api, cron, the collector, lab-cron and embed-pass | the client key, the fingerprint key, the seal key's public half |
 | `postgres-init.env` | postgres alone | `NOCTORNAL_EGRESS_DB_PASSWORD`, for `db/init/20-egress-role.sh`, beside the owner's and the system role's passwords (step 1) |
 
 ```sh
-python scripts/egress_setup.py keygen     # prints every key, once
+docker compose -p noctornal-prod -f infra/production/compose.yml \
+  run --rm --no-deps -T api python scripts/egress_setup.py keygen     # prints every key, once
 ( umask 077                               # a subshell: the umask must not outlive these two lines
   cp infra/production/egress-proxy.env.example infra/production/egress-proxy.env
   cp infra/production/egress-client.env.example infra/production/egress-client.env )
@@ -656,8 +730,18 @@ sudo chmod 600       infra/production/egress-proxy.env infra/production/egress-c
 # postgres-init.env exists since step 1 (root's, mode 600): set
 # NOCTORNAL_EGRESS_DB_PASSWORD in it with sudoedit, and do not copy its
 # template over it, which would put a placeholder where the owner's password is.
-python scripts/egress_setup.py preflight  # checks all three before you start
+docker compose -p noctornal-prod -f infra/production/compose.yml \
+  run --rm --no-deps -T --user 0 -v "$PWD/infra/production:/prod:ro" api \
+  python scripts/egress_setup.py preflight --dir /prod \
+  --compose-version "$(docker compose version --short)"    # checks all three before you start
 ```
+
+Both run in the application image, which `docker compose build` makes (step
+1), because the script needs the application's own libraries and a host
+`python3` has none of them. Preflight reads the three files through a
+read-only mount as root, which owns them (the container holds no
+capability, so root there reads only what it owns), and is told the host's
+Compose version because there is no `docker` inside the image to ask.
 
 Preflight also refuses a value still carrying a `replace-me` placeholder,
 the database password lines included: the proxy's role password is public in
@@ -770,7 +854,7 @@ request is one connection and one child. What `compose.yml` gives it:
   hold its slots or is more than four times what they need, or in a
   container that lets a child leave state behind;
 * one volume, `analysis-socket`: a tmpfs owned by root, group `10001`, mode
-  `0750`. `api`, `cron`, `collector` and `lab-triage` (user `10001`, the
+  `0750`. `api`, `collector` and `lab-triage` (user `10001`, the
   group) mount it read-only and can pass through it to the socket, which is
   mode `0660`.
   No child's user can even enter it.
@@ -838,7 +922,7 @@ What remains:
 
 | Variable | Set on | What it does |
 |---|---|---|
-| `NOCTORNAL_ANALYSIS_SOCKET` | the worker, `api`, `cron`, `collector`, `lab-triage` | the socket the worker listens on and the others connect to |
+| `NOCTORNAL_ANALYSIS_SOCKET` | the worker, `api`, `collector`, `lab-triage` | the socket the worker listens on and the others connect to |
 | `NOCTORNAL_ANALYSIS_WORKER_CONCURRENCY` | the worker | requests run at once, 1 to 16 (default 2); others wait up to 30 seconds for a slot. The service's `pids_limit` must hold 40 plus 20 a slot and be at most four times that, and the worker refuses to start when it is not |
 | `NOCTORNAL_ANALYSIS_WORKER_MAX_BYTES` | the worker | the largest request it reads (default `1GiB`); it must hold a sample at the analysis maximum plus a compiled YARA build, and readiness says when it cannot |
 | `NOCTORNAL_ANALYSIS_LOCAL` | nowhere, by default | `1` runs analysis in a local child instead, beside this deployment's secrets |
@@ -985,9 +1069,10 @@ sudo chmod 600      infra/production/collector.env
 Put the key in `collector.env` and nowhere else, never in `secrets.env`. The
 services that run the application's code (the API and the sample origin, the
 cron loop, the Lab workers, the embedding pass) and the egress proxy refuse
-to start if they find it. The database, the object store, Redis, the
-migration job and Caddy run none of that code and check nothing: they read
-`secrets.env`, so a key put there would simply be carried. The collector
+to start if they find it, and so does the migration job, which reads
+`migrate.env` alone. The database, the object store and Redis run none of
+that code and check nothing: they read `secrets.env`, so a key put there
+would simply be carried. Caddy reads `caddy.env` alone. The collector
 refuses to start without it, by name, **whether or not the deployment has a
 persona**. The collector also
 runs every scheduled poll (the cron loop no longer polls), so a deployment
@@ -1060,6 +1145,11 @@ hand and claims no other, within the 180 second `stop_grace_period`.
 docker compose -p noctornal-prod -f infra/production/compose.yml logs -f api
 docker compose -p noctornal-prod -f infra/production/compose.yml logs -f cron
 ```
+
+Docker keeps each container's log in a json-file, and `compose.yml` bounds
+every one at five files of 10 MiB (`x-logging`), about 750 MiB for the whole
+stack; Docker's own default has no limit and fills the disk of a host left
+alone. A host that sends logs elsewhere changes the driver there.
 
 The cron container prints a timestamped start and exit code for each pass.
 `notify_drain` exits 1 when a delivery failed in that pass (information,

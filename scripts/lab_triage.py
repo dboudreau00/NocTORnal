@@ -93,7 +93,11 @@ def main(argv: list[str] | None = None) -> int:
     # traceback; 2 is what every other job gives, and 1 here means a pass ran
     # and failed (Beta 1 verification, 2026-10-07).
     from noctornal_api.config import JOB_REFUSAL_EXIT, refuse_unsafe_job_environment
-    refusals = refuse_unsafe_job_environment("lab_triage", whole_environment=True)
+    # outbound=False: this loop sends nothing out and compose gives it no
+    # egress proxy, so lookups or a sandbox switched on in secrets.env, which
+    # it reads, are not its refusal (Beta 1 deployment gate, 2026-10-07).
+    refusals = refuse_unsafe_job_environment("lab_triage", whole_environment=True,
+                                             outbound=False)
     if refusals:
         print("\n".join(refusals), file=sys.stderr)
         return JOB_REFUSAL_EXIT

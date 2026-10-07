@@ -312,9 +312,11 @@ def sandbox_settings(env: Mapping[str, str] | None = None
         autopropose=autopropose == "config"), None
 
 
-def production_problems(env: Mapping[str, str]) -> list[str]:
+def production_problems(env: Mapping[str, str], *, sends: bool = True) -> list[str]:
     """config.verify_environment's sandbox refusals, naming variables and
-    never values. Nothing configured is not a problem."""
+    never values. Nothing configured is not a problem. `sends` is False for
+    a process that sends nothing out (the sample origin, static triage),
+    which is not refused for having no egress proxy."""
     from noctornal_api import egress
     from noctornal_api.egress_policy import Rule, internal_networks, validate_rule
     settings, problem = sandbox_settings(env)
@@ -327,7 +329,7 @@ def production_problems(env: Mapping[str, str]) -> list[str]:
     # proxy. The start refusal (egress_routes.enforce_production_egress)
     # reads egress.outbound_uses, which lists the sandbox too; this line
     # names the variable.
-    if not egress.proxy_problem(env) and egress.proxy_settings(env) is None:
+    if sends and not egress.proxy_problem(env) and egress.proxy_settings(env) is None:
         out.append(
             f"a sandbox is configured ({PROVIDER_ENV}) and "
             f"{egress.PROXY_URL_ENV} is not: in production every outbound "
