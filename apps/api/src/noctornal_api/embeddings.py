@@ -621,12 +621,27 @@ class EmbeddingService:
         """Register a space in the lowest free slot, or None when no slot is
         free or another registration won the race.
 
-        The table locks are a barrier, held for milliseconds: they wait for
-        every writer already inserting a document, exhibit or claim, so
-        that each of them is either visible to the bulk queueing that
-        follows or runs its own queueing trigger after the space exists.
-        Without it an item inserted in that instant would never be queued
-        for this space."""
+        The lock on the queue is a barrier, held for milliseconds: it waits
+        for every writer whose queueing trigger has already run (a document,
+        an exhibit or a claim inserted and not yet committed), so that each
+        of them is either committed, and so visible to the bulk queueing
+        that follows, or runs its own queueing trigger after the space
+        exists. Without it an item inserted in that instant would never be
+        queued for this space.
+
+        It is the QUEUE that is locked and not the three item tables
+        (until 2026-10-03 it was the tables). LOCK TABLE in SHARE mode needs
+        UPDATE, DELETE or TRUNCATE on the table, and 0135 took UPDATE and
+        DELETE on `core.assertion` from the runtime roles (invariant 5), so
+        the system role this runs as was refused and every registration
+        failed. Every item writer's trigger inserts into the queue through
+        `core.embedding_enqueue`, which takes the queue's ROW EXCLUSIVE lock
+        before it reads which spaces exist (even when it queues nothing), so
+        a SHARE lock on the queue waits for exactly those writers and holds
+        every later one at its queueing statement until the space is
+        committed; that statement then reads the new space. The role keeps
+        INSERT and DELETE on the queue for the pass's own work, so no
+        privilege is added."""
         import unicodedata
 
         if embedder is None:
@@ -643,8 +658,7 @@ class EmbeddingService:
                 self._c.execute(f"SET LOCAL lock_timeout = '{REGISTER_LOCK_TIMEOUT}'")
                 self._c.execute("SELECT pg_advisory_xact_lock(hashtextextended("
                                 "'noctornal:embed-spaces', 0))")
-                self._c.execute("LOCK TABLE collect.document, core.evidence, "
-                                "core.assertion IN SHARE MODE")
+                self._c.execute("LOCK TABLE core.embedding_pending IN SHARE MODE")
                 if self._state(role, state):
                     return None
                 row = self._c.execute(

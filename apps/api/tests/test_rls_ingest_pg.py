@@ -151,13 +151,19 @@ def _dead(owner, batch: UUID) -> UUID:
                          (batch,)).fetchone()[0]
 
 
+def _registered(conn, *keys: str) -> None:
+    """Every compartment a raw write carries is registered first (0059)."""
+    s.register(conn, *keys)
+
+
 def _person(owner, clearance: str = "AMBER", *roles: str,
             compartments: tuple[str, ...] = ()) -> SimpleNamespace:
     """An account with global roles, its id and a fresh session's header."""
     uid, email = h.user(owner, P, clearance=clearance, roles=roles)
     if compartments:
+        _registered(owner, *compartments)
         owner.execute("UPDATE iam.app_user SET compartments = %s WHERE id = %s",
-                      (s.register(owner, *compartments), uid))
+                      (list(compartments), uid))
     return SimpleNamespace(id=uid, email=email, hdr=h.auth(h.session(owner, email)))
 
 
@@ -1219,7 +1225,7 @@ def test_a_reveal_whose_credential_left_its_reach_before_its_count_reveals_nothi
     from noctornal_api.ingest import IngestError, IngestService
 
     w = _stealer_world(owner)
-    further = s.register(owner, "RLSIG-FURTHER")[0]
+    further = "RLSIG-FURTHER"
     granted = owner.execute(
         "INSERT INTO ingest.pii_authorisation (case_id, granted_to, granted_by, "
         f"scope_note, legal_basis, expires_at) VALUES (%s, %s, %s, {_PII_FIELDS}, "
@@ -1229,6 +1235,11 @@ def test_a_reveal_whose_credential_left_its_reach_before_its_count_reveals_nothi
 
     def then_walled(self, user_id, case_id):
         found = real(self, user_id, case_id)
+        # Registered by the function that writes it, at the moment it writes
+        # it: the guard (test_fixture_invariants) reads each helper for the
+        # order, and a key registered in the enclosing test is no promise
+        # about when this runs.
+        _registered(owner, further)
         _as_owner("UPDATE ingest.record SET compartments = compartments || %s "
                   "WHERE id = %s", ([further], w.record))
         return found

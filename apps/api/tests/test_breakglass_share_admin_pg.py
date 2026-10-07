@@ -909,13 +909,28 @@ def test_an_approval_names_who_asked(conn, client):
     """The approval card printed the payload's UUIDs and nothing about the
     requester, so a second signature was given to a stranger's request."""
     from noctornal_api.approvals import ApprovalService
+    from noctornal_api.graph import AssertionInput, GraphWriteService
     owner, owner_email = _user(conn, name="Rae Requester", roles=("CASE_OWNER",))
     auth = _session(conn, owner_email)
     case_id, _ = _case(client, auth)
+    # Two real entities the requester can read. A merge request is listed
+    # only to a viewer who sees both nodes it names (2026-10-03), and random
+    # ids name nothing, so the listing hid this request as it hides any it
+    # cannot show. That hidden case is covered by
+    # test_review_g42_merge_visibility_pg; this test is about the names on a
+    # request the viewer may see.
+    graph = GraphWriteService(conn)
+    source, target = (
+        graph.create_node(
+            case_id=case_id, node_type="IDENTITY", label=label,
+            classification="AMBER", created_by=owner,
+            assertion=AssertionInput(basis="DIRECT_OBSERVATION",
+                                     created_by=owner))
+        for label in ("crew-before", "crew-after"))
     ApprovalService(conn).request(
         operation="node.merge", case_id=case_id,
-        payload={"source_node_id": str(uuid4()),
-                 "target_node_id": str(uuid4()),
+        payload={"source_node_id": str(source),
+                 "target_node_id": str(target),
                  "reason": "same crew, renamed", "basis_selector_id": None},
         justification="Same crew, renamed after the March takedown",
         requested_by=owner)

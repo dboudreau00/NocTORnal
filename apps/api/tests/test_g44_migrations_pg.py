@@ -9,7 +9,7 @@ exists to allow two of, and a database holding two exhibits of one file in
 one case cannot take it back), that refusal is asserted and the round trip
 carries on without it.
 
-A real `alembic downgrade 0131` then `upgrade head` is the job of
+A real `alembic downgrade` to below 0139 then `upgrade head` is the job of
 `test_exhibit_production_pg.py`'s round trips and of CI's head, base, head
 step; this file covers what is specific to these four.
 """
@@ -71,9 +71,13 @@ def _catalogue(conn) -> dict:
     }
 
 
-def test_the_four_revisions_chain_from_0131_and_name_their_sql():
+def test_the_four_revisions_chain_from_0138_and_name_their_sql():
+    # The test was written when the first of these hung off 0131. The merge
+    # put other units' 0132 to 0138 in front of the four, and the migrations
+    # were renumbered with it; the four still run in this order and hang off
+    # the revision before them.
     assert [m.revision for m in MODULES] == ["0139", "0140", "0141", "0142"]
-    assert [m.down_revision for m in MODULES] == ["0131", "0139", "0140", "0141"]
+    assert [m.down_revision for m in MODULES] == ["0138", "0139", "0140", "0141"]
     for m in MODULES:
         assert m.UPGRADE_SQL.strip() and m.DOWNGRADE_SQL.strip()
         assert callable(m.upgrade) and callable(m.downgrade)

@@ -111,7 +111,8 @@ NOT_CONFIGURED = (
     "No isolated analysis worker is configured (NOCTORNAL_ANALYSIS_SOCKET), "
     "and this production deployment does not parse hostile input beside its "
     "own secrets, so nothing was analysed; run the analysis-worker service, "
-    "or set NOCTORNAL_ANALYSIS_LOCAL=1 to accept the local child (docs/17 F42)")
+    "or set NOCTORNAL_ANALYSIS_LOCAL=1 to parse in a local child on this "
+    "host, beside those secrets")
 NO_UNIX = (
     "NOCTORNAL_ANALYSIS_SOCKET is set and this platform has no Unix sockets, "
     "so the isolated analysis worker cannot be reached; unset it to analyse "
