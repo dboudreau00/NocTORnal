@@ -509,7 +509,13 @@ if (-not $running) {
 Write-Host ''
 Write-Detail 'All good. Next it will:'
 Write-Detail '  build a private Python environment in the .venv folder'
-Write-Detail '  write .env.local with fresh random keys (the file is yours to keep)'
+# On a re-run or an update the file is already there; step 3 never replaces
+# its keys, as install.sh says too (Beta 1 clean machine, 2026-10-07).
+if (Test-Path -LiteralPath (Join-Path $RepoRoot '.env.local')) {
+    Write-Detail '  keep your .env.local as it is (its keys are never replaced)'
+} else {
+    Write-Detail '  write .env.local with fresh random keys (the file is yours to keep)'
+}
 Write-Detail '  start four containers: Postgres, Redis, MinIO and Mailpit'
 Write-Detail '  set up the database and make your account'
 
@@ -976,7 +982,7 @@ if ($users -eq 0) {
     else {
         $adminName = $adminName -replace '"', ''
         Write-Detail 'Your password and the QR code are printed next. They are shown once.'
-        & $VenvPython $bootstrap create-user --email $adminEmail --name $adminName
+        & $VenvPython $bootstrap create-user --email $adminEmail --name $adminName --no-next
         if ($LASTEXITCODE -ne 0) {
             Stop-With 'the account could not be made.' "Fix what the lines above name, then run this installer again.`nEverything before this step is kept, so it picks up where it stopped."
         }
@@ -1008,6 +1014,12 @@ if ($Demo) { $demoMode = 'yes' } elseif ($NoDemo) { $demoMode = 'no' }
 $demoDecision = Get-DemoDecision -Mode $demoMode -Interactive $script:Interactive -Fresh $accountCreated
 $demoLoaded = $false
 $demoOwner = $adminEmail
+# Already there from an earlier run: said so, and neither loaded again nor
+# offered "later" on the card, as install.sh does (Beta 1 clean machine,
+# 2026-10-07). An answer that cannot be read changes nothing.
+$presentCode = 'import sys, noctornal_api.db as d; print(int(d.connect().execute(''select exists (select 1 from core.case where code = %s)'', (sys.argv[1],)).fetchone()[0]))'
+$present = Invoke-Capture $VenvPython @('-c', $presentCode, $demoCode)
+if ($present.Code -eq 0 -and $present.Text.Trim() -eq '1') { $demoDecision = 'present'; $demoLoaded = $true }
 if ($demoDecision -eq 'ask') {
     Write-Detail 'A fictional case with made-up people and ties, so there is something'
     Write-Detail 'to look at straight away. It is marked TLP:CLEAR and holds nothing real.'
@@ -1038,6 +1050,7 @@ if ($demoDecision -eq 'load') {
         }
     }
 }
+elseif ($demoDecision -eq 'present') { Write-Good "the demo case is already here from an earlier run: Operation Latticework, code $demoCode" }
 elseif ($demoMode -eq 'no') { Write-Detail 'Skipped, because -NoDemo was given.' }
 else { Write-Detail 'Skipped. The closing card says how to load it later.' }
 

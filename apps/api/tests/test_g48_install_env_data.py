@@ -157,6 +157,13 @@ def test_the_alembic_message_and_the_install_notes_do_not_say_to_source_the_file
     refusal = _text(ROOT / "db" / "migrations" / "env.py")
     assert "set -a" not in "\n".join(ln for ln in refusal.splitlines() if not ln.lstrip().startswith("#"))
     assert "scripts/_env.py export" in refusal
+    # The README's "Verifying the install" said `set -a; . ./.env.local; set +a`
+    # while INSTALL.md read the file as data (Beta 1 clean machine, 2026-10-07).
+    for doc in (ROOT / "README.md", ROOT / "release" / "INSTALL.md"):
+        text = _text(doc)
+        assert not re.search(r"(^|[;&|]\s*)(\.|source)\s+\S*\.env\.local", text, re.M), doc.name
+        assert "set -a" not in text, doc.name
+        assert 'eval "$(.venv/bin/python scripts/_env.py export)"' in text, doc.name
 
 
 # --- private from the first byte ----------------------------------------------

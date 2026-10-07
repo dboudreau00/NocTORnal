@@ -9,7 +9,7 @@ case material needs legal review first (see "What the beta is" below).
 
 | | Needed | How to check | Where to get it |
 |---|---|---|---|
-| **Docker** | Docker Desktop (Windows, macOS) or Docker Engine (Linux), with Compose | `docker compose version` prints a version | <https://www.docker.com/products/docker-desktop/> |
+| **Docker** | Docker Desktop (Windows, macOS) or Docker Engine (Linux), with Compose | `docker compose version` prints a version; on Linux `docker ps` also works without `sudo` | <https://www.docker.com/products/docker-desktop/> (Linux: <https://docs.docker.com/engine/install/>, then `sudo usermod -aG docker $USER` and log out and in) |
 | **Python** | 3.12 or newer | `python --version` (macOS and Linux: `python3 --version`) | <https://www.python.org/downloads/> (Windows: tick "Add python.exe to PATH") |
 
 Also about 8 GB of memory, 2 GB of free disk and an internet connection for
@@ -22,7 +22,8 @@ you install, and wait until it says it is running.
 **1. Download and unzip.** Unzip the release, then open a terminal inside the
 folder that holds `release` and `alembic.ini`. Windows: open the folder in
 File Explorer, click the address bar, type `powershell` and press Enter.
-macOS: right-click the folder and choose New Terminal at Folder.
+macOS: right-click the folder and choose New Terminal at Folder. A Linux
+server may lack `unzip`: `sudo apt install unzip`.
 
 **2. Run the one command.**
 
@@ -66,8 +67,8 @@ crews, marked TLP:CLEAR. **All of it is fictional.**
 
 1. Open Operation Latticework from the case list and look at the **Graph**:
    three crews joined by a few brokers.
-2. Open **Analysis**. It singles out `oriel`, the one broker that ties a crew
-   to the rest of the network.
+2. Open **Analysis** and choose **Run analysis**. Among the brokers it lists
+   is `oriel`, the only tie between the bit_ crew and the rest of the network.
 3. Click a person in **Entities** and read their claims. Every claim shows a
    source and a grade. Nothing in the system is stated as a fact.
 4. Use **Search** to find a handle such as `oriel`.
