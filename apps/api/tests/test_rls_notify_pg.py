@@ -27,6 +27,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from psycopg.types.json import Json
 
 import rls_support as s
 from outbound_support import assign, make_case, make_user, teardown
@@ -51,6 +52,10 @@ def owner(monkeypatch):
               "WHERE state = 'PENDING'")
     yield c
     c.execute(f"DELETE FROM core.approval_request WHERE requested_by IN {USERS}")
+    # The entities a merge request names (the reach test below): `teardown`
+    # leaves graph rows alone, and a case that still holds one is not
+    # deleted, so this suite's accounts and cases would accumulate.
+    s.cleanup(c, PREFIX)
     teardown(c, PREFIX)
     c.close()
 
@@ -99,15 +104,21 @@ def _notice(conn, recipient, *, case_id=None, kind="MERGE_PERFORMED",
         object_id=object_id, **kw)
 
 
+def _registered(conn, *keys: str) -> None:
+    """Every compartment a raw write carries is registered first (0059)."""
+    s.register(conn, *keys)
+
+
 def _raw_notice(owner, recipient, *, case_id=None, classification="AMBER",
-                kind="MERGE_PERFORMED") -> object:
+                kind="MERGE_PERFORMED", compartments=()) -> object:
     """A row as the owner writes it, labels unchecked: a notice whose
     recipient has since lost the clearance or the case it needed."""
+    _registered(owner, *compartments)
     return owner.execute(
         """INSERT INTO notify.notification (recipient_id, case_id, kind, subject,
                                             summary, body, classification, compartments)
-           VALUES (%s, %s, %s, 'OP-RLSNOTE: raw', 'raw', 'raw', %s, '{}') RETURNING id""",
-        (recipient, case_id, kind, classification)).fetchone()[0]
+           VALUES (%s, %s, %s, 'OP-RLSNOTE: raw', 'raw', 'raw', %s, %s) RETURNING id""",
+        (recipient, case_id, kind, classification, list(compartments))).fetchone()[0]
 
 
 def _destination(owner, admin, *, kinds=("APPROVAL_REQUESTED",)):
@@ -513,12 +524,23 @@ def test_drain_now_revokes_another_recipients_delivery(owner, world):
 
 def test_a_requests_reach_counts_the_signers_notices(owner, world):
     signers = [make_user(owner, PREFIX, clearance="AMBER")[0] for _ in range(2)]
+    # The two entities a merge request names, both readable by the analyst
+    # who lists the case's approvals: a node.merge request is listed only to a
+    # viewer who sees both (2026-10-03), and a payload naming nothing is
+    # hidden from everyone as a request that does not exist. That hidden
+    # case is held by test_review_g42_merge_visibility_pg; this test is about
+    # the count of notices behind a request the viewer may read.
+    source, target = (s.node(owner, world["case"], world["boss"], label)
+                      for label in ("rls note crew", "rls note crew renamed"))
+    payload = {"source_node_id": str(source), "target_node_id": str(target),
+               "reason": "rls note request", "basis_selector_id": None}
     request = owner.execute(
         """INSERT INTO core.approval_request (case_id, operation, payload, payload_hash,
                                               justification, requested_by, expires_at)
-           VALUES (%s, 'node.merge', '{}', %s, 'rls note request', %s,
+           VALUES (%s, 'node.merge', %s, %s, 'rls note request', %s,
                    now() + interval '1 hour') RETURNING id""",
-        (world["case"], uuid4().bytes, world["analyst"])).fetchone()[0]
+        (world["case"], Json(payload), uuid4().bytes,
+         world["analyst"])).fetchone()[0]
     for signer in signers:
         assign(owner, world["case"], signer)
         _notice(owner, signer, case_id=world["case"], kind="APPROVAL_REQUESTED",

@@ -153,6 +153,11 @@ BOUND_COLUMNS: tuple[tuple[str, str, str, str], ...] = (
     # A collection source carries the keys everything it collects is read
     # under (F43, 0163, 2026-10-02).
     ("collect", "source", "compartments", "array"),
+    # An observed selector carries its owner's keys (0134, bound by 0170).
+    # It stays after ("core", "node"): the selector's own trigger copies the
+    # owner's keys on every write of the column, so a rename moves the
+    # owner first and the selector rows then converge on it.
+    ("core", "selector", "compartments", "array"),
 )
 
 #: What an administrator calls the rows of each table, (one, many), for
@@ -188,6 +193,8 @@ NOUNS: dict[tuple[str, str], tuple[str, str]] = {
                                         "similarity index rows"),
     # F43, 0163.
     ("collect", "source"): ("collection source", "collection sources"),
+    # 0134, bound by 0170.
+    ("core", "selector"): ("selector", "selectors"),
 }
 
 #: The column that names a row to a person, where there is one, so the

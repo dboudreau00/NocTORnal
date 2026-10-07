@@ -130,7 +130,11 @@ def _state(conn):
             "ORDER BY column_name").fetchall(),
         conn.execute(
             "SELECT tgname FROM pg_trigger WHERE tgrelid = "
-            "'core.selector'::regclass AND NOT tgisinternal").fetchall(),
+            "'core.selector'::regclass AND NOT tgisinternal "
+            # 0170 binds the column to the compartment catalogue. It is not
+            # 0134's and sits above it in the chain, so a downgrade of 0134
+            # meets it already gone (below).
+            "AND tgname <> 'compartments_registered'").fetchall(),
     )
 
 
@@ -149,6 +153,9 @@ def test_0134_round_trips_and_names_a_value_held_at_two_labels(owner):
     _insert(owner, w.case_id, value, red)
     _insert(owner, w.case_id, value)
     with pytest.raises(_RollBack), owner.transaction():
+        # Alembic downgrades 0170 before it reaches 0134, and the column 0134
+        # drops is the one 0170's binding names, so the binding goes first.
+        owner.execute("DROP TRIGGER compartments_registered ON core.selector")
         # One value at two labels cannot go back under the 0005 key: the
         # honest answer of a downgrade over data the old key forbade.
         with pytest.raises(psycopg.errors.UniqueViolation), owner.transaction():
