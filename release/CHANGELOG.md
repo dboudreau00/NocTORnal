@@ -534,9 +534,11 @@ was a decision.
 area and fixed what it found with a test that failed before the fix:
 
 - **Install on a clean machine.** An Ubuntu 24.04 VM rebuilt from a base image.
-  From the install command to a working console took 7 minutes 41 seconds on a
-  machine with the prerequisites (about 5.5 minutes of it pulling 1.1 GB of
-  images), and sign-in took 0.5 seconds. A stop and start took 21 seconds with
+  On the release candidate, from the install command to a working console took
+  6 minutes 11 seconds on a machine with the prerequisites (most of it pulling
+  1.1 GB of images) and to a first sign-in 6 minutes 52 seconds; the earlier
+  run that found the installer's defects took 7 minutes 41 seconds, and
+  sign-in took 0.5 seconds. A stop and start took 21 seconds with
   the data intact, a re-run 31 seconds with `.env.local` unchanged byte for
   byte, and a reinstall with cached images 58 seconds. Everything listened on
   127.0.0.1, and the install added 1.49 GB. Nine installer and document

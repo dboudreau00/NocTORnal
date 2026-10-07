@@ -6,6 +6,21 @@ newest run is first. The first run on a clean machine, which found the
 defects that made the installer a wizard, follows it, then the Alpha 6
 re-runs.
 
+## Beta 1 release candidate, 2026-10-07
+
+**Result: PASS.** The release candidate, packaged from git exactly as the
+release is, on a machine rebuilt again from its base image, with START-HERE's
+prerequisites and nothing else: `bash release/install.sh --demo` ran all eight
+steps with no traceback, the console answered after 6 minutes 11 seconds (most
+of it pulling 1.1 GB of images) and the first sign-in, password and
+authenticator code, was accepted at 6 minutes 52 seconds. The walkthrough ran
+its six steps, the demo case's analysis named its broker, a new case took an
+exhibit and a tie citing it, and a stop, a start, a reboot and a start again
+kept everything. After a reboot nothing runs until `bash release/start.sh`.
+One thing a new user may meet: a tab chosen while a case is still opening is
+switched back to Graph when the case finishes loading; choosing it again
+works.
+
 ## Beta 1 run, 2026-10-07
 
 **Result: PASS WITH NOTES.** A new user who follows START-HERE on a pristine
