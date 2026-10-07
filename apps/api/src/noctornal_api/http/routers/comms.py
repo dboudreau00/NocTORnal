@@ -59,7 +59,6 @@ from noctornal_api.http.deps import (
     CurrentUser,
     check_writable_labels,
     current_user,
-    element_labels,
     get_conn,
     require,
     require_global,
@@ -1088,9 +1087,11 @@ def mark_incidental(
     user: CurrentUser = Depends(require("comms.bind")),
     conn: psycopg.Connection = Depends(get_conn),
     # The flag on a system connection (S1, 2026-09-25): minimisation at
-    # closure finds third parties by it, so it must land whatever the
-    # flagger's own labels are; as the request role the UPDATE touched no
-    # row of a conversation above them and still answered as done.
+    # closure finds third parties by it, so it must land; as the request role
+    # the UPDATE touched no row of a conversation above them and still
+    # answered as done. Since 2026-10-07 a conversation above the flagger is
+    # refused before the write (`_own_conversation`), so what this connection
+    # reaches is a conversation they may read.
     sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.MINIMISATION)),
 ) -> dict:
     """Flag a participant as not a subject.
@@ -1099,7 +1100,7 @@ def mark_incidental(
     and minimisation at closure has to be able to find them. Flagging is
     cheap; discovering afterwards that nobody did is not.
     """
-    _own_conversation(conn, case_id, conversation_id)
+    _own_conversation(conn, user, case_id, conversation_id, "comms.bind")
     CommsService(sconn).mark_incidental(conversation_id, body.handle,
                                         incidental=body.incidental)
     return {"conversation_id": str(conversation_id), "handle": body.handle,
@@ -1128,7 +1129,7 @@ def minimise(
     survive, so the contact graph and the co-participation projection are
     unaffected.
     """
-    _own_conversation(conn, case_id, conversation_id)
+    _own_conversation(conn, user, case_id, conversation_id, "comms.minimise")
     try:
         dropped = CommsService(sconn).minimise(
             conversation_id, actor_id=user.user_id, authority=body.authority)
@@ -1138,20 +1139,31 @@ def minimise(
             "retained": "participants, timing and the contact graph"}
 
 
-def _own_conversation(conn: psycopg.Connection, case_id: UUID,
-                      conversation_id: UUID) -> None:
-    """Refuse a conversation belonging to another case.
+def _own_conversation(conn: psycopg.Connection, user: CurrentUser,
+                      case_id: UUID, conversation_id: UUID,
+                      permission_key: str) -> None:
+    """Resolve a caller-supplied conversation id: this case's and within the
+    caller's labels, or one 404 for a conversation that is missing, in
+    another case or above them.
 
     The case gate authorises the caller against `case_id` from the path;
-    without this, a conversation id from a DIFFERENT case would be
-    accepted and minimised under an authorisation that never covered it.
-    """
-    # The conversation's case as a fact (S1, 2026-09-25): one above the
-    # caller's labels is still THIS case's, and the gate above has already
-    # decided the caller may act on the case, as it always did.
-    facts = element_labels(conn, "conversation", conversation_id)
-    if facts is None or facts[0] != case_id:
-        raise Problem(404, "Not found", "no such conversation in this case")
+    without the same-case check, a conversation id from a DIFFERENT case would
+    be accepted and minimised under an authorisation that never covered it.
+
+    The labels are checked too (verification round three, A3, 2026-10-07).
+    The write runs on a system connection, which sees every conversation, so
+    this is the only place a caller below a conversation is stopped: it
+    answered an AMBER analyst's flag on a RED conversation with a 200 and the
+    flag, and a random id with a 404. A conversation above the caller is now
+    the missing one's 404, its AUTHZ_DENIED row kept (`gate_element`). The
+    system connection still drops every body of a conversation the caller
+    may read, a message above them included (docs/16 L4)."""
+    # The conversation's case and labels as facts (S1, 2026-09-25), so the
+    # gate still answers one above the caller with its AUTHZ_DENIED row and
+    # not a silent unrecorded 404 from row-level security.
+    gate_element(conn, user, case_id=case_id, kind="conversation",
+                 element_id=conversation_id, permission_key=permission_key,
+                 missing_detail="no such conversation in this case")
 
 
 # ---------------------------------------------------------------------------

@@ -69,6 +69,35 @@ class MergeCollision(MergeError):
         return self._text("")
 
 
+class MergeBlocked(MergeError):
+    """A later live merge moved some of the same ties, so this one cannot be
+    reversed yet. The later merge's id and the count are in the message for a
+    reader of that merge; `without_blocker` is the sentence for one who is
+    not (verification round three, A5, 2026-10-07: the id of a merge the
+    ledger hides from them, and how many ties it shared, were theirs to
+    read in the refusal)."""
+
+    def __init__(self, blocker: UUID, shared: int):
+        self.blocker = blocker
+        one = shared == 1
+        super().__init__(
+            f"a later merge ({blocker}) is still live and moved "
+            f"{'one' if one else shared} of the same relationships. "
+            f"Reversing this one first would write "
+            f"{'its' if one else 'their'} old endpoints over "
+            f"{'a tie' if one else 'ties'} that "
+            f"merge now owns, and the graph would assert a relationship "
+            f"that never existed. Reverse the later merge first.")
+
+    def without_blocker(self) -> str:
+        return ("a later merge is still live and moved some of the same "
+                "relationships. Reversing this one first would write their "
+                "old endpoints over ties that merge now owns, and the graph "
+                "would assert a relationship that never existed. That merge "
+                "is not one you can see: someone cleared to see it has to "
+                "reverse it first.")
+
+
 @dataclass(frozen=True)
 class MergeRecord:
     id: UUID
@@ -86,8 +115,10 @@ class MergeRecord:
     #: the record disagree with its own audit row and told a case owner
     #: that a relationship survived somewhere else.
     edges_repointed: int = 0
-    #: Ties BETWEEN the two entities, soft-deleted by the merge. Restored
-    #: by a reversal, which is why they are recorded at all.
+    #: Ties BETWEEN the two entities, soft-deleted by the merge, and
+    #: duplicates it set aside for a merger who could not read them (the
+    #: ledger keeps one flag for both). Restored by a reversal, which is why
+    #: they are recorded at all.
     edges_self_loop_deleted: int = 0
 
     @property
@@ -101,12 +132,25 @@ class MergeService:
 
     def merge(self, *, case_id: UUID, source_node_id: UUID,
               target_node_id: UUID, merged_by: UUID, reason: str,
-              basis_selector_id: UUID | None = None) -> MergeRecord:
+              basis_selector_id: UUID | None = None,
+              clearance: str | None = None,
+              compartments: frozenset[str] | list[str] = ()) -> MergeRecord:
         """Fold `source` into `target`, reversibly.
 
         The source keeps its row, its assertions and its history. Its edges
         are re-pointed at the target, and each move is recorded so the
         reversal is a restore rather than a reconstruction.
+
+        `clearance` and `compartments` are the merger's. A tie of the source
+        that would duplicate one the target already holds to the same third
+        party is refused when the merger may read it (`MergeCollision`,
+        which tells them what to retire). When they may not, a refusal would
+        say that two ties they cannot see exist, where a merge with none is
+        made, so the duplicate is set aside instead: retired and recorded as
+        the merge's own, as a tie between the two entities is, and given
+        back by the reversal (verification round three, A2, 2026-10-07).
+        Without a merger's labels nothing is set aside and the merge is
+        refused, as it was.
         """
         if not reason or not reason.strip():
             raise MergeError(
@@ -163,6 +207,7 @@ class MergeService:
             # a destruction described as a move.
             repointed = 0
             self_loops_deleted = 0
+            folded = 0
             for edge_id, esrc, edst, etype in edges:
                 new_src = target_node_id if esrc == source_node_id else esrc
                 new_dst = target_node_id if edst == source_node_id else edst
@@ -190,12 +235,16 @@ class MergeService:
                        VALUES (%s, %s, %s, %s)""",
                     (merge_id, edge_id, esrc, edst))
                 try:
-                    self._c.execute(
-                        """UPDATE core.edge
-                              SET src_node_id = %s, dst_node_id = %s,
-                                  updated_at = %s
-                            WHERE id = %s""",
-                        (new_src, new_dst, now, edge_id))
+                    # In a savepoint of its own: a duplicate the merger may
+                    # not read is set aside below, and the transaction must
+                    # still be usable after the refusal to do that.
+                    with self._c.transaction():
+                        self._c.execute(
+                            """UPDATE core.edge
+                                  SET src_node_id = %s, dst_node_id = %s,
+                                      updated_at = %s
+                                WHERE id = %s""",
+                            (new_src, new_dst, now, edge_id))
                 except psycopg.errors.UniqueViolation:
                     # `edge_uniq_active` refused because BOTH entities
                     # already hold a live tie of this type, with the same
@@ -215,6 +264,24 @@ class MergeService:
                     # The OTHER end of the tie: it named the survivor for an
                     # outgoing tie, which is the merge's own target.
                     other = edst if esrc == source_node_id else esrc
+                    if clearance is not None and not self._tie_readable(
+                            edge_id, other, clearance, compartments):
+                        # The merger cannot read this tie, and so not the one
+                        # it duplicates: both carry the same labels and meet
+                        # the same third party. Refusing would tell them that
+                        # two exist (A2). Retired like a tie between the two
+                        # entities, and recorded the same way, so the
+                        # reversal brings it back whole.
+                        self._c.execute(
+                            """UPDATE core.node_merge_edge
+                                  SET deleted_by_merge = true
+                                WHERE merge_id = %s AND edge_id = %s""",
+                            (merge_id, edge_id))
+                        self._c.execute(
+                            "UPDATE core.edge SET deleted_at = %s WHERE id = %s",
+                            (now, edge_id))
+                        folded += 1
+                        continue
                     # `from None`: an authored sentence, which `safe_detail`
                     # answers verbatim, not the database's refusal behind it
                     # (it replaced this one with "that record already exists").
@@ -238,6 +305,9 @@ class MergeService:
                 # Folded into `edges_repointed` it read as a relationship
                 # that survived the merge somewhere else.
                 "edges_self_loop_deleted": self_loops_deleted,
+                # Duplicates of a tie the target held, set aside because the
+                # merger could not read them (A2); a reversal restores them.
+                "edges_duplicate_folded": folded,
                 "reason": reason.strip(),
                 "basis_selector_id": str(basis_selector_id)
                 if basis_selector_id else None,
@@ -251,7 +321,8 @@ class MergeService:
                 self._c, case_id=case_id, merge_id=merge_id,
                 source_label=src["label"], target_label=dst["label"],
                 edges_repointed=repointed,
-                self_loops_deleted=self_loops_deleted, reason=reason.strip(),
+                self_loops_deleted=self_loops_deleted,
+                duplicates_folded=folded, reason=reason.strip(),
                 actor_id=merged_by,
                 # The body names both nodes, so the notification is at least
                 # as classified as the more restricted of them.
@@ -319,15 +390,7 @@ class MergeService:
         if blocker is not None:
             # Agreed with the shared count, not a bracketed plural (README
             # screenshot set review, 2026-09-23).
-            one = blocker[2] == 1
-            raise MergeError(
-                f"a later merge ({blocker[0]}) is still live and moved "
-                f"{'one' if one else blocker[2]} of the same relationships. "
-                f"Reversing this one first would write "
-                f"{'its' if one else 'their'} old endpoints over "
-                f"{'a tie' if one else 'ties'} that "
-                f"merge now owns, and the graph would assert a relationship "
-                f"that never existed. Reverse the later merge first.")
+            raise MergeBlocked(blocker[0], blocker[2])
 
         now = datetime.now(timezone.utc)
         with self._c.transaction():
@@ -533,6 +596,23 @@ class MergeService:
                 "survivor's labels to people the merged entity is hidden "
                 "from. Merge the other way round, into the more restricted "
                 "entity.")
+
+    def _tie_readable(self, edge_id: UUID, other_id: UUID, clearance: str,
+                      compartments: frozenset[str] | list[str]) -> bool:
+        """Whether a tie, and the entity at its far end, are within the
+        given labels: what makes a tie one its reader may see. Asked on the
+        merge's system connection, which sees every row. Anything missing is
+        not readable (fail closed)."""
+        row = self._c.execute(
+            """SELECT e.classification <= %(clr)s::core.tlp
+                      AND e.compartments <@ %(held)s::text[]
+                      AND o.classification <= %(clr)s::core.tlp
+                      AND o.compartments <@ %(held)s::text[]
+                 FROM core.edge e, core.node o
+                WHERE e.id = %(edge)s AND o.id = %(other)s""",
+            {"edge": edge_id, "other": other_id, "clr": clearance,
+             "held": sorted(compartments)}).fetchone()
+        return bool(row and row[0])
 
     def _node(self, case_id: UUID, node_id: UUID, which: str) -> dict:
         row = self._c.execute(

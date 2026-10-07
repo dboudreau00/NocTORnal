@@ -589,15 +589,18 @@ def test_a_duplicate_tie_refusal_names_the_third_party_only_to_a_merger_who_may_
     assert "VOUCHED_FOR" in detail and "already exists" not in detail
     assert str(open_third) in detail and str(target) not in detail
 
+    # Ties to a third party the merger cannot read are theirs to see neither,
+    # so the merge is made as one with no such tie is and the duplicate is set
+    # aside (verification round three, A2, 2026-10-07). This block asserted the
+    # refusal, which told an AMBER lead that two ties to a RED entity existed.
     source2, target2 = w.node("g42 source two"), w.node("g42 target two")
     red_third = w.node("g42 red third party", "RED")
     w.edge(source2, red_third, "AMBER")
     w.edge(target2, red_third, "AMBER")
-    refused = _merge(client, w, w.lead, source2, target2)
-    assert refused.status_code == 409, refused.text
-    assert "VOUCHED_FOR" in refused.json()["detail"]
-    assert str(red_third) not in refused.text
-    assert not _merged_flag(owner, source) and not _merged_flag(owner, source2)
+    made = _merge(client, w, w.lead, source2, target2)
+    assert made.status_code == 201, made.text
+    assert str(red_third) not in made.text
+    assert not _merged_flag(owner, source) and _merged_flag(owner, source2)
 
 
 # --- the reversal's two failures ---------------------------------------------

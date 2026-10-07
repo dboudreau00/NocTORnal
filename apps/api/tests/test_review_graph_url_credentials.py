@@ -486,3 +486,68 @@ def test_a_value_that_does_not_parse_is_returned_as_written_unless_a_secret_is_i
     """The fallback for a value `urlsplit` cannot read removes a credential
     and nothing else: it does not tidy a trailing `?`."""
     assert url_norm(text) == text
+
+
+# --- verification round three, A7 (2026-10-07): a login that is not an address -
+
+@pytest.mark.parametrize("url, expected", [
+    ("https://y.example/login:carol:Zq9Pass7p", "https://y.example/login"),
+    ("https://y.example/login|carol|Zq9Pass7p", "https://y.example/login"),
+    ("https://y.example/a/b/login:carol:Zq9:Pass7p", "https://y.example/a/b/login"),
+    ("https://y.example/login:carol:Zq9Pass7p?next=1", "https://y.example/login"),
+    # a path with one colon is a path, and the e-mail form is as it was
+    ("https://y.example/wiki/Talk:Page", "https://y.example/wiki/Talk:Page"),
+    ("https://y.example/login:alice@example.com:Passw0rd", "https://y.example/login"),
+    ("https://y.example/a:b/c", "https://y.example/a:b/c"),
+])
+def test_a_login_and_password_after_the_path_are_never_kept_whatever_the_login_is(
+        url, expected):
+    """`url:login:password`, the stealer layout, where the login is a name
+    and not an address: the `@` the pattern looked for was never there, so
+    the pair was kept whole in the label, the selector and the raw value."""
+    out = url_norm(url)
+    assert out == expected, out
+    assert url_norm(out) == out
+    for secret in ("Zq9", "carol"):
+        assert secret not in out
+
+
+def test_the_redacted_form_of_a_login_pair_without_an_address_keeps_the_link():
+    assert redact_url_credentials("https://y.example/login:carol:Zq9Pass7p") \
+        == "https://y.example/login:REDACTED"
+    assert redact_url_credentials("see https://y.example/login|carol|Zq9Pass7p. ok") \
+        == "see https://y.example/login:REDACTED. ok"
+    out = redact_url_credentials("https://y.example/login:carol:Zq9Pass7p")
+    assert redact_url_credentials(out) == out
+
+
+def test_credential_spans_name_a_login_pair_without_an_address():
+    text = "x https://y.example/login:carol:Zq9Pass7p y"
+    (a, b), = credential_spans(text)
+    assert text[a:b] == ":carol:Zq9Pass7p"
+
+
+def test_a_capture_of_a_login_pair_without_an_address_proposes_no_secret():
+    from noctornal_api.extraction import find_selectors
+    from noctornal_api.selectors import carries_credential
+    text = "combo https://y.example/login:carol:Zq9Pass7p"
+    hits = find_selectors(text)
+    assert [(h.selector_type, h.norm_value) for h in hits
+            if h.selector_type == "URL"] == [("URL", "https://y.example/login")]
+    for h in hits:
+        # what the extractor stores and proposes is redacted (extraction.py)
+        assert "Zq9Pass7p" not in redact_url_credentials(h.raw_value)
+        assert "Zq9Pass7p" not in h.norm_value
+    assert carries_credential("URL", "https://y.example/login:carol:Zq9Pass7p")
+    assert not carries_credential("URL", "https://y.example/login")
+
+
+def test_the_login_pair_scan_is_linear_on_a_long_path():
+    import time
+    for tail in ("|a" * 500_000 + "/x", "a:" * 500_000, "a|" * 500_000 + "/"):
+        text = "https://y.example/" + tail
+        started = time.perf_counter()
+        url_norm(text)
+        redact_url_credentials(text)
+        credential_spans(text)
+        assert time.perf_counter() - started < 5.0, tail[:8]

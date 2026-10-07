@@ -861,3 +861,183 @@ published here.
 
 Archive expansion, which `docs/11` described as not built, is built; that
 document now says what it does and does not compare.
+## Beta 1 verification residuals (Group A)
+
+Found on 2026-10-07 by the independent verifiers who re-ran the review's 82
+fixes against the merged beta head (the graph read side: selectors, merges,
+communications, curation and URL credentials). Each entry says what was
+fixed, what was decided, and what is left. A residual is a judgement the owner
+may want to make differently, so none of them is closed by a test alone. A
+separate pass folds this section into the register above.
+
+### A1: a label correction no longer tells a held value from a free one
+
+`PATCH /graph/nodes/{id}` refused a label correction to junk with the
+ontology's reason, naming the selector type, when the value the entity held
+was also held by an entity the caller cannot read, and accepted it when no one
+held the value. `core.selector` is policied by case alone (0134), so row
+security did not hide the holder. `SelectorStore._types_held_by_others` now
+reads only rows the caller may read (the same predicate as every other
+selector read), so a value held above them answers as one held by nobody.
+
+**Left.** The lookup needs the caller's clearance and compartments, which the
+route passes down. A retraction that restores a label passes none, so the
+lookup is not made there. A retraction never refuses, so nothing is told. The
+narrow cost is that the restored label of an entity that owns no index row for
+its own label (a duplicate of a value another entity holds) is not indexed
+under that holder's type: the index holds nothing for it, which `strict=False`
+already allows.
+
+### A2: a merge over duplicate ties the merger cannot read sets them aside
+
+A merge that would give the survivor two live ties of one type to one third
+party was refused with a 409 naming the type, where a merge with no such tie
+answered 201. An AMBER merger therefore learned that two ties they cannot read
+exist. `MergeService.merge` now takes the merger's clearance and compartments.
+When the colliding tie, or the entity at its far end, is above them, the
+duplicate is retired and recorded in `core.node_merge_edge` with
+`deleted_by_merge = true`, as a tie between the two entities already is, so the
+reversal gives it back at its original endpoints. The merge answers 201 as it
+does with no collision. Where the merger can read the tie, the refusal is
+unchanged and still names the third party only to a reader of it.
+
+**Left.**
+
+- While the merge is live the set-aside tie is retired, so its claims count
+  toward nothing and the survivor's own tie stands alone. Reversing the merge
+  restores them. Nothing is destroyed.
+- The column comment on `deleted_by_merge` (0055) still says a self-loop, and a
+  merge record's `edges_self_loop_deleted` counts set-aside duplicates with the
+  ties between the two entities. `edges_duplicate_folded` in the `NODE_MERGED`
+  audit detail, and the case owner's notification, tell them apart. Rewording
+  the comment needs a migration, which this round did not add.
+- A merge made through the service with no labels (the suite, a script) is
+  refused as before, because nothing says what the caller may read.
+
+### A3: flagging and minimising a conversation needs the conversation's labels
+
+`POST .../comms/conversations/{id}/incidental` and `/minimise` ran on the
+minimisation system connection after a check that threw the conversation's
+labels away. An AMBER analyst could flag a participant of a RED conversation
+and an AMBER lead could minimise it, while a random id answered 404. Both
+routes now gate at the conversation's own labels and answer one 404, the
+sentence for a missing conversation, for a conversation that is missing, in
+another case or above the caller. The hidden case keeps its AUTHZ_DENIED row.
+
+**Decision recorded.** Minimisation is a legal duty (docs/16 L4), and the
+system connection stays so that minimising a conversation the caller may read
+still drops every body, a message above them included. The duty is not a
+licence to act on a conversation above the caller's labels: the code comment
+described a complete drop on a conversation the minimiser can read, not a
+minimisation anyone may order by id.
+
+**Left.** A RED conversation in an AMBER case can now be flagged or minimised
+only by someone cleared for it. Where no such person is assigned, nobody can.
+Whether a case's closure should look for a conversation no one on the team can
+minimise is not decided.
+
+### A4 and A5: two refusals named what the caller cannot read
+
+Curating a node that was merged into another (`_node_for_write`) named the
+survivor, and a reversal held up by a later merge named that merge and how many
+ties they shared. Each now names the entity or the merge only to a reader of
+it, and otherwise says "another" or that the later merge is not one they can
+see.
+
+**Left.** A refused reversal still says that a later merge the reader cannot
+see exists. That one bit cannot go without allowing the reversal the rule
+forbids, which would write old endpoints over ties a live merge owns.
+
+### A6: `POST /selectors` refuses a link with a password
+
+`POST /selectors` stored the raw value of a URL as written and answered with it,
+so `https://alice:...@mail.bank.example/login`, a `?api_key=` query and the
+other shapes of `carries_credential` came back with the secret in them. The
+route now refuses with the sentence `POST /nodes` gives (400, nothing stored).
+
+**Decision.** Refuse rather than redact, because this is a route a person types
+a value into and its neighbour for an entity label refuses. `SelectorStore.record`,
+the write of the machine paths, still redacts, since a capture's text is not the
+typist's to correct. Rows this route stored earlier are cleaned by the 0137
+scrub where the shape is one it knows.
+
+### A7: a login that is not an e-mail address after a path
+
+The stealer-log layout `url:login:password` was cut only when the login held an
+`@`. `https://y.example/login:carol:Zq9Pass7p` (or with `|` between) was kept
+whole in the label, the selector and the raw value, on capture, accept,
+`POST /nodes` and a label correction. `normalisers._login_cut` now cuts a final
+path segment shaped `name:login:password`, with `:` or `|` between the three,
+at its first separator, for the normal form, the redacted text and the credential
+spans alike.
+
+**Cost.** A final path segment with two separators that is not a login pair (a
+time such as `/at/10:30:00`, an IPv6 address, a URN) is cut too, so two such
+URLs can collide in the selector index. That was chosen over keeping a possible
+password.
+
+**Not found, and cannot be.** A secret in a path with no separators
+(`/hooks/T0/B0/<token>`), a `?l=` or `?hash=` value whose name does not say it
+is a credential, a pair with one separator, and a pair with no path
+(`https://y.example:carol:pw`).
+
+**Rows written before this change are not cleaned.** The 0137 scrub has the same
+blind spot, and no migration was added for it. An owner-run query lists them;
+the shape also matches the false positives above, so look at each hit before
+changing it. A label is corrected through the product, which records the
+correction as a claim.
+
+```sql
+WITH shape(re) AS (VALUES (
+  '^[a-z][a-z0-9+.-]*://[^/?#]+(/[^/?#]*)*/[^/?#:|@]*[:|][^/?#:|@]+[:|][^/?#]+([?#].*)?$'))
+SELECT 'core.node' AS "table", n.id, n.case_id, 'label' AS "column"
+  FROM core.node n, shape WHERE n.label ~* re
+UNION ALL
+SELECT 'core.node', n.id, n.case_id, 'attrs.raw_value'
+  FROM core.node n, shape WHERE n.attrs ->> 'raw_value' ~* re
+UNION ALL
+SELECT 'core.selector', s.id, s.case_id, 'raw_value or norm_value'
+  FROM core.selector s, shape
+ WHERE s.selector_type IN ('URL', 'SOCIAL_URL')
+   AND (s.raw_value ~* re OR s.norm_value ~* re)
+UNION ALL
+SELECT 'collect.proposal', p.id, p.case_id, 'payload label or raw_value'
+  FROM collect.proposal p, shape
+ WHERE p.payload ->> 'label' ~* re OR p.payload -> 'attrs' ->> 'raw_value' ~* re
+UNION ALL
+SELECT 'collect.extraction', e.id, NULL, 'raw_value or norm_value'
+  FROM collect.extraction e, shape
+ WHERE e.selector_type IN ('URL', 'SOCIAL_URL')
+   AND (e.raw_value ~* re OR e.norm_value ~* re);
+```
+
+The pasted line itself stays in the captured document's text and in any claim
+rationale that copied its context, as 0137 records for the other shapes. Run
+the query as the schema owner: it is read-only, and row security hides rows
+from the request role.
+
+### A8: three disclosures that were found and not changed
+
+- **Hidden and missing differ in time and in the audit log.** The status and the
+  sentence are one answer for a hidden element and a missing one, which was the
+  fix. Medians over 40 interleaved in-process calls each were 97.6 ms against
+  79.1 ms (merge), 95.9 against 80.4 (tie create) and 81.1 against 66.5 (entity
+  correction), and the gate writes an AUTHZ_DENIED row for the hidden id and
+  none for the missing one. Not changed: doing the same work for a missing id
+  would append a denial row for every id that names nothing, and the gap was
+  measured with no network between the caller and the process.
+- **Retiring an entity that carries a tie the caller cannot read ignores
+  `withheld_disclosure`.** The refusal (`HIDDEN_TIES_REFUSAL`) is the same under
+  NONE, PRESENCE and COUNT, so under NONE it still says that a tie above the
+  caller touches the entity, while docs/14 U2 makes what is said about withheld
+  material a per-case setting. The docstring of
+  `GraphWriteService._refuse_if_ties_above_clearance` said the refusal made the
+  same disclosure as the console's notice; that is corrected. Honouring NONE
+  needs a decision between retiring over ties the caller cannot see and a
+  refusal in words no different from any other.
+- **Co-participation weights divide by the room's raw size.** Hidden members are
+  in the divisor, so under NONE a room of two AMBER identities and one RED one
+  weighs 0.5 where a two-person room weighs 1.0, and a reader who knows a room
+  can difference a weight to learn that someone they cannot see is in it. The
+  explicit count is gone under NONE; the weight is not. Migration 0030 already
+  concedes that differencing is possible.

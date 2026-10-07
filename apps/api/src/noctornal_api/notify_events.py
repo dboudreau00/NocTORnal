@@ -67,6 +67,9 @@ def merge_performed(conn: psycopg.Connection, *, case_id: UUID, merge_id: UUID,
                     #: relationships that survived the merge somewhere else,
                     #: which is a destruction described as a move.
                     self_loops_deleted: int = 0,
+                    #: Duplicates of a tie the survivor already held, set
+                    #: aside because the merger could not read them.
+                    duplicates_folded: int = 0,
                     element_classification: str | None = None,
                     element_compartments: frozenset[str] = frozenset()) -> None:
     """docs/01 asks for this one by name: "Merges require `graph.merge` with
@@ -99,6 +102,15 @@ def merge_performed(conn: psycopg.Connection, *, case_id: UUID, merge_id: UUID,
                  f"{agree(self_loops_deleted, 'it', 'them')}. Reversing the "
                  f"merge brings {agree(self_loops_deleted, 'it', 'them')} back."
                  if self_loops_deleted else "")
+              + (f" A further "
+                 f"{count_of(duplicates_folded, 'relationship', 'relationships')} "
+                 f"duplicated {agree(duplicates_folded, 'a tie', 'ties')} the "
+                 f"survivor already held and "
+                 f"{agree(duplicates_folded, 'was', 'were')} set aside rather "
+                 f"than moved, because the person merging could not read "
+                 f"{agree(duplicates_folded, 'it', 'them')}. Reversing the "
+                 f"merge brings {agree(duplicates_folded, 'it', 'them')} back."
+                 if duplicates_folded else "")
               + f"\n\nReason given: {reason}\n\n"
               f"Merging is the operation most likely to quietly corrupt a "
               f"case. If this is wrong, it is reversible from the "
