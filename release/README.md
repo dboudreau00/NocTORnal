@@ -109,7 +109,11 @@ UCINET-grade network mathematics.
 
 ## Getting it running
 
-**[INSTALL.md](INSTALL.md)**: one command on Windows, macOS or Linux.
+**[START-HERE.md](START-HERE.md)**: the one page to follow first. What you
+need, three install steps, the first sign-in and the commonest problems.
+
+**[INSTALL.md](INSTALL.md)**: the detail behind it, one command on Windows,
+macOS or Linux.
 
 **[MANUAL.md](MANUAL.md)**, the analyst manual: what each pane is for,
 what the numbers mean, and the traps.

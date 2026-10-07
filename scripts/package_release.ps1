@@ -142,7 +142,9 @@ try {
     # constraints.txt since 2026-09-23 (sec-pin-dependencies): both
     # installers refuse to run without it.
     foreach ($needed in @('alembic.ini', 'release/install.ps1',
-                          'release/install.sh', 'apps/api/pyproject.toml',
+                          'release/install.sh', 'release/START-HERE.md',
+                          'release/start.sh', 'release/start.ps1',
+                          'apps/api/pyproject.toml',
                           'constraints.txt',
                           'infra/docker-compose.yml', 'LICENSE')) {
         if (-not (Test-Path (Join-Path $Destination $needed))) {
@@ -305,7 +307,7 @@ try {
     }
 
     Write-Host ''
-    Say 'Done. Tell the recipient to start at release/INSTALL.md.'
+    Say 'Done. Tell the recipient to start at release/START-HERE.md.'
     Write-Host ''
 }
 finally { Pop-Location }

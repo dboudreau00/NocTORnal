@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 #
-# One-command install for NocTORnal on macOS and Linux.
+# One-command install for NocTORnal on macOS and Linux, as a short wizard
+# of eight numbered steps.
 #
-# Checks prerequisites, builds the virtual environment, generates the
-# secrets that have no safe default, starts the containers, migrates the
-# database, creates the first account and runs the API.
+# Step 1 looks at your computer and changes nothing. The rest builds the
+# virtual environment, generates the secrets that have no safe default,
+# starts the containers, migrates the database, creates the first account
+# (and waits while you save its password), offers a fictional demo case
+# and runs the API.
 #
 # Every step is idempotent and reports what it found rather than assuming.
-# Re-running this is safe.
+# Re-running this is safe. Start here: release/START-HERE.md.
 #
 # READ THE README.md AT THE PROJECT ROOT FIRST, section "Five blocking
 # items". Five legal decisions, L1 to L5, gate any use of this software
@@ -17,8 +20,15 @@
 #   ./release/install.sh                  start everything
 #   ./release/install.sh --port 8001      a different API port
 #   ./release/install.sh --skip-launch    install and configure, start nothing
+#   ./release/install.sh --demo           load the fictional demo case, without asking
+#   ./release/install.sh --no-demo        do not load it, without asking
+#   ./release/install.sh --open           open the console in your browser when it is up
 #   ./release/install.sh --with-telegram  also install the Telegram collection library (optional)
 #   ./release/install.sh --with-yara      also install the YARA scanning library (optional)
+#
+# With no terminal attached (a pipe, cron, CI) it never asks a question
+# beyond the two the account needs, read from standard input: an email,
+# then a display name. The demo case is then loaded only with --demo.
 #
 # The production deployment (infra/production, read its README.md first):
 #   sudo ./release/install.sh --production-secrets
@@ -50,10 +60,21 @@ WITH_TELEGRAM=0
 WITH_YARA=0
 PRODUCTION_STEP=0
 PROD_DIR=""
+# The demo case: "" asks when a person is at the keyboard and skips when
+# not, "yes" loads it, "no" skips it. The browser: 1 opens it without asking.
+DEMO_MODE=""
+OPEN_BROWSER=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --port) PORT="$2"; shift 2 ;;
     --skip-launch) SKIP_LAUNCH=1; shift ;;
+    --demo)
+      if [[ "$DEMO_MODE" == "no" ]]; then echo "choose --demo or --no-demo, not both" >&2; exit 2; fi
+      DEMO_MODE=yes; shift ;;
+    --no-demo)
+      if [[ "$DEMO_MODE" == "yes" ]]; then echo "choose --demo or --no-demo, not both" >&2; exit 2; fi
+      DEMO_MODE=no; shift ;;
+    --open) OPEN_BROWSER=1; shift ;;
     --with-telegram) WITH_TELEGRAM=1; shift ;;
     --with-yara) WITH_YARA=1; shift ;;
     --production-secrets) PRODUCTION_STEP=1; shift ;;
@@ -70,17 +91,92 @@ else
   C_CYAN=; C_GREEN=; C_YELLOW=; C_RED=; C_DIM=; C_OFF=
 fi
 
-step()   { printf '\n  %s%s%s\n' "$C_CYAN" "$1" "$C_OFF"; }
+# The wizard's numbered steps. step() counts for itself, so a step added or
+# removed cannot leave "Step 3 of 8" wrong in the middle of the run; a test
+# holds STEP_TOTAL to the number of step calls. heading() is for output that
+# is not one of the eight (the production secrets job, the closing line of
+# --skip-launch).
+STEP_TOTAL=8
+STEP_NO=0
+step() {
+  STEP_NO=$((STEP_NO + 1))
+  printf '\n  %sStep %d of %d: %s%s\n' "$C_CYAN" "$STEP_NO" "$STEP_TOTAL" "$1" "$C_OFF"
+}
+heading() { printf '\n  %s%s%s\n' "$C_CYAN" "$1" "$C_OFF"; }
 good()   { printf '    %s%s%s\n' "$C_GREEN" "$1" "$C_OFF"; }
 note()   { printf '    %s%s%s\n' "$C_YELLOW" "$1" "$C_OFF"; }
 detail() { printf '    %s\n' "$1"; }
 
+# The first line of the second argument is the one sentence that says what to
+# do; any lines after it are the commands.
 stop_with() {
   printf '\n  %sCannot continue: %s%s\n\n' "$C_RED" "$1" "$C_OFF"
   printf '  %sWhat to do:%s\n' "$C_YELLOW" "$C_OFF"
   printf '%s\n' "$2" | sed 's/^/    /'
   printf '\n'
   exit 1
+}
+
+# Whether a person is at the keyboard. Standard input is the test, because it
+# is what the questions read: a clean-VM harness, cron, CI and `curl | bash`
+# all feed or close it, and a question asked there eats the lines meant for
+# the account prompt.
+INTERACTIVE=0
+if [[ -t 0 ]]; then INTERACTIVE=1; fi
+
+# The decisions below are functions of their arguments and nothing else, so a
+# test can run them (apps/api/tests/test_install_wizard.py).
+#
+# decide_demo MODE INTERACTIVE FRESH: what to do about the fictional demo
+# case. MODE is yes, no or empty; INTERACTIVE and FRESH are 1 or 0, FRESH
+# meaning this run made the account. Prints load, ask or skip. A question is
+# asked only of a person who has just made their first account.
+decide_demo() {
+  local mode="$1" interactive="$2" fresh="$3"
+  if [[ "$mode" == "no" ]]; then echo skip; return 0; fi
+  if [[ "$mode" == "yes" ]]; then echo load; return 0; fi
+  if [[ "$fresh" == "1" && "$interactive" == "1" ]]; then echo ask; else echo skip; fi
+}
+
+# decide_open FORCE INTERACTIVE DESKTOP: whether to open the browser. Prints
+# open, ask or skip. --open forces it, and nothing opens without a desktop.
+decide_open() {
+  local force="$1" interactive="$2" desktop="$3"
+  if [[ "$desktop" != "1" ]]; then echo skip; return 0; fi
+  if [[ "$force" == "1" ]]; then echo open; return 0; fi
+  if [[ "$interactive" == "1" ]]; then echo ask; else echo skip; fi
+}
+
+# Whether this machine has a desktop to open a page on: macOS always, Linux
+# when a display is set and xdg-open exists. Prints 1 or 0.
+has_desktop() {
+  case "$(uname -s 2>/dev/null || echo unknown)" in
+    Darwin) if command -v open >/dev/null 2>&1; then echo 1; else echo 0; fi ;;
+    *) if [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && command -v xdg-open >/dev/null 2>&1; then echo 1; else echo 0; fi ;;
+  esac
+}
+
+# The question's answer: empty and anything starting with y or Y is yes,
+# so Enter takes the default. Prints yes or no.
+answer_is_yes() {
+  case "$1" in
+    ''|[Yy]*) echo yes ;;
+    *) echo no ;;
+  esac
+}
+
+# What this machine calls itself, read as data (never sourced).
+describe_os() {
+  local name=""
+  case "$(uname -s 2>/dev/null || echo unknown)" in
+    Darwin) name="macOS $(sw_vers -productVersion 2>/dev/null || true)" ;;
+    *)
+      if [[ -r /etc/os-release ]]; then
+        name="$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release | head -n 1 | tr -d '"')"
+      fi
+      if [[ -z "$name" ]]; then name="$(uname -sr 2>/dev/null || echo unknown)"; fi ;;
+  esac
+  printf '%s, %s' "$name" "$(uname -m 2>/dev/null || echo unknown)"
 }
 
 RELEASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -106,7 +202,7 @@ RELEASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ $PRODUCTION_STEP -eq 1 ]]; then
   ROOT_DIR="$(dirname "$RELEASE_DIR")"
   TARGET_DIR="${PROD_DIR:-$ROOT_DIR/infra/production}"
-  step 'Bringing the production secrets files to this release'
+  heading 'Bringing the production secrets files to this release'
   detail "in $TARGET_DIR"
   HOST_PY=""
   for name in python3 python; do
@@ -117,7 +213,8 @@ if [[ $PRODUCTION_STEP -eq 1 ]]; then
     fi
   done
   [[ -n "$HOST_PY" ]] || stop_with 'Python 3.8 or newer was not found on this host.' \
-    "The production secrets step runs on the host's own python3, with the
+    "Install Python 3 on this host, then run this again.
+The production secrets step runs on the host's own python3, with the
 standard library only. Debian/Ubuntu:  sudo apt update && sudo apt install python3"
   NEW_DATABASE=0
   if [[ -z "$PROD_DIR" ]] && command -v docker >/dev/null 2>&1 \
@@ -172,19 +269,22 @@ virtual environment on top of a Windows one and break both."
     ;;
 esac
 
-printf '\n  NocTORnal - Alpha Release\n'
+printf '\n  NocTORnal - Beta Install\n'
 printf '  %s─────────────────────────%s\n' "$C_DIM" "$C_OFF"
 # Five, L1 to L5, as the root README's table has them, and a heading that
 # exists there. The banner said four and pointed at a "LEGAL STATUS"
 # section only release/README.md has. It names the README at the project
 # root in full because release/README.md is the one beside this script
 # and has no such heading (Alpha 6 pre-release check, 2026-09-23).
-printf '  %sAlpha software. Not audited. Five legal decisions (L1 to L5)%s\n' "$C_YELLOW" "$C_OFF"
+printf '  %sBeta software. Not audited. Five legal decisions (L1 to L5)%s\n' "$C_YELLOW" "$C_OFF"
 printf '  %sgate any use against real material: see "Five blocking items"%s\n' "$C_YELLOW" "$C_OFF"
 printf '  %sin the README.md at the project root. Installing is fine;%s\n' "$C_YELLOW" "$C_OFF"
 printf '  %spointing it at a real case is not, until those are settled.%s\n' "$C_YELLOW" "$C_OFF"
 printf '  %sLegal review is required before any active case load, and%s\n' "$C_YELLOW" "$C_OFF"
 printf '  %sholding this material is itself dangerous: see docs/16.%s\n' "$C_YELLOW" "$C_OFF"
+printf '\n  This takes %d short steps. Step 1 only looks at your computer and\n' "$STEP_TOTAL"
+printf '  changes nothing. If a step fails it says what to do, and running this\n'
+printf '  again is safe.\n'
 
 # ---------------------------------------------------------------------------
 # Locate the application. The release directory may sit inside the source
@@ -207,25 +307,31 @@ if [[ -f "$candidate/alembic.ini" ]]; then
 fi
 [[ -n "$REPO_ROOT" ]] || stop_with \
   "this does not look like a complete NocTORnal package." \
-  "install.sh expects to live in the release/ directory of the project, so
-that its parent contains alembic.ini. That parent has no alembic.ini.
-
-The usual cause is copying release/ out on its own. It is documentation and
-installers only, with no application source in it. Clone or download
-the whole repository and run:
+  "Clone or download the whole repository, then run this installer again from
+the project root:
 
     ./release/install.sh
 
-from the project root."
-
-step 'Locating the application'
-good "found at $REPO_ROOT"
+install.sh expects to live in the release/ directory of the project, so
+that its parent contains alembic.ini. That parent has no alembic.ini. The
+usual cause is copying release/ out on its own. It is documentation and
+installers only, with no application source in it."
 
 # ---------------------------------------------------------------------------
-# 1. Python
+# Step 1: look at the computer. Nothing is changed here. What it finds is
+# printed as it goes, so the summary is on screen before step 2 touches
+# anything: the system, Python, Docker and Compose, and the API's port.
 # ---------------------------------------------------------------------------
 
-step 'Checking Python'
+step 'Checking your computer'
+detail 'This step only looks. Nothing on your computer has been changed.'
+good "folder:  $REPO_ROOT"
+good "system:  $(describe_os)"
+
+# ---------------------------------------------------------------------------
+# 1a. Python
+# ---------------------------------------------------------------------------
+
 PYTHON=""
 for name in python3.13 python3.12 python3 python; do
   command -v "$name" >/dev/null 2>&1 || continue
@@ -233,21 +339,21 @@ for name in python3.13 python3.12 python3 python; do
   major="${ver%%.*}"; minor="${ver##*.}"
   if (( major > 3 || (major == 3 && minor >= 12) )); then
     PYTHON="$(command -v "$name")"
-    good "Python $ver at $PYTHON"
+    full="$("$PYTHON" -c 'import platform; print(platform.python_version())' 2>/dev/null || echo "$ver")"
+    good "Python:  $full at $PYTHON"
     break
   fi
-  detail "found Python $ver at $(command -v "$name") - too old"
+  detail "found Python $ver at $(command -v "$name"), which is too old"
 done
 # `apt update` first, in this message and the venv one below: on a fresh
 # cloud image the package lists are empty and `apt install python3.12-venv`
 # answers "has no installation candidate" (Alpha 6 pre-release check,
 # 2026-09-23, on the clean VM).
 [[ -n "$PYTHON" ]] || stop_with "Python 3.12 or newer was not found." \
-  "Debian/Ubuntu:  sudo apt update && sudo apt install python3.12 python3.12-venv
+  "Install Python 3.12 or newer, then run this installer again.
+Debian/Ubuntu:  sudo apt update && sudo apt install python3.12 python3.12-venv
 Fedora:         sudo dnf install python3.12
-macOS:          brew install python@3.12
-
-Then run this script again."
+macOS:          brew install python@3.12"
 
 # `venv` is a separate package on Debian-family systems and its absence
 # only shows up at the create step, with a message that does not name the
@@ -271,41 +377,93 @@ if [[ -n "$missing_venv" ]]; then
   # interpreter found above installs the wrong one and changes nothing.
   py_pkg="$(basename "$PYTHON")-venv"
   stop_with "Python is installed but cannot build a virtual environment ($missing_venv missing)." \
-    "Debian/Ubuntu:  sudo apt update && sudo apt install $py_pkg
+    "Install the Python venv package, then run this installer again.
+Debian/Ubuntu:  sudo apt update && sudo apt install $py_pkg
                 (or: sudo apt update && sudo apt install python3-venv)
 Fedora:         sudo dnf install python3-devel
 
 This is a separate package on Debian-family systems: the interpreter is
 present and importing 'venv' succeeds, but 'ensurepip' is what actually
-creates the environment, and it ships separately.
-
-Then run this script again."
+creates the environment, and it ships separately."
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Docker
+# 1b. Docker
 # ---------------------------------------------------------------------------
 
-step 'Checking Docker'
 command -v docker >/dev/null 2>&1 || stop_with "Docker was not found." \
-  "Linux:  https://docs.docker.com/engine/install/
-macOS:  https://www.docker.com/products/docker-desktop/  (or: brew install --cask docker)
+  "Install Docker, then run this installer again.
+Linux:  https://docs.docker.com/engine/install/
+macOS:  https://www.docker.com/products/docker-desktop/  (or: brew install --cask docker)"
 
-Then run this script again."
-
-if ! docker info >/dev/null 2>&1; then
+if ! docker info >/dev/null 2>&1 </dev/null; then
   stop_with "Docker is installed but the engine is not reachable." \
-    "Linux:  sudo systemctl start docker
+    "Start Docker and wait until it is running, then run this installer again.
+Linux:  sudo systemctl start docker
         and add yourself to the docker group so sudo is not needed:
           sudo usermod -aG docker \$USER   (then log out and back in)
 macOS:  start Docker Desktop and wait for it to report running."
 fi
 
-docker compose version >/dev/null 2>&1 || stop_with \
+docker compose version >/dev/null 2>&1 </dev/null || stop_with \
   "Docker Compose v2 was not found." \
-  "This needs the 'docker compose' subcommand, not the older standalone
-'docker-compose' binary. Update Docker to a current release."
-good 'Docker engine is running, Compose v2 present'
+  "Update Docker to a current release, then run this installer again.
+This needs the 'docker compose' subcommand, not the older standalone
+'docker-compose' binary."
+DOCKER_VERSION="$(docker version --format '{{.Server.Version}}' 2>/dev/null </dev/null || true)"
+COMPOSE_VERSION="$(docker compose version --short 2>/dev/null </dev/null || true)"
+good "Docker:  ${DOCKER_VERSION:-version unknown}, engine running, Compose ${COMPOSE_VERSION:-v2} present"
+
+# ---------------------------------------------------------------------------
+# 1c. The port. A re-run while the API is already up says so here, before
+# anything is built, in this script's voice. It used to run every step and
+# then end in uvicorn's "[Errno 98] ... address already in use" and exit 3,
+# while INSTALL.md quoted a message only launch.ps1 printed (Alpha 6
+# pre-release check, 2026-09-23). bash's /dev/tcp connects without any extra
+# tool; a refused connection means the port is free. --skip-launch starts no
+# API, so a busy port is only reported then.
+# ---------------------------------------------------------------------------
+
+PORT_BUSY=0
+if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
+  PORT_BUSY=1
+fi
+if [[ $PORT_BUSY -eq 1 && $SKIP_LAUNCH -eq 0 ]]; then
+  stop_with "port $PORT is already in use." \
+    "Open http://127.0.0.1:$PORT/ui/ if an earlier copy is still running there, or choose another port.
+
+    ./release/install.sh --port $((PORT + 1))
+
+To stop an earlier copy, press Ctrl-C in the window it runs in."
+fi
+if [[ $PORT_BUSY -eq 1 ]]; then
+  note "Port:    $PORT is in use (fine, since --skip-launch starts nothing)"
+else
+  good "Port:    $PORT is free"
+fi
+
+# The other ports are the containers'. When none of this project's containers
+# is running and one of those is taken, `docker compose up` fails on it, so
+# the install says so now rather than after the images are pulled. Not fatal:
+# the compose file is the authority, and a port held by an earlier copy of
+# this stack is fine.
+if [[ -z "$(docker compose -f "$REPO_ROOT/infra/docker-compose.yml" ps -q 2>/dev/null </dev/null || true)" ]]; then
+  taken=""
+  for p in 5432 6379 9000 9001 1025 8025; do
+    if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then taken="${taken:+$taken, }$p"; fi
+  done
+  if [[ -n "$taken" ]]; then
+    note "Ports:   in use by another program: $taken"
+    note 'The containers need them. If step 4 fails, stop that program first.'
+  fi
+fi
+
+printf '\n'
+detail 'All good. Next it will:'
+detail '  build a private Python environment in the .venv folder'
+detail '  write .env.local with fresh random keys (the file is yours to keep)'
+detail '  start four containers: Postgres, Redis, MinIO and Mailpit'
+detail '  set up the database and make your account'
 
 # ---------------------------------------------------------------------------
 # 3. Virtual environment and dependencies
@@ -334,8 +492,8 @@ elif [[ -x "$VENV_PY" ]]; then
   detail 'creating .venv (this takes a moment)'
   "$PYTHON" -m venv "$VENV" || { rm -rf "$VENV"; stop_with \
     "the virtual environment could not be created." \
-    "The output above says why. Nothing was left behind, so fixing the
-cause and running this again is all that is needed."; }
+    "Fix what the output above names, then run this installer again.
+Nothing was left behind, so that is all that is needed."; }
   good 'created'
 elif [[ -e "$VENV" ]]; then
   # Something is there and it is not a Unix venv. Refuse rather than
@@ -343,10 +501,9 @@ elif [[ -e "$VENV" ]]; then
   # half-overwritten environment is the likely outcome and it fails later,
   # somewhere unrelated.
   stop_with "$VENV exists but has no bin/python." \
-    "That usually means it was created on Windows (interpreter in
+    "Delete that folder, then run this installer again.
+It usually means the folder was created on Windows (interpreter in
 Scripts/ rather than bin/), or a previous install was interrupted.
-
-Delete it and run this again:
 
     rm -rf '$VENV'"
 else
@@ -356,12 +513,12 @@ else
   # pip" on every later run.
   "$PYTHON" -m venv "$VENV" || { rm -rf "$VENV"; stop_with \
     "the virtual environment could not be created." \
-    "The output above says why. Nothing was left behind, so fixing the
-cause and running this again is all that is needed."; }
+    "Fix what the output above names, then run this installer again.
+Nothing was left behind, so that is all that is needed."; }
   good 'created'
 fi
 
-detail 'installing dependencies'
+detail 'installing dependencies (a few minutes the first time)'
 # Every install below is held to constraints.txt, the exact versions the
 # release's suite passed on (sec-pin-dependencies, 2026-09-23). Without it
 # each `>=` in the pyproject files resolved to whatever was newest that day,
@@ -370,9 +527,9 @@ detail 'installing dependencies'
 # "dependency installation failed" with pip's error scrolled past.
 CONSTRAINTS="$REPO_ROOT/constraints.txt"
 [[ -f "$CONSTRAINTS" ]] || stop_with "constraints.txt is missing from $REPO_ROOT." \
-  "It pins every Python dependency to the version this release was tested
-on, and it ships with the release. Unpack the release again, or check out
-the whole repository, and run this again."
+  "Unpack the release again, or check out the whole repository, then run this
+installer again. The file pins every Python dependency to the version this
+release was tested on, and it ships with the release."
 "$VENV_PY" -m pip install --upgrade pip --quiet
 # BOTH packages, editable. The ontology package is the single source of the
 # selector normalisers and the API imports it; installing only the API
@@ -381,7 +538,8 @@ the whole repository, and run this again."
   -e "$REPO_ROOT/packages/ontology" \
   -e "$REPO_ROOT/apps/api" \
   || stop_with "dependency installation failed." \
-     "The output above says why. The commonest causes are no network
+     "Check your internet connection, then run this installer again.
+The output above says why. The commonest causes are no network
 access, or a proxy that needs pip configured for it."
 "$VENV_PY" -m pip install --quiet -c "$CONSTRAINTS" -e "$REPO_ROOT/apps/api[dev]" 2>/dev/null || true
 good 'dependencies installed'
@@ -397,10 +555,10 @@ if [[ -n "$EXTRAS" ]]; then
   detail "installing the optional extras: $EXTRAS"
   "$VENV_PY" -m pip install --quiet -c "$CONSTRAINTS" -e "$REPO_ROOT/apps/api[$EXTRAS]" \
     || stop_with "the optional extras ($EXTRAS) did not install." \
-       "The output above says why. The commonest causes are no network
+       "Run this installer again without the switch to install everything else.
+The output above says why. The commonest causes are no network
 access, or a macOS older than 14 for yara (yara-x publishes no wheel for
-it). Run this again without the switch to install everything else; the
-readiness register then shows what the missing extra leaves out."
+it). The readiness register then shows what the missing extra leaves out."
   good "optional extras installed: $EXTRAS"
 fi
 
@@ -411,7 +569,7 @@ fi
 # deliberate refusal, never an insecure fallback -- so these are generated
 # once, here, and left alone on every subsequent run.
 
-step 'Generating secrets'
+step 'Creating your secret keys'
 ENV_LOCAL="$REPO_ROOT/.env.local"
 if [[ -f "$ENV_LOCAL" ]]; then
   good '.env.local already exists - left untouched'
@@ -421,8 +579,8 @@ if [[ -f "$ENV_LOCAL" ]]; then
   if ! grep -q '^NOCTORNAL_PERSONA_KEK=' "$ENV_LOCAL"; then
     PKEK="$("$VENV_PY" -c 'import base64, os; print(base64.b64encode(os.urandom(32)).decode())')"
     [[ -n "$PKEK" ]] || stop_with 'Could not generate the persona key.' \
-'The Python in the virtual environment produced nothing.
-Nothing was written, so re-running this installer is safe.'
+'Run this installer again. Nothing was written, so that is safe.
+The Python in the virtual environment produced nothing.'
     {
       printf '%s\n' '# NOCTORNAL_PERSONA_KEK seals every collection persona credential. Lost, every persona is enrolled again.'
       printf 'NOCTORNAL_PERSONA_KEK=%s\n' "$PKEK"
@@ -454,9 +612,9 @@ else
     2>/dev/null || printf '0')"
   if [[ -z "$KEK" || "$KEK_BYTES" != "32" ]]; then
     stop_with "The generated TOTP key is ${KEK_BYTES:-0} bytes, not 32." \
-"The Python in the virtual environment did not produce a usable key.
-Run \"$VENV_PY -c 'import base64, os'\" to see the real error.
-Nothing was written, so re-running this installer is safe."
+"Run this installer again. Nothing was written, so that is safe.
+The Python in the virtual environment did not produce a usable key.
+Run \"$VENV_PY -c 'import base64, os'\" to see the real error."
   fi
   # The persona key (A collector process, 2026-10-02), checked as the TOTP
   # key is: the persona ring refuses anything but 32 bytes at run time.
@@ -466,13 +624,13 @@ Nothing was written, so re-running this installer is safe."
     2>/dev/null || printf '0')"
   if [[ -z "$PKEK" || "$PKEK_BYTES" != "32" ]]; then
     stop_with "The generated persona key is ${PKEK_BYTES:-0} bytes, not 32." \
-"The Python in the virtual environment did not produce a usable key.
-Nothing was written, so re-running this installer is safe."
+"Run this installer again. Nothing was written, so that is safe.
+The Python in the virtual environment did not produce a usable key."
   fi
   if [[ -z "$PEPPER" ]]; then
     stop_with 'Could not generate the ingest pepper.' \
-"The Python in the virtual environment produced nothing.
-Nothing was written, so re-running this installer is safe."
+"Run this installer again. Nothing was written, so that is safe.
+The Python in the virtual environment produced nothing."
   fi
   # R9: the SERVICE CONFIG is persisted too, not just the secrets. These
   # used to be exported into this script's own shell and lost when it
@@ -637,7 +795,7 @@ export MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-dev_only_change_me}"
 export EVIDENCE_BUCKET="${EVIDENCE_BUCKET:-noctornal-evidence}"
 
 if [[ $SKIP_LAUNCH -eq 1 ]]; then
-  step 'Done (nothing started, --skip-launch was given)'
+  heading 'Done (nothing was started, because --skip-launch was given)'
   detail "To start it:  $0 --port $PORT"
   printf '\n'
   exit 0
@@ -647,9 +805,17 @@ fi
 # 5. Containers
 # ---------------------------------------------------------------------------
 
-step 'Starting the service containers'
-detail 'Postgres, Redis, MinIO, Mailpit'
-docker compose -f "$REPO_ROOT/infra/docker-compose.yml" up -d
+step 'Starting the services'
+detail 'Four containers: Postgres, Redis, MinIO, Mailpit.'
+detail 'The first time, Docker downloads about 1 GB, which can take several minutes.'
+docker compose -f "$REPO_ROOT/infra/docker-compose.yml" up -d \
+  || stop_with 'docker compose up failed.' \
+"Read the output above, fix what it names, then run this installer again.
+The usual causes are a port that is already taken (5432, 6379, 9000, 9001,
+1025, 8025), or an image that could not be pulled. To stop a stale stack
+that holds the ports:
+
+    docker compose -f infra/docker-compose.yml down"
 
 detail 'waiting for Postgres to report healthy'
 # R17 (2026-07-26): the loop had no failure branch. Sixty exhausted probes
@@ -688,7 +854,8 @@ for _ in $(seq 1 60); do
 done
 if [[ "$PG_READY" -ne 1 ]]; then
   stop_with 'Postgres did not become ready within two minutes.' \
-"The container is up but not accepting connections. Look at why:
+"Look at the Postgres log, fix what it names, then run this installer again.
+The container is up but not accepting connections:
 
     docker compose -f infra/docker-compose.yml logs postgres
 
@@ -707,15 +874,19 @@ fi
 # fails with "No 'script_location' key found in configuration", which reads
 # as a broken install and is not one.
 
-step 'Applying database migrations'
+step 'Setting up the database'
 ( cd "$REPO_ROOT" && "$VENV/bin/alembic" upgrade head )
 good "at $( cd "$REPO_ROOT" && "$VENV/bin/alembic" current 2>/dev/null | tail -1 )"
 
 # ---------------------------------------------------------------------------
-# 7. First account
+# Step 6: the first account. The password and the QR code are printed once by
+# bootstrap.py, so when a person is at the keyboard the installer WAITS here
+# until they say they have saved them: nothing printed later can push them off
+# the screen. (install.ps1 used to hand off to launch.ps1, whose server log did
+# exactly that: release finding R8.)
 # ---------------------------------------------------------------------------
 
-step 'Checking for a user account'
+step 'Creating your account'
 USERS="$( cd "$REPO_ROOT" && "$VENV_PY" - <<'PY'
 import os
 import psycopg
@@ -724,9 +895,10 @@ with psycopg.connect(url) as c:
     print(c.execute("SELECT count(*) FROM iam.app_user").fetchone()[0])
 PY
 )"
-# Declared out here: the closing output below reads it on every path, and
+# Declared out here: the closing output below reads them on every path, and
 # under `set -u` an unset variable ends the script.
 ADMIN_EMAIL=""; ADMIN_NAME=""
+ACCOUNT_CREATED=0
 if [[ "$USERS" == "0" ]]; then
   # R4 (2026-07-26): this called `bootstrap.py init`, which does not
   # exist -- argparse exits 2 and `set -e` then killed the install at the
@@ -734,18 +906,31 @@ if [[ "$USERS" == "0" ]]; then
   # `create-user`, which is flag-driven and GENERATES the password rather
   # than asking for one, so the prompt below matches what happens.
   note 'No account exists yet. Creating one.'
-  detail 'Enter an email and a display name. A strong password is generated'
-  detail 'and printed ONCE, with a QR code to scan into an authenticator.'
+  detail 'Enter your email address (you sign in with it) and a display name.'
+  detail 'A strong password is made for you and shown once, with a QR code'
+  detail 'for an authenticator app (any TOTP app on your phone will do).'
   printf '\n'
   # `|| true` is not decoration either. `read` returns non-zero at EOF,
   # and `set -e` acts on that BEFORE the emptiness test below, so the
   # branch written to handle "they gave nothing" was unreachable: the
   # script simply stopped, mid-sentence, with no message at all. Anything
   # that is not a terminal reaches EOF here.
-  printf '    Email: '
-  read -r ADMIN_EMAIL || true
-  printf '    Display name: '
-  read -r ADMIN_NAME || true
+  #
+  # A person at the keyboard gets three tries at an address that is not one.
+  # Standard input that is not a terminal is read once, as it always was:
+  # the harness feeds an email, then a name, and nothing else.
+  for _attempt in 1 2 3; do
+    printf '    Email: '
+    read -r ADMIN_EMAIL || true
+    printf '    Display name: '
+    read -r ADMIN_NAME || true
+    if [[ $INTERACTIVE -eq 1 && -n "$ADMIN_EMAIL" && "$ADMIN_EMAIL" != *@* ]]; then
+      note 'That does not look like an email address. Try again.'
+      ADMIN_EMAIL=""
+      continue
+    fi
+    break
+  done
   printf '\n'
   if [[ -z "$ADMIN_EMAIL" || -z "$ADMIN_NAME" ]]; then
     note 'Skipped: both an email and a display name are needed.'
@@ -754,8 +939,20 @@ if [[ "$USERS" == "0" ]]; then
     detail "      --email you@example.org --name 'Your Name'"
     ADMIN_EMAIL=""
   else
+    detail 'Your password and the QR code are printed next. They are shown once.'
     ( cd "$REPO_ROOT" && "$VENV_PY" scripts/bootstrap.py create-user \
-        --email "$ADMIN_EMAIL" --name "$ADMIN_NAME" )
+        --email "$ADMIN_EMAIL" --name "$ADMIN_NAME" ) \
+      || stop_with 'the account could not be made.' \
+"Fix what the lines above name, then run this installer again.
+Everything before this step is kept, so it picks up where it stopped."
+    ACCOUNT_CREATED=1
+    if [[ $INTERACTIVE -eq 1 ]]; then
+      printf '\n'
+      note 'Save the password and scan the QR code now. They are not shown again.'
+      printf '    Press Enter when you have saved them: '
+      read -r _saved || true
+      printf '\n'
+    fi
   fi
 elif [[ "$USERS" == "1" ]]; then
   good '1 account already exists'
@@ -764,34 +961,74 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 8. Go
+# Step 7: the fictional demo case. Asked only of a person at the keyboard who
+# has just made their first account, and defaulting to yes. Without a terminal
+# nothing is asked, because a question there would eat the lines the account
+# prompt reads: the demo loads only with --demo. It is the synthetic
+# TLP:CLEAR network `bootstrap.py demo-network` makes, and the installer says
+# it is fictional.
+# ---------------------------------------------------------------------------
+
+step 'Loading the demo case (optional)'
+DEMO_CODE_NAME="OP-LATTICEWORK-26"
+DEMO_DECISION="$(decide_demo "$DEMO_MODE" "$INTERACTIVE" "$ACCOUNT_CREATED")"
+DEMO_LOADED=0
+DEMO_OWNER="$ADMIN_EMAIL"
+if [[ "$DEMO_DECISION" == "ask" ]]; then
+  detail 'A fictional case with made-up people and ties, so there is something'
+  detail 'to look at straight away. It is marked TLP:CLEAR and holds nothing real.'
+  printf '    Load the synthetic demo case so there is something to explore? [Y/n] '
+  read -r DEMO_ANSWER || true
+  if [[ "$(answer_is_yes "${DEMO_ANSWER:-}")" == "yes" ]]; then DEMO_DECISION=load; else DEMO_DECISION=skip; fi
+  printf '\n'
+fi
+if [[ "$DEMO_DECISION" == "load" ]]; then
+  if [[ -z "$DEMO_OWNER" ]]; then
+    # --demo on a re-run: the earliest active Lead investigator owns it.
+    DEMO_OWNER="$( cd "$REPO_ROOT" && "$VENV_PY" - 2>/dev/null <<'PY'
+import os
+import psycopg
+url = os.environ["DATABASE_URL"].replace("postgresql+psycopg", "postgresql")
+with psycopg.connect(url) as c:
+    row = c.execute(
+        "SELECT u.email FROM iam.app_user u"
+        " JOIN iam.user_role ur ON ur.user_id = u.id"
+        " WHERE ur.role_key = 'CASE_OWNER' AND u.is_active"
+        " ORDER BY u.created_at LIMIT 1"
+    ).fetchone()
+    print(row[0] if row else "")
+PY
+)" || DEMO_OWNER=""
+  fi
+  if [[ -z "$DEMO_OWNER" ]]; then
+    note 'The demo case needs an account to own it, and none was found.'
+  elif ( cd "$REPO_ROOT" && "$VENV_PY" scripts/bootstrap.py demo-network \
+           --owner-email "$DEMO_OWNER" --code "$DEMO_CODE_NAME" --classification CLEAR ); then
+    DEMO_LOADED=1
+    good "demo case loaded: Operation Latticework, code $DEMO_CODE_NAME"
+    detail 'It is fictional: made-up names and ties, marked TLP:CLEAR. Find it in the case list.'
+  else
+    note 'The demo case was not loaded. The lines above say why.'
+    detail 'If it is already there from an earlier run, that is fine.'
+  fi
+elif [[ "$DEMO_MODE" == "no" ]]; then
+  detail 'Skipped, because --no-demo was given.'
+else
+  detail 'Skipped. The closing card says how to load it later.'
+fi
+
+# ---------------------------------------------------------------------------
+# Step 8: start the API, and say what to do next.
+#
+# The port was checked in step 1, so a re-run while the API is already up said
+# what was wrong before anything was built. The Security Officer count is
+# read, not assumed, so a re-run on a stack that has one says nothing about
+# it; a count that cannot be read prints the advice anyway, because it costs
+# less than a blocked collection nobody can explain (Alpha 6 pre-release
+# check, 2026-09-23).
 # ---------------------------------------------------------------------------
 
 step 'Starting the API'
-
-# The port is checked BEFORE uvicorn, so a re-run while the API is already
-# up says what is wrong in this script's voice. It used to run every step
-# and then end in uvicorn's "[Errno 98] ... address already in use" and
-# exit 3, while INSTALL.md quoted a message only launch.ps1 printed (Alpha
-# 6 pre-release check, 2026-09-23). bash's /dev/tcp connects without any
-# extra tool; a refused connection means the port is free.
-if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
-  stop_with "port $PORT is already in use." \
-    "Either an earlier copy of the API is still running, in which case the
-stack is already up at http://127.0.0.1:$PORT/ui/, or something else
-holds the port. Stop it (Ctrl-C in the API's window), or pick another:
-
-    ./release/install.sh --port $((PORT + 1))"
-fi
-
-# What to do next, in this script's words. The account block printed by
-# bootstrap.py above is not the whole story for a new install: the console
-# is signed in to in a browser, the README's showcase recipe is what fills
-# it, and the account just created holds no Security Officer role (Alpha 6
-# pre-release check, 2026-09-23). The officer count is read, not assumed,
-# so a re-run on a stack that has one says nothing about it; a count that
-# cannot be read prints the advice anyway, because it costs less than a
-# blocked collection nobody can explain.
 OFFICERS="$( cd "$REPO_ROOT" && "$VENV_PY" - 2>/dev/null <<'PY'
 import os
 import psycopg
@@ -804,36 +1041,64 @@ with psycopg.connect(url) as c:
     ).fetchone()[0])
 PY
 )" || OFFICERS=""
-OWNER_EMAIL="${ADMIN_EMAIL:-you@example.org}"
+OWNER_EMAIL="${DEMO_OWNER:-you@example.org}"
 
 warn() { printf '  %s%s%s\n' "$C_YELLOW" "$1" "$C_OFF"; }
 
+# Open the console once the API answers, from the background so uvicorn can
+# stay in the foreground and keep Ctrl-C. It gives up after a minute.
+open_when_up() {
+  local url="$1" i
+  for i in $(seq 1 60); do
+    if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
+      if [[ "$(uname -s 2>/dev/null)" == "Darwin" ]]; then open "$url" || true; else xdg-open "$url" || true; fi
+      return 0
+    fi
+    sleep 1
+  done
+}
+
+DESKTOP="$(has_desktop)"
+OPEN_DECISION="$(decide_open "$OPEN_BROWSER" "$INTERACTIVE" "$DESKTOP")"
+if [[ "$OPEN_BROWSER" == "1" && "$DESKTOP" != "1" ]]; then
+  note 'No desktop was found, so no browser will be opened. Open the address below yourself.'
+fi
+if [[ "$OPEN_DECISION" == "ask" ]]; then
+  printf '    Open the console in your browser when it is ready? [Y/n] '
+  read -r OPEN_ANSWER || true
+  if [[ "$(answer_is_yes "${OPEN_ANSWER:-}")" == "yes" ]]; then OPEN_DECISION=open; else OPEN_DECISION=skip; fi
+fi
+
+printf '\n  %s------------------------------------------------------------%s\n' "$C_GREEN" "$C_OFF"
+printf '  %sYou are ready.%s\n' "$C_GREEN" "$C_OFF"
+printf '  %s------------------------------------------------------------%s\n' "$C_GREEN" "$C_OFF"
 detail "console:  http://127.0.0.1:$PORT/ui/"
 if [[ -n "$ADMIN_EMAIL" ]]; then
-  detail "sign in:  as $ADMIN_EMAIL, with the password and authenticator code above"
+  detail "sign in:  $ADMIN_EMAIL, with the password from step 6"
+else
+  detail 'sign in:  your email and password'
 fi
-detail 'stop it:  Ctrl-C'
+detail '          then the six-digit code from your authenticator app'
+detail "start:    next time, run: cd '$REPO_ROOT' && bash release/start.sh"
+detail 'stop:     press Ctrl-C here. The containers keep running; to stop them too, from that folder:'
+detail '          docker compose -f infra/docker-compose.yml down'
+detail 'help:     release/START-HERE.md, and release/MANUAL.md for what each pane does'
 printf '\n'
-printf '  Next, in a second terminal in %s\n' "$REPO_ROOT"
-printf '  (no exports needed: bootstrap.py reads .env.local).\n'
+warn 'This is a beta: use it on synthetic or published, non-personal data only.'
+warn 'Real case material needs legal review first (docs/16, "Read this before you hold anything").'
+if [[ "$DEMO_LOADED" -eq 0 ]]; then
+  printf '\n'
+  printf '  To load the fictional demo case later, from %s:\n' "$REPO_ROOT"
+  printf '      .venv/bin/python scripts/bootstrap.py demo-network --owner-email %s --code %s --classification CLEAR\n' "$OWNER_EMAIL" "$DEMO_CODE_NAME"
+fi
 printf '\n'
-printf '  To fill the console with the showcase case the README screenshots\n'
-printf '  come from, follow README.md, section "First run", with your address\n'
-printf '  as the owner. It starts with:\n'
-printf '      .venv/bin/python scripts/bootstrap.py demo-network --owner-email %s --code OP-SHOWCASE-26 --classification CLEAR\n' "$OWNER_EMAIL"
+printf '  The bigger showcase case the README screenshots come from is in\n'
+printf '  README.md, section "First run".\n'
 if [[ "$OFFICERS" == "0" || -z "$OFFICERS" ]]; then
   printf '\n'
-  if [[ "$OFFICERS" == "0" ]]; then
-    warn 'Nobody holds the Security Officer role yet; the account this'
-    warn 'installer creates does not. Until somebody does, the readiness'
-  else
-    warn 'The Security Officer holders could not be counted. The account'
-    warn 'this installer creates is not one. Until somebody is, the readiness'
-  fi
-  warn "register's blocking check security_officer_present fails, so"
-  warn 'collection runs are refused, and break-glass is refused because'
-  warn 'nobody could review it. Give the role to a second person, not to'
-  warn 'your own account (release/INSTALL.md, "After installing"):'
+  warn 'Nobody holds the Security Officer role yet, so collection runs and break-glass'
+  warn 'are refused. That does not matter for the demo. To fix it, give the role to a'
+  warn 'second person, not to your own account (release/INSTALL.md, "After installing"):'
   # security.officer@, not officer@: officer@example.org is the account
   # seed_readme_showcase.py creates, so after the README recipe this
   # command exited 1 with "already exists", and run first it would have
@@ -842,10 +1107,15 @@ if [[ "$OFFICERS" == "0" || -z "$OFFICERS" ]]; then
   printf '      .venv/bin/python scripts/bootstrap.py create-user --email security.officer@example.org --name "Officer Name" --roles SECURITY_OFFICER\n'
 fi
 printf '\n'
-printf '  %sSample ingest is refused until a prohibited-content policy is%s\n' "$C_YELLOW" "$C_OFF"
+printf '  %sUploading samples is refused until a prohibited-content policy is%s\n' "$C_YELLOW" "$C_OFF"
 printf '  %sdeclared (README, L1). That refusal is deliberate.%s\n' "$C_YELLOW" "$C_OFF"
+printf '\n'
+printf '  The API log follows below. Leave this window open while you use it.\n'
 printf '\n'
 
 cd "$REPO_ROOT"
+if [[ "$OPEN_DECISION" == "open" ]]; then
+  open_when_up "http://127.0.0.1:$PORT/ui/" >/dev/null 2>&1 &
+fi
 exec "$VENV/bin/uvicorn" noctornal_api.http.app:app \
      --host 127.0.0.1 --port "$PORT"

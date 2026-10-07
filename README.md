@@ -180,6 +180,11 @@ sociogram is for.
 
 ## Install
 
+**New here? Follow [`release/START-HERE.md`](release/START-HERE.md):** one
+page with what you need, the three install steps, the first sign-in and the
+five commonest problems. The installer is a short wizard that explains each
+step as it goes.
+
 Two supported paths. Both are one command, and both are safe to re-run.
 
 **Windows**
@@ -206,7 +211,7 @@ carries Mark-of-the-Web, and an unzipped `.sh` has no execute bit.
 4. generates a fresh TOTP key and ingest pepper into `.env.local` (mode 600) and **never overwrites an existing one**
 5. starts Postgres, Redis, MinIO and Mailpit, then waits for the database to actually accept connections
 6. applies all 131 Alembic migrations (Alembic head 0131)
-7. offers to create your first account, printing the password **once** with a QR code to scan (on Windows it prints the `create-user` command to run instead)
+7. offers to create your first account, printing the password **once** with a QR code to scan (on both systems, before the API starts), then offers a fictional demo case
 8. starts the API and prints the console URL, <http://127.0.0.1:8000/ui/>
 
 Detail and troubleshooting: **[`release/INSTALL.md`](release/INSTALL.md)**.
@@ -245,8 +250,7 @@ which needs no exports: `bootstrap.py` reads `.env.local`. On Windows the
 interpreter is `.venv\Scripts\python`.
 
 **Only if you have no account yet**, because you skipped the installer's
-account prompt or installed on Windows, where the installer prints this
-command rather than running it:
+account prompt:
 
 ```bash
 .venv/bin/python scripts/bootstrap.py create-user \
