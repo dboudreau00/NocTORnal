@@ -66,6 +66,7 @@ _RUN_FIRST = frozenset({
 #: (2026-09-25).
 _NEEDS_EXTRA = {
     "test_telegram_wire.py": "telethon",
+    "test_telegram_live_check_script.py": "telethon",
     "test_yara_compile_child.py": "yara_x",
     "test_yara_db_script.py": "yara_x",
 }
