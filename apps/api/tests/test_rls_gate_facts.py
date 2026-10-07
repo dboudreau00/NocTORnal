@@ -41,8 +41,9 @@ _FACT_READERS = {
     ("http/routers/proposals.py", "_check_accept_labels"): "element_labels",
     ("http/routers/evidence.py", "_authorize_export"): "element_labels",
     # S1, 2026-09-25: comms under policy (0122). The conversation's case
-    # is found as a fact before the gate's work proceeds.
-    ("http/routers/comms.py", "_own_conversation"): "element_labels",
+    # is found as a fact before the gate's work proceeds. Through
+    # `gate_element`, which reads `element_labels`, since 2026-10-07 (A3).
+    ("http/routers/comms.py", "_own_conversation"): "gate_element",
 }
 
 

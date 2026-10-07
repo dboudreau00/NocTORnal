@@ -1101,8 +1101,12 @@ def mark_incidental(
     cheap; discovering afterwards that nobody did is not.
     """
     _own_conversation(conn, user, case_id, conversation_id, "comms.bind")
-    CommsService(sconn).mark_incidental(conversation_id, body.handle,
-                                        incidental=body.incidental)
+    if not CommsService(sconn).mark_incidental(conversation_id, body.handle,
+                                               incidental=body.incidental):
+        # It answered 200 and the flag for a handle nobody in the
+        # conversation has, and changed nothing (Beta 1 gate 61).
+        raise Problem(404, "Not found",
+                      "no participant of this conversation has that handle")
     return {"conversation_id": str(conversation_id), "handle": body.handle,
             "is_incidental": body.incidental}
 

@@ -42,6 +42,7 @@ from noctornal_api.http.deps import (
     user_ceiling,
 )
 from noctornal_api.http.body_ceiling import credential_in_body
+from noctornal_api.http.element_gate import authorize_element
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import BodyCappedRoute, body_cap, rate_limit
 # The Lab's own door policy for the sample origin, shared by the exhibit
@@ -88,6 +89,11 @@ def _svc(conn: psycopg.Connection) -> EvidenceService:
     return EvidenceService(conn, EvidenceStorage())
 
 
+#: One sentence for an exhibit that is missing, in another case or above
+#: the caller's labels.
+EXHIBIT_MISSING = "evidence does not exist in this case"
+
+
 def _authorize_exhibit(
     conn: psycopg.Connection, user: CurrentUser, case_id: UUID,
     evidence_id: UUID, permission_key: str,
@@ -103,18 +109,24 @@ def _authorize_exhibit(
     """
     authorize_object(conn, user, case_id=case_id, permission_key=permission_key)
     # The element's case and labels as facts (`deps.element_labels`,
-    # S1 2026-09-25), so the gate below still answers an element above the
-    # caller's labels with its 403 and AUTHZ_DENIED row, not a silent 404 from
-    # row-level security. Content is read only after the gate.
+    # S1 2026-09-25), so the gate below still decides an element above the
+    # caller's labels and writes its AUTHZ_DENIED row, rather than row-level
+    # security hiding it unrecorded. Content is read only after the gate.
     facts = element_labels(conn, "evidence", evidence_id)
     if facts is None or facts[0] != case_id:
-        raise Problem(404, "Not found", "evidence does not exist in this case")
+        raise Problem(404, "Not found", EXHIBIT_MISSING)
     row = (facts[1], facts[2])
     # The second gate: one open is one use of a break-glass grant, not one
-    # per gate (sec-breakglass-double-count, 2026-09-23).
-    authorize_object(conn, user, case_id=case_id, permission_key=permission_key,
-                     after_case_gate=True,
-                     classification=row[0], compartments=frozenset(row[1] or []))
+    # per gate (sec-breakglass-double-count, 2026-09-23). A refusal the
+    # exhibit's own labels cause is the missing exhibit's 404, its
+    # AUTHZ_DENIED row kept, as for an entity or a tie (http_ui-016): it
+    # answered 403 "missing permission evidence.read" to an analyst who
+    # holds it, and so told a hidden exhibit from a missing one (Beta 1
+    # gate 61).
+    authorize_element(conn, user, case_id=case_id, permission_key=permission_key,
+                      classification=row[0],
+                      compartments=frozenset(row[1] or []),
+                      missing_detail=EXHIBIT_MISSING)
 
 
 #: What a stale sign-in is told when it is the ONLY thing between a caller
@@ -169,15 +181,23 @@ def _authorize_export(conn: psycopg.Connection, user: CurrentUser,
 
     gate()
     # The element's case and labels as facts (`deps.element_labels`,
-    # S1 2026-09-25), so the gate below still answers an element above the
-    # caller's labels with its 403 and AUTHZ_DENIED row, not a silent 404 from
-    # row-level security. Content is read only after the gate.
+    # S1 2026-09-25), so the gate below still decides an element above the
+    # caller's labels and writes its AUTHZ_DENIED row, rather than row-level
+    # security hiding it unrecorded. Content is read only after the gate.
     facts = element_labels(conn, "evidence", evidence_id)
     if facts is None or facts[0] != case_id:
-        raise Problem(404, "Not found", "evidence does not exist in this case")
+        raise Problem(404, "Not found", EXHIBIT_MISSING)
     row = (facts[1], facts[2])
-    gate(row[0], frozenset(row[1] or []),
-         count_use=not counted_at_case_gate(conn, user, case_id))
+    # The case's gate asked the same verb and the same sign-in, so a 403
+    # here is the exhibit's labels, answered as its absence (gate 61, as
+    # `_authorize_exhibit`).
+    try:
+        gate(row[0], frozenset(row[1] or []),
+             count_use=not counted_at_case_gate(conn, user, case_id))
+    except Problem as exc:
+        if exc.status != 403:
+            raise
+        raise Problem(404, "Not found", EXHIBIT_MISSING) from None
 
 
 #: Why a hostile exhibit's bytes are refused here, in the words the
