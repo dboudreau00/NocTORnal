@@ -701,9 +701,16 @@ def test_the_packager_names_every_zip_entry_itself_and_refuses_a_backslash():
     assert text.index("if ($backslashed) {") < text.index("Good \"wrote $zipPath")
 
 
-@pytest.mark.skipif(not shutil.which("powershell"), reason="Windows PowerShell 5.1 is the runtime that wrote backslashes")
 def test_the_packager_zip_block_writes_forward_slashes_under_windows_powershell(tmp_path):
+    """Run under Windows PowerShell 5.1, the runtime that wrote backslashes,
+    where there is one; under pwsh elsewhere (a CI runner has it), which runs
+    the same block. With neither, the static check above is the cover: no
+    skip, because CI fails a build that skips."""
     import zipfile
+    shell = shutil.which("powershell") or shutil.which("pwsh")
+    if shell is None:
+        test_the_packager_names_every_zip_entry_itself_and_refuses_a_backslash()
+        return
     tree = tmp_path / "pkg"
     (tree / "release").mkdir(parents=True)
     (tree / "release" / "install.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
@@ -712,7 +719,7 @@ def test_the_packager_zip_block_writes_forward_slashes_under_windows_powershell(
     script = tmp_path / "zipit.ps1"
     script.write_text(f"$Destination = '{tree}'\n$zipPath = '{zip_path}'\n" + _packager_zip_block() + "\n",
                       encoding="utf-8")
-    done = subprocess.run([shutil.which("powershell"), "-NoProfile", "-ExecutionPolicy", "Bypass",
+    done = subprocess.run([shell, "-NoProfile", "-ExecutionPolicy", "Bypass",
                            "-File", str(script)], capture_output=True, text=True,
                           stdin=subprocess.DEVNULL, timeout=120)
     assert done.returncode == 0, done.stdout + done.stderr

@@ -1714,14 +1714,20 @@ def test_a_child_of_a_uid_of_its_own_is_started_as_that_user_behind_the_launcher
     monkeypatch.setattr(ar.subprocess, "Popen", popen)
     argv = _script(tmp_path, "ok.py",
                    "import sys\nsys.stdin.buffer.readline()\nsys.stdout.write('{}')\n")
+    # The launcher sets RLIMIT_NPROC to the figure it is given and, run
+    # unprivileged here, may not raise the hard limit: ask for no more than
+    # this host's (a CI runner's is well under 2**20).
+    import resource
+    hard = resource.getrlimit(resource.RLIMIT_NPROC)[1]
+    tasks = 1 << 20 if hard == resource.RLIM_INFINITY else min(hard, 1 << 20)
     result = ar.run_local({"mode": "pe"}, (b"MZ",), wall_s=20, stdout_cap=1024,
-                          argv=argv, user=10101, max_tasks=1 << 20)
+                          argv=argv, user=10101, max_tasks=tasks)
     assert result.ok, result
     kw = seen["kw"]
     assert (kw["user"], kw["group"], kw["extra_groups"]) == (10101, 10101, [])
     assert kw["start_new_session"] is True
     assert seen["argv"][:4] == [sys.executable, "-I", "-S", "-c"]
-    assert seen["argv"][5] == str(1 << 20) and seen["argv"][6:] == argv
+    assert seen["argv"][5] == str(tasks) and seen["argv"][6:] == argv
     # The control: with no uid asked for, the child is started as itself
     # and with no launcher, which is every development run.
     ar.run_local({"mode": "pe"}, (b"MZ",), wall_s=20, stdout_cap=1024, argv=argv)

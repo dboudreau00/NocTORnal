@@ -147,9 +147,11 @@ def test_traversal_absolute_and_drive_names_are_refused():
                    ("ok/../../evil2", b"x" * 10), ("//server/share", b"x" * 10),
                    ("good/./a.bin", b"x" * 10)])
     report, payloads = expand(data)
-    # zipfile itself writes a backslash as a slash, so the drive name
-    # arrives as C:/...; the child refuses it by its drive letter.
-    assert codes(report) == {"../evil.exe": "parent_traversal",
+    # zipfile writes a backslash as a slash on Windows only, so the drive
+    # name arrives as C:/... there and as C:\... elsewhere; the child refuses
+    # it by its drive letter either way.
+    assert {k.replace("\\", "/"): v for k, v in codes(report).items()} == {
+                             "../evil.exe": "parent_traversal",
                              "/etc/passwd": "absolute_path",
                              "C:/Windows/evil.dll": "absolute_path",
                              "ok/../../evil2": "parent_traversal",
