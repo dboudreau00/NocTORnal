@@ -346,6 +346,7 @@ def verify_chain(
     -- table that did not finish inside two minutes. As joins the planner
     -- hashes each side once and the same check runs in well under a
     -- second.
+    , judged AS MATERIALIZED (
     SELECT w.seq, w.occurred_at, w.action, w.actor_id, w.case_id,
            -- ORPHAN: names a predecessor that is not in the window at all.
            -- The genesis row (prev_hash NULL) is exempt by construction.
@@ -361,7 +362,20 @@ def verify_chain(
       FROM windowed w
       LEFT JOIN hashes h ON h.row_hash = w.prev_hash
       LEFT JOIN claims c ON c.prev_hash = w.prev_hash
-     ORDER BY w.seq
+    )
+    -- Only the rows that do not verify leave the database, beside the
+    -- count and the span of what was checked (Beta 1 gate 64): every row
+    -- came back to Python, 380 MB and 35 seconds of the API process for a
+    -- 1.5 million row log. One summary row always, even with nothing wrong.
+    SELECT s.checked, s.first_seq, s.last_seq,
+           f.seq, f.occurred_at, f.action, f.actor_id, f.case_id,
+           f.link_broken, f.forked, f.fresh_fork, f.content_broken
+      FROM (SELECT count(*) AS checked, min(seq) AS first_seq,
+                   max(seq) AS last_seq FROM judged) s
+      LEFT JOIN LATERAL (
+           SELECT * FROM judged
+            WHERE link_broken OR forked OR content_broken) f ON true
+     ORDER BY f.seq
     """
     # `fresh_fork` in the query is a fork whose claimants are ALL above the
     # 0149 boundary: honest traffic cannot make one. No boundary, no such fork.
@@ -372,7 +386,11 @@ def verify_chain(
     if limit is not None:
         params["limit"] = limit
 
-    rows = conn.execute(sql, params).fetchall()
+    summary = conn.execute(sql, params).fetchall()
+    checked, first_seq, last_seq = summary[0][:3]
+    # The rows that did not verify; a run with none answers the summary row
+    # alone, with no row columns.
+    rows = [r[3:] for r in summary if r[3] is not None]
     breaks: list[ChainBreak] = []
     forks: list[ChainBreak] = []
 
@@ -419,8 +437,6 @@ def verify_chain(
                 kind="GENESIS", actor_id=g_actor, case_id=g_case))
 
     for seq, occurred_at, action, actor_id, case_id, link, fork, fresh, content in rows:
-        if not (link or fork or content):
-            continue
         parts = []
         if link:
             parts.append("LINK")
@@ -457,11 +473,11 @@ def verify_chain(
                 kind="ANCHOR_" + result.status, actor_id=None, case_id=None))
 
     return ChainReport(
-        checked=len(rows),
+        checked=checked,
         breaks=tuple(breaks),
         forks=tuple(forks),
-        first_seq=rows[0][0] if rows else None,
-        last_seq=rows[-1][0] if rows else None,
+        first_seq=first_seq,
+        last_seq=last_seq,
         genesis_count=len(genesis),
         tail_seq=tail[0] if tail else None,
         tail_row_hash=tail[1] if tail else None,

@@ -53,7 +53,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import psycopg
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request, Response
 from pydantic import BaseModel, Field
 
 from noctornal_api.break_glass import BreakGlassError, BreakGlassService, Grant
@@ -71,7 +71,7 @@ from noctornal_api.http.deps import (
     user_ceiling,
 )
 from noctornal_api.http.errors import Problem, safe_detail
-from noctornal_api.http.limits import rate_limit
+from noctornal_api.http.limits import enforce, rate_limit
 from noctornal_api.evidence import EvidenceError, EvidenceStorage
 from noctornal_api.retention import (
     MAX_OUT_OF_SCHEDULE,
@@ -1006,10 +1006,26 @@ class LegalHoldBody(BaseModel):
     reason: str | None = Field(default=None, max_length=1000)
 
 
+def _meter_lift(request: Request, response: Response, conn: psycopg.Connection,
+                user: CurrentUser, on: bool) -> None:
+    """A LIFT spends the destruction meter; a placement does not.
+
+    The three hold routes were metered on `retention.destroy` whichever way
+    the hold went, so placing a fourth hold inside a few minutes was refused
+    (a burst of three, ten an hour, shared with the purges), and with the
+    meter's store down every placement was refused (Beta 1 gate 64).
+    Preservation is never the act a loop abuses; releasing is what makes
+    destruction lawful, so a lift keeps the tight meter and fails closed, and
+    a placement has the ordinary request meter."""
+    if not on:
+        enforce(request, response, "retention.destroy", f"u:{user.user_id}",
+                conn=conn, actor_id=user.user_id)
+
+
 @router.post("/legal-hold", response_model=dict,
-             dependencies=[Depends(rate_limit("retention.destroy"))])
+             dependencies=[Depends(rate_limit("request"))])
 def legal_hold(
-    body: LegalHoldBody,
+    body: LegalHoldBody, request: Request, response: Response,
     user: CurrentUser = Depends(require_global("retention.manage")),
     conn: psycopg.Connection = Depends(get_conn),
     # A hold is preservation, not a read, so it applies to an exhibit
@@ -1024,6 +1040,7 @@ def legal_hold(
     -- so both are audited, and applying one requires a reason the service
     enforces.
     """
+    _meter_lift(request, response, conn, user, body.on)
     # The exhibit's OWN case, resolved from the row rather than taken on
     # trust. Without this the endpoint was a blind UPDATE by id: a holder
     # of the global role could LIFT a court-ordered hold on any exhibit in
@@ -1077,9 +1094,9 @@ class CaseHoldBody(BaseModel):
 
 
 @router.post("/cases/{case_id}/legal-hold", response_model=dict,
-             dependencies=[Depends(rate_limit("retention.destroy"))])
+             dependencies=[Depends(rate_limit("request"))])
 def case_legal_hold(
-    case_id: UUID, body: CaseHoldBody,
+    case_id: UUID, body: CaseHoldBody, request: Request, response: Response,
     user: CurrentUser = Depends(require_global("retention.manage")),
     conn: psycopg.Connection = Depends(get_conn),
     # The case row is written as a system purpose, as an exhibit hold is:
@@ -1107,6 +1124,7 @@ def case_legal_hold(
     cannot release on the exhibit."""
     from noctornal_api.retention import RetentionNotFound
 
+    _meter_lift(request, response, conn, user, body.on)
     _case_scoped(conn, user, case_id, "retention.manage")
     # A lift needs the lifter's own ceiling on this case to cover everything
     # the case holds (the service refuses otherwise); a hold needs nothing
@@ -1137,9 +1155,10 @@ class DocumentHoldBody(BaseModel):
 # A hold a person places on a collected document and every earlier
 # version of it (2026-09-24; docs/00 decision 74).
 @router.post("/documents/{document_id}/legal-hold", response_model=dict,
-             dependencies=[Depends(rate_limit("retention.destroy"))])
+             dependencies=[Depends(rate_limit("request"))])
 def document_legal_hold(
-    document_id: UUID, body: DocumentHoldBody,
+    document_id: UUID, body: DocumentHoldBody, request: Request,
+    response: Response,
     user: CurrentUser = Depends(require_global("retention.manage")),
     conn: psycopg.Connection = Depends(get_conn),
     # The hold on a system connection (S1, 2026-09-25): it must count and
@@ -1162,6 +1181,7 @@ def document_legal_hold(
     from noctornal_api.http.deps import authorize_global
     from noctornal_api.retention import RetentionConflict, RetentionNotFound
 
+    _meter_lift(request, response, conn, user, body.on)
     authorize_global(conn, user, "collection.read")
     clearance, held = user_ceiling(conn, user.user_id)
     try:

@@ -379,7 +379,7 @@ def verify_custody_chain(
         SELECT prev_hash, COUNT(*) AS claimants, MIN(id) AS lowest
           FROM core.evidence_custody WHERE prev_hash IS NOT NULL
          GROUP BY prev_hash
-    )
+    ), judged AS MATERIALIZED (
     SELECT s.id, s.evidence_id, s.action, s.actor_id, s.occurred_at,
            -- ORPHAN: names a predecessor no row has. The genesis row
            -- (prev_hash NULL) is exempt by construction; the anchor check
@@ -395,7 +395,19 @@ def verify_custody_chain(
       FROM scoped s
       LEFT JOIN hashes h ON h.row_hash = s.prev_hash
       LEFT JOIN claims cl ON cl.prev_hash = s.prev_hash
-     ORDER BY s.id
+    )
+    -- Only the rows that do not verify leave the database, beside the
+    -- count and the span of what was checked, as `audit_verify` does it
+    -- (Beta 1 gate 64). One summary row always, even with nothing wrong.
+    SELECT j.checked, j.first_id, j.last_id,
+           f.id, f.evidence_id, f.action, f.actor_id, f.occurred_at,
+           f.link_broken, f.forked, f.fresh_fork, f.content_broken
+      FROM (SELECT count(*) AS checked, min(id) AS first_id,
+                   max(id) AS last_id FROM judged) j
+      LEFT JOIN LATERAL (
+           SELECT * FROM judged
+            WHERE link_broken OR forked OR content_broken) f ON true
+     ORDER BY f.id
     """
     # `fresh_fork` in the query is a fork whose claimants are ALL above the
     # 0149 boundary: honest traffic cannot make one. No boundary, no such fork.
@@ -404,7 +416,11 @@ def verify_custody_chain(
     if evidence_id is not None:
         params["evidence_id"] = evidence_id
 
-    rows = conn.execute(sql, params).fetchall()
+    summary = conn.execute(sql, params).fetchall()
+    checked, first_id, last_id = summary[0][:3]
+    # The rows that did not verify; a run with none answers the summary row
+    # alone, with no row columns.
+    rows = [r[3:] for r in summary if r[3] is not None]
     breaks: list[CustodyBreak] = []
     forks: list[CustodyBreak] = []
 
@@ -455,8 +471,6 @@ def verify_custody_chain(
                 kind="GENESIS", actor_id=g_actor))
 
     for row_id, ev, action, actor_id, occurred_at, link, fork, fresh, content in rows:
-        if not (link or fork or content):
-            continue
         parts = []
         if link:
             parts.append("LINK")
@@ -486,11 +500,11 @@ def verify_custody_chain(
                 actor_id=None))
 
     return CustodyReport(
-        checked=len(rows),
+        checked=checked,
         breaks=tuple(breaks),
         forks=tuple(forks),
-        first_id=rows[0][0] if rows else None,
-        last_id=rows[-1][0] if rows else None,
+        first_id=first_id,
+        last_id=last_id,
         genesis_count=len(genesis),
         evidence_id=evidence_id,
         tail_row_hash=tail[0] if tail else None,

@@ -69,7 +69,10 @@ channel, outcome, cause, recipient and time. Every delivery records a
 cause, a fixed code with a fixed sentence that never names a marking above
 the reader's (egress refused, transport error, rate limited, gave up,
 revoked, withdrawn, case not routed, already on the issue and the rest),
-and what left: STUB, SUBJECT or SUMMARY.
+and what left: STUB, SUBJECT or SUMMARY. The gate judges a delivery at
+its notification's labels composed with its case's labels as they stand
+when it is sent, so a case raised or given a compartment while a delivery
+waits (a digest, quiet hours, a retry) is gated at its new labels.
 
 **Held against failed.** A delivery that cannot be attempted because
 something is not configured (no `SMTP_HOST`, no `smtp` or `webhook` route,

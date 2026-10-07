@@ -819,10 +819,12 @@ def _withdraw(conn, condition: str, params: tuple, detail_sql: str) -> int:
             RETURNING d.id""", params or None).fetchall())
 
 
+#: The labels are composed with the case's as they stand now, as the email
+#: and webhook drain composes them (`transports.CASE_LABELS_SQL`).
 _JIRA_DUE_SQL = """
 SELECT d.id, d.notification_id, d.channel, d.attempts,
        n.recipient_id, n.case_id, n.kind, n.priority, n.subject, n.summary,
-       n.classification, n.compartments, NULL, c.code,
+       {labels}, NULL, c.code,
        n.object_type, n.object_id, n.created_at, coalesce(n.event_id, n.id)
   FROM notify.delivery d
   JOIN notify.notification n ON n.id = d.notification_id
@@ -836,9 +838,10 @@ SELECT d.id, d.notification_id, d.channel, d.attempts,
 
 def _due(conn, limit: int) -> list:
     from noctornal_api.notifications import readable_predicate
-    from noctornal_api.transports import Outgoing
+    from noctornal_api.transports import CASE_LABELS_SQL, Outgoing
 
-    rows = conn.execute(_JIRA_DUE_SQL.format(readable=readable_predicate("n")),
+    rows = conn.execute(_JIRA_DUE_SQL.format(readable=readable_predicate("n"),
+                                             labels=CASE_LABELS_SQL),
                         (limit,)).fetchall()
     return [Outgoing(
         delivery_id=r[0], notification_id=r[1], channel=r[2], attempts=r[3],

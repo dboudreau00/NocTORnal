@@ -166,6 +166,35 @@ def test_untouched_chain_verifies(tamperable):
     assert not [f for f in report.forks if f.id > (report.fork_boundary or 0)]
 
 
+def test_only_the_rows_that_do_not_verify_leave_the_database(tamperable):
+    """Beta 1 gate 64, as for the audit chain: the custody verifier handed
+    every row of the ledger back to Python. A scoped clean run now answers
+    one summary row, with the count and span of what it checked."""
+    from noctornal_api.custody_verify import verify_custody_chain
+
+    evidence_id, uid = _exhibit(tamperable, "rows")
+    ids = _seed(tamperable, evidence_id, uid, n=5)
+    returned = []
+
+    class _Counter:
+        def execute(self, sql, params=None):
+            cur = tamperable.execute(sql, params)
+            if "judged" not in sql:
+                return cur
+            rows = cur.fetchall()
+            returned.append(len(rows))
+
+            class _Rows:
+                def fetchall(self):
+                    return rows
+            return _Rows()
+
+    report = verify_custody_chain(_Counter(), evidence_id=evidence_id)
+    assert report.intact and report.checked == 5
+    assert (report.first_id, report.last_id) == (ids[0], ids[-1])
+    assert returned == [1]
+
+
 def test_in_place_edit_of_the_note_is_a_CONTENT_break(tamperable):
     """A row's payload edited in place must be caught by the recompute.
 

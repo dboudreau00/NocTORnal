@@ -779,10 +779,20 @@ def send_webhook(url: str, payload: dict, secret: str | None, *, route,
 #: `d.channel = ANY(%s)` is the channels this pass can send (F8 A5): JIRA
 #: is never in it (Jira has its own capped query, F7) and a channel whose
 #: route is missing is held, not attempted.
+#:
+#: The labels the gate judges are the notification's composed with its
+#: case's AS THEY STAND NOW (`CASE_LABELS_SQL`), the way an export composes
+#: them. The notification's own were fixed when it was raised, so a case
+#: raised to RED, or given a compartment, while a delivery waited (a digest,
+#: quiet hours, a retry) had its code and summary sent under the old marking
+#: (Beta 1 gate 64).
+CASE_LABELS_SQL = """greatest(n.classification, coalesce(c.classification, n.classification)),
+       n.compartments || coalesce(c.compartments, '{}'::text[])"""
+
 _DUE_SQL = f"""
 SELECT d.id, d.notification_id, d.channel, d.attempts,
        n.recipient_id, n.case_id, n.kind, n.priority, n.subject, n.summary,
-       n.classification, n.compartments,
+       {CASE_LABELS_SQL},
        coalesce(p.address, u.email), c.code
   FROM notify.delivery d
   JOIN notify.notification n ON n.id = d.notification_id

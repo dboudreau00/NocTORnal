@@ -230,6 +230,35 @@ def test_the_live_refusal_is_recognised_as_a_lock_by_the_classifier(
                         "RetentionPeriodNotMet"), exc.code
 
 
+def test_a_second_exhibit_of_the_same_bytes_has_a_key_the_store_lists(
+        storage, locked_bucket):
+    """Beta 1 gate 64. The second exhibit of bytes another exhibit holds
+    (another label, or a lost race) was stored at `plain/<evidence id>`, and
+    MinIO does not list an object whose name continues another object's past
+    a "/": `delete_all_versions` saw no version, so the purge reported "no
+    object found" for bytes still served by version id and could never
+    destroy them. `own_key` puts it beside the plain key. Both halves are
+    measured, so a change in MinIO's listing shows up here."""
+    from noctornal_api.evidence import own_key
+
+    data = b"plain-" + uuid4().bytes
+    plain, _, retain_until = _locked_object(storage, data)
+    nested = f"{plain}/{uuid4()}"
+    storage.put(nested, data, media_type="application/octet-stream",
+                retain_until=retain_until)
+    assert _versions(storage, nested) == [], (
+        "MinIO now lists a key nested under another object; re-measure "
+        "evidence.own_key's docstring")
+
+    sibling = own_key(plain, uuid4())
+    assert not sibling.startswith(plain + "/")
+    version = storage.put(sibling, data, media_type="application/octet-stream",
+                          retain_until=retain_until)
+    r = storage.delete_all_versions(sibling)
+    assert (r.versions_seen, r.versions_locked, r.versions_removed) == (1, 1, 0), r
+    assert _get_version(storage, sibling, version) == data
+
+
 # ---------------------------------------------------------------------------
 # The defect, kept as a measurement
 # ---------------------------------------------------------------------------

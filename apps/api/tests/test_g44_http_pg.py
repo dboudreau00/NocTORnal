@@ -96,6 +96,33 @@ def test_a_lead_cleared_below_an_exhibit_cannot_lift_its_hold(conn, client):
     assert (missing.status_code, missing.json()["detail"]) == (404, "no such exhibit")
 
 
+def test_placing_holds_does_not_spend_the_destruction_meter(conn):
+    """Beta 1 gate 64: every hold route spent `retention.destroy` (a burst
+    of three, ten an hour), so the fourth hold an officer placed inside a few
+    minutes was refused. With the REAL limits: five placements in a row
+    succeed, and lifting still meets the tight meter."""
+    from fastapi.testclient import TestClient
+
+    from noctornal_api.http.app import create_app
+    from noctornal_api.ratelimit import LIMITS, InProcessBackend, RateLimiter
+
+    app = create_app()
+    app.state.limiter = RateLimiter(InProcessBackend(), limits=dict(LIMITS))
+    real = TestClient(app, raise_server_exceptions=False)
+    boss = g.user(conn, "RED", roles=("CASE_OWNER",))
+    case_id = g.case(conn, boss)
+    s.assign(conn, case_id, boss, "CASE_OWNER")
+    exhibits = [s.exhibit(conn, case_id, boss, "AMBER") for _ in range(5)]
+    headers = g.token(conn, boss)
+    placed = [_hold(real, headers, e).status_code for e in exhibits]
+    assert placed == [200] * 5, placed
+    assert all(_is_held(conn, e) for e in exhibits)
+    lifted = [_hold(real, headers, e, on=False,
+                    reason="order discharged by the court").status_code
+              for e in exhibits]
+    assert lifted[:3] == [200] * 3 and 429 in lifted[3:], lifted
+
+
 def test_a_lead_below_an_exhibit_may_still_place_a_hold_on_it(conn, client):
     """Preservation never waits for a clearance (decision 144)."""
     _boss, lead, _case_id, exhibit = _setup_red_exhibit(conn)

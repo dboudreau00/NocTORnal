@@ -145,6 +145,11 @@ class _StorageOutcome:
     held: tuple = ()
     #: Exhibits another purge destroyed first, found under the same locks.
     gone: tuple = ()
+    #: Which exhibits landed in each of the three counts, so each outcome
+    #: gets a tombstone of its own (`RetentionService._evidence_tombstones`).
+    deleted_ids: tuple = ()
+    locked_ids: tuple = ()
+    failed_ids: tuple = ()
 
 
 #: The most exhibits one out-of-schedule purge may name. Its rows and their
@@ -210,8 +215,9 @@ class PurgeResult:
     #: 2026-09-02 only a row whose object the store confirmed removed is
     #: marked `purged_at`; `storage_deleted` is that number, and the two
     #: differ by exactly `storage_locked + storage_failed`. Kept as the
-    #: attempt count because the tombstone's `object_count` is the
-    #: attempt too, and the two must agree.
+    #: attempt count because the evidence tombstones' `object_count`s, one
+    #: per storage outcome, add up to the attempt too, and the two must
+    #: agree.
     evidence_purged: int = 0
     documents_purged: int = 0
     #: Ingest, added 2026-07-25 (docs/17 F17(a)). Counted SEPARATELY rather
@@ -993,7 +999,8 @@ class RetentionService:
         entered during the first delete waited for ALL of it and then landed
         on destroyed exhibits with no word (C6): now it waits for the exhibit
         in flight, and every exhibit after that reads it and is kept."""
-        storage = self._purge_evidence_each(evidence_ids)
+        storage = self._purge_evidence_each(evidence_ids, actor_id=actor_id,
+                                            rule="case.retention_until")
         outcome = storage.outcome
         if storage.held:
             # Reread under the rows' locks (evidence-purge-hold-race,
@@ -1079,11 +1086,9 @@ class RetentionService:
             # second purge will not record them.
             try:
                 with self._c.transaction():
-                    result.tombstones.append(self._tombstone(
-                        case_id=case_id, object_type="evidence",
-                        ids=evidence_ids, authority=authority,
-                        actor_id=actor_id, rule="case.retention_until",
-                        storage_outcome=outcome))
+                    result.tombstones.extend(self._evidence_tombstones(
+                        storage, case_id=case_id, authority=authority,
+                        actor_id=actor_id, rule="case.retention_until"))
             except Exception as exc:
                 # `from None`: a router replaces the message of an error
                 # chained to a database error (`safe_detail`), and this one
@@ -1100,7 +1105,8 @@ class RetentionService:
                     f"an administrator, because the purged_at stamps are "
                     f"the only record of this destruction.") from None
 
-    def _purge_evidence_each(self, ids: list[UUID]) -> "_StorageOutcome":
+    def _purge_evidence_each(self, ids: list[UUID], *, actor_id: UUID,
+                             rule: str) -> "_StorageOutcome":
         """`_purge_evidence` over `ids`, one exhibit per transaction, in id
         order. Each exhibit is claimed (its row and its case held, its holds
         reread), asked of the store and marked purged inside one transaction
@@ -1110,7 +1116,8 @@ class RetentionService:
         parts = []
         for evidence_id in sorted(set(ids)):
             with self._c.transaction():
-                parts.append(self._purge_evidence([evidence_id]))
+                parts.append(self._purge_evidence([evidence_id], actor_id=actor_id,
+                                                  rule=rule))
         locked = sum(p.locked for p in parts)
         failed = sum(p.failed for p in parts)
         return _StorageOutcome(
@@ -1119,7 +1126,40 @@ class RetentionService:
             deleted=sum(p.deleted for p in parts), locked=locked, failed=failed,
             warnings=tuple(w for p in parts for w in p.warnings),
             held=tuple(h for p in parts for h in p.held),
-            gone=tuple(g for p in parts for g in p.gone))
+            gone=tuple(g for p in parts for g in p.gone),
+            deleted_ids=tuple(i for p in parts for i in p.deleted_ids),
+            locked_ids=tuple(i for p in parts for i in p.locked_ids),
+            failed_ids=tuple(i for p in parts for i in p.failed_ids))
+
+    def _evidence_tombstones(self, storage: "_StorageOutcome", *,
+                             case_id: UUID | None, authority: str,
+                             actor_id: UUID, rule: str,
+                             approval_request_id: UUID | None = None,
+                             ) -> list[UUID]:
+        """One evidence tombstone per storage outcome, each counting the
+        exhibits that had it: DELETED, then LOCKED_UNTIL_RETENTION, then
+        FAILED, and none for an outcome no exhibit had.
+
+        Beta 1 gate 64. One tombstone per batch carried the WORST outcome and
+        counted the whole batch, which was right while a batch was all or
+        nothing. Since each exhibit is destroyed on its own answer, a sweep in
+        which some locks had ended and some had not (the usual case: a lock
+        runs a year from lodging, so exhibits lodged in a case's last year
+        are still locked when it falls due) wrote one LOCKED record for every
+        exhibit, the destroyed ones included, and the refused ones were
+        counted again by the sweep that later destroyed them. The record of
+        destruction said nothing was destroyed."""
+        made = []
+        for outcome, ids in ((STORAGE_DELETED, storage.deleted_ids),
+                             (STORAGE_LOCKED, storage.locked_ids),
+                             (STORAGE_FAILED, storage.failed_ids)):
+            if ids:
+                made.append(self._tombstone(
+                    case_id=case_id, object_type="evidence", ids=list(ids),
+                    authority=authority, actor_id=actor_id, rule=rule,
+                    approval_request_id=approval_request_id,
+                    storage_outcome=outcome))
+        return made
 
     def purge_out_of_schedule(self, *, actor_id: UUID, authority: str,
                               approval_request_id: UUID,
@@ -1178,7 +1218,9 @@ class RetentionService:
                 # its row is locked.
                 self._lock_approval(approval_request_id, actor_id=actor_id,
                                     case_id=case_id, payload=payload)
-                storage = self._purge_evidence(evidence_ids, refuse_held=True)
+                storage = self._purge_evidence(evidence_ids, refuse_held=True,
+                                               actor_id=actor_id,
+                                               rule="out-of-schedule")
                 ApprovalService(self._c).consume(
                     approval_request_id, actor_id=actor_id,
                     operation="evidence.purge", case_id=case_id,
@@ -1240,12 +1282,10 @@ class RetentionService:
                         f"written. Do not report this as a completed "
                         f"destruction.")
                 if evidence_ids:
-                    result.tombstones.append(self._tombstone(
-                        case_id=case_id, object_type="evidence",
-                        ids=evidence_ids, authority=authority,
+                    result.tombstones.extend(self._evidence_tombstones(
+                        storage, case_id=case_id, authority=authority,
                         actor_id=actor_id, rule="out-of-schedule",
-                        approval_request_id=approval_request_id,
-                        storage_outcome=storage.outcome))
+                        approval_request_id=approval_request_id))
         except ApprovalError as exc:
             raise RetentionError(str(exc)) from exc
         # F7: the early destruction most likely
@@ -1423,7 +1463,8 @@ class RetentionService:
                 rule="case.retention_until", storage_outcome=STORAGE_NA))
 
     def _purge_evidence(self, ids: list[UUID], *,
-                        refuse_held: bool = False) -> "_StorageOutcome":
+                        refuse_held: bool = False, actor_id: UUID | None = None,
+                        rule: str | None = None) -> "_StorageOutcome":
         """Ask the object store, then mark ONLY the rows whose bytes went.
 
         ## The holds are reread under locks (evidence-purge-hold-race, 2026-10-03)
@@ -1554,6 +1595,8 @@ class RetentionService:
         # STORAGE_FAILED existed for it and was dead code.
         deleted = locked = failed = 0
         destroyed_ids: list[UUID] = []
+        locked_ids: list[UUID] = []
+        failed_ids: list[UUID] = []
         warnings: list[str] = []
         for evidence_id, key in rows:
             if hasattr(self._storage, "delete_all_versions"):
@@ -1568,6 +1611,7 @@ class RetentionService:
                     # path nothing will, which is worse and is why that
                     # caller adds a warning of its own.
                     failed += 1
+                    failed_ids.append(evidence_id)
                     warnings.append(
                         f"object store refused storage_key {key!r} for a "
                         f"reason that is not a retention lock "
@@ -1590,6 +1634,7 @@ class RetentionService:
                     # than in a counter the router publishes next to a row
                     # count.
                     locked += 1
+                    locked_ids.append(evidence_id)
                     warnings.append(
                         f"{r.versions_locked} of "
                         f"{count_of(r.versions_seen, 'version', 'versions')} "
@@ -1602,6 +1647,7 @@ class RetentionService:
                     continue
                 if r.versions_removed == 0:
                     failed += 1
+                    failed_ids.append(evidence_id)
                     warnings.append(
                         f"no object found for storage_key {key!r}: the store "
                         f"holds no bytes under it "
@@ -1624,8 +1670,10 @@ class RetentionService:
             except Exception as exc:  # noqa: BLE001 - a refusal IS the answer
                 if _is_retention_refusal(exc):
                     locked += 1
+                    locked_ids.append(evidence_id)
                 else:
                     failed += 1
+                    failed_ids.append(evidence_id)
                 continue
             deleted += 1
             destroyed_ids.append(evidence_id)
@@ -1639,6 +1687,21 @@ class RetentionService:
             self._c.execute(
                 "UPDATE core.evidence SET purged_at = now() WHERE id = ANY(%s)",
                 (destroyed_ids,))
+            if actor_id is not None:
+                # The exhibit's own custody trail ends with its destruction,
+                # in the transaction that marks it (Beta 1 gate 64): it ended
+                # at the last read, so "who touched this exhibit, and when"
+                # did not say who destroyed it, and the only per-exhibit
+                # record was a column. The tombstone counts the batch; this
+                # names the exhibit. Written after every delete, so the
+                # chain's lock is not held while the store answers.
+                self._c.execute(
+                    """INSERT INTO core.evidence_custody
+                           (evidence_id, action, actor_id, detail)
+                       SELECT x, 'DESTROYED', %s, %s FROM unnest(%s::uuid[]) AS x""",
+                    (actor_id, Json({"rule": rule,
+                                     "storage_outcome": STORAGE_DELETED}),
+                     destroyed_ids))
         if locked:
             outcome = STORAGE_LOCKED
         elif failed:
@@ -1648,7 +1711,10 @@ class RetentionService:
         return _StorageOutcome(outcome=outcome, deleted=deleted,
                                locked=locked, failed=failed,
                                warnings=tuple(warnings), held=tuple(held_ids),
-                               gone=tuple(gone_ids))
+                               gone=tuple(gone_ids),
+                               deleted_ids=tuple(destroyed_ids),
+                               locked_ids=tuple(locked_ids),
+                               failed_ids=tuple(failed_ids))
 
     def _claim_for_destruction(self, ids: list[UUID], *, refuse_held: bool,
                                held: list, gone: list):
@@ -2103,6 +2169,7 @@ class RetentionService:
             raise RetentionError(
                 "a legal hold has to say what it rests on, placed or lifted: "
                 "a hold nobody can attribute is a hold nobody can lift")
+        refused = False
         with self._c.transaction():
             prior = self._c.execute(
                 """SELECT legal_hold, legal_hold_reason FROM core."case"
@@ -2111,15 +2178,25 @@ class RetentionService:
                 raise RetentionNotFound("no such case")
             if not on and not self._ceiling_covers_case(
                     case_id, lifter_ceiling, document_ceiling):
-                raise RetentionError(self._lift_refusal(case_id))
-            self._c.execute(
-                """UPDATE core."case" SET legal_hold = %s, legal_hold_reason = %s
-                    WHERE id = %s""", (on, reason if on else None, case_id))
-            self._audit(case_id, actor_id,
-                        "LEGAL_HOLD_APPLIED" if on else "LEGAL_HOLD_LIFTED",
+                refused = True
+            else:
+                self._c.execute(
+                    """UPDATE core."case" SET legal_hold = %s, legal_hold_reason = %s
+                        WHERE id = %s""", (on, reason if on else None, case_id))
+                self._audit(case_id, actor_id,
+                            "LEGAL_HOLD_APPLIED" if on else "LEGAL_HOLD_LIFTED",
+                            {"case_id": str(case_id), "scope": "case",
+                             "reason": reason, "prior_on": bool(prior[0]),
+                             "prior_reason": prior[1]})
+        if refused:
+            # Recorded, as an exhibit's lift below its label is (the gate's
+            # AUTHZ_DENIED row): an attempt to release a hold over material
+            # above the lifter is what an officer looks for, and it left no
+            # row at all (Beta 1 gate 64). Names nothing above the lifter.
+            self._audit(case_id, actor_id, "LEGAL_HOLD_LIFT_REFUSED",
                         {"case_id": str(case_id), "scope": "case",
-                         "reason": reason, "prior_on": bool(prior[0]),
-                         "prior_reason": prior[1]})
+                         "reason": reason}, outcome="DENIED")
+            raise RetentionError(self._lift_refusal(case_id))
         return {"case_id": str(case_id), "legal_hold": bool(on),
                 "legal_hold_reason": reason if on else None}
 
@@ -2206,10 +2283,10 @@ class RetentionService:
         return above == 0
 
     def _audit(self, case_id: UUID | None, actor_id: UUID, action: str,
-               detail: dict) -> None:
+               detail: dict, *, outcome: str = "SUCCESS") -> None:
         self._c.execute(
             """INSERT INTO audit.event
                    (actor_id, actor_kind, action, object_type, object_id,
-                    case_id, detail)
-               VALUES (%s, 'USER', %s, 'retention', NULL, %s, %s)""",
-            (actor_id, action, case_id, Json(detail)))
+                    case_id, outcome, detail)
+               VALUES (%s, 'USER', %s, 'retention', NULL, %s, %s, %s)""",
+            (actor_id, action, case_id, outcome, Json(detail)))

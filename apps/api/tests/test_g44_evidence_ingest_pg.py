@@ -109,6 +109,12 @@ def test_the_bytes_of_a_hidden_exhibit_are_lodged_as_a_new_exhibit(conn, store, 
     assert len(rows) == 2
     assert {r[1] for r in rows} == {hidden_key, rows[1][1]} and rows[1][1] != hidden_key
     assert rows[1][2] == "AMBER"
+    # Beside the hidden exhibit's key, never under it (Beta 1 gate 64: the
+    # store does not list a key nested under another object, so the purge
+    # could not destroy it; test_evidence_lock_live_pg measures that).
+    from noctornal_api.evidence import own_key
+    assert rows[1][1] == own_key(hidden_key, rows[1][0])
+    assert not rows[1][1].startswith(hidden_key + "/")
 
 
 def test_the_service_alone_never_writes_on_a_key_it_cannot_see(conn, store):
@@ -648,11 +654,17 @@ def test_an_exhibit_a_purge_is_destroying_now_is_not_called_tampered_with(conn, 
     assert seen["row"] is True, "the fixture must read the exhibit as live mid-purge"
     assert seen["verify_integrity"] == BEING_DESTROYED_DETAIL
     assert seen["view"] == BEING_DESTROYED_DETAIL
-    assert _alarm_state(conn, evidence_id) == before
+    # The reads wrote nothing; the purge itself ends the trail with its
+    # DESTROYED row (Beta 1 gate 64).
+    after = (before[0], before[1], before[2] + 1)
+    assert _alarm_state(conn, evidence_id) == after
+    assert conn.execute(
+        "SELECT action FROM core.evidence_custody WHERE evidence_id = %s "
+        "ORDER BY id DESC LIMIT 1", (evidence_id,)).fetchone()[0] == "DESTROYED"
     with pytest.raises(ExhibitUnavailable) as caught:
         g.service(conn, store).verify_integrity(evidence_id, boss)
     assert str(caught.value) == PURGED_DETAIL
-    assert _alarm_state(conn, evidence_id) == before
+    assert _alarm_state(conn, evidence_id) == after
 
 
 def test_a_live_exhibit_whose_object_is_gone_is_still_an_alarm(conn, store):
