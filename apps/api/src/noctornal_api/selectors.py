@@ -306,8 +306,17 @@ class SelectorStore:
           caller records is ever narrowed by an entity attributed later:
           that entity gets a row of its own at its own labels.
 
-        A row above the caller is never read, counted or written."""
+        A row above the caller is never read, counted or written.
+
+        A link that carries a password, token or key is refused
+        (`CREDENTIAL_REFUSAL`), as `POST /nodes` refuses it for an entity's
+        label: this is the route a person types a value into, and the row
+        stored its raw value as written and answered with it
+        (verification round three, A6, 2026-10-07). `record` redacts, for
+        the machine paths that read a value out of a capture."""
         norm = self._norm(selector_type, raw_value)
+        if carries_credential(selector_type, raw_value):
+            raise SelectorError(CREDENTIAL_REFUSAL)
         held = sorted(compartments)
         if node_id is not None:
             owner = self._c.execute(
@@ -419,6 +428,8 @@ class SelectorStore:
         new_label: str,
         declared_type: str | None = None,
         strict: bool = True,
+        clearance: str | None = None,
+        compartments: frozenset[str] | list[str] = (),
     ) -> UUID | None:
         """Keep the index on the label of an entity whose label IS its
         selector, when the label changes, and return another live entity
@@ -443,7 +454,15 @@ class SelectorStore:
         retraction that restores an older label passes False: the label
         was accepted under the rules of its day, and a withdrawn source
         must never be kept live because a rule has since tightened, so
-        the index then simply holds nothing for it."""
+        the index then simply holds nothing for it.
+
+        `clearance` and `compartments` are the caller's (verification round
+        three, A1, 2026-10-07): the types of an entity that owns no row of
+        its own are read only from rows the caller may read, so a value
+        held above them is refused no differently from one held nowhere.
+        Without them that lookup is not made (fail closed: an unknown
+        caller learns nothing from it), and the entity is followed as it
+        was."""
         types: list[str] = []
         for sel_type, norm in self._c.execute(
                 """SELECT selector_type, norm_value FROM core.selector
@@ -453,8 +472,9 @@ class SelectorStore:
                 types.append(sel_type)
         if declared_type in _VALID_TYPES and declared_type not in types:
             types.append(declared_type)
-        if not types:
-            types = self._types_held_by_others(case_id, old_label)
+        if not types and clearance is not None:
+            types = self._types_held_by_others(
+                case_id, old_label, clearance, compartments)
         lead = None
         for sel_type in types:
             old_norm = _norm_or_empty(sel_type, old_label)
@@ -477,7 +497,10 @@ class SelectorStore:
                 lead = row.node_id
         return lead
 
-    def _types_held_by_others(self, case_id: UUID, label: str) -> list[str]:
+    def _types_held_by_others(
+        self, case_id: UUID, label: str, clearance: str,
+        compartments: frozenset[str] | list[str],
+    ) -> list[str]:
         """The selector types of an entity that owns no index row for its
         own label: a DUPLICATE, created while another entity held the value
         (the index keeps its first owner and reports the second as a lead).
@@ -487,18 +510,29 @@ class SelectorStore:
         canonical form, whoever owns them (or nobody). Without them its
         label corrections were neither validated nor followed, while the
         owner's were (graph-selector-index-drift, 2026-10-03, verify
-        round). A row this reader cannot see under row security is not
-        found, and the entity is then followed as it was."""
+        round).
+
+        Only rows the caller may read are asked (`_READABLE`). The table is
+        policied by case alone (0134), so row security does not hide a row
+        held above the caller, and without this a correction to junk was
+        refused, naming the type, where the value was held above them and
+        accepted where it was held by nobody (verification round three, A1,
+        2026-10-07). A row they cannot read is not found, and the entity is
+        then followed as it was. Where the holder IS readable the labels of
+        its row are the duplicate's own, so nothing legitimate is missed."""
         pairs = [(t, n) for t in sorted(_VALID_TYPES)
                  if (n := _norm_or_empty(t, label)).strip()]
         if not pairs:
             return []
         found = self._c.execute(
-            """SELECT s.selector_type FROM core.selector s
-                WHERE s.case_id = %s
-                  AND (s.selector_type, s.norm_value) IN
-                      (SELECT * FROM unnest(%s::text[], %s::text[]))""",
-            (case_id, [t for t, _ in pairs], [n for _, n in pairs])).fetchall()
+            f"""SELECT s.selector_type FROM core.selector s
+                 WHERE s.case_id = %(case)s
+                   AND (s.selector_type, s.norm_value) IN
+                       (SELECT * FROM unnest(%(types)s::text[], %(norms)s::text[]))
+                   AND {_READABLE}""",
+            {"case": case_id, "types": [t for t, _ in pairs],
+             "norms": [n for _, n in pairs], "clr": clearance,
+             "held": sorted(compartments)}).fetchall()
         return sorted({r[0] for r in found})
 
     def release_node(self, *, case_id: UUID, node_id: UUID,

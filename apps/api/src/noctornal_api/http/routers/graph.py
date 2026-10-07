@@ -1085,6 +1085,7 @@ def update_node(
     # raw psycopg message — constraint names, offending values, PL/pgSQL
     # line numbers — out of the response. Catching it here to re-raise
     # `Problem(400, ..., str(exc))` would hand exactly that to the client.
+    clearance, held = user_ceiling(conn, user.user_id, case_id=case_id)
     with conn.transaction():
         lead = GraphWriteService(conn).update_node(
             node_id, case_id=case_id,
@@ -1092,6 +1093,7 @@ def update_node(
                                  claim_path=_claim_path(changed),
                                  claim_value=changed or None),
             label=body.label, attrs=body.attrs, valid_to=end,
+            clearance=clearance.name, compartments=held,
         )
         _audit_change(conn, user, case_id, action="NODE_UPDATED",
                       object_type="node", object_id=node_id,

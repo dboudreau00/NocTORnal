@@ -226,9 +226,17 @@ def _node_for_write(conn: psycopg.Connection, user: CurrentUser, case_id: UUID,
         # Invariant 12 in spirit: an overlay attached to the losing side of
         # a merge is invisible in every read path (they all filter
         # `merged_into_id IS NULL`), so accepting this would silently drop
-        # the analyst's work. Name the survivor so they can retry.
+        # the analyst's work. Name the survivor so they can retry, when it
+        # is theirs to read (verification round three, A4, 2026-10-07): an
+        # entity folded into one above the caller is an alias of it, which
+        # the merge ledger withholds, and the sibling `_gate_endpoints` and
+        # `update_node` name a survivor only on the same condition.
+        clearance, held = _ceiling(conn, user, case_id)
+        survivor = (f" {row[4]}"
+                    if _visible_node(conn, case_id, row[4], clearance, held)
+                    else " another")
         raise Problem(409, "Conflict",
-                      f"that node was merged into {row[4]}; curate the "
+                      f"that node was merged into{survivor}; curate the "
                       f"surviving node instead")
 
 

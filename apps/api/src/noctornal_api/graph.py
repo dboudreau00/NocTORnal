@@ -391,10 +391,18 @@ class GraphWriteService:
         label: str | None = None,
         attrs: dict | None = None,
         valid_to: datetime | None | _Keep = KEEP,
+        clearance: str | None = None,
+        compartments: frozenset[str] | list[str] = (),
     ) -> UUID | None:
         """Correct a node's label, attributes and/or end date, with a
         reason. Returns another live entity that already holds the
         corrected label as its selector (a merge lead), or None.
+
+        `clearance` and `compartments` are the caller's. They bound which
+        index rows a label correction may be validated against, so a value
+        held above the caller reads as held by nobody
+        (`SelectorStore.follow_label`). A request names them; without them
+        the lookup is not made.
 
         `case_id` is checked, not trusted: the caller supplies both, and a
         node id from another case must not be editable by passing the
@@ -477,7 +485,8 @@ class GraphWriteService:
                         lead = SelectorStore(self._c).follow_label(
                             case_id=case_id, node_id=node_id,
                             old_label=old_label, new_label=label,
-                            declared_type=(old_attrs or {}).get("selector_type"))
+                            declared_type=(old_attrs or {}).get("selector_type"),
+                            clearance=clearance, compartments=compartments)
                     except SelectorError as exc:
                         # The ontology's own sentence, authored text.
                         raise GraphWriteError(str(exc)) from None
@@ -750,12 +759,21 @@ class GraphWriteService:
 
         So the operation is refused. The refusal does disclose one bit —
         that a tie above the caller's clearance exists — and that is
-        deliberate: it is the same disclosure the console's withheld-material
-        notice already makes on purpose (docs/14 U2), on the same reasoning.
-        An analyst who cannot tell a sparse network from a censored one
-        reads structure off a picture they believe is complete; an analyst
-        whose retirement silently failed to remove half a node's ties is in
-        the same position.
+        deliberate: an analyst whose retirement silently failed to remove
+        half a node's ties reads structure off a picture they believe is
+        complete, which is what the console's withheld-material notice
+        exists to prevent (docs/14 U2).
+
+        It is NOT the same disclosure as that notice, and this docstring
+        used to say it was. The notice follows the case's
+        `withheld_disclosure` (migration 0030): nothing under NONE, whether
+        under PRESENCE, how many under COUNT, because the count is itself a
+        weak signal. This refusal does not read the setting, so under NONE
+        it still tells the caller that a tie they cannot see touches this
+        entity (verification round three, A8, 2026-10-07; recorded in
+        docs/17). Honouring NONE would mean retiring over a tie the caller
+        cannot see, or refusing in words no different from any other
+        refusal, and neither has been decided.
         """
         # Counted on a system connection with the caller's ceiling (S1,
         # 2026-09-25). The ties it looks for are exactly the ones row-level

@@ -605,15 +605,45 @@ _PATH_PARAM = re.compile(r";([^;/=]*)=[^;/]*")
 #: A `login:password` pair written onto the end of a link, the stealer-log
 #: and combo-list layout `url:login:password`: the first path segment that
 #: holds a ':' with an '@' after it, so the login is an e-mail address. Group
-#: 1 is everything up to the ':'. A plain login (`/login:alice:pw`) cannot be
-#: told from a path, and is not found (docs/17).
+#: 1 is everything up to the ':'. A login that is not an address is
+#: `_LOGIN_PAIR`'s.
 _LOGIN_TAIL = re.compile(r"(/[^/?#:@]*):[^/?#]*@")
+#: The same layout with a login that is not an address (verification round
+#: three, A7, 2026-10-07: `/login:carol:pw` was kept whole): the final path
+#: segment `name:login:password`, ':' or '|' between the three, matched from
+#: its start. Possessive, so the scan is linear on a path of any length.
+_LOGIN_PAIR = re.compile(r"[^:|@]*+[:|][^:|@]++[:|]")
 
 
 def _first_of(s: str, chars: str) -> int:
     """The offset of the first of `chars` in `s`, or its length."""
     return min((i for i in (s.find(c) for c in chars) if i != -1),
                default=len(s))
+
+
+def _login_cut(path: str) -> int | None:
+    """Where a `login:password` pair written onto the end of a URL path
+    starts (the offset of the separator after the last name that is the
+    link's own), or None when the path has none.
+
+    Two shapes (`_LOGIN_TAIL`, `_LOGIN_PAIR`): a login that is an e-mail
+    address, anywhere in the first segment that holds one, and a login that
+    is not, in the final segment. The second cannot be told from a path that
+    happens to hold two colons (a time, an IPv6 address, a URN), so such a
+    path loses everything from its first colon: at worst a distinction
+    missed, never a secret kept (docs/17). A password after the second
+    separator may hold any character, a separator included."""
+    tail = _LOGIN_TAIL.search(path)
+    if tail is not None:
+        return tail.end(1)
+    slash = path.rfind("/")
+    if slash == -1:
+        return None
+    start = slash + 1
+    pair = _LOGIN_PAIR.match(path, start)
+    if pair is None or pair.end() >= len(path):
+        return None
+    return start + _first_of(path[start:], ":|")
 
 
 def _piece_name_is_secret(piece: str) -> bool:
@@ -679,9 +709,9 @@ def _clean_path_part(s: str) -> str:
     cut = _first_of(rest, "?#")
     path, after = rest[:cut], rest[cut:]
     path = URL_IN_TEXT.sub(lambda m: strip_url_userinfo(m.group(0)), path)
-    tail = _LOGIN_TAIL.search(path)
-    if tail is not None:
-        return head + authority + path[:tail.end(1)]
+    cut = _login_cut(path)
+    if cut is not None:
+        return head + authority + path[:cut]
     return head + authority + path + after
 
 
@@ -738,9 +768,9 @@ def _redact_path(path: str, depth: int) -> str:
         lambda m: (m.group(0).partition("=")[0] + "=" + REDACTED
                    if _secret_query_key(m.group(1)) else m.group(0)), path)
     path = redact_url_credentials(path, depth + 1)
-    tail = _LOGIN_TAIL.search(path)
-    if tail is not None:
-        path = path[:tail.end(1)] + ":" + REDACTED
+    cut = _login_cut(path)
+    if cut is not None:
+        path = path[:cut] + ":" + REDACTED
     return path
 
 
@@ -815,9 +845,9 @@ def credential_spans(text: str) -> list[tuple[int, int]]:
         host_end = _first_of(remainder, "/?#")
         path = remainder[host_end:]
         path = path[:_first_of(path, "?#")]
-        tail = _LOGIN_TAIL.search(path)
-        if tail is not None:
-            spans.append((origin + host_end + tail.end(1), m.start() + len(url)))
+        cut = _login_cut(path)
+        if cut is not None:
+            spans.append((origin + host_end + cut, m.start() + len(url)))
     return spans
 
 

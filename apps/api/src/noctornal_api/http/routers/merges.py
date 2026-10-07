@@ -58,6 +58,7 @@ from noctornal_api.approvals import (
 )
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.merges import (
+    MergeBlocked,
     MergeCollision,
     MergeError,
     MergeRecord,
@@ -180,11 +181,18 @@ def _conflict(conn, user: CurrentUser, case_id: UUID, exc: MergeError) -> Proble
     """A merge the service refused, as a 409. A duplicate tie names its third
     party only to a merger who may read that entity (2026-10-03): the id of
     one above them, and with it that two ties to it exist, was theirs to read
-    in the refusal."""
+    in the refusal. A reversal held up by a later merge names that merge only
+    to a reader of it (verification round three, A5, 2026-10-07)."""
     if (isinstance(exc, MergeCollision)
             and exc.third_party not in visible_node_ids(
                 conn, user, case_id, [exc.third_party])):
         return Problem(409, "Conflict", exc.without_third_party())
+    if isinstance(exc, MergeBlocked):
+        clearance, held = user_ceiling(conn, user.user_id, case_id=case_id)
+        if MergeService(conn).get_for_reader(
+                exc.blocker, clearance=clearance.name,
+                compartments=held) is None:
+            return Problem(409, "Conflict", exc.without_blocker())
     return Problem(409, "Conflict", safe_detail(exc))
 
 
@@ -222,11 +230,13 @@ def merge(
                       "no such node in this case")
     check_basis_selector(conn, user, case_id=case_id,
                          selector_id=body.basis_selector_id)
+    clearance, held = user_ceiling(conn, user.user_id, case_id=case_id)
     try:
         record = MergeService(sconn).merge(
             case_id=case_id, source_node_id=body.source_node_id,
             target_node_id=body.target_node_id, merged_by=user.user_id,
-            reason=body.reason, basis_selector_id=body.basis_selector_id)
+            reason=body.reason, basis_selector_id=body.basis_selector_id,
+            clearance=clearance.name, compartments=held)
     except MergeError as exc:
         raise _conflict(conn, user, case_id, exc) from exc
     return _out(_as_reader(conn, record, user))
@@ -302,6 +312,7 @@ def _merge_under_dual_control(conn, case_id: UUID, body: MergeBody,
                       "no such approval request in this case")
     check_basis_selector(conn, user, case_id=case_id,
                          selector_id=basis_selector_id)
+    clearance, held = user_ceiling(conn, user.user_id, case_id=case_id)
 
     try:
         with sconn.transaction():
@@ -310,7 +321,8 @@ def _merge_under_dual_control(conn, case_id: UUID, body: MergeBody,
             record = MergeService(sconn).merge(
                 case_id=case_id, source_node_id=source_node_id,
                 target_node_id=target_node_id, merged_by=user.user_id,
-                reason=reason, basis_selector_id=basis_selector_id)
+                reason=reason, basis_selector_id=basis_selector_id,
+                clearance=clearance.name, compartments=held)
     except ApprovalError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
     except MergeError as exc:
