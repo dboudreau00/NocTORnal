@@ -327,16 +327,18 @@ def test_a_second_gate_refusal_keeps_the_case_gates_use(conn, client):
     """The one request `counted_at_case_gate` leaves counted although it
     was refused, pinned so it is a decision and not a surprise. A GREEN
     analyst on an AMBER case under an AMBER grant asks for a RED exhibit:
-    the grant let the request past the case's gate (and so tells an
-    exhibit that exists from one that does not), and the exhibit's gate
-    refuses. One use, not two, and not none."""
+    the grant let the request past the case's gate, and the exhibit's gate
+    refuses. One use, not two, and not none. The refusal answers as a
+    missing exhibit does (Beta 1 authorization gate, 2026-10-07), so the
+    status no longer tells the two apart; the count still does, to the
+    officer reviewing the grant, which is what it is for."""
     owner, case_id, auth, _officer = _setting(
         conn, client, clearance="GREEN", case_level="AMBER")
     stricter = _exhibit(conn, case_id, owner, "RED")
     gid = _grant(client, auth, case_id, "AMBER")
     case = f"/api/v1/cases/{case_id}"
     assert _uses(conn, client, gid, "GET",
-                 f"{case}/evidence/{stricter}/custody", auth, 403) == 1
+                 f"{case}/evidence/{stricter}/custody", auth, 404) == 1
     assert _uses(conn, client, gid, "GET",
                  f"{case}/evidence/{uuid4()}/custody", auth, 404) == 1
 

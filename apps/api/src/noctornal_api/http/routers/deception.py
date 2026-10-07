@@ -77,6 +77,7 @@ from noctornal_api.http.deps import (
     get_conn,
     user_ceiling,
 )
+from noctornal_api.http.element_gate import gate_element
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import BodyCappedRoute, body_cap, rate_limit
 
@@ -299,15 +300,15 @@ def create_capture(
         # S1 2026-09-25), so the gate below still answers an element above the
         # caller's labels with its 403 and AUTHZ_DENIED row, not a silent 404 from
         # row-level security. Content is read only after the gate.
-        found = element_labels(conn, "evidence", exhibit_id)
-        # Same answer for "does not exist" and "belongs to a case you
-        # cannot see": a status code must not be an existence oracle.
-        if found is None or found[0] != case_id:
-            raise Problem(404, "Not found", f"no such exhibit for {field}")
-        authorize_object(conn, user, case_id=case_id,
-                         permission_key="evidence.read", after_case_gate=True,
-                         classification=found[1],
-                         compartments=found[2])
+        # Same answer for "does not exist", "belongs to a case you cannot
+        # see" and "is above your labels" (Beta 1 authorization gate,
+        # 2026-10-07): a status code must not be an existence oracle. The
+        # verb is `evidence.read`, which the route's own gate did not ask,
+        # so it is asked first whether or not the exhibit exists.
+        gate_element(conn, user, case_id=case_id, kind="evidence",
+                     element_id=exhibit_id, permission_key="evidence.read",
+                     missing_detail=f"no such exhibit for {field}",
+                     case_gated=False)
     _one_of(body.capture_method, _CAPTURE_METHODS, "capture_method")
     # The table refuses an ACTIVE capture with no egress profile; said
     # here as a sentence, because the console's form now posts to this
