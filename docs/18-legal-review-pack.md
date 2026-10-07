@@ -42,8 +42,8 @@ pressure.
 | | |
 |---|---|
 | **Capability blocked** | Malware sample ingest. `samples.py` refuses until `NOCTORNAL_PROHIBITED_CONTENT_POLICY` and `NOCTORNAL_DESIGNATED_PERSON` are set. |
-| **What the software does** | Records a *declaration* that a policy exists. **It cannot verify one.** A false declaration produces a working system and an unlawful deployment. Since 2026-09-24 (F11, F12) static triage decrypts and parses every held sample after submission, in child processes started without the deployment's secrets. **Residual:** on Linux such a child can still read those secrets from other processes running as the same user and reach the database host, so a parser exploit in a hostile sample is a compromise of the deployment. The readiness row `sample_static_analysis` shows both facts on the host it runs on; a separate analysis container with no secrets and no network closes it and is not built (docs/16 L1). |
-| **Decide** | (1) Notification: who, how fast, what channel, when screening trips. (2) What `REJECTED` does with the bytes, destroy, quarantine, or **preserve under instruction**. These conflict. Since 2026-09-22 the build **preserves** by default (its own object-locked store, under a legal hold, two people to retrieve) and destroys only where `NOCTORNAL_REJECTED_SAMPLE_DISPOSITION=destroy` is declared, never under a hold (docs/17 F2). Which of the two this jurisdiction requires is still yours to decide. (3) Reporting duties in **both** operating jurisdictions (decision 13: US and Canada. They differ). (4) Who may view a quarantined item, under what authority. (5) Whether you may **hold** known-material hash sets at all, in most jurisdictions this needs specific authorisation: screening is built and imports nothing until that authorisation is recorded in `NOCTORNAL_HASH_SET_AUTHORITY` (C3). It compares exact hashes only. (6) How analyst exposure is limited, logged and supported. |
+| **What the software does** | Records a *declaration* that a policy exists. **It cannot verify one.** A false declaration produces a working system and an unlawful deployment. Static triage decrypts and parses every held sample after submission. In production the parsing runs in the analysis worker, a container with no secrets and no network (docs/17 F42). **Residual:** where a local child process runs instead (development, or `NOCTORNAL_ANALYSIS_LOCAL=1` in production, which the readiness register reports), the child is started without the deployment's secrets, but on Linux it can still read them from other processes running as the same user and reach the database host, so a parser exploit in a hostile sample is a compromise of the deployment. A kernel or container-runtime escape from the worker is not addressed either. The readiness row `sample_static_analysis` shows where analysis runs on the host it reports on (docs/16 L1). |
+| **Decide** | (1) Notification: who, how fast, what channel, when screening trips. (2) What `REJECTED` does with the bytes, destroy, quarantine, or **preserve under instruction**. These conflict. The build **preserves** by default (its own object-locked store, under a legal hold, two people to retrieve) and destroys only where `NOCTORNAL_REJECTED_SAMPLE_DISPOSITION=destroy` is declared, never under a hold (decided by the owner on 2026-09-22, docs/17 F2). Which of the two this jurisdiction requires is still yours to decide. (3) Reporting duties in **both** operating jurisdictions (decision 13: US and Canada. They differ). (4) Who may view a quarantined item, under what authority. (5) Whether you may **hold** known-material hash sets at all, in most jurisdictions this needs specific authorisation: screening is built and imports nothing until that authorisation is recorded in `NOCTORNAL_HASH_SET_AUTHORITY` (C3). It compares exact hashes only. (6) How analyst exposure is limited, logged and supported. |
 | **If unanswered** | Sample ingest stays refused. That is the intended failure mode. |
 | **Determination** | |
 
@@ -51,7 +51,7 @@ pressure.
 
 | | |
 |---|---|
-| **Capability blocked** | Nothing, technically, stealer logs are in scope by operator direction of 2026-07-25 and the pipeline runs. **This is the single largest exposure in the platform and the one most likely to be discovered by an incident rather than by a review.** |
+| **Capability blocked** | Nothing, technically, stealer logs are in scope by operator direction (2026-07-25) and the pipeline runs. **This is the single largest exposure in the platform and the one most likely to be discovered by an incident rather than by a review.** |
 | **What the software does** | Compartments the material, models victims as `VICTIM` nodes flagged `is_incidental`, masks credential values with a step-up audited reveal, gives each category its own retention clock independent of the case, and makes free-text search across victim PII *impossible* rather than merely forbidden. There is no index to run it against. |
 | **Decide** | (1) **The lawful basis for holding data about thousands of people who are not under investigation.** (2) Whether victim **notification** obligations attach, and to whom. (3) The retention period per category, the build's numbers are placeholders (B3). (4) Whether **session tokens and live credentials** may be held at all, as against their metadata: the architecture is designed so almost all analytic value is available from metadata alone. (5) Cross-border transfer, if any analyst or partner is in a third country. (6) What "minimisation review at closure" must produce. (7) Who may perform a reveal (B7). |
 | **If unanswered** | The material accumulates lawfully or unlawfully depending on an answer nobody has given. The software cannot tell the difference. |
@@ -62,7 +62,7 @@ pressure.
 | | |
 |---|---|
 | **Capability blocked** | Nothing. The collector will drive an account into a forum on request. |
-| **What the software does** | Encrypts persona credentials so they are decrypted only inside `PersonaVault.use()`, in production in the collector process alone, the one service that holds the persona key (invariant 7, 2026-10-02), refuses every forum and Telegram read that no collection authority covers, recorded by one person and confirmed by another (a PUBLIC_READ or MEMBER_READ scope, and no active scope because nothing in it posts, messages or purchases; an earlier copy of this pack said it distinguished passive from active engagement through a flag that never existed, corrected 2026-09-24), jitters polling and rate-limits per source so a persona is not trivially identifiable in an access log. In production every persona connection leaves through the egress proxy, on the exit the persona's profile names, only for a live run, act or logout and only to the site of a source the authority covers, and every connection is recorded (docs/20; the exit providers are B12). It asserts nothing about authority. |
+| **What the software does** | Encrypts persona credentials so they are decrypted only inside `PersonaVault.use()`, in production in the collector process alone, the one service that holds the persona key (invariant 7). Refuses every forum and Telegram read that no collection authority covers, recorded by one person and confirmed by another (a PUBLIC_READ or MEMBER_READ scope; there is no active scope and no flag separating passive from active engagement, because nothing in the build posts, messages or purchases). Jitters polling and rate-limits per source so a persona is not trivially identifiable in an access log. In production every persona connection leaves through the egress proxy, on the exit the persona's profile names, only for a live run, act or logout and only to the site of a source the authority covers, and every connection is recorded (docs/20; the exit providers are B12). It asserts nothing about authority. |
 | **Decide** | (1) Authority to operate a covert persona against each target, per jurisdiction, in several, using credentials registered under a false identity engages computer-misuse law regardless of intent. (2) Whether passive and active collection are separately authorised. (3) Entrapment / agent-provocateur exposure for active engagement. (4) Terms-of-service breach as a risk independent of criminal exposure. (5) Whether the collector may present a browser user-agent; it currently identifies itself honestly as `NocTORnal-collector/1`, which is a choice with a legal dimension either way. |
 | **If unanswered** | Every poll is an unreviewed act. |
 | **Determination** | |
@@ -77,15 +77,6 @@ pressure.
 | **Determination** | |
 
 ### A5. Active web capture of attacker infrastructure  *(docs/16 L5)*
-
-> **This entry was missing from this pack until 2026-07-26.** The
-> capability shipped with the deception subsystem, and the constraint was
-> written into the schema and into README, SECURITY.md, ARCHITECTURE.md
-> and docs/19, but neither this pack nor docs/16 carried it, so a reviewer
-> working from A1-A4 would have cleared the platform without ever being
-> asked the question below. Flagged here rather than quietly inserted: if
-> an earlier version of this pack has already been reviewed, **this item
-> was not covered by that review.**
 
 | | |
 |---|---|
@@ -106,10 +97,10 @@ pressure.
 | **B4** | Purge destroys or preserves *(D4)* | **Destroys**, leaving an append-only tombstone | Object lock is COMPLIANCE-mode on evidence, so it can refuse a delete even to satisfy a deletion order (C2 / decision 50). The purge reports what storage refused rather than claiming success. | |
 | **B5** | Detonation exposure *(D5)* | **A self-hosted CAPEv2 can be sent to**, only as the encrypted archive, by a worker, after a second person's sign-off when the target is exposed or the network route live; a record-only request is never sent | docs/11: integrate a sandbox, do not build one. The target's exposure is your declaration; CAPE keeps what it is sent outside this product's labels, holds and retention. | |
 | **B6** | Ingest key holders *(D6)* | Keys are write-only by construction (invariant 11, CHECK-enforced), max TTL 365d, default 90d | A leaked key means junk data, never the case file. The question is who may hold one and under what agreement. | |
-| **B7** | Who may reveal a victim credential *(D7 / docs/17 F16)* | **The Lead investigator (`CASE_OWNER`), and only under an authorisation the Security Officer grants.** Decided by the owner 2026-09-22, migration 0062 | `SECURITY_OFFICER` alone holds `victim_pii.authorise` and does not hold `reveal`; `CASE_OWNER` holds `reveal` and no longer holds `authorise`. The case gate reads one role per case, so a reveal is always two different people by construction, and `iam.separated_duty` refuses any grant that would give one role both halves. Whether the data may be held at all is still A2. | |
+| **B7** | Who may reveal a victim credential *(D7 / docs/17 F16)* | **The Lead investigator (`CASE_OWNER`), and only under an authorisation the Security Officer grants.** Decided by the owner 2026-09-22, migration 0062 | `SECURITY_OFFICER` alone holds `victim_pii.authorise` and does not hold `reveal`; `CASE_OWNER` holds `reveal` and does not hold `authorise`. The case gate reads one role per case, so a reveal is always two different people by construction, and `iam.separated_duty` refuses any grant that would give one role both halves. Whether the data may be held at all is still A2. | |
 | **B8** | Break-glass reviewer *(D7)* | `SECURITY_OFFICER` only; invoke granted to `SYS_ADMIN` and `CASE_OWNER`. Decided by the owner 2026-09-22 (docs/17 F14) | docs/05 wants emergency access "available, loud and short". Too narrow and people route around the system during an incident; too broad and the review queue becomes noise. No role may hold both invoke and review (migration 0062). | |
 | **B9** | Dead-letter retention | **90 days**, the shortest rule rather than the 365-day default | A dead letter's category is unknown *by construction*, the parse failed, so nothing assessed the content. Short is the safe default for unassessed third-party data. Confirm it is short enough. | |
-| **B10** | Telegram channel/user id collision *(D8)* | Both index on the numeric id and can collide | A model change, recorded and not yet made. Until then a channel id and a user id could in principle resolve to the same durable selector. | |
+| **B10** | Telegram channel/user id collision *(D8)* | **Resolved in the model.** Every Telegram id is namespaced by type (`u:` user, `c:` channel or supergroup, `g:` basic group), and a bare positive number is refused rather than assumed to be a user | A channel id and a user id of the same number can no longer resolve to one durable selector. The cost is lower recall: a collector that cannot say which kind of id it saw records nothing durable. Rows typed by assumption before the refusal are listed by `scripts/telegram_bare_ids.py` (docs/17 F1). | |
 | **B11** | Outbound lookup exposure *(D9)* | **Nothing is sent.** No provider is seeded or enabled, and the host switch `NOCTORNAL_OUTBOUND_LOOKUPS` ships off | Whether a provider is VENDOR or PUBLIC is the operator's word with a written basis; lowering it takes a second administrator. NONE is checked by the code only as far as the first hop. A VENDOR or PUBLIC lookup waits for a named colleague's sign-off in the product; personal data and sample hashes are refused outright. If counsel wants every lookup signed off first, this becomes blocking. | |
 | **B12** | Egress exit providers *(D10)* | **No exit is configured.** A persona reads nothing until its egress profile names an exit and a collection authority covers the source; a residential or VPN exit used in clear needs an audited acknowledgement | Some residential proxy networks run through devices whose owners did not knowingly consent, and whether Tor exits are acceptable is a question for your authority. The build records an exit's kind and region, seals it for the proxy alone, and cannot tell a consenting network from one that is not. | |
 | **B13** | Egress ledger retention *(D11)* | **Kept for good.** The connection ledger is append-only and hash-chained, and nothing purges it | It records which sites the deployment read and when, and what each integration reached. Kept, it is the record of what left the building; kept for ever, it outlives the sources and cases it concerns. | |
@@ -138,12 +129,12 @@ where being wrong is quiet.
 | **C11** | A gpg-verified signature is evidentially meaningful, and the verifier version is recorded | The only cryptographic-evidence path in the system. |
 | **C12** | The GLOBAL service stoplist holds identifiers of real people who are not subjects | It exists to stop attributing a forum's escrow to a vendor; it is itself a small set of personal data. |
 | **C13** | Co-participation manufactures ties, including for uninvolved third parties in a room | An inferred edge about someone who was merely present. |
-| **C14** | **Third-party YARA rule licensing** (added 2026-07-25) | A parallel workstream began pulling a public YARA corpus. Several sources (`signature-base`, `elastic-protections`) carry non-permissive terms and are flagged for review. A prosecution-grade tool must not silently inherit the licence of every third-party rule. **See Section D3, that workstream also pulled live malware onto a workstation.** Since 2026-09-24 (F12) each stored version records its licence, and a version flagged for review is activated only when a Security Officer other than its sponsor writes down the clearance, kept on the activation and in the audit chain; the clearance itself is still counsel's (docs/16 C14). |
-| **C15** | A Web Key Directory lookup may be made to the directories listed on the `wkd` route, from this deployment's address (added 2026-09-24) | A lookup sends the hash of the address's local part, which the directory's operator can reverse, so it learns which address was looked up, when and from where. Lookups are off until a ceiling is set and the route lists each directory by name (docs/16 C15). |
-| **C16** | Each lookup provider's terms permit caching its answers, this use at this tier, redistribution in a report, and filing an answer as a locked exhibit (added 2026-09-24) | The VirusTotal public API excludes commercial use; several vendors restrict caching and redistribution. Nothing here has been read against a contract. |
-| **C17** | A Jira Cloud project may receive case codes and one-line summaries: Atlassian's data residency and processing agreement cover it, the project's audience may see them, and issues outliving retention is acceptable (added 2026-09-25) | Case codes are intelligence (decision 46). Nothing ships enabled, the default ceiling is GREEN and STUB exposure carries no case code, but nobody has read Atlassian's terms against this use or looked at who reads the project. |
-| **C18** | Telegram behaves as the adapter assumes: per-account message ids in basic groups, nothing returned for a deleted message, public megagroups readable without joining, which acts appear in a chat's recent actions, whether API reads move last-seen, the published data-centre networks and ports, the per-persona api_id terms, and reading content-protected chats (added 2026-09-24) | Deletions, attribution to an account and whether a persona is noticed all rest on it, and Telegram changes it without notice (docs/16 C18). |
-| **C19** | The production application network has no route to the internet, so the egress proxy is the only way out (added 2026-09-24) | Every claim about what left the deployment rests on it, and the readiness register checks the process, not the host. Docker's embedded resolver still forwards names off the host as lookups (docs/16 C19). |
+| **C14** | **Third-party YARA rule licensing** | The detection-rule corpus is pulled from public sources, and several (`signature-base`, `elastic-protections`) carry non-permissive terms and are flagged for review. A prosecution-grade tool must not silently inherit the licence of every third-party rule. See Section D3, the same workstream also pulled live malware onto a workstation. Each stored version records its licence, and a version flagged for review is activated only when a Security Officer other than its sponsor writes down the clearance, kept on the activation and in the audit chain; the clearance itself is still counsel's (docs/16 C14). |
+| **C15** | A Web Key Directory lookup may be made to the directories listed on the `wkd` route, from this deployment's address | A lookup sends the hash of the address's local part, which the directory's operator can reverse, so it learns which address was looked up, when and from where. Lookups are off until a ceiling is set and the route lists each directory by name (docs/16 C15). |
+| **C16** | Each lookup provider's terms permit caching its answers, this use at this tier, redistribution in a report, and filing an answer as a locked exhibit | The VirusTotal public API excludes commercial use; several vendors restrict caching and redistribution. Nothing here has been read against a contract. |
+| **C17** | A Jira Cloud project may receive case codes and one-line summaries: Atlassian's data residency and processing agreement cover it, the project's audience may see them, and issues outliving retention is acceptable | Case codes are intelligence (decision 46). Nothing ships enabled, the default ceiling is GREEN and STUB exposure carries no case code, but nobody has read Atlassian's terms against this use or looked at who reads the project. |
+| **C18** | Telegram behaves as the adapter assumes: per-account message ids in basic groups, nothing returned for a deleted message, public megagroups readable without joining, which acts appear in a chat's recent actions, whether API reads move last-seen, the published data-centre networks and ports, the per-persona api_id terms, and reading content-protected chats | Deletions, attribution to an account and whether a persona is noticed all rest on it, and Telegram changes it without notice (docs/16 C18). |
+| **C19** | The production application network has no route to the internet, so the egress proxy is the only way out | Every claim about what left the deployment rests on it, and the readiness register checks the process, not the host. Docker's embedded resolver still forwards names off the host as lookups (docs/16 C19). |
 
 ---
 
@@ -162,37 +153,27 @@ in was routine rather than adversarial: any record with a top-level
 is gated for a compartment at key issue, and a partner whose schema drifts
 dead-letters their entire feed.
 
-**Fixed 2026-07-25.** Migration 0040 labels the table, backfills the
+**What the build does about it.** Migration 0040 labels the table, backfills the
 labels from the issuing key and puts every row on a clock. Fragments are
-now structurally redacted before storage (keys, types and lengths, never
+structurally redacted before storage (keys, types and lengths, never
 values) and a database constraint refuses any new unredacted row.
 
-**Checked 2026-07-26 on the development database: nothing to repair
-here.** All three dead-letter rows present are `redacted = true`, labelled
-AMBER and on a clock, so every one of them was written after the fix.
-`scripts/redact_dead_letters.py` reports "0 unredacted dead-letter rows".
-
-That closes item 1 **for this deployment only**, and the distinction
-matters: the script exists because any deployment that ran the code before
-migration 0040 will have rows this one does not. Run it there before
-concluding anything.
+**What it leaves.** A deployment that ran the code before migration 0040
+holds rows from that time verbatim on disk. `scripts/redact_dead_letters.py`
+reports "0 unredacted dead-letter rows" when none are left, and
+`scripts/redact_dead_letters.py --apply` rewrites the rest. The rewrite is
+irreversible, which is why a human runs it rather than a migration. Run it
+on any such deployment before concluding anything about it.
 
 **Outstanding, and it needs a decision:**
 
-1. ~~Rows recorded before the fix are still verbatim on disk.~~ None on
-   this database (checked 2026-07-26). Still required on any deployment
-   that processed feeds before 0040; `scripts/redact_dead_letters.py
-   --apply` rewrites them, and it is irreversible, which is why a human
-   runs it rather than a migration.
-2. **Whether this constitutes a reportable data-protection incident** in
+1. **Whether this constitutes a reportable data-protection incident** in
    either operating jurisdiction, given the material involved and the
-   access controls that were absent while it existed. On this deployment
-   the affected rows are development data; on any deployment that has
-   processed real feeds, this is a question for counsel and not for the
-   engineer who found it. **Still open, and the check above does not touch
-   it**, "we found nothing left on this machine" is not an answer to
-   "was anything disclosed".
-3. Confirm B9 (the 90-day dead-letter clock).
+   access controls that were absent while it existed. On a deployment that
+   has processed real feeds this is a question for counsel and not for the
+   engineer who found it. The script does not touch it: "we found nothing
+   left on this machine" is not an answer to "was anything disclosed".
+2. Confirm B9 (the 90-day dead-letter clock).
 
 | **Determination** | |
 |---|---|
@@ -206,11 +187,11 @@ with a storage adapter, and every construction passed none, so it returned
 202, wrote a batch row whose `raw_key` pointed at nothing, and dropped the
 payload. Silently.
 
-**Fixed 2026-07-25** (`rawstore.py`). `accept()` now refuses rather than
+**What the build does about it** (`rawstore.py`). `accept()` refuses rather than
 acknowledging bytes it has nowhere to put, and a re-parse verifies the
 stored object against the digest recorded at acceptance.
 
-**Outstanding:** any batch accepted before the fix cannot be re-parsed.
+**Outstanding:** any batch accepted before that change cannot be re-parsed.
 The API says so explicitly rather than parsing an empty payload and
 marking the batch complete. If real feeds submitted during that window,
 the partner has to resend.
@@ -226,10 +207,10 @@ carried **live FIN7 and Babuk samples**. The workstation's antivirus
 quarantined mid-clone. The collateral damage included most of the Git for
 Windows installation, which had to be reinstalled.
 
-**Why it is in this document.** The engineering lesson is recorded in that
-workstream's own notes (the manifest now excludes repositories that ship
-samples, `fetch` prunes every non-rule file after each clone, and
-`NOCTORNAL_YARA_HOME` can relocate the corpus off a synced volume). The
+**Why it is in this document.** The engineering response is in the tooling:
+the manifest (`yara/sources.json`) excludes repositories that ship samples,
+`fetch` prunes every non-rule file after each clone, and
+`NOCTORNAL_YARA_HOME` can relocate the corpus off a synced volume. The
 parts that are **not** engineering questions:
 
 1. **The repository lives inside a OneDrive-synced folder.** Material
@@ -265,5 +246,5 @@ choices, not gaps:
 | Free-text search across victim PII | Refused by design. There is no index to run it against; the authorisation path is narrow and logged |
 | Archive expansion in the sample pipeline | Uncapped is a zip bomb; capped is real work and is not done |
 | Deep links with tokens in email | A bearer credential in the least trustworthy channel available |
-| A collection scheduler that runs itself | A collector on a timer nobody watches is how a persona gets burnt at 3am. Polling is a button |
+| Unattended collection without an authority | A collector on a timer nobody watches is how a persona gets burnt at 3am. The scheduled poll looks every five minutes and each source's own jittered `next_due_at` decides when it is polled, but a poll is refused while a blocking readiness check is open, and a forum or Telegram read is refused unless a confirmed collection authority covers it |
 | Any legal determination | This file is the inventory of them, not the answer to any |
