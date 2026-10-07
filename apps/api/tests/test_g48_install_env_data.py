@@ -262,10 +262,18 @@ DANGEROUS = (
     b"LD_LIBRARY_PATH=./evil\nDYLD_INSERT_LIBRARIES=./evil.dylib\nBASH_ENV=./evil.sh\nENV=./evil.sh\n"
     b"IFS=x\nPS4=$(touch PWNED-PS4)\nPROMPT_COMMAND=touch PWNED-PC\nSHELLOPTS=xtrace\nCOMSPEC=evil.exe\n"
     b"Path=./evilbin\nHOME=./evilhome\n"
+    # The tools the scripts start next (Beta 1 verification, 2026-10-07):
+    # DOCKER_CONFIG held a fake cli-plugins/docker-compose that `docker compose`
+    # ran as root. Mixed case on purpose: Windows names are case-insensitive.
+    b"DOCKER_CONFIG=./evil\nDOCKER_HOST=tcp://203.0.113.9:2375\nCOMPOSE_FILE=./evil.yml\n"
+    b"Git_Ssh_Command=./evil.sh\nPIP_INDEX_URL=http://evil.example/simple\n"
+    b"NODE_OPTIONS=--require ./evil.js\nPSModulePath=./evil\n"
 )
 _DANGEROUS_NAMES = ("PATH", "PYTHONPATH", "PythonStartup", "LD_PRELOAD", "LD_LIBRARY_PATH",
                     "DYLD_INSERT_LIBRARIES", "BASH_ENV", "ENV", "IFS", "PS4", "PROMPT_COMMAND",
-                    "SHELLOPTS", "COMSPEC", "Path", "HOME")
+                    "SHELLOPTS", "COMSPEC", "Path", "HOME",
+                    "DOCKER_CONFIG", "DOCKER_HOST", "COMPOSE_FILE", "Git_Ssh_Command",
+                    "PIP_INDEX_URL", "NODE_OPTIONS", "PSModulePath")
 #: Prints every dangerous name's value, or UNSET. Some are always set by the
 #: shell itself (IFS, PS4, SHELLOPTS, HOME), so the test compares a snapshot
 #: before and after the loader rather than expecting them unset.
@@ -344,9 +352,43 @@ def test_launch_sh_leaves_the_same_names_out(tmp_path):
     assert done.returncode == 0, done.stdout + done.stderr
     assert "names-unchanged=yes" in done.stdout, done.stdout
     assert "ordinary=fine ok ok ok" in done.stdout
-    for name in ("PATH", "PYTHONPATH", "LD_PRELOAD", "BASH_ENV", "Path", "HOME"):
+    for name in ("PATH", "PYTHONPATH", "LD_PRELOAD", "BASH_ENV", "Path", "HOME",
+                 "DOCKER_CONFIG", "NODE_OPTIONS", "PSModulePath"):
         assert f"{name} ignored: it changes how programs start" in done.stdout, name
     assert "evil" not in done.stdout.replace("ignored", ""), "a value was printed"
+
+
+def test_launch_sh_does_not_evaluate_a_subscript_in_a_name(tmp_path):
+    """`${!name+x}` evaluates an array subscript, so a name like `x[$(cmd)]` ran
+    `cmd` as the launching user: the sibling of infra-9 that install.sh closed
+    with an identifier check and launch.sh did not (Beta 1 verification,
+    2026-10-07; `release/start.sh` execs `launch.sh`). The real loop runs on the
+    hostile lines. `>file` is a command with no spaces, because the loop strips
+    them from a name."""
+    bash = _bash()
+    if bash is None:
+        pytest.skip("no bash")
+    (tmp_path / ".env.local").write_bytes(
+        b"x[$(>PWNED-SUBSCRIPT)]=1\n"
+        b"y[`>PWNED-TICK`]=1\n"
+        b"z[0]=1\n"
+        b"w$(>PWNED-BARE)=1\n"
+        b"BAD-NAME=skipped\n"
+        b"1BAD=skipped\n"
+        b"G57_ORDINARY=fine\n")
+    script = tmp_path / "run.sh"
+    script.write_text(
+        "set -euo pipefail\ndetail() { printf '    %s\\n' \"$1\"; }\n"
+        'cd "$1"\nENV_LOCAL=.env.local\n' + _launch_sh_loop() +
+        'echo "ordinary=$G57_ORDINARY"\n'
+        'echo "badnames=$(env | grep -c "BAD" || true)"\n',
+        encoding="utf-8", newline="\n")
+    done = subprocess.run([bash, script.as_posix(), tmp_path.as_posix()], capture_output=True,
+                          text=True, encoding="utf-8", timeout=60)
+    assert not list(tmp_path.glob("PWNED*")), "a name in .env.local was evaluated as shell"
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "command not found" not in done.stderr and "not a valid identifier" not in done.stderr
+    assert "ordinary=fine" in done.stdout and "badnames=0" in done.stdout, done.stdout
 
 
 def _shell_case_list(path: Path, subject: str) -> tuple[set[str], set[str]]:
@@ -394,8 +436,13 @@ def test_the_install_notes_powershell_loader_leaves_out_the_same_names():
 
 def test_a_name_is_refused_by_the_python_list_without_regard_to_case():
     module = _env_module(Path("."))
-    for name in ("PATH", "path", "Path", "pythonpath", "LD_PRELOAD", "ld_preload", "BASH_ENV", "Ps4"):
+    for name in ("PATH", "path", "Path", "pythonpath", "LD_PRELOAD", "ld_preload", "BASH_ENV", "Ps4",
+                 "DOCKER_CONFIG", "docker_host", "COMPOSE_FILE", "Compose_Project_Name", "GIT_SSH_COMMAND",
+                 "git_dir", "PIP_INDEX_URL", "pip_require_virtualenv", "NODE_OPTIONS", "node_path",
+                 "PSModulePath", "PSMODULEPATH", "psmodulepath"):
         assert module.is_refused_name(name), name
     for name in ("NOCTORNAL_TOTP_KEK", "DATABASE_URL", "PATHOLOGY", "HOMEPAGE", "ENVIRONMENT",
-                 "SMTP_HOST", "REDIS_URL"):
+                 "SMTP_HOST", "REDIS_URL",
+                 # A prefix is the word and the underscore: a name that only starts alike is a setting.
+                 "DOCKERIZED", "GITHUB_NOTE", "NODEPOOL", "PIPELINE", "COMPOSERS", "PSMODULEPATHS"):
         assert not module.is_refused_name(name), name

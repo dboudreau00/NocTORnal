@@ -39,7 +39,12 @@ isolated analysis worker does not answer, or a production deployment
 configures none, it says so and exits 1 having touched nothing (docs/17
 F42): that is a fault, and the queue waits for it. When the worker fails
 during the pass, the pass stops, prints `interrupted=1` and exits 1; the
-run or compile it was on goes back to the queue with no attempt spent.
+run or compile it was on goes back to the queue with no attempt spent. Under
+NOCTORNAL_ENV=production an environment this job will not run on exits 2
+(`config.JOB_REFUSAL_EXIT`, the code every job gives that refusal, so an alert
+can tell a job that would not start from a pass that failed), one line per
+problem on stderr led by `lab_triage: refusing to run:`, naming variables and
+never a value.
 
 `--backfill` decrypts every held sample in the passes that follow. That is
 the operator's decision, never a migration's, and it is recorded as
@@ -82,8 +87,16 @@ def main(argv: list[str] | None = None) -> int:
                         help="start a compile or run only if its worst case fits")
     args = parser.parse_args(argv)
 
-    from noctornal_api.config import enforce_environment
-    enforce_environment()
+    # First, before anything is connected to: the API's whole production list,
+    # through the one helper every job calls (config.py). It was
+    # `enforce_environment()`, whose RuntimeError made a refusal exit 1 with a
+    # traceback; 2 is what every other job gives, and 1 here means a pass ran
+    # and failed (Beta 1 verification, 2026-10-07).
+    from noctornal_api.config import JOB_REFUSAL_EXIT, refuse_unsafe_job_environment
+    refusals = refuse_unsafe_job_environment("lab_triage", whole_environment=True)
+    if refusals:
+        print("\n".join(refusals), file=sys.stderr)
+        return JOB_REFUSAL_EXIT
     from noctornal_api import lab_triage
     from noctornal_api.db import SystemPurpose, connect_system
     from noctornal_api.samples import policy_declared

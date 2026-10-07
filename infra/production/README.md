@@ -1472,7 +1472,8 @@ both names resolve to the same digest, which is how that is checked.
   `mc admin user svcacct add`, once, the first time each account is created
   (the `SAMPLE_` and `PRESERVE_` keys; the root credential and the database role
   passwords are not). Mount `/proc` with `hidepid=2` on the Docker host if it
-  has other local accounts.
+  has other local accounts. The command's own output, which echoes the new
+  secret key, is discarded, so the key is not in the `minio-init` container log.
 * **The build context is the checkout, not an export of it.** `.dockerignore`
   keeps out everything it names (every `.env` file at any depth, every `*.env`
   file and an editor's copy of one such as `secrets.env.bak`, keys,

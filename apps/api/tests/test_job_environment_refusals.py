@@ -23,8 +23,12 @@ password and DSN with no check at all. Held here:
   collector's mark, through the same helper (the collector and the poll it
   starts as a child pass `holds_persona_key=True`: the key is theirs by
   design, and each makes the collector's own half itself);
-* the Lab's three workers, which call `enforce_environment`, refuse the
-  owner's credential through it.
+* the Lab's three workers ask the same helper for the API's whole production
+  list (`whole_environment=True`), and refuse the owner's credential, a
+  published one and the rest of that list the way every other job does: one
+  line per problem on stderr led by the job's name, exit 2 and no traceback.
+  They called `enforce_environment`, whose RuntimeError was exit 1 with a
+  traceback (Beta 1 verification, 2026-10-07).
 
 No database: every script is stopped before it could connect, and the test
 fails if it tries.
@@ -295,16 +299,70 @@ def test_the_persona_key_is_nobodys_business_outside_production():
 
 
 # ---------------------------------------------------------------------------
-# The Lab's workers refuse it through enforce_environment
+# The Lab's workers refuse it through the same helper, asked for the whole list
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("worker", LAB_WORKERS)
-def test_each_lab_worker_refuses_the_owner_credential_before_connecting(worker, monkeypatch):
+def test_each_lab_worker_refuses_the_owner_credential_before_connecting(
+        worker, monkeypatch, capsys):
     module = _script(worker)
     _production_process(monkeypatch, **{config.OWNER_PASSWORD_ENV: OWNER_PASSWORD})
     _no_connection(monkeypatch, module)
-    with pytest.raises(RuntimeError) as refused:
-        module.main([])
-    message = str(refused.value)
-    assert f"{config.OWNER_PASSWORD_ENV} is set on a runtime process" in message
-    assert OWNER_PASSWORD not in message
+    assert module.main([]) == config.JOB_REFUSAL_EXIT == 2
+    out = capsys.readouterr()
+    assert out.err.splitlines() == config.refuse_unsafe_job_environment(worker, whole_environment=True)
+    assert any(line.startswith(
+        f"{worker}: refusing to run: {config.OWNER_PASSWORD_ENV} is set on a runtime process")
+        for line in out.err.splitlines()), out.err
+    assert "Traceback" not in out.out + out.err
+    assert OWNER_PASSWORD not in out.out + out.err
+
+
+@pytest.mark.parametrize("worker", LAB_WORKERS)
+def test_each_lab_worker_refuses_a_published_credential_before_connecting(
+        worker, monkeypatch, capsys):
+    module = _script(worker)
+    _production_process(monkeypatch, SMTP_PASSWORD="replace-me-smtp-password")
+    _no_connection(monkeypatch, module)
+    assert module.main([]) == config.JOB_REFUSAL_EXIT
+    err = capsys.readouterr().err
+    assert any(line.startswith(f"{worker}: refusing to run: SMTP_PASSWORD still carries")
+               for line in err.splitlines()), err
+    assert "replace-me-smtp-password" not in err
+
+
+@pytest.mark.parametrize("worker", LAB_WORKERS)
+def test_each_lab_worker_still_makes_the_checks_only_the_whole_list_has(
+        worker, monkeypatch, capsys):
+    """The workers hold the sample store's credentials and the key ring, so
+    they keep every refusal the API makes, not only the three the cron jobs
+    ask for: an unset sample-store credential is one only the whole list makes."""
+    module = _script(worker)
+    _production_process(monkeypatch)
+    monkeypatch.delenv("SAMPLE_ACCESS_KEY", raising=False)
+    assert not any("SAMPLE_ACCESS_KEY" in line for line in
+                   config.refuse_unsafe_job_environment(worker)), "the narrow helper does not ask"
+    _no_connection(monkeypatch, module)
+    assert module.main([]) == config.JOB_REFUSAL_EXIT
+    assert f"{worker}: refusing to run: SAMPLE_ACCESS_KEY is not set" in capsys.readouterr().err
+
+
+def test_the_whole_environment_is_verify_environments_list_one_line_each():
+    env = {**_production(), "SMTP_PASSWORD": "replace-me-smtp-password"}
+    whole = config.refuse_unsafe_job_environment("lab_triage", env, whole_environment=True)
+    assert whole == [f"lab_triage: refusing to run: {p}" for p in config.verify_environment(env)]
+    assert any(line.startswith("lab_triage: refusing to run: SMTP_PASSWORD still carries")
+               for line in whole)
+    assert not any("replace-me-smtp-password" in line for line in whole)
+    assert config.refuse_unsafe_job_environment(
+        "lab_triage", {**env, "NOCTORNAL_ENV": "development"}, whole_environment=True) == []
+    assert config.refuse_unsafe_job_environment("lab_triage", _production(), whole_environment=True) == []
+
+
+@pytest.mark.parametrize("worker", LAB_WORKERS)
+def test_a_lab_worker_calls_the_one_helper_once_and_no_longer_raises(worker):
+    text = (ROOT / "scripts" / f"{worker}.py").read_text(encoding="utf-8")
+    code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    assert text.count("refuse_unsafe_job_environment(") == 1, worker
+    assert 'whole_environment=True' in code and "return JOB_REFUSAL_EXIT" in code
+    assert "enforce_environment(" not in code, "a RuntimeError is exit 1 with a traceback"

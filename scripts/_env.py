@@ -78,11 +78,18 @@ def env_local_path() -> Path:
 #: apps/api/tests/test_g48_install_env_data.py holds all five to each other
 #: (and release/INSTALL.md's one-line loader). Matched without regard to case, because
 #: Windows treats `Path` and `PATH` as one name.
+#:
+#: The tools these scripts start next are on the list too (Beta 1 verification,
+#: 2026-10-07): `DOCKER_CONFIG` pointed `docker compose` at a fake
+#: `cli-plugins/docker-compose` that ran as the installing user, and `DOCKER_HOST`,
+#: `COMPOSE_*`, `GIT_*`, `PIP_*`, `NODE_OPTIONS` and PowerShell's `PSModulePath`
+#: redirect a program the same way.
 REFUSED_NAMES = frozenset({
     "PATH", "PATHEXT", "HOME", "COMSPEC", "IFS", "ENV", "CDPATH", "GLOBIGNORE",
     "SHELLOPTS", "BASHOPTS", "PROMPT_COMMAND", "PS1", "PS2", "PS3", "PS4",
+    "PSMODULEPATH",
 })
-REFUSED_PREFIXES = ("BASH_", "LD_", "DYLD_", "PYTHON")
+REFUSED_PREFIXES = ("BASH_", "LD_", "DYLD_", "PYTHON", "DOCKER_", "COMPOSE_", "GIT_", "PIP_", "NODE_")
 
 
 def is_refused_name(name: str) -> bool:
