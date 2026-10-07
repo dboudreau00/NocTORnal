@@ -351,8 +351,8 @@ route it leaves by, the outbox with **Drain now** and a retry of real
 failures, and the delivery ledger, which says for each delivery what
 happened, why, and what left. A channel whose route or setting is missing
 is **held**: its deliveries wait, spend no attempt, and go once it is
-fixed. Create the egress routes `smtp` and `webhook` under
-Administration, Egress before upgrading, or mail and webhooks are held.
+fixed. Mail and webhooks each leave by an egress route (`smtp`, `webhook`),
+created under Administration, Egress; without one they are held.
 
 **Jira** takes work items only, and only from analysts who turned it on
 for themselves. Declare the one destination (base URL, project, issue

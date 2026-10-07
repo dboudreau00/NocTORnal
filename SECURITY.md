@@ -26,31 +26,29 @@ use**. It has never been operated against real targets. That means:
 - **In scope:** authentication, session handling, the five-part access
   gate, and the egress gate.
 - **How a session works, so a report starts from the right model:** the
-  cookie is the session, and since 2026-09-10 it is the *only* thing a
-  sign-in hands a browser. `POST /auth/login` answers **204** and sets
-  `__Host-session` (HttpOnly) and a readable `__Host-csrf`; an unsafe
-  method on a cookie session must carry that cookie's value in
-  `x-csrf-token`. There is no token in the response body. The two paths
-  that used to need one both take the cookie now: the live websocket
-  reads `__Host-session` off the upgrade (where a double-submit is
-  impossible, so `SameSite=Strict` plus an `Origin` check against the
-  configured origin stands in for it), and the Lab download (which is
-  cross-origin by design, so no `__Host-` cookie can reach it) crosses
-  on a **one-shot ticket** minted on the application origin under the
-  cookie session: 60 seconds, one sample, one redemption, and it buys an
-  archive rather than the case file. A session token in web storage, in
-  a URL, or in a log *is* a finding, and after a form sign-in there is
-  nowhere in the browser it exists at all outside the HttpOnly cookie.
-  One legitimate exception remains, and it is not a sign-in:
-  `scripts/bootstrap.py session` mints a bearer directly for a host
-  whose clock TOTP cannot live with and prints it in a URL *fragment*,
-  which the console erases from the address bar, holds in page memory
-  (never storage) and exchanges once for the pair through `POST
-  /auth/cookie`, but only after it has named the account the link
-  carries and the person has said yes (2026-10-03: a link made from
-  anybody's session would otherwise sign a signed-out colleague in as its
-  author). `deps.session_token` still accepts `Authorization:
-  Bearer`, for clients that are not browsers.
+  cookie is the session, and it is the *only* thing a sign-in hands a
+  browser. `POST /auth/login` answers **204** and sets `__Host-session`
+  (HttpOnly) and a readable `__Host-csrf`; an unsafe method on a cookie
+  session must carry that cookie's value in `x-csrf-token`. There is no
+  token in the response body. The live websocket reads `__Host-session`
+  off the upgrade (where a double-submit is impossible, so
+  `SameSite=Strict` plus an `Origin` check against the configured origin
+  stands in for it), and the Lab download (which is cross-origin by
+  design, so no `__Host-` cookie can reach it) crosses on a **one-shot
+  ticket** minted on the application origin under the cookie session: 60
+  seconds, one sample, one redemption, and it buys an archive rather than
+  the case file. A session token in web storage, in a URL, or in a log
+  *is* a finding, and after a form sign-in there is nowhere in the
+  browser it exists at all outside the HttpOnly cookie. One legitimate
+  exception remains, and it is not a sign-in: `scripts/bootstrap.py
+  session` mints a bearer directly for a host whose clock TOTP cannot
+  live with and prints it in a URL *fragment*, which the console erases
+  from the address bar, holds in page memory (never storage) and
+  exchanges once for the pair through `POST /auth/cookie`, but only after
+  it has named the account the link carries and the person has said yes,
+  because a link made from anybody's session would otherwise sign a
+  signed-out colleague in as its author. `deps.session_token` accepts
+  `Authorization: Bearer`, for clients that are not browsers.
 - **How the database backs the invariants, so a report starts from the
   right model.** Row-level security stands on 82 tables, enabled and not
   forced, so the schema owner is not bound and a production start refuses a
@@ -82,12 +80,12 @@ use**. It has never been operated against real targets. That means:
 ## What this project treats as a bug even when tests pass
 
 Unusually, and deliberately: **a violation of an invariant is a bug even
-if every test is green.** Eight adversarial reviews have each found a real
-defect under a fully passing suite, and three of those defects were green
-tests asserting the bug. The ninth, of the beta build on 2026-10-03, kept 82
-findings, and its fixes and the nine release reviews that followed found
-more. If you can show an invariant does not hold, that
-is a valid report regardless of what CI says.
+if every test is green.** The software has been adversarially reviewed nine
+times, and each review found real defects: the first eight under a fully
+passing suite, three of those defects being green tests asserting the bug.
+The ninth, of the beta build on 2026-10-03, kept 82 findings. If you can
+show an invariant does not hold, that is a valid report regardless of what
+CI says.
 
 ## Hardening this is *not* responsible for
 
