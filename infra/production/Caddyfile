@@ -73,9 +73,27 @@
 #
 # HTTP/3 is off. 443/udp is not published (compose.yml), so advertising it
 # in Alt-Svc sent browsers to a port nothing answers on.
+#
+# ## The log (Beta 1 deployment gate, 2026-10-07)
+#
+# Caddy writes no access log here, but on an upstream failure (a 502 while
+# the API restarts) it logs the request with its headers. It redacts Cookie
+# and Authorization by itself, and nothing else: X-Csrf-Token (the value of
+# the __Host-csrf cookie) and X-Setup-Token (the first-run door's secret)
+# reached `docker logs` verbatim, measured with Caddy 2.11.4. The filter takes
+# both out of every log line this process writes.
 {
 	servers {
 		protocols h1 h2
+	}
+	log {
+		format filter {
+			wrap json
+			fields {
+				request>headers>X-Csrf-Token delete
+				request>headers>X-Setup-Token delete
+			}
+		}
 	}
 }
 

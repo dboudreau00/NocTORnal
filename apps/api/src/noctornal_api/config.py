@@ -491,12 +491,21 @@ def declared_cap(name: str, default: int = DEFAULT_UPLOAD_CAP) -> int:
 
 
 def verify_environment(env: Mapping[str, str] | None = None, *,
-                       collector: bool = False) -> list[str]:
+                       collector: bool = False, outbound: bool = True) -> list[str]:
     """Every reason this environment must not run a production deployment.
 
     `collector` is True only from scripts/collector.py: the one process
     that must hold the persona key, where every other must not (A collector
     process, 2026-10-02; `persona_key_problems`).
+
+    `outbound` is False from a job that sends nothing out and is given no
+    egress proxy (scripts/lab_triage.py); the sample origin is recognised by
+    its origin, as `egress_routes.enforce_production_egress` recognises it.
+    Neither is refused for an outbound integration with no proxy: both read
+    secrets.env, where the operator turns lookups and the sandbox on for the
+    processes that send them (Beta 1 deployment gate, 2026-10-07: until then
+    turning either on stopped the sample origin from starting and every
+    static triage pass).
 
     Pure: it reads `env` (the process environment by default), opens
     nothing, and returns the refusals rather than raising, so the rules
@@ -668,6 +677,15 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
             "HTTP: live malware bytes cross the network in clear text, and each "
             "request's signature can be lifted off the wire and replayed against "
             "the sample bucket (docs/11).")
+    # The preservation store falls back to SAMPLE_SECURE when its own is
+    # unset (samples.PreservationStorage), so only a value SET and not
+    # "true" is refused (Beta 1 deployment gate, 2026-10-07).
+    preserve_secure = env.get("PRESERVE_SECURE")
+    if preserve_secure and preserve_secure.lower() != "true":
+        problems.append(
+            'PRESERVE_SECURE is set and not "true", so the preservation client '
+            "speaks plain HTTP: rejected samples under a legal hold cross the "
+            "network in clear text (docs/11).")
 
     base_url = env.get("NOCTORNAL_BASE_URL", "").strip()
     if not base_url:
@@ -850,8 +868,10 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
             problems.append(
                 f"{name} names a file that does not exist or cannot be read, so "
                 f"the private certificate authority it should add is missing.")
+    from noctornal_api.egress_routes import _serves_samples
+    sends = outbound and not _serves_samples(env)
     lookups = env.get("NOCTORNAL_OUTBOUND_LOOKUPS", "").strip().lower()
-    if lookups == "on" and egress.proxy_problem(env) is None \
+    if sends and lookups == "on" and egress.proxy_problem(env) is None \
             and not env.get(egress.PROXY_URL_ENV, "").strip():
         problems.append(
             f"NOCTORNAL_OUTBOUND_LOOKUPS is on and {egress.PROXY_URL_ENV} is not set, "
@@ -879,7 +899,7 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
     # reader (sandbox.sandbox_settings), so the worker, readiness and this
     # cannot disagree. Named, never quoted.
     from noctornal_api.sandbox import production_problems
-    problems.extend(production_problems(env))
+    problems.extend(production_problems(env, sends=sends))
 
     # The similarity settings (F6.1 and F6.2, 2026-09-24), through the
     # one reader of NOCTORNAL_EMBED_*, so this and the pass cannot disagree
@@ -990,7 +1010,8 @@ JOB_REFUSAL_EXIT = 2
 def refuse_unsafe_job_environment(job: str, env: Mapping[str, str] | None = None,
                                   *, holds_owner_credential: bool = False,
                                   holds_persona_key: bool = False,
-                                  whole_environment: bool = False
+                                  whole_environment: bool = False,
+                                  outbound: bool = True
                                   ) -> list[str]:
     """Why the job `job` must not run here: one line per problem, each led by
     the job's name, naming variables and never a value. `[]` outside
@@ -1010,7 +1031,9 @@ def refuse_unsafe_job_environment(job: str, env: Mapping[str, str] | None = None
     questions below). They called `enforce_environment` once, which raised a
     RuntimeError: a refusal was exit 1 with a traceback where every other job
     gave 2 (Beta 1 verification, 2026-10-07). A caller prints the lines on
-    stderr and exits `JOB_REFUSAL_EXIT`.
+    stderr and exits `JOB_REFUSAL_EXIT`. `outbound=False` is lab_triage's,
+    which sends nothing out and is given no egress proxy (`verify_environment`
+    says what that excuses).
 
     Two refusals, the two the API makes that every job needs as well (docs/17
     F52 and infra-12, ROADMAP-REMAINING's "The cron jobs and a published
@@ -1044,7 +1067,8 @@ def refuse_unsafe_job_environment(job: str, env: Mapping[str, str] | None = None
     if env.get(ENV_VAR, "").strip().lower() != PRODUCTION:
         return []
     if whole_environment:
-        return [f"{job}: refusing to run: {problem}" for problem in verify_environment(env)]
+        return [f"{job}: refusing to run: {problem}"
+                for problem in verify_environment(env, outbound=outbound)]
     published = published_credentials(env)
     problems = [p.refusal for p in published]
     if not holds_owner_credential:

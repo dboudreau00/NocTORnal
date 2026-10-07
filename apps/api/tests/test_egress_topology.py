@@ -237,7 +237,7 @@ def _subnet(doc, name) -> ipaddress.IPv4Network:
 
 def test_the_reader_resolves_anchors_and_merges(doc):
     api = doc["services"]["api"]
-    assert api["image"].startswith("noctornal-api:") and "build" in api
+    assert api["image"].startswith("noctornal-api:") and api["pull_policy"] == "never"
     assert doc["x-egress-ip"] == "172.31.243.11"
 
 
@@ -341,3 +341,24 @@ def test_the_reader_fails_closed_on_what_it_does_not_read():
         Reader("a: *nowhere\n").document()
     with pytest.raises(Unparseable):
         Reader("a: !tag x\n").document()
+
+
+def test_the_readme_names_every_place_that_carries_a_movable_subnet():
+    """Beta 1 deployment gate (2026-10-07): the README's answer to `Pool
+    overlaps` said to change the subnet in two places, and five more keys
+    (the egress address and the internal networks, on six services) carry it.
+    A move done as written left the proxy listening on an address its network
+    no longer had. Every key that names the noctornal or the edge subnet is
+    in that section, and the two subnets the code holds are said to be fixed."""
+    readme = (ROOT / "infra" / "production" / "README.md").read_text(encoding="utf-8")
+    section = readme.split("### If `up` fails creating the network", 1)[1].split("\n## ", 1)[0]
+    keys = set()
+    for line in COMPOSE.read_text(encoding="utf-8").splitlines():
+        code = _strip_comment(line.strip())
+        if re.search(r"172\.31\.24[34]\.", code):
+            keys.add(code.lstrip("- ").split(":", 1)[0])
+    assert keys == {"x-caddy-ip", "x-egress-ip", "subnet", "NOCTORNAL_EGRESS_PROXY_URL",
+                    "NOCTORNAL_EGRESS_LISTEN", "NOCTORNAL_EGRESS_INTERNAL_CIDRS"}, keys
+    for key in keys:
+        assert key in section, key
+    assert "EXITS_NETWORK" in section and "MODELS_NETWORK" in section
