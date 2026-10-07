@@ -387,6 +387,21 @@ def test_amber_strict_sends_nothing_to_jira_not_even_a_stub(conn):
         "REFUSED", "EGRESS_REFUSED", None, None, 0)
 
 
+def test_a_case_raised_after_queueing_sends_nothing(conn):
+    """Beta 1 gate 64: the pass judged the labels the notification was
+    raised with, so a case raised to RED while the row waited went to Jira
+    marked AMBER. The case's labels are composed in at the drain."""
+    world = _world(conn)
+    fake = FakeJira()
+    (n,) = _raise(conn, world, classification="AMBER")
+    conn.execute('UPDATE core."case" SET classification = %s WHERE id = %s',
+                 ("RED", world["case"]))
+    _drain(conn, fake)
+    assert not fake.issues
+    state, cause, *_ = _jira_row(conn, n)
+    assert (state, cause) == ("REFUSED", "EGRESS_REFUSED")
+
+
 def test_compartmented_material_sends_nothing(conn):
     world = _world(conn)
     for uid in world["people"]:

@@ -461,6 +461,14 @@ def test_a_case_hold_is_lifted_only_by_somebody_cleared_for_all_of_it(conn):
                                     reason="released by order", lifter_ceiling=ceiling)
     assert conn.execute('SELECT legal_hold FROM core."case" WHERE id = %s',
                         (case_id,)).fetchone()[0] is True
+    # Each refusal is recorded (Beta 1 gate 64: it left no row at all), and
+    # the row names nothing above the lifter.
+    refused = conn.execute(
+        """SELECT outcome, detail FROM audit.event
+            WHERE action = 'LEGAL_HOLD_LIFT_REFUSED' AND case_id = %s
+            ORDER BY seq""", (case_id,)).fetchall()
+    assert [r[0] for r in refused] == ["DENIED", "DENIED"]
+    assert set(refused[0][1]) == {"case_id", "scope", "reason"}
     out = svc.set_case_legal_hold(case_id, actor_id=boss, on=False,
                                   reason="released by order",
                                   lifter_ceiling=("RED", []))

@@ -241,7 +241,10 @@ def test_the_evidence_register_identifies_exhibits_by_hash(conn, builder):
     report = builder.build(case_id, target_tlp="AMBER", generated_by=owner)
     assert report.evidence[0]["sha256"] == digest.hex()
     assert report.evidence[0]["blake3"] == digest.hex()
-    assert digest.hex()[:32] in render_markdown(report)
+    # The WHOLE digest (Beta 1 gate 64): the released file printed its first
+    # 32 hex characters and an ellipsis, so the document that leaves could
+    # not be checked against a digest recomputed from the exhibit.
+    assert f"`{digest.hex()}`" in render_markdown(report)
 
 
 def test_exhibits_above_the_target_are_withheld_and_counted(conn, builder):

@@ -1065,7 +1065,10 @@ def render_markdown(report: Report) -> str:
         purged = e.get("purged_at")
         title = (f"{e['title']} **(PURGED {purged}: does not count as "
                  f"evidence)**" if purged else e["title"])
-        lines.append(f"| {title} | `{(e['sha256'] or '')[:32]}…` | "
+        # The whole digest: half of one cannot be checked against a digest
+        # recomputed from the exhibit, which is what the column is for
+        # (Beta 1 gate 64).
+        lines.append(f"| {title} | `{e['sha256'] or ''}` | "
                      f"{e['acquired_at']} | {e['acquisition_method']} |")
     if not d["evidence"]:
         lines.append("| _none at this classification_ | | | |")

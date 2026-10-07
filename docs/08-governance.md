@@ -47,7 +47,11 @@ date should be visibly flagged in the case list, not silently rolling on.
   authority, by whom. The record of destruction survives the data. The
   console's Destroyed list shows each batch's count, actor, rule and
   storage outcome, and a batch whose bytes the object store refused is
-  never shown as destroyed.
+  never shown as destroyed. A batch of exhibits writes one tombstone per
+  storage outcome (destroyed, refused under a lock, failed), so a refusal
+  never hides the destructions beside it, and each destroyed exhibit's own
+  custody trail ends with a DESTROYED row naming who purged it and under
+  which rule.
 - A per-category retention rule is stamped onto each record when it is
   ingested. Confirming or changing a rule therefore applies to material
   ingested afterwards and recomputes no deadline already on file; the

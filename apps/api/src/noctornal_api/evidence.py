@@ -149,6 +149,20 @@ def lock_short_before(case_retention: date | None,
 _NO_EGRESS = frozenset(t.name for t in NEVER_EGRESS)
 
 
+def own_key(plain: str, evidence_id: UUID) -> str:
+    """The storage key of an exhibit whose bytes another exhibit already
+    holds under `plain`: beside it, never under it.
+
+    Beta 1 gate 64. It was `plain/evidence_id`, and MinIO does not list an
+    object whose name continues another object's name past a "/": measured
+    against the dev store, a versioned listing of that key returns nothing
+    while the object is served by version id. Both `delete_all_versions` and
+    `extend_lock` find versions by listing, so every such exhibit was
+    reported by the purge as having no object, stayed due for ever with its
+    bytes kept, and could not have its lock lengthened."""
+    return f"{plain}.{evidence_id}"
+
+
 def _sha256(data: bytes) -> bytes:
     return hashlib.sha256(data).digest()
 
@@ -819,7 +833,7 @@ class EvidenceService:
             # Another exhibit of these bytes (above this uploader, or
             # destroyed) owns the plain key; this one gets its own, so no
             # upload ever adds a version to another exhibit's object.
-            storage_key = f"{storage_key}/{evidence_id}"
+            storage_key = own_key(storage_key, evidence_id)
 
         # The ROW first, the object second, one transaction (http_ui-003,
         # evidence-orphan-locked-object, 2026-10-03). The object used to be
@@ -915,7 +929,7 @@ class EvidenceService:
                     return self._reacquired(existing, case_id, shahex, acquired_by,
                                             provenance)
                 if attempt == 1:
-                    storage_key = f"{case_id}/{shahex}/{evidence_id}"
+                    storage_key = own_key(f"{case_id}/{shahex}", evidence_id)
                     continue
                 raise EvidenceError(
                     "this exhibit could not be lodged because another upload "

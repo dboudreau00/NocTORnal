@@ -126,7 +126,12 @@ def readable_predicate(alias: str = "n") -> str:
     branch exists so that adding a genuinely case-independent notification
     later is a decision rather than an accident.
 
-    Aliases are deliberately obscure (`ru`, `rca`): this fragment is
+    The labels half reads the case's labels as they stand too (Beta 1 gate
+    64): a case raised above the recipient, or given a compartment they do
+    not hold, shuts them out of the case, and its notifications stayed
+    readable in the centre and deliverable, labelled as they were raised.
+
+    Aliases are deliberately obscure (`ru`, `rca`, `rcs`): this fragment is
     embedded in queries that already join `u` and `c`, and a collision would
     silently re-bind the outer alias rather than fail.
     """
@@ -134,7 +139,12 @@ def readable_predicate(alias: str = "n") -> str:
         EXISTS (SELECT 1 FROM iam.app_user ru
                  WHERE ru.id = {alias}.recipient_id AND ru.is_active
                    AND {alias}.classification <= ru.tlp_clearance
-                   AND {alias}.compartments <@ ru.compartments)
+                   AND {alias}.compartments <@ ru.compartments
+                   AND ({alias}.case_id IS NULL OR EXISTS (
+                        SELECT 1 FROM core."case" rcs
+                         WHERE rcs.id = {alias}.case_id
+                           AND rcs.classification <= ru.tlp_clearance
+                           AND rcs.compartments <@ ru.compartments)))
         AND ({alias}.case_id IS NULL OR EXISTS (
                 SELECT 1 FROM iam.case_assignment rca
                  WHERE rca.case_id = {alias}.case_id

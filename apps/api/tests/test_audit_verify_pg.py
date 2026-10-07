@@ -141,6 +141,50 @@ def test_windowed_run_reports_that_it_is_windowed(tamperable):
     assert windowed.first_seq > full.first_seq
 
 
+class _RowCounter:
+    """The connection, counting how many rows the chain query hands back."""
+
+    def __init__(self, conn):
+        self._c = conn
+        self.returned: list[int] = []
+
+    def execute(self, sql, params=None):
+        cur = self._c.execute(sql, params)
+        if "judged" not in sql:
+            return cur
+        rows = cur.fetchall()
+        self.returned.append(len(rows))
+
+        class _Rows:
+            def fetchall(self):
+                return rows
+        return _Rows()
+
+
+def test_only_the_rows_that_do_not_verify_leave_the_database(tamperable):
+    """Beta 1 gate 64: every row of the chain came back to Python, 380 MB
+    and 35 seconds of the API process for a 1.5 million row log. A clean
+    chain now answers one summary row however long it is, and a tampered
+    one adds the rows that do not verify."""
+    from noctornal_api.audit_verify import verify_chain
+
+    since = _seed(tamperable, n=12)
+    spy = _RowCounter(tamperable)
+    report = verify_chain(spy, since_seq=since)
+    assert report.intact and report.checked == 12
+    assert report.last_seq - report.first_seq == 11
+    assert spy.returned == [1]
+
+    tamperable.execute("ALTER TABLE audit.event DISABLE TRIGGER USER")
+    tamperable.execute(
+        """UPDATE audit.event SET action = 'NOTHING_HAPPENED'
+            WHERE seq = (SELECT max(seq) - 2 FROM audit.event)""")
+    spy = _RowCounter(tamperable)
+    report = verify_chain(spy, since_seq=since)
+    assert [b.kind for b in report.breaks] == ["CONTENT"]
+    assert report.checked == 12 and spy.returned == [1]
+
+
 def test_empty_window_is_not_reported_as_a_pass(tamperable):
     """`intact` on zero rows means "nothing to say", never "verified".
 
