@@ -290,6 +290,10 @@ services:
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
     security_opt: ["no-new-privileges:true"]
+    # Docker's default /dev/shm is 64 MB; a parallel query's shared memory
+    # outgrows it under load and fails with DiskFull, an HTTP 500 to the
+    # analyst (measured at 50 concurrent users on a case of a million claims).
+    shm_size: 1gb
     # postgres-init.env carries the passwords only initdb reads: the owner's
     # POSTGRES_PASSWORD (docs/17 F52, 2026-10-02), the system role's and the
     # egress role's (db/init/20-egress-role.sh reads NOCTORNAL_EGRESS_DB_PASSWORD).
