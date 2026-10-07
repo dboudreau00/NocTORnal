@@ -1,8 +1,9 @@
 # noctornal-api
 
-The FastAPI service. Phase 1 surface: authentication, cases, graph writes,
-selectors, evidence, search, every case-scoped request through the
-five-part access gate, every graph write carrying an assertion.
+The FastAPI service: authentication, cases, graph writes, selectors, evidence,
+search, analytics, collection, notification, the sample Lab and ingest, with
+every case-scoped request through the five-part access gate and every graph
+write carrying an assertion. `ARCHITECTURE.md` maps what is in it.
 
 ## Run it
 
@@ -16,8 +17,9 @@ export MINIO_ENDPOINT=localhost:9000 MINIO_ACCESS_KEY=noctornal MINIO_SECRET_KEY
 uvicorn noctornal_api.http.app:app --reload
 ```
 
-PowerShell uses `$env:NAME = "value"`. Interactive docs:
-<http://localhost:8000/api/v1/docs>.
+PowerShell uses `$env:NAME = "value"`. `scripts/launch.ps1` and
+`scripts/launch.sh` do all of this for a development stack. Interactive docs
+(`NOCTORNAL_ENABLE_DOCS=1`): <http://localhost:8000/api/v1/docs>.
 
 **Keep the KEK.** It seals TOTP secrets; losing it means every user must
 re-enrol. There is deliberately no default.
@@ -36,6 +38,8 @@ cases.py     case CRUD, lifecycle, assignment
 curation.py  tags, node sets, search
 http/        app factory, deps (auth + gate), routers
 ```
+
+These are the modules the rules below name; `ARCHITECTURE.md` maps the rest.
 
 ## The three rules a new endpoint must follow
 
@@ -86,18 +90,16 @@ the suite degrades to unit-only without the stack. `test_http_e2e.py` is
 the wiring proof: the analyst journey plus the 401/403/404/400 paths,
 including step-up re-challenge and the invariant-8 export refusal.
 
-## Not yet done
+## Deliberate absences
 
-- **Jira**, `notifications.JIRA` is a channel and `egress.Destination.JIRA`
-  a ceiling, but `transports.dispatch_due` has no branch for it: a
-  jira-channel row fails into `notify.delivery` rather than being sent. The
-  signed webhook transport it would specialise is built; the API mapping,
-  and a Jira to verify it against, is not (docs/07).
-- **No worker process.** `POST /notifications/dispatch` drains the outbox
-  once, driven by an operator, a cron entry (`scripts/notify_drain.py`, so
-  the drain does not need step-up) or a test. Decision 30 set that
-  precedent for analytics: a queue adds a process, a runtime and a failure
-  mode, and a thread that dies silently at 3am is worse than a call you
-  have to make.
-- **WebAuthn**, `security/` covers passwords, TOTP and recovery codes.
+- **No worker framework and no broker.** `POST /notifications/dispatch`
+  drains the outbox once, driven by an operator, a cron entry
+  (`scripts/notify_drain.py`, so the drain does not need step-up) or a test.
+  Decision 30 set that precedent for analytics: a queue adds a process, a
+  runtime and a failure mode, and a thread that dies silently at 3am is worse
+  than a call you have to make. In production two resident services sit
+  beside the API: the collector, which holds the persona key and claims
+  persona acts from a Postgres table (decision 174), and the analysis worker
+  that parses hostile bytes (docs/17 F42). Neither is a queue broker.
+- **WebAuthn.** `security/` covers passwords, TOTP and recovery codes.
   Hardware keys are named in docs/05 and are not built.

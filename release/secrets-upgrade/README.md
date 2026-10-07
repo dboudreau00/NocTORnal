@@ -1,11 +1,11 @@
 # Upgrading an existing deployment: the owner's credential and Redis
 
-From this release (2026-10-02) the production deployment keeps the schema
-owner's credential out of `secrets.env`, and its Redis runs an ACL in which
-the default user is disabled and the rate limiter has a user of its own
-(`docs/17` F52; the Redis isolation item of `ROADMAP-REMAINING.md`). An
-existing deployment keeps its data, its passwords and its sessions. It
-needs one command before `up`, and refuses to start without it.
+The production deployment keeps the schema owner's credential out of
+`secrets.env`, and its Redis runs an ACL in which the default user is
+disabled and the rate limiter has a user of its own (`docs/17` F52; the Redis
+isolation item of `ROADMAP-REMAINING.md`). A deployment from before Beta 1
+(before 2026-10-02) keeps its data, its passwords and its sessions. It needs
+one command before `up`, and refuses to start without it.
 
 ## What stops, and what it says
 
@@ -88,7 +88,7 @@ ACL GETUSER reads users' rules, which the row says.
 ## Going back
 
 Copy each `NAME.backup-UTCSTAMP` over its file and check out the previous
-release, together: this release's compose file refuses the old layout,
-and the old one does not read `migrate.env`. `infra/production/README.md`,
+release, together: the new compose file refuses the old layout, and the old
+one does not read `migrate.env`. `infra/production/README.md`,
 Upgrading, has the commands. Nothing in the database changes in either
 direction.

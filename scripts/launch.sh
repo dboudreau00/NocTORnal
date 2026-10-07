@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Starts the whole NocTORnal development stack: Docker services, database
 # migrations, then the API. The POSIX counterpart of scripts/launch.ps1 for
-# macOS and Linux; the Windows script is the one that gets exercised daily.
+# macOS and Linux.
 #
 # One command, in order: Docker engine -> compose stack -> TOTP key ->
 # environment -> migrations -> first-user check -> API. Safe to re-run; every

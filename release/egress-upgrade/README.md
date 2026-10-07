@@ -1,10 +1,10 @@
 # Upgrading an existing deployment to the egress proxy
 
-From this release the production deployment's application network is
-internal: the API, the cron loop and the sample origin have no route to the
-internet, and everything that leaves goes through the egress proxy, which
-decides each connection by route and records it
-(`infra/production/README.md`, Egress). An existing deployment keeps its
+In the production deployment the application network is internal: the API,
+the cron loop and the sample origin have no route to the internet, and
+everything that leaves goes through the egress proxy, which decides each
+connection by route and records it (`infra/production/README.md`, Egress).
+A deployment installed before the proxy existed (before Alpha 7) keeps its
 data. It needs keys, three small files, one database role and its routes,
 in this order.
 
@@ -51,7 +51,7 @@ Fill them from step 1. Choose a password for the egress role and write it in
 goes in `secrets.env`.
 
 The `cp` of `postgres-init.env` is guarded because that file may already be
-there: from the 2026-10-02 release it also holds the schema owner's password
+there: it also holds the schema owner's password
 (`release/secrets-upgrade/README.md`), and a copy of the template over it
 would put a placeholder back in its place. Write the egress password into the
 file that is there.

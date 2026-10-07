@@ -27,9 +27,9 @@ compile is silently dropped, and licences are explicit.
 
 ## Safety: rules only, kept off the cloud
 
-Two hardening rules, both added after a pulled threat-intel/IOC repo
+Two hardening rules, both because a threat-intel/IOC repository
 (`StrangerealIntel/DailyIOC`) shipped live FIN7 and Babuk samples that the
-workstation's ESET quarantined mid-clone:
+workstation's antivirus quarantined mid-clone:
 
 - **Rules only.** `fetch` prunes every file that is not `.yar`/`.yara` (keeping
   `.git` for updates) immediately after each clone, so no sample, dropper,
@@ -69,8 +69,7 @@ anything.**
 
 ## How it plugs into the Lab
 
-Since 2026-09-24 (roadmap F12) rule sets live in the product, in the Lab's
-**Rules** tab:
+Rule sets live in the product (roadmap F12), in the Lab's **Rules** tab:
 
 1. A lab member (`sample.yara.manage`) creates a labelled rule set and
    uploads a version: a `.yar`/`.yara` file or a `.zip` of them, with its

@@ -1,6 +1,6 @@
 # 13. Differentiators
 
-Everything in this scaffold that the commercial market handles badly or
+Everything in this system that the commercial market handles badly or
 not at all, consolidated. Scored honestly: several are cheap and decisive,
 a few are expensive and worth it, one or two are expensive and optional.
 
@@ -126,7 +126,7 @@ projecting or a 500-member forum manufactures a spurious clique.
 Co-affiliation is how you find cells that never communicate directly on
 the record. UCINET does this; the link-analysis tools mostly do not.
 
-Built for forums and wallets (2026-09-24): an option of the Analysis pane,
+Built for forums and wallets: an option of the Analysis pane,
 with every venue over the size limit named and every exclusion counted.
 Conversations keep their own projection in the Comms pane.
 
@@ -137,10 +137,10 @@ playing the same role. **This finds the replacement**, the second
 launderer, the developer who took over. Available in UCINET, absent from
 every investigative platform.
 
-CONCOR is built (2026-09-24): the Analysis pane's Roles card, with the fit
+CONCOR is built: the Analysis pane's Roles card, with the fit
 stated first because CONCOR always splits in two.
 
-REGE is built (2026-10-02): the Regular roles card, for the same kinds of
+REGE is built: the Regular roles card, for the same kinds of
 ties to the same kinds of others, which finds the replacement who serves a
 different crew and shares no contact with the first. Its limits are on
 the card: an approximation over three rounds, sensitive to how ties are
@@ -217,13 +217,14 @@ sometimes the world) what you are interested in. Operators watch public
 sandboxes for their own samples. Mark providers with an exposure level and
 say so in the confirmation dialogue, in plain words.
 
-**Built for lookups, 2026-09-24 (roadmap F15).** Every lookup provider
-carries an exposure level (NONE, VENDOR, PUBLIC) with the administrator's
-written basis, and the console says what each level means before anything
-is sent. A lookup to a vendor or the public waits for a named colleague's
-sign-off in the product; lowering a provider's level takes a second
-administrator. **Recorded only for detonation:** the authorisation record
-exists and nothing submits, until the sandbox work lands.
+**Built for lookups (roadmap F15) and for detonation (F14).** Every lookup
+provider carries an exposure level (NONE, VENDOR, PUBLIC) with the
+administrator's written basis, and the console says what each level means
+before anything is sent. A lookup to a vendor or the public waits for a named
+colleague's sign-off in the product; lowering a provider's level takes a
+second administrator. A detonation goes only to one self-hosted CAPEv2, and
+a send to an exposed target waits for a named second person's sign-off
+(decision 127).
 
 ### 21. Watchlist-driven triage with near-duplicate suppression
 

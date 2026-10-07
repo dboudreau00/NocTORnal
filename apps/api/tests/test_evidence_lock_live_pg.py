@@ -1,10 +1,10 @@
 """The COMPLIANCE lock, exercised against the REAL MinIO for the first time.
 
-Until 2026-09-02 the roadmap said `EvidenceStorage.delete()` "has never
-been exercised against a live COMPLIANCE lock", and every test of the
-purge's storage half used a stub. A stub proves the code maps what it is
-told; it cannot prove what the store actually says. Two of those things
-matter enough to measure rather than assume:
+`EvidenceStorage.delete()` is exercised here against a live COMPLIANCE
+lock. A stub, which every earlier test of the purge's storage half used,
+proves the code maps what it is told; it cannot prove what the store
+actually says. Two of those things matter enough to measure rather than
+assume:
 
 1. The keyless `delete()` RETURNS SUCCESS on this bucket and destroys
    nothing. The bucket is created `--with-lock`, which forces versioning

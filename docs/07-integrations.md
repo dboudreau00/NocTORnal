@@ -7,7 +7,7 @@
 lookups and export alike. `AMBER_STRICT` and `RED` never leave the platform
 boundary, regardless of who clicked what.
 
-Outbound lookups (roadmap F15, 2026-09-24) are `Destination.LOOKUP`: the
+Outbound lookups (F15) are `Destination.LOOKUP`: the
 gate reads the subject's labels as they stand at the moment of sending,
 against the provider's ceiling (CLEAR for a PUBLIC provider, GREEN at most
 for a VENDOR one, AMBER at most for your own instance), and refuses
@@ -19,12 +19,11 @@ anyone intends it, but because a Jira ticket auto-created from a watch hit
 quietly copies intelligence into a system with a completely different
 access model and a much wider audience.
 
-## Where it may go: integration routes (egress proxy, 2026-09-24)
+## Where it may go: integration routes
 
 `can_egress` decides WHAT may leave. Where it may go is a second question,
 answered by the egress route (docs/00 decision 68; docs/20 is the whole
-contract). Every integration takes its
-route from `egress.route_for("integration", name, ...)`, and in production
+contract). Every integration takes its route from `egress.route_for("integration", name, ...)`, and in production
 the route is a tunnel through the egress proxy, the only way out of the
 internal network. An **integration route** (`smtp`, `webhook`, and the
 others each integration registers; one route per lookup provider, named
@@ -59,7 +58,7 @@ watch_hit / graph event / review request
 ### The admin view: the delivery ledger
 
 Administration, Integrations (`integration.manage`) is where everything
-that tried to leave is seen (roadmap F8, 2026-09-24). One card per channel
+that tried to leave is seen (F8). One card per channel
 (email, webhook, Jira) says which egress route it leaves by and whether
 that route is usable. The outbox shows what is queued, held and backing
 off, with an audited "Drain now" and a bulk retry of real failures (the
@@ -85,39 +84,47 @@ row whose recipient has since turned Jira off. The readiness row
 `notify_outbox_draining` fails when a due row has waited more than 30
 minutes on a channel that is not held.
 
-**Upgrading to this.** Create the `smtp` route (admitting `SMTP_HOST` and
-`SMTP_PORT`) and the `webhook` route before upgrading, or email and webhook
-deliveries are held until you do. The migration locks the delivery table
-for its whole run: stop the api and the cron first.
+**Upgrading from a build without the routes.** Create the `smtp` route
+(admitting `SMTP_HOST` and `SMTP_PORT`) and the `webhook` route before
+upgrading, or email and webhook deliveries are held until you do. The
+migration locks the delivery table for its whole run: stop the api and the
+cron first.
 
 ### Alert hygiene
 
 A platform that emails on every hit gets muted in week two, and then the
-one alert that mattered is also muted. Build the hygiene in from the start:
+one alert that mattered is also muted. The hygiene is built in:
 
 - **Suppression window** per watch, repeated hits on the same thread
   collapse into one notification with a running count
-- **Digest mode**, hourly or daily rollup, default for anything below
-  priority 2
-- **Quiet hours** per user, with priority-1 override
-- **Escalation**, an unacknowledged priority-1 hit escalates to the case
-  owner after a configured interval
-- **Acknowledgement** tracked on `watch_hit`, so a hit someone has already
-  looked at stops nagging everyone else
+- **Digest mode**, a per-user, per-channel switch (off by default) that
+  defers a delivery to the next hour boundary; there is no daily rollup.
+  Priority 1 skips it.
+- **Quiet hours** per user, in their own time zone, with priority-1
+  override. A delivery they defer is still a row, due later.
+- **Escalation**, a priority-1 notification unacknowledged for one hour
+  (`ESCALATE_AFTER`) escalates to the case owner, or to the Security officers
+  when the owner is the silent recipient or the notification concerns no case
+- **Acknowledgement** tracked on `watch_hit` and on the notification, so a hit
+  someone has already looked at stops nagging everyone else
 
 ## SMTP
 
-Configuration lives in the admin surface; secrets in Vault. Mail leaves
-only through the egress route `smtp`, which must admit `SMTP_HOST` and
-`SMTP_PORT`; without it, email is held rather than failed (see the admin
-view above).
+Configuration is environment (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`,
+`SMTP_PASSWORD`, `SMTP_FROM`; `secrets.env` in production), and there is no
+Vault or KMS. Mail leaves only through the egress route `smtp`, which must
+admit `SMTP_HOST` and `SMTP_PORT`; without it, email is held rather than
+failed (see the admin view above).
 
-- Explicit TLS (STARTTLS on 587) or implicit (465). Never plaintext.
-- DKIM signing, SPF-aligned envelope sender
-- Per-recipient rate limit and a global hourly cap, a runaway loop must
-  not fire ten thousand emails
-- Bounce and complaint handling; hard bounces deactivate delivery and
-  raise an admin alert
+- Explicit TLS (STARTTLS on 587) or implicit (465). Never plaintext in
+  production. A development relay may be declared with `SMTP_ALLOW_PLAINTEXT`;
+  a production start refuses it, the sender ignores it there, and the
+  `smtp_configured` readiness row fails.
+- DKIM signing and an SPF-aligned envelope sender are the relay's, not the
+  product's. Bounce and complaint handling is not built.
+- A drain sends at most 200 deliveries (`MAX_PER_DRAIN`), so a runaway
+  producer cannot fire ten thousand emails. There is no per-recipient or
+  per-hour cap.
 
 **Content rules.** Email is the least trustworthy channel you have. It sits
 in inboxes, gets forwarded, is often synced to phones.
@@ -126,15 +133,21 @@ in inboxes, gets forwarded, is often synced to phones.
 - Body carries a summary and a deep link, not the content. The recipient
   authenticates and reads it in the platform.
 - TLP marking in the body, always.
-- Deep links are single-use, short-TTL, and land on the login page. They
-  are not an access-control bypass.
-- Optional: refuse to send anything above AMBER, notify in-app only.
+- The link is a plain URL to the console that lands on the login page, with
+  no token in it. A single-use token in an email is a bearer credential in
+  the least trustworthy channel in the system; requiring the recipient to
+  authenticate is both simpler and stronger, and a link is never an
+  access-control bypass. Single-use, short-TTL deep links are not built; if
+  they are, they must be scoped to navigation only.
+- Content above the destination's ceiling is not dropped or downgraded: the
+  delivery is recorded REFUSED with the gate's reason, and a stub goes out
+  where the recipient would otherwise have nothing (something is waiting, no
+  case code, no content). The full notification stays in the centre.
 
 ## Jira
 
-Jira is an opt-in notification channel for work items (roadmap F7,
-2026-09-24). Jira is never authoritative for anything, and the
-intelligence stays here.
+Jira is an opt-in notification channel for work items (F7). Jira is never
+authoritative for anything, and the intelligence stays here.
 
 **Who decides what.** An analyst turns Jira on for themselves under their
 notification preferences, and the change is audited. An administrator
@@ -144,8 +157,9 @@ sealed credential, the kinds routed to it, a ceiling and a field exposure.
 Routing is an allowlist in code: approvals requested and decided, proposals
 waiting in triage, case reviews due, merges performed and reversed, exhibit
 integrity alarms and feed hits on a watched selector. Break-glass,
-escalations, collection authorities, persona events, lookup sign-offs and
-provider changes are named as never routed, and a notification about no
+escalations, collection authorities, persona events, sample screening
+matches and withdrawals, detonation requests, sign-offs and results, lookup
+sign-offs and provider changes are named as never routed, and a notification about no
 case is never routed whatever its kind. A case owner can keep a case out of
 Jira entirely, and is told how many issues already exist about it: keeping
 it out does not reach back into Jira.
@@ -351,31 +365,30 @@ def verify_noctornal_v2(secret: bytes, header: str, body: bytes, seen_ids: set) 
 
 ## Sandbox (CAPEv2, self-hosted)
 
-One operator-configured CAPEv2 (`NOCTORNAL_SANDBOX_*`, docs/11). The
-sandbox worker (`scripts/sandbox_dispatch.py`) is the only thing that
-connects to it, through the one outbound client on the integration route
-`integration:sandbox`:
+One operator-configured CAPEv2 (`NOCTORNAL_SANDBOX_*`). The sandbox worker
+(`scripts/sandbox_dispatch.py`) is the only thing that connects to it,
+through the one outbound client on the integration route
+`integration:sandbox`. What is sent, the ceiling, the sign-off, custody and
+the hardening CAPE needs are in docs/11 ("Sending to a self-hosted CAPEv2").
+The integration side is:
 
 - Create the route under Administration, Egress, with an allowlist entry
   for the CAPE host and port; a CAPE on a private address is reachable only
   through an entry naming its network (`NOCTORNAL_SANDBOX_NETWORK`). In
   production it leaves through the egress proxy like every integration.
-- Same classification gate, destination `sandbox`: AMBER_STRICT, RED and
-  compartmented samples never go, and the ceiling the operator declares
-  (`NOCTORNAL_SANDBOX_CEILING`) binds.
+- Same classification gate, destination `sandbox`, bound by the ceiling the
+  operator declares (`NOCTORNAL_SANDBOX_CEILING`).
 - The API token travels as `Authorization: Token <key>`, never follows a
   redirect, and never appears in an error or a log. A POST is sent once.
-- Harden CAPE before it holds anything: `token_auth_enabled = yes` in
-  api.conf, and `enabled = yes` under `[web_auth]` in web.conf (or no web
-  interface on the allowlisted host and port). A shipped CAPE serves every
-  report and every sample to anyone who can reach it; the worker's
-  preflight and the readiness register refuse such an instance.
 - CAPE's filecreate limit is two a minute; the worker paces itself
   (`NOCTORNAL_SANDBOX_MIN_INTERVAL_S`) and polls at most eight tasks a pass.
 
-## MISP / STIX (later, but design for it)
+## MISP / STIX (export not built)
 
-Do not build this in the MVP, but keep the door open:
+There is no MISP or STIX export. MISP is reachable as an outbound lookup
+provider (an attribute search, through its own `lookup-<key>` route), and a
+STIX bundle or MISP event sent to ingest is read as plain JSON (docs/12). The
+mapping below keeps the door open for an export:
 
 - STIX 2.1 export maps reasonably: `threat-actor` ← GROUP,
   `identity` ← IDENTITY, `relationship` ← edge, `indicator` ← SELECTOR
@@ -389,7 +402,7 @@ Keeping node and edge types aligned to STIX vocabulary *where it does not
 distort the model* costs nothing now and saves a mapping layer later. Where
 STIX would distort the model (its actor/identity conflation, for instance) keep your model and eat the mapping cost.
 
-## Web Key Directory lookups (F10c, 2026-09-24)
+## Web Key Directory lookups (F10c)
 
 The integration route `wkd` carries vendor key lookups. It is off unless
 `NOCTORNAL_WKD_CEILING` is CLEAR, GREEN or AMBER and an administrator has

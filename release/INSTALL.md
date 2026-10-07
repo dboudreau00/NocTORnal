@@ -32,14 +32,14 @@ powershell -ExecutionPolicy Bypass -File .\release\install.ps1
 **macOS / Linux:**
 
 ```bash
-chmod +x release/install.sh && ./release/install.sh
+bash release/install.sh
 ```
 
-Neither prefix is decoration (R6). The default Windows client
-ExecutionPolicy is `Restricted`, and a file extracted from a downloaded
-zip additionally carries Mark-of-the-Web; bare `.\install.ps1` is
-blocked either way. A `.sh` out of a zip has no execute bit, so `./` fails
-with "permission denied" before bash ever sees it.
+Both prefixes are needed. The default Windows client ExecutionPolicy is
+`Restricted`, and a file extracted from a downloaded zip additionally
+carries Mark-of-the-Web, so a bare `.\install.ps1` is blocked either way. A
+`.sh` out of a zip has no execute bit, so `./release/install.sh` fails with
+"permission denied" before bash ever sees it.
 
 That is the whole thing. It is a wizard of eight numbered steps ("Step 3
 of 8"). Step 1 looks at your computer and prints what it found (system,
@@ -82,7 +82,7 @@ machine with 8 GB of RAM.
 | **Python** | 3.12 | With `venv` and `ensurepip`. On Debian and Ubuntu those are a separate package: `sudo apt update && sudo apt install python3.12-venv`. 3.13 is what it is developed on. |
 | **Docker** | with Compose v2 | Docker Engine and its Compose plugin on Linux; Docker Desktop on Windows and macOS. Runs four containers: Postgres, Redis, MinIO, Mailpit. |
 | **Memory** | 8 GB tested | The four containers used about 300 MB at idle after the showcase seed. Postgres is configured with `shared_buffers=512MB`, so it grows past that under load. |
-| **Disk** | 2 GB free | 1.5 GB was added by the Beta 1 install alone (measured 2026-10-07): 1.1 GB of images, a 273 MB `.venv`, and the data. Installing Docker Engine and the venv package on a bare Ubuntu took about 0.8 GB before that. |
+| **Disk** | 2 GB free | 1.5 GB was added by the Beta 1 install alone: 1.1 GB of images, a 273 MB `.venv`, and the data. Installing Docker Engine and the venv package on a bare Ubuntu took about 0.8 GB before that. |
 | **OS** | Windows 10/11, macOS 12+, Linux | PowerShell 5.1 is supported and specifically tested for. |
 
 Optional, and only for the features that use them:
@@ -96,7 +96,7 @@ Optional, and only for the features that use them:
 **Optional extras.** Two Python extras are installed only when asked
 for: `telegram` (Telethon, for collecting from Telegram) and `yara`
 (yara-x, for YARA scanning of samples). Ask for them with
-`./release/install.sh --with-telegram --with-yara` or
+`bash release/install.sh --with-telegram --with-yara` or
 `.\release\install.ps1 -WithTelegram -WithYara`, and for the image with
 the build argument `--build-arg NOCTORNAL_EXTRAS=telegram,yara`. A switch
 that is given and fails stops the install, where the dev tools above
@@ -118,12 +118,13 @@ Nothing hidden, in this order:
    reachable, or if the port is taken.
 2. **Creates a virtual environment** at `.venv` and installs the API and
    the ontology package into it.
-3. **Generates secrets** into `.env.local`, a TOTP key-encryption key and
-   an ingest pepper, both random, both 32 bytes. *It never writes a default
-   secret.* Beside them it writes the development stack's settings, and
-   names each service by `127.0.0.1` rather than `localhost`
-   (`DATABASE_URL`, `REDIS_URL`, `MINIO_ENDPOINT`, `SMTP_HOST`). If the
-   file already exists it is left alone.
+3. **Generates secrets** into `.env.local`: a TOTP key-encryption key, a
+   persona key and an ingest pepper, each made from 32 random bytes. *It
+   never writes a default secret.* Beside them it writes the development
+   stack's settings, and names each service by `127.0.0.1` rather than
+   `localhost` (`DATABASE_URL`, `REDIS_URL`, `MINIO_ENDPOINT`, `SMTP_HOST`).
+   If the file already exists it is left alone, except that a file with no
+   persona key gains one, appended.
 4. **Starts the containers** and waits for Postgres to report healthy.
 5. **Applies the database migrations** (`alembic upgrade head`).
 6. **Creates your account** if no user exists, and prints the password
@@ -131,12 +132,10 @@ Nothing hidden, in this order:
    attached it then waits until you press Enter, so you have saved the
    password before anything else is printed.
 
-   > **Windows note (R8, fixed).** `install.ps1` used to hand off to
-   > `launch.ps1`, whose server log scrolled the password and the QR code
-   > off the screen within seconds, so a new user reached the sign-in page
-   > with no credentials. It now makes the account before it starts the
-   > API, as `install.sh` does, and waits for you. If you installed with an
-   > older copy and have no credentials, run:
+   > **Windows note (R8, fixed).** `install.ps1` makes the account before
+   > it starts the API, as `install.sh` does, and waits for you, so the
+   > server log cannot scroll the password and the QR code off the screen.
+   > If you installed with an older copy and have no credentials, run:
    >
    > ```powershell
    > .venv\Scripts\python scripts\bootstrap.py create-user --email you@example.org --name "Your Name"
@@ -170,8 +169,8 @@ another machine, use an SSH tunnel, for example
 machine you installed over SSH: `ssh -L 8000:127.0.0.1:8000 you@the-host`,
 then open <http://127.0.0.1:8000/ui/> on your own computer.
 
-A stack started by an earlier release keeps its old bindings, on every
-interface, until its containers are recreated from this file.
+A stack created by an earlier release still publishes its ports on every
+interface until its containers are recreated from this file.
 `docker compose -f infra/docker-compose.yml up -d` does that and keeps the
 data volumes; re-running the installer runs it too.
 
@@ -372,8 +371,8 @@ service reads (`docs/17` F52). The rate limiter's Redis gets a password and a
 Redis has. It prints the name of each change and never a value, and keeps
 a backup of every file before it changes it.
 
-Run it after every `git pull`, before `up`. From a release before
-2026-10-02 it is required: it moves the owner's credential out of an
+Run it after every `git pull`, before `up`. Coming from Alpha 7a or an
+earlier release it is required: it moves the owner's credential out of an
 existing `secrets.env`, and until it has, the migrate job and Redis each
 refuse to start with a sentence naming it, and nothing that waits on them
 starts. [secrets-upgrade/README.md](secrets-upgrade/README.md) is that
@@ -392,9 +391,9 @@ missing until an owner step is run.
 
 **"port 8000 is already in use"**: an earlier copy of the API is still
 running, or something else holds the port. Both installers stop with this
-in step 1, before they build anything. If it is an earlier copy, the stack is already
-up at <http://127.0.0.1:8000/ui/>. Otherwise stop what holds the port, or
-pass `--port 8001` (`-Port 8001` on Windows).
+in step 1, before they build anything. If it is an earlier copy, the stack
+is already up at <http://127.0.0.1:8000/ui/>. Otherwise stop what holds the
+port, or pass `--port 8001` (`-Port 8001` on Windows).
 
 **"No 'script_location' key found in configuration"**: you ran `alembic`
 from `db/`. It must run from the repository root, where `alembic.ini`
@@ -436,15 +435,15 @@ exit code and `docker compose -f infra/docker-compose.yml logs minio-init`
 the error. A clean start's log has no ERROR line in it.
 
 **On Windows, every connection to Postgres or MinIO takes about two
-seconds**: the `.env.local` was written by an earlier installer, which
-named the services `localhost`. With Windows' default address
-preferences `localhost` resolves to `::1` first, nothing listens there
-now that the services are published on 127.0.0.1 only, and a refused
-connection on Windows takes about two seconds before the client tries
-127.0.0.1. Replace `localhost` with `127.0.0.1` in `DATABASE_URL`,
-`REDIS_URL`, `MINIO_ENDPOINT` and `SMTP_HOST` in `.env.local`, which is
-what a new one carries. On Linux the old file works as it is: there
-`localhost` reached every service in a millisecond or less.
+seconds**: the `.env.local` names the services `localhost`, as an older
+installer wrote it. With Windows' default address preferences `localhost`
+resolves to `::1` first, nothing listens there because the services are
+published on 127.0.0.1 only, and a refused connection on Windows takes
+about two seconds before the client tries 127.0.0.1. Replace `localhost`
+with `127.0.0.1` in `DATABASE_URL`, `REDIS_URL`, `MINIO_ENDPOINT` and
+`SMTP_HOST` in `.env.local`, which is what a new one carries. On Linux the
+old file works as it is: there `localhost` reached every service in a
+millisecond or less.
 
 **PGP tests fail rather than skip**: that is deliberate. The only
 cryptographic-evidence path in the system should break the build if it
@@ -500,7 +499,7 @@ pytest roots, and running one gives a number that matches nothing in the
 documentation. The collected total for a given release is in
 `release/CHANGELOG.md`.
 
-**What skips depends on what this shell can reach (R7).** Each of these
+**What skips depends on what this shell can reach.** Each of these
 is a correct result and not a broken install:
 
 | Missing | What skips |

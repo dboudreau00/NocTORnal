@@ -1715,12 +1715,12 @@ def test_a_child_its_own_cpu_limit_stops_is_a_timeout_not_a_crash(tmp_path):
 @pytest.mark.skipif(sys.platform == "win32", reason="a uid of its own is POSIX's")
 def test_a_child_of_a_uid_of_its_own_is_started_as_that_user_behind_the_launcher(
         tmp_path, monkeypatch):
-    """The supervised worker's wiring, which CI cannot run for real (it
-    needs root with setuid): Popen is wrapped to record what it is asked
-    and to start the child without the switch. Removing the user, the
-    group, the empty group list, the new session or the launcher from
-    run_local fails this; only a container shows the switch itself (the
-    review's reproductions, re-run on 2026-10-03)."""
+    """The supervised worker's wiring (the switch itself needs root with
+    setuid): Popen is wrapped to record what it is asked and to start the
+    child without the switch. Removing the user, the group, the empty
+    group list, the new session or the launcher from run_local fails this;
+    a container shows the switch itself (the review's reproductions, re-run
+    on 2026-10-03)."""
     import subprocess
     seen = {}
     real = subprocess.Popen

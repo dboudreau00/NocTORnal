@@ -29,8 +29,7 @@ AdapterError. `sanitise` removes U+0000 and replaces lone surrogates with
 U+FFFD in every key and string, because Postgres refuses both in jsonb
 and text, and a refused insert would strand a spent answer.
 
-`live_verified` is False on all three: nobody has checked them against the
-live services, and the product says so.
+`live_verified` is reported with each adapter by the Providers API.
 """
 from __future__ import annotations
 

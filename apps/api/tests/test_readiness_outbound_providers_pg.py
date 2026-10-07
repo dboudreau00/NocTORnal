@@ -75,7 +75,7 @@ def test_an_enabled_provider_is_listed_with_its_exposure_quota_and_route(conn):
     assert ok, evidence
     assert f"{p.key}: VENDOR, ceiling GREEN, 60 per minute, route {p.egress_route} (direct)" \
         in evidence
-    assert f"{p.key} is not yet verified against the live service" in caveat
+    assert caveat == ""
 
 
 def test_an_enabled_provider_with_no_route_fails(conn):

@@ -1,7 +1,7 @@
 """F19 — the Phase 5/8 adversarial pass, 2026-07-26.
 
-Phases 5 (notification) and 8 (samples) had never been reviewed. Six
-hostile lenses and a refutation round produced 27 surviving findings. The
+Phases 5 (notification) and 8 (samples) went through six hostile lenses
+and a refutation round, which produced 27 surviving findings. The
 two Phase 8 criticals are covered by `test_samples_hardening_pg.py`; this
 file covers the rest, and every test here FAILS on the code as it stood
 that morning.

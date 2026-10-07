@@ -424,7 +424,7 @@ class EvidenceStorage:
         3. **It genuinely destroys bytes.** `delete()` never did. Its
            first live run was `tests/test_evidence_lock_live_pg.py` on
            2026-09-02, against throwaway `_itest-lock/` keys with
-           seconds-long locks — not against an exhibit.
+           seconds-long locks.
 
         4. **Its integration test creates objects nobody can delete
            early.** A COMPLIANCE retention cannot be shortened, lifted or

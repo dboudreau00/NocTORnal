@@ -74,8 +74,8 @@ and none has a classifier of its own.
 ### 2.2 Address classes and fixed facts
 
 - `BLOCKED_NETWORKS`, `METADATA_HOSTS` and `is_blocked(address)`: the
-  collector's classifier, moved here, with `collection.py` re-exporting the
-  same objects. `is_blocked` asks the address what it is first (an
+  collector's classifier, which `collection.py` re-exports as the same
+  objects. `is_blocked` asks the address what it is first (an
   IPv4-mapped address is unwrapped, a 6to4 address embedding an internal
   one is internal) and uses the list only for ranges the standard library
   does not classify: CGNAT (100.64/10), 192.0.0.0/24, 198.18/15, the
@@ -485,11 +485,11 @@ with STARTTLS on the returned socket.
 
 ### 5.8 Redaction and the collector's wrappers
 
-`redact()`, `secret_in_scope()` and the credential patterns moved here
-from the collector and are re-exported under their old names;
+`redact()`, `secret_in_scope()` and the credential patterns live here and
+`collection.py` re-exports them under the collector's names;
 `live_secret_in(text)` says whether a live secret appears in a text.
 
-`collection.fetch(url, ..., route=None)` returns the collector's old tuple
+`collection.fetch(url, ..., route=None)` returns the collector's tuple
 and `collection.fetch_response(url, route=None, **kwargs)` a `Fetched`;
 both call the client with the collector's classifier seam, which is on no
 public signature and is allowed in three modules only. A call with no
@@ -531,7 +531,7 @@ route_for(kind, name, *, conn, context=None, declared=()) -> EgressRoute
 
 `production` is `NOCTORNAL_ENV=production`, `proxy` is
 `NOCTORNAL_EGRESS_PROXY_URL`, and `provider` is the route provider
-(section 7), which ships with this build. The rows without a provider are
+(section 7). The rows without a provider are
 what a process sees when the provider module is absent, which is how the
 tests exercise the client alone.
 
@@ -933,5 +933,6 @@ internal network, not through a route (docs/17).
 - `test_telegram_wire.py` runs Telethon's SOCKS5 path through the stub with
   run, act and stop contexts; `test_egress_act_targets_pg.py` holds the act
   rule of section 8.5, target by target.
-- A persona run, act and stop through the real listener, end to end with
-  Telegram, has not been run (docs/17 F31).
+- `test_persona_contexts_through_proxy_pg.py` runs a persona's run, act and
+  stop contexts through the real listener, and `scripts/telegram_live_check.py`
+  runs them end to end with Telegram (docs/17 F31).

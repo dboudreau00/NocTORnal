@@ -5,10 +5,9 @@ useful. All ten are built; `ROADMAP-REMAINING.md` holds what is left of each
 and is the only place completion is worked out.
 
 This file is what each phase was FOR, and the exit criterion it was held to.
-The code cites it by phase number for that reason. It carried a checkbox list
-until 2026-09-15; the boxes had stopped being maintained around Phase 3 and
-were wrong in both directions, which is worse than being out of date, so they
-are gone rather than corrected. What is true now is not a checkbox question.
+The code cites it by phase number for that reason. It carries no checklist: a
+box kept by hand goes wrong in both directions, and what is built is answered
+by the tree, the tests and `ROADMAP-REMAINING.md`.
 
 ## The one ordering constraint that matters
 
@@ -30,7 +29,7 @@ had to exist before comms (7) captured message content it could leak.
 
 | Phase | For | Done when |
 |---|---|---|
-| **0. Foundation** | The monorepo, Compose, Alembic, the ontology package, password and TOTP auth, the access gate as one function, the hash-chained audit log, CI | A user can register, enrol TOTP, sign in, and every action appears in a **verifiable** audit chain. The word verifiable is the load-bearing one: the chain was written for weeks before anything recomputed it |
+| **0. Foundation** | The monorepo, Compose, Alembic, the ontology package, password and TOTP auth, the access gate as one function, the hash-chained audit log, CI | A user can register, enrol TOTP, sign in, and every action appears in a **verifiable** audit chain. The word verifiable is the load-bearing one: a chain nothing recomputes proves nothing |
 | **1. Graph core** | Nodes, edges, the assertion layer, selectors, evidence with WORM and custody, cases as the unit of access | An analyst can build a case entirely by hand, and every edge answers "why do we believe this?" in one click |
 | **2. Sociogram** | Projection presets, the graph API (neighbourhood, path, subgraph, as-of), the canvas renderer, the inspector, live local metrics | A 2,000-node case renders at 60fps and an analyst can find a broker visually |
 | **3. Analytics** | igraph and leidenalg: betweenness, brokerage, k-core, communities, Burt's constraint, key player, signed balance | The tool answers "who holds this network together" with something better than a degree count. Met on the demo network: the optimal three-actor removal set fragments it to F=0.727, where the top three by betweenness leave it in one piece |
@@ -47,5 +46,4 @@ Deliberately unscheduled, in no order: link prediction and stylometry
 (hypotheses only), a disclosure-pack generator, STIX and MISP export,
 cross-case pivoting that respects compartments, blockchain analytics,
 translation for non-English sources, a mobile read-only view,
-change-point detection on network structure. (CONCOR blockmodelling left
-this list when it was built on 2026-09-24.)
+change-point detection on network structure.

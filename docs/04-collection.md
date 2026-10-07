@@ -2,60 +2,81 @@
 
 ## Adapter contract
 
-Every source kind implements the same interface. New platforms are new
-adapters, never new pipeline code.
+Every source kind implements one contract, `Adapter` in `collection.py`,
+and is registered in one place, `default_adapters()`: `rss`, `xenforo`,
+`mybb` (public boards), `xenforo_member` and `mybb_member` (a board read as
+a signed-in member), and `telegram`. New platforms are new adapters, never
+new pipeline code. The contract is declared attributes (`source_kinds`,
+`requires_authority`, `persona_platform`, `keeps_raw`, page, byte and time
+caps) and hooks that each have a no-op base: `refusal`, `validate_source`,
+`validate_config`, `validate_persona`, `authority_need`, `plan` (before any
+network), `fetch`, `commit`, `commit_item` and `settle`.
 
-```python
-class SourceAdapter(Protocol):
-    kind: SourceKind
-    parser_version: str
+`fetch` returns `Item`s in a `FetchResult`, never a graph element: an
+adapter holds nothing that could write `core.node` or `core.edge`
+(invariant 3). `run_once` stores each item as a versioned `collect.document`
+in its own savepoint, with its raw markup and retention clock, matches the
+source's watches and writes a `collect.watch_hit`. No extractor and no
+proposal runs in a poll; the only path from a source into `collect.proposal`
+is a manual capture (Triage, Capture text).
 
-    async def discover(self, watch: Watch, ctx: RunContext) -> list[TargetRef]:
-        """Enumerate what to fetch. Boards → threads, channels → messages."""
+Parsing is a pure function (`forum_parse.py`: bytes in, plain data out). The
+adapters parse each page in a bounded child process that limits its own CPU
+and memory, and in production that child runs in the isolated analysis
+worker (docs/17 F42), so a page built to exhaust the parser costs at most its
+wall clock and is reported as parser drift.
 
-    async def fetch(self, target: TargetRef, ctx: RunContext) -> RawCapture:
-        """Retrieve bytes. Honour conditional GET. Never parse here."""
-
-    def parse(self, raw: RawCapture) -> list[ParsedItem]:
-        """Bytes → structured items. Pure function, unit-testable offline."""
-
-    def health_check(self, raw: RawCapture) -> HealthVerdict:
-        """Did the page look like we expect? See parser drift below."""
-```
-
-`fetch` and `parse` are separated so raw captures are stored before parsing.
-When a parser breaks you re-parse history instead of re-collecting it,
-which matters when the original thread has since been deleted.
+**Raw before parse.** An adapter that sets `keeps_raw` stores each item's own
+markup, with navigation and form tokens removed, in the collect-raw bucket
+(`collect.document.body_html_key`), inside the item's savepoint. When a
+parser breaks, the markup is there to re-run it over instead of
+re-collecting, which matters when the original thread has since been
+deleted. If the object store is not configured or refuses the put, the
+document is kept and the run is PARTIAL with `RAW_NOT_KEPT`. Nothing
+re-parses stored markup by itself.
 
 ## Per-platform notes
 
 ### RSS / Atom
-Easiest, still has traps. Use conditional GET (`ETag`, `If-Modified-Since`),
-polling without it will get you blocked from legitimate sources. Most
-feeds truncate, so fetch the linked article and store both. Handle feeds
-that reuse GUIDs on edit.
+Easiest, still has traps. Conditional GET is used, because polling without
+it gets you blocked from legitimate sources: the stored `ETag` goes back as
+`If-None-Match` (`Last-Modified` is recorded and not sent back). Most feeds
+truncate; the adapter stores what the feed carries and does not
+fetch the linked article. A feed that reuses a GUID on edit becomes a new
+version of the same item. The feed is parsed with the standard-library XML
+parser and entity resolution disabled: a feed is by definition
+attacker-adjacent.
 
 ### XenForo
 No usable API in practice. XenForo 2 ships a REST API but it is disabled by
-default and no criminal forum enables it, so this is authenticated HTML
-parsing against a session.
+default and no criminal forum enables it, so this is HTML parsing, as a
+public reader or as a signed-in member.
 
-- Session cookies expire and rotate; detect the login redirect and
-  re-authenticate rather than silently collecting login pages for a week
-- Thread pagination is `/page-N`; last-page detection needs care
-- Post IDs are stable, post *content* is editable, hash content, version
-  on change, keep old versions
-- Quoted blocks (`<blockquote>`) must be stripped before selector
-  extraction or you attribute every quoted address to whoever quoted it.
-  This one mistake will pollute a case faster than anything else.
-- Signature blocks likewise: same Jabber address on 4,000 posts creates
-  4,000 false observations
-- "Thanks/likes" are cheap edges but genuinely informative for affiliation
+- Session cookies expire and rotate. A public read that meets a login page
+  stops as a FAILED run and stores nothing (a `LoginWall`); a member read
+  signs in again once when the board ends its session, and a second loss ends
+  the run where it was.
+- Thread pagination is `/page-N`; last-page detection needs care. The page
+  number stored is the one the fetched page says it is, and the walk moves one
+  page past the last page it read.
+- Post IDs are stable, post *content* is editable: content is hashed, a
+  change is a new version, old versions are kept.
+- Quoted blocks (`<blockquote>`) are cut out before selector extraction and
+  only the quoted post ids are kept, or you attribute every quoted address to
+  whoever quoted it. This one mistake will pollute a case faster than
+  anything else.
+- Signature blocks likewise: the same Jabber address on 4,000 posts creates
+  4,000 false observations. A signature is kept once per post beside the
+  post (`collect.forum_post`), as intelligence about the author.
+- "Thanks/likes" are cheap edges but genuinely informative for affiliation;
+  the parser reads the reaction types and up to 50 reactor names per post.
 
 ### MyBB / phpBB
-Older, simpler markup, more fragile. Same quote-stripping requirement.
-`showthread.php?tid=` style URLs; watch for both `mode=linear` and threaded
-views returning different DOM.
+MyBB is built; phpBB has no adapter. Older, simpler markup, more fragile.
+Same quote-stripping requirement. `showthread.php?tid=` style URLs; the
+adapter always asks for `mode=linear`, because the threaded view returns a
+different DOM. MyBB prints the board's own zone with no offset, so a post time
+is stored only when the source declares both the zone and the formats.
 
 ### Telegram
 Two entirely different paths, and the choice matters:
@@ -63,7 +84,7 @@ Two entirely different paths, and the choice matters:
 - **Bot API**, only sees chats the bot has been added to. Cannot read
   arbitrary channels. Fine for your own alerting, useless for monitoring.
 - **MTProto user client** (Telethon / Pyrogram), acts as a user account.
-  This is what "watch channels" requires.
+  This is what "watch channels" requires, and what is built.
 
 MTProto specifics:
 - `FLOOD_WAIT_X` must be honoured exactly, with backoff. Ignoring it is the
@@ -77,8 +98,8 @@ MTProto specifics:
 - Channels get deleted. Mirror content promptly; you are often the only
   remaining copy.
 
-**What is built (roadmap F5.2 to F5.4, 2026-09-24).** The MTProto user
-client (Telethon 1.45, the optional `telegram` extra) reads channels,
+**What is built (F5.2 to F5.4).** The MTProto user client (Telethon 1.45 or
+later in the 1.x line, the optional `telegram` extra) reads channels,
 supergroups and basic groups as a persona. Without the extra, every
 Telegram act refuses with one sentence and the `telegram_collection`
 readiness row names the gap.
@@ -86,9 +107,10 @@ readiness row names the gap.
 - *One persona, one account, one exit, for life.* A Telegram persona names
   an egress profile when it is created, keeps it for good, and no other
   Telegram persona may ever hold it, a burnt one included: Telegram links
-  accounts that were seen from one address. Its account id (`u:<id>`) is
-  set once at enrolment; a different account is a different persona. It is
-  registered on no venue: it reads each chat through the chat's own source.
+  accounts that were seen from one address (a unique index holds it). Its
+  account id (`u:<id>`) is set once at enrolment; a different account is a
+  different persona. It is registered on no venue: it reads each chat through
+  the chat's own source.
 - *Enrolment on the server, never in the browser.* The console creates the
   persona with its device (model, system version, app version, language
   codes: what Telegram is told instead of this server's platform string)
@@ -155,70 +177,87 @@ readiness row names the gap.
 - *Retention.* Telegram documents take the CHAT_EXPORT rule's clock from
   their capture time. A document cited by a case under legal hold, through
   any version, is never purged; a purged one loses the typed ids and names
-  its capture record held. `scripts/retention_sweep.py` sweeps collected
-  documents past their clock: an operator runs it, dry by default, under a
-  declared authority, and nothing schedules it (infra/production/README.md,
-  Retention sweep; docs/17 F30).
+  its capture record held. The sweep that destroys collected documents past
+  their clock is described under Retention below.
 
 ### General hygiene
-- Randomised intervals with jitter, never a clean cron cadence
-- Per-source `max_rps`, globally enforced through Redis
-- Backoff ladder on 429/403, then automatic cooldown of the persona
-- Full request/response metadata retained for the custody record
+- Randomised intervals with jitter, never a clean cron cadence: `next_due_at`
+  adds symmetric jitter as a percentage of the interval, and a source that has
+  never been polled is due now. `scripts/collection_poll.py` is a cron entry
+  that asks `due_sources()` what is ready and polls that; the operator
+  chooses how often to look and each source's own `next_due_at` decides when
+  it is polled.
+- Per-source `max_rps`, spaced rather than bursted, from
+  `collect.source.last_request_at`, which survives the process and is shared
+  between workers. It is held in Postgres, not Redis.
+- Backoff ladder on a challenge or a 429: the next poll waits twice the
+  interval after one in a row, four times after two, up to a day. A forum is
+  paced as a whole, not per source: two sources on one forum are never polled
+  at once.
+- Full request metadata retained for the custody record (the run's request
+  log).
 
 ## Collection accounts (personas)
 
-You asked for "watch links with account access." That is a credential
-management problem with an operational-security problem wrapped around it.
+A watch link with account access is a credential management problem with an
+operational-security problem wrapped around it.
 
 **Credential handling**
-- Envelope encryption: AES-256-GCM data key, wrapped by a KMS/Vault master
-  key. Ciphertext in `collection_account.secret_ciphertext`, master key
-  never in the database.
-- Decryption happens only inside `PersonaVault.use()`, only at use time.
-  Since 2026-10-02 that is the collector process (`scripts/collector.py`),
-  the one service holding `NOCTORNAL_PERSONA_KEK`: the API holds no persona
-  key and queues every persona act in `collect.persona_act`. Development
-  runs the same code inline in the API (`NOCTORNAL_COLLECTOR_INLINE`).
-- The API never returns plaintext. `collection_account.reveal` exists as a
-  permission but requires step-up *and* dual control, and fires a
-  high-priority audit alert.
-- Rotation reminders; `secret_rotated_at` surfaced in the admin view.
+- Envelope encryption: AES-256-GCM under `NOCTORNAL_PERSONA_KEK`, a key of
+  its own that is never in the database. Ciphertext in
+  `collection_account.secret_ciphertext`. There is no KMS or Vault in the
+  product (infra/production/README.md).
+- Decryption happens only inside `PersonaVault.use()`, only at use time, in
+  the collector process in production (`scripts/collector.py`, which queues
+  persona acts through `collect.persona_act`; docs/05, Persona credentials).
+  Development runs the same code inline in the API
+  (`NOCTORNAL_COLLECTOR_INLINE`).
+- The API never returns plaintext. `collection_account.reveal` is registered
+  as a step-up permission and nothing spends it: no route reveals a
+  credential, deliberately (docs/05, Never revealed).
+- `secret_rotated_at` is stamped when a credential is set or replaced (a
+  platform moving a session is not a rotation) and returned with the persona.
+  Nothing reminds anyone to rotate.
 
 **Operational separation**
-- One persona ↔ one egress profile. Enforced with a constraint, not a
-  convention. Two personas sharing an exit IP can be correlated by any
-  competent forum admin, and you lose both at once.
+- One persona ↔ one egress profile. Enforced, not advised: a unique index
+  for Telegram personas, and for every other kind `check_egress_separation()`,
+  the persona gate and the egress proxy, which require the persona to be
+  usable and alone on its profile. It is not a plain database constraint,
+  because a profile legitimately serves different personas on different
+  sources over time; what must not happen is two personas live on one profile
+  against the same source at once. Two personas sharing an exit IP can be
+  correlated by any competent forum admin, and you lose both at once.
 - Consistent browser fingerprint per persona, stored in
   `fingerprint_profile`.
-- Human-plausible activity windows, a persona active 24/7 is a bot and
-  reads as one.
-- Status lifecycle: `HEALTHY → COOLDOWN → LOCKED → BURNED`. A burned
-  persona is retired, never reused, and every document it collected is
-  flagged for re-verification.
+- Human-plausible activity windows (`active_window_utc` in the fingerprint),
+  a persona active 24/7 is a bot and reads as one.
+- Status lifecycle: `HEALTHY → COOLDOWN → LOCKED → BURNED`. BURNED is
+  terminal and takes a reason, which is what stops the next analyst quietly
+  reusing it: a burned persona is retired, never reused. Its documents are
+  not flagged automatically; the run records the persona, so a query finds
+  them.
 
 **Accountability**
 Every `collection_run` records which persona and which egress was used.
 This is not bureaucracy, if collection is ever challenged, "which account
 gathered this, under what authority" is the first question, and it needs a
-query rather than a memory.
+query rather than a memory. A forum or Telegram source also needs a
+collection authority a second person confirmed, and a declared
+classification ceiling, before it is read (docs/00 decision 69).
 
 **Where a poll leaves (egress proxy)**
 Every poll takes its route from `egress.route_for` with its run as context.
-In production that route is a tunnel through the egress proxy, and the proxy
-checks, from the database and never from the caller: that the run is
-running; that the persona is bound to the profile, usable and alone on it;
-that the run's collection authority is live, covers the source at its
-current address, and was recorded and confirmed after the profile last
-widened and after the persona (or a persona-less source) was last re-bound;
-and that the destination is the source's own site. It closes an open
-tunnel within 30 seconds of any of these ending. An act (an enrolment, a
-join) is judged the same way target by target: it reaches a source's site
-only through that source's own passing target. A stop (a logout) needs only
-the binding, and is limited to 60 seconds, 256 KiB and four an hour per
-persona. Every connection, allowed or refused, is a row in the append-only
-connection ledger (`collect.egress_connection`), labelled by its source's
-current classification and compartments.
+In production that route is a tunnel through the egress proxy, which decides
+from the database, never from the caller, whether the run, the persona, the
+profile and the collection authority still allow this destination
+(docs/20 section 8.5). It closes an open tunnel within 30 seconds of any of
+them ending. An act (an enrolment, a join) is judged the same way target by
+target; a stop (a logout) needs only the binding, and is limited to 60
+seconds, 256 KiB and four an hour per persona. Every connection, allowed or
+refused, is a row in the append-only connection ledger
+(`collect.egress_connection`), labelled by its source's current
+classification and compartments.
 
 ## Parser drift
 
@@ -226,21 +265,30 @@ The most common silent failure in a platform like this: a forum upgrades,
 the selectors stop matching, collection reports success and returns zero
 items, and nobody notices for six weeks.
 
-Defences, all of them:
-1. **Structural assertions per parser**, expect ≥1 post block, a
-   non-empty author, a parseable date. Zero valid items from a 200 OK is
-   an alert, not a quiet success.
-2. **Volume anomaly detection**, a source averaging 40 items/day
-   returning 0 for two cycles alerts, even if parsing "succeeded."
-3. **Login-wall detection**, classify the response before parsing.
-4. **`parser_version` on every document**, so a re-parse campaign after a
-   fix can target exactly the affected rows.
-5. **Golden-file tests**, a saved HTML fixture per source, asserted
-   against in CI.
+Defences:
+1. **Structural assertions per parser**, built for the forum parsers. A thread
+   page with no recognisable post, posts whose ids are not read, most posts
+   with no author or no time, a board page with no thread listing and a member
+   page with no member are each reported as `PARSER_DRIFT` (the run is
+   PARTIAL, the cursor is held so the next poll starts where this one did, and
+   no deletion is reported). Zero valid items from a 200 OK is an alert, not a
+   quiet success.
+2. **Source health from consecutive failures.** A parser that broke this
+   morning fails every time, so the signal is the streak: two in a row read
+   DEGRADED and five read BROKEN, and the source goes on the unhealthy list.
+   There is no volume anomaly detection (a source averaging 40 items a day
+   returning 0 for two cycles, with parsing "succeeded"): it is not built.
+3. **Login-wall detection**, the response is classified before anything is
+   stored. A page that asks for a sign-in is a FAILED run.
+4. **`parser_version` on every run**, so a re-parse campaign after a fix can
+   target exactly the affected rows through `collect.document.collection_run_id`.
+5. **Golden-file tests**, a saved HTML fixture per source kind
+   (`apps/api/tests/fixtures/xenforo`, `mybb`, `telegram`), asserted against
+   in CI.
 
 ## The aggregation bucket
 
-Your "aggregation text bucket" is `collect.document` plus the object store.
+The aggregation text bucket is `collect.document` plus the object store.
 
 **Three representations of every capture:**
 1. **Raw bytes**, MinIO, WORM, object-locked, `sha256`. Never modified.
@@ -259,11 +307,10 @@ insert a new version, link `supersedes_id`, keep both. Edits and deletions
 are themselves intelligence: a post deleted twenty minutes after appearing
 is more interesting than one that stayed up.
 
-**Labels.** A document carries a classification and, since 2026-09-24,
-`compartments` (migration 0070). Every read of one checks both, and its
-source's classification (docs/05, "Collected documents carry
-compartments"). A document is not a case's, so its labels are set where it
-is stored:
+**Labels.** A document carries a classification and `compartments`
+(migration 0070). Every read of one checks both, and its source's
+classification (docs/05, "Collected documents carry compartments"). A
+document is not a case's, so its labels are set where it is stored:
 
 - *A capture* (Triage, Capture text) is stored at the label asked for,
   never below its case's, and under its case's compartments. A re-paste
@@ -279,23 +326,27 @@ is stored:
   source does; the forum work that gives a source compartments owns the
   copy onto its documents.
 
-Captures made before 2026-09-24 were labelled from the cases that cite
-them (0071): the keys every citing case holds, and never below the least
-citing case's classification. One that no lock fits (cited by cases with
-no key in common, or by an open case) is counted by the readiness row
+Captures made before 0070 were labelled from the cases that cite them
+(0071): the keys every citing case holds, and never below the least citing
+case's classification. One that no lock fits (cited by cases with no key in
+common, or by an open case) is counted by the readiness row
 `captured_documents_compartmented` and listed by
 `python scripts/legacy_records.py --section captures`.
 
 `document_tsv` rebuilds the text index only when indexed text changes
 (title, author handle, body, or a purge, which empties it), so a triage
-click, a relabel or a compartment rename no longer re-indexes a body of up
+click, a relabel or a compartment rename does not re-index a body of up
 to 500 KB. A change that adds a column to the index adds it to that
 trigger's column list.
 
-**Retention** is per-source and per-case, enforced by a scheduled purge that
-respects `legal_hold`. Documents supporting an accepted assertion are
-pinned regardless of source retention, otherwise you retract the evidence
-out from under your own graph.
+**Retention** is per-source and per-case and respects `legal_hold`.
+Documents supporting an accepted assertion are pinned regardless of source
+retention, otherwise you retract the evidence out from under your own graph.
+Nothing destroys a collected document by itself: it belongs to no case, so
+the console's case purge never reaches it, and `scripts/retention_sweep.py`
+sweeps those past their clock when an operator runs it, dry by default, under
+a declared authority (infra/production/README.md, Retention sweep; docs/17
+F30). Nothing schedules it, because it destroys third-party personal data.
 
 ## Triage queue
 
@@ -303,10 +354,12 @@ The bucket fills fast; without a triage surface it becomes a landfill.
 
 `document.triage_state`: `NEW → TRIAGED → LINKED | DISCARDED`
 
-The triage view should default to sorting by watch-hit priority and
-extraction density, items containing several strong selectors first. Bulk
-discard is essential. Cheap keyboard-driven actions (link to case, create
-proposal, discard, escalate) are what make it survivable at volume.
+The list is newest first (posting time, else capture time) and filters by
+source, triage state and date. An analyst sets the state one document at a
+time, behind the same label checks as a read. LINKED is set by hand, because
+nothing automated links a document to the graph. Not built: a sort by
+watch-hit priority and extraction density (items containing several strong
+selectors first), and a bulk discard, both of which a high volume will want.
 
 ## Watches
 

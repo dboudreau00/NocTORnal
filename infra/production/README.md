@@ -1,9 +1,10 @@
 # Production deployment: one host, docker compose
 
 This directory is the whole deployment: a reverse proxy, Postgres, Redis,
-MinIO, the API, a second process serving the sample origin, a cron
-loop, and the collector, the one process that holds the persona key. There is no Kubernetes here and no cloud service; the target is one
-Linux box you control.
+MinIO, the API, a second process serving the sample origin, a cron loop, the
+collector (the one process that holds the persona key), the Lab's loops, the
+egress proxy and the analysis worker. There is no Kubernetes here and no
+cloud service; the target is one Linux box you control.
 
 Read [What you are NOT getting](#what-you-are-not-getting) before you rely
 on this for casework. It is short and it is the honest part.
@@ -53,8 +54,8 @@ The parentheses are deliberate. The `umask` is there so the two files are
 created private from the first byte, and it must end with the subshell: left
 in force in your shell it would also make everything you create afterwards
 unreadable to the containers (the TLS directory and certificate in step 3,
-and every file a later `git pull` writes, because the image keeps the modes it
-copies). Whatever your shell's own `umask` is, [check the modes
+and the files a later `git pull` writes, which the containers read through
+bind mounts). Whatever your shell's own `umask` is, [check the modes
 before you start the stack](#4-start-it).
 
 The second command (`release\install.ps1 -ProductionSecrets` on Windows,
@@ -590,9 +591,9 @@ speaks TLS. That one is configuration rather than a decision, and
 Mailpit, and a production deployment carrying it sends case summaries in
 the clear on the day STARTTLS fails.
 
-Three more are red on a fresh stack that is configured correctly (measured
-on 2026-10-07: six red in all, these three, `smtp_configured` and blocking
-items 1 and 2). None of them is blocking, and each row's action says the same:
+Three more are red on a fresh stack that is configured correctly (six red in
+all: these three, `smtp_configured` and blocking items 1 and 2). None of them
+is blocking, and each row's action says the same:
 
 * **`egress_routes_cover_sources`** and `smtp_configured` again: `SMTP_HOST`
   is set and no `smtp` route admits it, so mail is held. Create the route
@@ -616,9 +617,9 @@ items 1 and 2). None of them is blocking, and each row's action says the same:
 
 ## The limiter's Redis
 
-Redis holds the rate limiter's meters and nothing else, and since
-2026-10-02 that is a property of the server rather than a hope. The
-`redis` service builds an ACL file at every start from `REDIS_PASSWORD`
+Redis holds the rate limiter's meters and nothing else, and that is a
+property of the server rather than a hope. The `redis` service builds an ACL
+file at every start from `REDIS_PASSWORD`
 (stored as its SHA-256, never the password) in which:
 
 * the **default user is off**: no password, no command, no key. A client
@@ -754,8 +755,8 @@ into the one image every service runs, so `.dockerignore` leaves out all of
 `infra/production/` and lets back in only those two kinds of tracked file,
 whatever a file in it is called. A `collector.env.old` or a `secrets.env.bak`
 (each holds what the file held) is covered as well as the files named above.
-The same file keeps an `.env`, a key, a backup and an editor copy out
-wherever they land in the tree, at every depth. `test_dockerignore_secrets.py`
+The same file keeps an `.env`, a key, a certificate, a dump, a backup and an
+editor copy out wherever they land in the tree, at every depth. `test_dockerignore_secrets.py`
 fails when a path `.gitignore` keeps out of a commit reaches the image, so a
 file you add here is covered without anyone editing either list.
 
@@ -813,9 +814,8 @@ an entry naming `host.docker.internal` with its network.
 the role for an existing volume (`python scripts/egress_setup.py role-sql`),
 preflight, `up`, then `python scripts/egress_setup.py adopt`, which proposes
 the passive default and the smtp and webhook routes from your current
-settings and creates them when you confirm. Until adopt has run, feeds and
-deliveries are refused for want of a route, and the readiness row
-`egress_routes_cover_sources` says so.
+settings. Until adopt has run, feeds and deliveries are refused for want of a
+route, and the readiness row `egress_routes_cover_sources` says so.
 
 ---
 
@@ -881,23 +881,22 @@ capability), so:
 * before the request is answered every process of that uid is killed, so
   what it detached with `setsid` does not outlive its request, whether or
   not the helper kept the child's stdout. The kill comes before anything
-  waits on the child's pipes: until 2026-10-03 it came after, and a helper
-  that kept a pipe open wedged the request for as long as it lived, which
-  cost the slot for good and left no signal but the readiness row. A slot
-  whose uid cannot be emptied, or whose emptying fails, is retired, and with
-  none left the worker exits so that Docker restarts it clean;
-* it can create nothing that outlives its request. SysV shared memory used to
-  survive every process of its uid, count against the container's memory
-  limit and be readable by a child of another slot, so that a few requests
-  were enough to fill the limit and have the worker killed for it; POSIX
-  shared memory (`/dev/shm`), POSIX message queues and files in `/tmp` did
-  the same, and the worker, which holds no capability that overrides
-  ownership, could remove none of it. `ipc: none` leaves the container no
-  `/dev/shm`, the sysctls leave a child unable to create a segment, a queue
-  or a semaphore set, and `/tmp` is a tmpfs of root's with mode `0755`, so no
-  child's user can write in it (nothing a child runs writes there). The
-  worker reads each of these from its own process, refuses to start unless
-  they hold, and the readiness row fails when its hello says one is open.
+  waits on the child's pipes, so a helper that keeps a pipe open cannot wedge
+  the request or cost the slot. A slot whose uid cannot be emptied, or whose
+  emptying fails, is retired, and with none left the worker exits so that
+  Docker restarts it clean;
+* it can create nothing that outlives its request. SysV shared memory
+  survives every process of its uid, counts against the container's memory
+  limit and is readable by a child of another slot, and POSIX shared memory
+  (`/dev/shm`), POSIX message queues and files in `/tmp` do the same: a few
+  requests would fill the limit and have the worker killed for it, and the
+  worker, which holds no capability that overrides ownership, could remove
+  none of it. So `ipc: none` leaves the container no `/dev/shm`, the sysctls
+  leave a child unable to create a segment, a queue or a semaphore set, and
+  `/tmp` is a tmpfs of root's with mode `0755`, so no child's user can write
+  in it (nothing a child runs writes there). The worker reads each of these
+  from its own process, refuses to start unless they hold, and the readiness
+  row fails when its hello says one is open.
 
 What remains:
 
@@ -913,7 +912,7 @@ What remains:
 * Where there is no uid to empty, the local runner (development, and
   `NOCTORNAL_ANALYSIS_LOCAL=1`) stops the child's process group, but a
   helper that left the child's session keeps the child's pipes and lives on.
-  The run no longer waits for it (it is answered after five seconds at most)
+  The run does not wait for it (it is answered after five seconds at most)
   and nothing it writes afterwards reaches the answer, but the process stays
   until it exits or is killed.
 * A kernel or container-runtime escape from the worker's container is not
@@ -957,7 +956,7 @@ row stays red, saying so. It is a decision about where hostile bytes are
 parsed, so write down who took it.
 
 **Memory.** Each running request holds its payload once while it arrives
-(a 256 MiB request peaked the worker at 286 MiB, measured on 2026-10-03), a
+(a 256 MiB request peaked the worker at 286 MiB), a
 child bounded by `NOCTORNAL_SAMPLE_ANALYSIS_MEMORY` (2 GiB of address space
 by default) and its output (8 MiB for a step, up to 256 MiB for a compile).
 Two YARA scans at their worst, a 256 MiB sample plus a build of up to
@@ -1009,55 +1008,40 @@ the largest request it takes. It runs the child's selftest through the
 worker as well, which must not reach the database host. Every one of those
 it does not report, or reports wrong, fails the row.
 
-What was shown with docker, and what was not. The network and environment
-checks above were shown on 2026-10-02, and everything else on 2026-10-03,
-with the `noctornal-api:0.5.2` image and this tree's code mounted read-only
-(a 0.7.1 image needs a package index to build). Against the worker as
-`compose.yml` starts it: a child that exhausts the pids, a child that
-forks a hundred helpers and hangs, a child that detaches processes into a
-new session, a child that tries to replace the worker's socket, and one
-slot's child reading another's memory. None of them stopped the worker,
-left a process behind, or replaced the socket. The worker refused to start
-in each of five shapes that differ from `compose.yml`, and a selftest and
-a PE step ran through it as uid `10100` with no capability, a task limit
-of 16 and the highest OOM score (the image has no `pefile`, so the step
-answered with that gap). Not shown: a build of the 0.7.1 image under the
-worker's environment allow-list (a base-image bump that adds a variable
-shows as a refused worker, by name, in its log), forum parsing inside a
-container (the image has no `selectolax`), and the host's `ptrace_scope`
-at `0`, which is a host setting this work does not change.
-
-The 2026-10-03 verification round, in containers started as `compose.yml`
-now starts them (the same image and mounted code). A child that detaches a
-helper which keeps its stdout, started with `setsid` or without, used to
-leave its request unanswered for ninety-five seconds, the helper alive and
-the slot lost, and two such requests left every later request answering
-`worker_busy` while the health check stayed green. Now both requests are
-answered in 0.3 seconds, a third request in 0.2, and no process of a child's
-user is left. A compromised child that tried to create SysV shared memory
-(200 MiB), a semaphore set, a message queue, POSIX shared memory, a POSIX
-queue and files in `/tmp` and `/dev/shm` succeeded at all of them under the
-old container settings (the segment stayed after the request, and a later
-request on another slot could use it) and at none under the current ones
-(`EINVAL`, `ENOSPC`, `ENOENT` and permission denied). The worker refused to
-start, by name, with default IPC, with the sysctls missing, with a `/tmp`
-every user could write, with no pids limit (the host's own, 38393, is above
-the ceiling) and with a limit of 100000, and started with the settings as
-they are, reporting a pids limit of 128 and nothing open.
+What has been shown with docker. The worker was started as
+`compose.yml` starts it, with an earlier image of the application and this
+tree's code mounted read-only. A child that exhausts the pids, one that forks
+a hundred helpers and hangs, one that detaches processes into a new session
+(with or without a helper that keeps the child's stdout), one that tries to
+replace the worker's socket, and one slot's child reading another's memory
+did not stop the worker, leave a process behind or replace the socket; a
+request with such a helper is answered in 0.3 seconds. A child that tried to
+create SysV shared memory (200 MiB), a semaphore set, a message queue, POSIX
+shared memory, a POSIX queue and files in `/tmp` and `/dev/shm` failed at all
+of them (`EINVAL`, `ENOSPC`, `ENOENT` and permission denied). The worker
+refused to start, by name, with default IPC, with the sysctls missing, with a
+`/tmp` every user could write, with no pids limit (the host's own, 38393, is
+above the ceiling) and with a limit of 100000, and started with the settings
+as they are, reporting a pids limit of 128 and nothing open. A selftest and a
+PE step ran through it as uid `10100` with no capability, a task limit of 16
+and the highest OOM score (the image has no `pefile`, so the step answered
+with that gap). A base-image bump that adds a variable to the worker's
+environment allow-list shows as a refused worker, by name, in its log. The
+host's `ptrace_scope` at `0` is a host setting this deployment does not change.
 
 ---
 
 ## The collector: the one service that holds the persona key
 
-Since 2026-10-02 the API cannot open a collection persona's credential. A
-persona credential (a Telegram session, a forum login) is sealed under its
-own key, `NOCTORNAL_PERSONA_KEK`, and the only service that holds it is
-`collector`: it runs every persona act the console asks for (a Telegram
-chat looked up, joined, checked, marked as a member chat or rebound, and a
-Poll now of a source a persona reads) and the scheduled collection polls.
-The API queues an act in the database and answers with its outcome, or
-with "queued" while the collector has not finished it; the console follows
-it under Feeds, Persona acts. The cron loop no longer polls.
+The API cannot open a collection persona's credential. A persona credential
+(a Telegram session, a forum login) is sealed under its own key,
+`NOCTORNAL_PERSONA_KEK`, and the only service that holds it is `collector`: it
+runs every persona act the console asks for (a Telegram chat looked up,
+joined, checked, marked as a member chat or rebound, and a Poll now of a
+source a persona reads) and the scheduled collection polls. The API queues an
+act in the database and answers with its outcome, or with "queued" while the
+collector has not finished it; the console follows it under Feeds, Persona
+acts. The cron loop does not poll.
 
 ```sh
 python3 -c "import base64, os; print(base64.b64encode(os.urandom(32)).decode())"
@@ -1074,9 +1058,9 @@ to start if they find it, and so does the migration job, which reads
 that code and check nothing: they read `secrets.env`, so a key put there
 would simply be carried. Caddy reads `caddy.env` alone. The collector
 refuses to start without it, by name, **whether or not the deployment has a
-persona**. The collector also
-runs every scheduled poll (the cron loop no longer polls), so a deployment
-without `collector.env` polls **nothing at all**, the feeds no persona reads
+persona**. The collector also runs every scheduled poll (the cron loop does
+not poll), so a deployment without `collector.env` polls **nothing at all**,
+the feeds no persona reads
 (RSS, a plain site) included. That is red on the readiness register (below),
 not silent. Enrolling a Telegram persona needs the key too, so it runs in the
 collector:
@@ -1173,10 +1157,10 @@ release before 2026-10-02 it is required: see [Upgrading](#upgrading) and
 
 On a host whose `umask` is `077`, a pull leaves the files it writes `0600`,
 which a container that does not own them cannot read: run the mode check from
-[step 4](#4-start-it) before the `up`. Coming from a tree older than
-2026-10-03, also know that every container now drops its capabilities, so
-`Caddyfile`, `mc-alias.sh`, `tls/public.crt` and `db/init` must be readable by
-`other` (the check says so), and `tls/private.key` must be root's, mode 600.
+[step 4](#4-start-it) before the `up`. From a tree older than 2026-10-03, also
+know that every container drops its capabilities, so `Caddyfile`,
+`mc-alias.sh`, `tls/public.crt` and `db/init` must be readable by `other` (the
+check says so), and `tls/private.key` must be root's, mode 600.
 
 Every image the stack pulls is pinned by digest (Hardening, below), so an
 update that changes one arrives as a change in this repository, never from a
@@ -1301,9 +1285,8 @@ ALTER TABLE core.evidence ENABLE TRIGGER evidence_anchors_fixed;
 ```
 
 An exhibit lodged before 0139 has no recorded version and is not affected.
-This was reasoned from the object store's behaviour and the code, and was not
-reproduced against a restored bucket. Preserved samples have the same limit,
-which the paragraph on the preservation bucket below states.
+Preserved samples have the same limit, which the paragraph on the
+preservation bucket below states.
 
 The second command runs `mc` in a one-off container of the `minio-init`
 service, because that service already has what `mc` needs: the compose
@@ -1377,7 +1360,7 @@ things moved, and an existing deployment that is not brought along stops
 at boot, on purpose and with a sentence saying how to fix it:
 
 * `POSTGRES_PASSWORD` and `NOCTORNAL_MIGRATION_DATABASE_URL` left
-  `secrets.env` (`docs/17` F52). The migrate job now reads `migrate.env`
+  `secrets.env` (`docs/17` F52). The migrate job reads `migrate.env`
   alone and refuses without it. Every other service holds both blank
   whatever `secrets.env` says, and the API and the cron jobs refuse to run
   holding either.
@@ -1395,13 +1378,10 @@ docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
 ```
 
 It moves the two lines out of `secrets.env` into `postgres-init.env` and
-`migrate.env` (creating them from their templates if they are not there),
-keeps the Redis password if it is URL-safe and rewrites `REDIS_URL` to sign
-in with it as `noctornal_limiter`, and prints what it did by name, never by
-value. A destination that already holds a different owner password is a
-refusal, and nothing is written: keep the one the database was initialised
-with, delete the other line, and run it again. So is a file it may not
-read, in one sentence naming the file: run it with `sudo`.
+`migrate.env`, and rewrites `REDIS_URL` to sign in as `noctornal_limiter`. It
+prints what it did by name, never by value. What it refuses (a different
+owner password already in a destination; a file it may not read, in which case
+run it with `sudo`) and how it fails part way are in the upgrade guide above.
 
 **The way back.** Before it changes a file it copies it to
 `NAME.backup-UTCSTAMP` beside it, mode 600, gitignored and kept out of the
@@ -1603,9 +1583,8 @@ both names resolve to the same digest, which is how that is checked.
   key is what protects it from the application user. Splitting it into a CA
   directory is open work.
 * **No read-only root filesystem, and no memory or process limits, on the
-  application services.** The CA bundle and the Lab's child processes write to
-  `/tmp`, which has not been proved under a tmpfs, and the limits need a sizing
-  for your host.
+  application services** (the analysis worker has both). The CA bundle and the Lab's child processes write to
+  `/tmp`, and the limits need a sizing for your host.
 * **Two MinIO service-account secrets are still arguments** of
   `mc admin user svcacct add`, once, the first time each account is created
   (the `SAMPLE_` and `PRESERVE_` keys; the root credential and the database role
@@ -1613,14 +1592,12 @@ both names resolve to the same digest, which is how that is checked.
   has other local accounts. The command's own output, which echoes the new
   secret key, is discarded, so the key is not in the `minio-init` container log.
 * **The build context is the checkout, not an export of it.** `.dockerignore`
-  keeps out everything it names (every `.env` file at any depth, every `*.env`
-  file and an editor's copy of one such as `secrets.env.bak`, keys,
-  certificates, dumps and backups), and `.gitignore` carries the same set, but
-  a file with a name no rule knows still reaches the image, except under
-  `infra/production/`, which is left out whole apart from the templates and
-  the compose file.
-  Building from `git archive HEAD` removes that class, and needs the compose
-  file's `context` pointed at the export, which this file does not do.
+  and `.gitignore` keep out the secret files and their editor copies (Keys and
+  files, above), but a file with a name no rule knows still reaches the image,
+  except under `infra/production/`, which is left out whole apart from the
+  templates and the compose file. Building from `git archive HEAD` removes
+  that class, and needs the compose file's `context` pointed at the export,
+  which this file does not do.
 * **Images and tools that are not digest pinned.** The development stack
   (`infra/docker-compose.yml`) and the CI workflow's service containers pull by
   tag, on purpose: they track what a developer's machine and the suite use, and

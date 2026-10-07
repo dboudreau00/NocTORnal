@@ -111,9 +111,7 @@ corroborating assertions, and a correction that re-grades the tie (it
 counts at the value it states). A correction to the tie's weight or
 attributes grades that value, not the tie, and does not move it.
 Recording a weaker second source never lowers a tie; retracting the claim
-that graded it high does. Until 2026-09-22 the edge carried its own
-confidence, written once at creation from a default of LOW, and a tie
-graded HIGH was drawn and filtered as LOW.
+that graded it high does.
 
 ## Temporal model
 
@@ -165,11 +163,9 @@ centrality calculation.
 Merging is the operation most likely to quietly corrupt a case.
 
 **Rules:**
-- **Designed, never built.** A strong-selector collision raises
-  `StrongSelectorConflict` (a merge *lead*) and every merge is
-  analyst-initiated. The rule as designed read: auto-merge (never built)
-  only on a single `is_strong` selector match (PGP fingerprint,
-  Telegram numeric ID, forum UID). Never on nickname similarity.
+- **No automatic merge.** A strong-selector collision (PGP fingerprint,
+  Telegram numeric ID) raises `StrongSelectorConflict`, a merge *lead*, and
+  every merge is made by an analyst. Nickname similarity never counts.
 - Every merge is reversible: the losing node sets `merged_into_id` rather
   than being deleted, and its edges are re-pointed with a record of the
   original endpoints.

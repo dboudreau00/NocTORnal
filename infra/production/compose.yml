@@ -154,9 +154,8 @@ x-logging: &logging
 # needs none; dropping the lot takes CAP_NET_RAW (read or spoof a hop on the
 # bridge) out of the bounding set as well, and no-new-privileges closes the
 # setuid route back. A read-only root filesystem is NOT set: the CA bundle
-# below is written to /tmp and the Lab's child processes write there too, and
-# that has not been proved under a tmpfs, so it is left as a stated gap
-# (infra/production/README.md, Hardening).
+# below is written to /tmp and the Lab's child processes write there too, so
+# it is left as a stated gap (infra/production/README.md, Hardening).
 x-noctornal-app: &noctornal-app
   image: noctornal-api:0.9.0
   pull_policy: never

@@ -200,12 +200,8 @@ sociogram is for.
 
 ## Install
 
-**New here? Follow [`release/START-HERE.md`](release/START-HERE.md):** one
-page with what you need, the three install steps, the first sign-in and the
-five commonest problems. The installer is a short wizard that explains each
-step as it goes.
-
-Two supported paths. Both are one command, and both are safe to re-run.
+One command installs it, and it is safe to re-run. The installer is a wizard
+of eight numbered steps that explains each one as it goes.
 
 **Windows**
 
@@ -216,25 +212,32 @@ powershell -ExecutionPolicy Bypass -File .\release\install.ps1
 **macOS / Linux**
 
 ```bash
-chmod +x release/install.sh && ./release/install.sh
+bash release/install.sh
 ```
 
-The `-ExecutionPolicy Bypass` and the `chmod` are not optional: the
-default Windows policy is `Restricted`, a script extracted from a zip
-carries Mark-of-the-Web, and an unzipped `.sh` has no execute bit.
+Add `--demo` (Windows: `-Demo`) to load a fictional demo case without being
+asked, `--no-demo` (`-NoDemo`) to skip it without being asked, and `--open`
+(`-Open`) to open the console in your browser once it is up.
 
-**What the installer does**, reporting each step rather than assuming it:
+**New here? Follow [`release/START-HERE.md`](release/START-HERE.md):** one
+page with what you need, the three install steps, the first sign-in and the
+five commonest problems.
 
-1. finds Python 3.12+, or tells you exactly how to get it
-2. checks Docker is installed, **the engine is running**, and Compose v2 is present
-3. creates `.venv` and installs the two workspace packages
-4. generates a fresh TOTP key and ingest pepper into `.env.local` (mode 600) and **never overwrites an existing one**
-5. starts Postgres, Redis, MinIO and Mailpit, then waits for the database to actually accept connections
-6. applies all 173 Alembic migrations (Alembic head 0173)
-7. offers to create your first account, printing the password **once** with a QR code to scan (on both systems, before the API starts), then offers a fictional demo case
-8. starts the API and prints the console URL, <http://127.0.0.1:8000/ui/>
+`-ExecutionPolicy Bypass` is not optional on Windows: the default policy is
+`Restricted`, and a script extracted from a zip carries Mark-of-the-Web.
 
-Detail and troubleshooting: **[`release/INSTALL.md`](release/INSTALL.md)**.
+**What it does**, reporting each step rather than assuming it: step 1 only
+looks at your computer (Python 3.12+, Docker with **the engine running** and
+Compose v2, whether the API's port is free) and tells you exactly how to fix
+anything missing. Then it builds `.venv` with the two workspace packages;
+generates a fresh TOTP key, persona key and ingest pepper into `.env.local`
+(mode 600), **never overwriting an existing one**; starts Postgres, Redis,
+MinIO and Mailpit and waits for the database to accept connections; applies
+all 173 Alembic migrations (Alembic head 0173); creates your first account,
+printing the password **once** with a QR code to scan and waiting until you
+have saved it; offers the demo case; and starts the API, printing the console
+URL, <http://127.0.0.1:8000/ui/>. Detail and troubleshooting:
+**[`release/INSTALL.md`](release/INSTALL.md)**.
 
 ### Prerequisites
 
@@ -246,7 +249,7 @@ checks Python and Docker; it does not check memory or disk.
 | **Python** | 3.12 | With `venv` and `ensurepip`. On Debian and Ubuntu those are a separate package: `sudo apt update && sudo apt install python3.12-venv`. 3.13 is what it is developed on. |
 | **Docker** | with Compose v2 | Docker Engine and its Compose plugin on Linux; Docker Desktop on Windows and macOS. Runs four containers: Postgres, Redis, MinIO, Mailpit. |
 | **Memory** | 8 GB tested | The four containers used about 300 MB at idle after the showcase seed. Postgres is configured with `shared_buffers=512MB`, so it grows past that under load. |
-| **Disk** | 2 GB free | 1.5 GB was added by the Beta 1 install alone (measured 2026-10-07): 1.1 GB of images, a 273 MB `.venv`, and the data. Installing Docker Engine and the venv package on a bare Ubuntu took about 0.8 GB before that. |
+| **Disk** | 2 GB free | 1.5 GB was added by the Beta 1 install alone: 1.1 GB of images, a 273 MB `.venv`, and the data. Installing Docker Engine and the venv package on a bare Ubuntu took about 0.8 GB before that. |
 | **OS** | Windows 10/11, macOS 12+, Linux | PowerShell 5.1 is supported and specifically tested for. |
 | **GnuPG** | optional | Only for verifying PGP signatures on contact blocks. |
 
@@ -265,8 +268,14 @@ operator turns on; in production all of it leaves through the egress proxy
 
 The installer ends with the API running and the console URL printed.
 Open <http://127.0.0.1:8000/ui/> and sign in with the account it created.
-The commands below run from the repository root in a second terminal,
-which needs no exports: `bootstrap.py` reads `.env.local`. On Windows the
+If you took the demo case, Operation Latticework (`OP-LATTICEWORK-26`) is
+in the case list: three fictional crews joined by a few brokers, enough to
+try the graph and Analysis. The recipe below makes the larger showcase case
+every screenshot here comes from (`OP-SHOWCASE-26`), which fills every
+pane. The two sit side by side.
+
+The commands run from the repository root in a second terminal, and need no
+exports: the scripts read `.env.local` themselves. On Windows the
 interpreter is `.venv\Scripts\python`.
 
 **Only if you have no account yet**, because you skipped the installer's
@@ -277,9 +286,8 @@ account prompt:
     --email you@example.org --name "Your Name"
 ```
 
-Then seed the showcase case every screenshot below comes from. Put your
-own account's address, the one you gave the installer, where these say
-`you@example.org`:
+Then seed the showcase case. Put your own account's address, the one you gave the installer,
+where these say `you@example.org`:
 
 ```bash
 .venv/bin/python scripts/bootstrap.py demo-network \
@@ -299,18 +307,20 @@ own account's address, the one you gave the installer, where these say
 > gives the command that makes a second person the officer.
 
 > **If TOTP rejects every code**, your host clock is out of step.
-> Diagnose with `bootstrap.py totp-diagnose`, or get in anyway with
-> `bootstrap.py session`, which prints a URL that opens the console already
-> signed in. That login is recorded in the audit trail as MFA-bypassed,
-> because a session that appeared from nowhere would be worse than no
-> session at all, and step-up-gated actions (merge, export, purge, sample
+> `bootstrap.py totp-diagnose` says whether the clock or the secret is
+> wrong, and `bootstrap.py session` prints a URL that opens the console
+> already signed in. That login is recorded in the audit trail as
+> MFA-bypassed, and step-up-gated actions (merge, export, purge, sample
 > download) stay refused until you have a real TOTP login.
+> [`release/INSTALL.md`](release/INSTALL.md#if-totp-will-not-accept-your-code)
+> has the detail.
 
 ### Verifying the install
 
 Run it against a scratch database, never against the install's own: the
 suite writes permanent rows into append-only tables, and some tests migrate
-the database they are given.
+the database they are given. The Windows form is in
+[`release/INSTALL.md`](release/INSTALL.md#verifying-the-install).
 
 ```bash
 eval "$(.venv/bin/python scripts/_env.py export)"    # REDIS_URL, MinIO and Mailpit, read as data
@@ -338,23 +348,24 @@ the containers are down. CI provides them all and fails on any skip.
 
 ## The tour
 
-### Sociogram
+The panes below are the console's rail tabs, named as the rail names them.
+
+### Graph: the sociogram
 ![Sociogram](docs/images/01-graph.png)
 
 A hand-written 2D `<canvas>` renderer with a ForceAtlas2 layout in a web
-worker; the sketch's `sigma.js` WebGL renderer was replaced before
-anything was built. **Projections decide which edge types count as a
-social tie**: identity plumbing (`SAME_AS`, `ALIAS_OF`) stays out, or
-whichever persona you researched hardest looks the most central. Entities
-joined only by structural edges wait on a shelf at the side (five here:
-three crews, a wallet and a domain). Inferred edges render **dashed**,
-like the one beside the selected vouch between bit_forge and bit_lathe,
-and count toward the metrics only when a projection opts in. The console's
-default projection does, and the readout under the legend says so. The bar
-along the bottom is world time: drag it and the graph becomes the network
-as it stood on that date, as the case records it today.
+worker. **Projections decide which edge types count as a social tie**:
+identity plumbing (`SAME_AS`, `ALIAS_OF`) stays out, or whichever persona
+you researched hardest looks the most central. Entities joined only by
+structural edges wait on a shelf at the side (five here: three crews, a
+wallet and a domain). Inferred edges render **dashed**, like the one beside
+the selected vouch between bit_forge and bit_lathe, and count toward the
+metrics only when a projection opts in. The console's default projection
+does, and the readout under the legend says so. The bar along the bottom is
+world time: drag it and the graph becomes the network as it stood on that
+date, as the case records it today.
 
-### Structural analysis
+### Analysis: structural measures
 ![Structural analysis](docs/images/06-analytics.png)
 
 Betweenness, eigenvector and Burt's constraint via `igraph`'s C core,
@@ -367,12 +378,13 @@ here keeps only one of the three, and prints the top three by betweenness
 beside it with the fragmentation each reaches, so the difference is on
 screen rather than taken on trust. Above them, one actor's betweenness
 across past runs, each with the date it describes and its preset, because
-a rising betweenness is a claim about a person. Roles (CONCOR) find
-entities in the same position whether or not they are tied; forums and
-wallets can be projected to ties between the entities they link, marked
-derived and never drawn; and any run can count accepted ties only.
+a rising betweenness is a claim about a person. Roles (CONCOR) and regular
+roles (REGE) find entities in the same position whether or not they are
+tied; forums and wallets can be projected to ties between the entities they
+link, marked derived and never drawn; and any run can count accepted ties
+only.
 
-### Evidence and chain of custody
+### Evidence: exhibits and chain of custody
 ![Evidence](docs/images/03-evidence.png)
 
 SHA-256 and BLAKE3 at ingest; every exhibit written under a per-object
@@ -384,7 +396,7 @@ reads**: the log open here has the exhibit's VIEWED row between ACQUIRED
 and HASH_VERIFIED. The email is attacker markup, so it is produced only
 through the separate sample origin, never served from this one.
 
-### Competing hypotheses (ACH)
+### ACH: competing hypotheses
 ![ACH](docs/images/10-ach.png)
 
 Hypotheses scored against evidence explicitly and **ranked by the evidence
@@ -411,7 +423,7 @@ labelled blocks. Collapsing them is how a crime gets attributed to
 whoever's number the attacker picked. Every URL defanged and
 non-clickable. See [`docs/19`](docs/19-social-engineering-evidence.md).
 
-### Malware lab
+### Lab: malware samples
 ![Lab](docs/images/13-samples.png)
 
 Metadata renders; bytes never do. Even the attacker's filename is escaped,
@@ -427,7 +439,7 @@ activated, in child processes that never hold the data key; every sample is
 screened by exact hash against the prohibited-content lists the deployment
 imported, and a match leaves the Lab for good.
 
-### Channels and contact blocks
+### Comms: channels and contact blocks
 ![Comms](docs/images/08-comms.png)
 
 **Durable identifiers, not displayed ones.** Tox indexes the 64-hex public
@@ -440,19 +452,20 @@ clearsigned or detached, a vendor key is kept with where it came from, and
 a binding is confirmed only when a contact block ties the signing key to
 its holder.
 
-### Lifecycle and governance
-![Governance](docs/images/12-governance.png)
+### Records: retention, legal holds and break-glass
+![Records](docs/images/12-governance.png)
 
 Retention schedules, each flagged **unconfirmed** until a named person
-confirms its period with a written reason: the placeholder the build
-shipped still runs, but never silently, and a category with live records
-and no rule at all says so, with the 365-day fallback it runs on. Legal holds that override every
-deletion path; purge tombstones that outlive what they describe;
+confirms its period with a written reason: a placeholder period still runs,
+but never silently, and a category with live records and no rule at all
+says so, with the 365-day fallback it runs on. Legal holds that override
+every deletion path; purge tombstones that outlive what they describe;
 break-glass access that is loud, capped at eight hours, and must be
 reviewed afterwards by a security officer who is not the person who used
-it.
+it. The Audit chain section re-computes the audit log's hash chain, since
+an intact log and an edited one look identical until somebody asks.
 
-### Entity list
+### Entities
 ![Entity list](docs/images/02-entities.png)
 
 Every entity in the case with its type, label and TLP marking, filterable
@@ -462,7 +475,7 @@ assertion behind it with its Admiralty grading, the exhibits linked to
 it, and every tie at the entity with its sign; further down come its
 local metrics and any selectors observed for it.
 
-### Capture and triage
+### Triage: capture and review
 ![Capture and triage](docs/images/04-triage.png)
 
 Paste an observation (a forum profile, a vendor advert, a contact block)
@@ -471,16 +484,15 @@ graph. Accept, reject or defer; a deferral parks the ambiguous item as
 DISPUTED rather than forcing a yes/no on something that does not deserve
 one yet. `J` and `K` move through the queue.
 
-### Notifications
+### Inbox: notifications
 ![Notifications](docs/images/05-inbox.png)
 
 Re-authorised **on every delivery**, not only at subscribe time: the list
 is filtered by the clearance, compartments and case assignment you hold
 now, so a notice about material you can no longer read, or about a case
 you were taken off, disappears rather than lingering. A long-lived
-subscription and a case assignment have different lifetimes, and a
-notification centre that checked once was the headline finding of a
-previous review. Email carries a summary and a link, never the detail.
+subscription and a case assignment have different lifetimes, so the check
+is made each time. Email carries a summary and a link, never the detail.
 Quiet hours defer delivery and never drop it, and an urgent notice, like
 the break-glass alert here, ignores them.
 
@@ -497,7 +509,7 @@ similar wording (reposts, light edits, transliterations, computed on this
 host) and, where an operator configures a model server, similar meaning,
 each shown as a band rather than a score.
 
-### Feeds and ingest
+### Feeds: ingest, dead letters and sources
 ![Feeds and ingest](docs/images/09-feeds.png)
 
 The **dead-letter table**: anything unparseable is recorded, not dropped,
@@ -518,7 +530,7 @@ every figure in it a lower bound, and flags each entity and tie that no
 exhibit in it backs. Release is a separate action, through the egress
 gate, and is recorded either way.
 
-### Add entity and add relationship
+### Add entity and add link
 ![Add entity](docs/images/15-add-node.png)
 
 Neither form will complete until you grade the claim yourself: a basis, an
@@ -528,14 +540,14 @@ there is no "add it now, justify it later" path. Beside the form, the
 inspector shows what a recorded claim keeps: its grade, its reference and
 the passage of the exhibit that backs it.
 
-![Add relationship](docs/images/16-add-edge.png)
+![Add link](docs/images/16-add-edge.png)
 
-A relationship is graded the same way, and an inference must also state
-its reasoning: choose Analyst inference and the rationale is marked
-required, and the form will not record the tie without one. Types are
-offered only where the ontology permits the pair, and none is chosen for
-you. On the right, an inference already on the case shows the reasoning it
-was recorded with, and says plainly that no exhibit backs it.
+A link is graded the same way, and an inference must also state its
+reasoning: choose Analyst inference and the rationale is marked required,
+and the form will not record the tie without one. Types are offered only
+where the ontology permits the pair, and none is chosen for you. On the
+right, an inference already on the case shows the reasoning it was
+recorded with, and says plainly that no exhibit backs it.
 
 ---
 
@@ -659,7 +671,7 @@ test named after it.
 |---|---|---|
 | **System of record** | Postgres 16 + pgvector | The graph, the assertion ledger and the audit log live in **one transactional store**, so an inference and its justification commit or fail together. A separate graph database makes that a distributed-transaction problem, which is how provenance gets lost. |
 | **API** | Python 3.12+ / FastAPI | Async, typed, OpenAPI for free. |
-| **SNA maths** | `igraph` (C core) + `leidenalg` | **Not NetworkX** (pure Python, and it falls over around 50k edges on betweenness. **Leiden, not Louvain**) Louvain can produce internally disconnected communities. |
+| **SNA maths** | `igraph` (C core) + `leidenalg` | **Not NetworkX** (pure Python, and it falls over around 50k edges on betweenness). **Leiden, not Louvain**: Louvain can produce internally disconnected communities. |
 | **Object store** | MinIO, S3 object lock | Every exhibit is written under a per-object COMPLIANCE retention, which not even a root credential can shorten. The shipped compose file sets the BUCKET DEFAULT to `GOVERNANCE 365d`; the default is the floor for anything written by another path, and the guarantee above is the per-object lock `EvidenceStorage.put()` applies. GOVERNANCE alone is bypassable and is not a WORM guarantee. |
 | **Cache / limits** | Redis | GCRA rate limiting in one atomic Lua script. |
 | **Egress** | one pinned client and an egress proxy | Every outbound connection takes its route from one function and goes through one client that connects only to the address it checked. In production the proxy (HTTP CONNECT and SOCKS5 on one internal listener) is the only way out, and records every connection in a ledger the application cannot write ([`docs/20`](docs/20-outbound-connections.md)). |
@@ -670,8 +682,7 @@ test named after it.
 
 Plain HTML, CSS and ES modules under a strict CSP. **No build step, no
 framework, no `node_modules`.** A hand-written 2D `<canvas>` renderer draws
-the sociogram and a web worker runs the ForceAtlas2 layout; the sketch's
-`graphology` + `sigma.js` (WebGL) pair was replaced before it was built.
+the sociogram and a web worker runs the ForceAtlas2 layout.
 
 A deliberate trade. The console is served same-origin by the API, so there
 is no CORS surface; there is no `unsafe-inline`, so a stored XSS has no
@@ -711,10 +722,11 @@ noctornal/
 ├── db/
 │   ├── schema.sql             generated mirror (scripts/dump_schema.py; CI diffs it)
 │   └── migrations/versions/   173 Alembic revisions
-├── docs/                      00-20, the reasoning
+├── docs/                      the reasoning, one numbered document per subject
 ├── release/                   installers, INSTALL, MANUAL, CHANGELOG
 ├── scripts/                   launch, bootstrap, demo seeds, screenshots
-└── infra/docker-compose.yml   Postgres, Redis, MinIO, Mailpit
+├── infra/docker-compose.yml   development stack: Postgres, Redis, MinIO, Mailpit
+└── infra/production/          the production deployment (its README is the procedure)
 ```
 
 ---
@@ -723,22 +735,23 @@ noctornal/
 
 | Read | For |
 |---|---|
-| **[`release/INSTALL.md`](release/INSTALL.md)** | installing, in detail, with troubleshooting |
 | **[`release/START-HERE.md`](release/START-HERE.md)** | the one page to follow first: what you need, three install steps, the first sign-in |
-| **[`release/MANUAL.md`](release/MANUAL.md)** | operating it, every pane, every refusal, and what it means |
+| **[`release/INSTALL.md`](release/INSTALL.md)** | installing in detail: what each step does, configuration, troubleshooting, verifying the install |
+| **[`release/MANUAL.md`](release/MANUAL.md)** | operating it: what each pane is for, what the numbers mean, every refusal and why |
 | [`docs/18-legal-review-pack.md`](docs/18-legal-review-pack.md) | **the sign-off document**, with a row to answer each question in |
 | [`docs/16-legal-and-external.md`](docs/16-legal-and-external.md) | **the register**: every place the build stops because the next step is a legal question, and why holding this material is dangerous |
-| [`docs/00-decisions.md`](docs/00-decisions.md) | why the architecture is the way it is |
+| [`docs/17-flagged-for-review.md`](docs/17-flagged-for-review.md) | what may need to change: data not to be trusted, the Beta 1 review, known residuals, judgement calls |
+| [`docs/00-decisions.md`](docs/00-decisions.md) | the numbered decisions and why the architecture is the way it is |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | the map of what was built |
 | [`docs/02-architecture.md`](docs/02-architecture.md) | the architecture brief: what was specified, and why |
 | [`docs/01-domain-model.md`](docs/01-domain-model.md) | nodes, edges, selectors, assertions |
 | [`docs/03-graph-analytics.md`](docs/03-graph-analytics.md) | the SNA methodology, and its limits |
 | [`docs/04-collection.md`](docs/04-collection.md) | collection adapters and the aggregation bucket |
-| [`docs/05-security-rbac.md`](docs/05-security-rbac.md) | the access model |
+| [`docs/05-security-rbac.md`](docs/05-security-rbac.md) | the access model: roles for verbs, relationships and labels for rows |
 | [`docs/06-interface.md`](docs/06-interface.md) | the interface design brief |
 | [`docs/07-integrations.md`](docs/07-integrations.md) | integrations and notifications, and the classification check every outbound path makes |
 | [`docs/08-governance.md`](docs/08-governance.md) | governance and tradecraft features |
-| [`docs/09-roadmap.md`](docs/09-roadmap.md) | the ten build phases |
+| [`docs/09-roadmap.md`](docs/09-roadmap.md) | what each of the ten build phases was for, and its exit criterion |
 | [`docs/10-comms-channels.md`](docs/10-comms-channels.md) | communication channels: which identifier is durable on each platform |
 | [`docs/11-malware-handling.md`](docs/11-malware-handling.md) | malware sample handling, not to be switched on until L1 is settled |
 | [`docs/12-ingest-api.md`](docs/12-ingest-api.md) | ingest API keys and feed categorisation |
@@ -746,11 +759,12 @@ noctornal/
 | [`docs/14-enhancement-map.md`](docs/14-enhancement-map.md) | the enhancement map the code cites for provenance |
 | [`docs/19-social-engineering-evidence.md`](docs/19-social-engineering-evidence.md) | phishing, BEC and vishing evidence |
 | [`docs/20-outbound-connections.md`](docs/20-outbound-connections.md) | how anything leaves: the address policy, the one client, routes and the egress proxy |
-| [`docs/17-flagged-for-review.md`](docs/17-flagged-for-review.md) | known gaps, honestly listed |
-| [`QUICKSTART.md`](QUICKSTART.md) | a local development instance, not hardened for real material |
+| [`infra/production/README.md`](infra/production/README.md) | the production deployment: one host, Docker Compose, TLS, the egress proxy, backups |
+| [`QUICKSTART.md`](QUICKSTART.md) | the development launcher and account recovery; not hardened for real material |
 | [`SECURITY.md`](SECURITY.md) | reporting a vulnerability, and what is not one |
-| [`ROADMAP-REMAINING.md`](ROADMAP-REMAINING.md) | what is left |
-| [`release/CLEAN-VM-INSTALL.md`](release/CLEAN-VM-INSTALL.md) | a recorded clean-VM install, step by step |
+| [`release/CHANGELOG.md`](release/CHANGELOG.md) | what each release shipped, with the steps for upgrading |
+| [`release/CLEAN-VM-INSTALL.md`](release/CLEAN-VM-INSTALL.md) | the clean-machine install runs and what each found |
+| [`ROADMAP-REMAINING.md`](ROADMAP-REMAINING.md) | what is left, and where the completion figure is worked out |
 | [`NOTICE.md`](NOTICE.md) | the licence, and why it had to be this one |
 | [`CONVENTIONS.md`](CONVENTIONS.md) | the working agreement, if you are contributing |
 
@@ -760,67 +774,51 @@ noctornal/
 
 **Beta. Unaudited. Not certified for evidential use. Not lawful to operate against real material until the five blocking items above are settled.** It is fit for other people to try on synthetic or published, non-personal data.
 
-Working end to end: cases; the graph and assertion layer; evidence with
-WORM and custody; the five-part access gate; SNA analytics, with roles and
-forum and wallet projection; proposals and triage; entity merge and the
-two-person policy; comms, contact blocks, PGP verification and vendor keys;
-collection from feeds, forums and Telegram under a two-person authority
-(the Telegram adapter has never met Telegram, docs/17 F31), and ingest; similarity search; retention, legal hold and break-glass; ACH;
-reporting with a TLP egress gate; the malware lab, with static triage,
-YARA, archive expansion, prohibited-content screening and a self-hosted
-sandbox; Jira, the delivery ledger and outbound lookups; the egress proxy;
-the collector service that alone holds the persona key, and the isolated
-worker that parses hostile bytes; row-level security on every case table;
-the deception subsystem; live change push; a one-command installer and a
-first-sign-in walkthrough; and the analyst console over all of it.
+This is Beta 1: version 0.9.0, tag `v0.9.0-beta`. What was measured, from
+[`release/CHANGELOG.md`](release/CHANGELOG.md): the whole suite, on a
+database built from nothing with every migration and both runtime database
+roles present, passed 12073 and skipped 51. An adversarial review on
+2026-10-03 kept 82 findings, 16 of them high; every one is fixed or stated in
+`docs/17`, an independent re-verification re-ran each against the merged
+code, and nine release reviews then exercised install, analyst workflows,
+load, authorisation, evidence and egress, collection and the Lab, the
+upgrade from Alpha 7a, the production deployment and code quality. On a clean
+Ubuntu 24.04 machine with the prerequisites in place the console answered 6
+minutes 11 seconds after the install command. Writes, entity and claim reads,
+selectors, search and the audit log hold at 100,000 entities and 1,000,000
+claims per case; the canvas, the metrics, the report and ego are built for
+about 5,000 entities a case. That load was measured from a Windows host with
+Postgres in WSL2.
 
-Deliberately absent, with reasons in [`docs/17`](docs/17-flagged-for-review.md):
-WebAuthn (password + TOTP today), session IP/UA binding by default in
-development (a production start refuses to run without it), perceptual
-matching of prohibited content, expansion of RAR and 7-Zip archives, and
-**any form of live interception**. What the 2026-10-03 review and the fixes
-after it left open is in the same document, under Known residuals at Beta 1.
+Beyond what the tour shows, Beta 1 has entity merge under the two-person
+policy; PGP verification and vendor keys; collection from feeds, forums and
+Telegram under a two-person authority (the operator's end-to-end Telegram
+check is `docs/17` F31); ingest; similarity search; Jira, the delivery
+ledger and outbound lookups; the egress proxy; the collector service that
+alone holds the persona key; the isolated worker that parses hostile bytes;
+row-level security on every case table; live change push; and the one-command
+installer with its first-sign-in walkthrough.
 
-### Findings that carry forward
+Deliberately absent: WebAuthn (password and TOTP today), session IP and
+client binding by default in development (a production start refuses to run
+without it), perceptual matching of prohibited content, expansion of RAR
+and 7-Zip archives, and live SIP interception. The reasons are in
+[`docs/17`](docs/17-flagged-for-review.md), [`docs/11`](docs/11-malware-handling.md)
+and [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-An adversarial review of Phase 7 found three critical defects under a
-fully green 953-test suite. They are fixed, and each leaves a rule:
-
-- **A forged verdict, from a parser trusting a stream it did not control.**
-  A crafted OpenPGP user ID smuggled a fake `VALIDSIG` line into gpg's
-  status output through characters `str.splitlines()` treats as line breaks
-  and gpg does not escape, minting a CONFIRMED identity binding for a key
-  the attacker never held. **The `CHECK` constraints could not catch it**,
-  because both compared values came from the same lied-to parse. A
-  constraint defends against the application *forgetting* to check, never
-  against it checking a forged input.
-  *→ Any `CONFIRMED` binding recorded before commit `12ff904` should be
-  re-derived, not trusted.*
-- **Inert on the Windows dev host, live on Linux.** The defect depended on
-  how bytes decode, so the development machine and the deployment target
-  disagreed about whether the system was exploitable.
-  *→ Where a defence depends on decoding, test the bytes.*
-- **A metric overstated by 499×.** Newman weighting divided by the
-  participant count remaining *after* filtering, so two people sharing a
-  500-member channel scored as high as a private two-party conversation.
-  *→ Any co-participation figure produced before commit `8595602` is
-  wrong, not approximate.*
-
-**Determination D8 is now CLOSED.** A Telegram channel id and an unrelated
-user id could normalise to the same durable value, a strong selector, so
-it fed the merge lead an analyst is asked to confirm. The Bot-API encoding is arithmetic
-(`chat_id = -(10¹² + id)`), not a text prefix, and the old code stripped
-the characters `100`, which inverts it only for a ten-digit channel id.
-Decoding is now arithmetic and namespaced by id space (`u:`/`c:`/`g:`);
-migration `0051` re-keys stored selectors. It cannot undo a merge already
-made, and says so.
+**What is still open is in `docs/17`.** Its Known residuals at Beta 1 lists,
+by area, what the review, its re-verification and the release reviews left,
+among them a request role that is not a wall in every table, no console
+control for an exhibit's or a case's legal hold, and two outbound paths that
+judge less than they should. Its section on data already recorded that
+should not be trusted lists the rows an older instance may hold, such as a
+`CONFIRMED` channel binding recorded before commit `12ff904` and a
+co-participation figure produced before commit `8595602`.
 
 **The software has been adversarially reviewed nine times, and every pass
 found real defects, four times a critical one. The first eight found them
 under a fully passing test suite, and three of those were green tests
-asserting the bug. The ninth, on 2026-10-03, kept 82 findings (16 high), and
-the independent re-verification of its fixes and nine release reviews found
-more. Assume the next pass would find something too.**
+asserting the bug. Assume the next pass would find something too.**
 
 ---
 
