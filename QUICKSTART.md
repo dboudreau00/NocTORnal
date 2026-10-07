@@ -3,8 +3,10 @@
 New here? [`release/START-HERE.md`](release/START-HERE.md) is the one page
 to follow first, and its installer does what this page does, step by step.
 
-Everything below is a **local development instance**. It is not hardened for
-real case material: see "Before anything real" at the bottom.
+This page is the development launcher (`scripts/launch.ps1`,
+`scripts/launch.sh`) and what to do once it is running. Everything below is
+a **local development instance**. It is not hardened for real case material:
+see "Before anything real" at the bottom.
 
 ## 1. Start it
 
@@ -15,28 +17,29 @@ powershell -ExecutionPolicy Bypass -File "scripts\launch.ps1"
 ```
 
 (macOS/Linux: `bash scripts/launch.sh`. The explicit `-ExecutionPolicy
-Bypass` is needed because this machine's policy is `Restricted`; a bare
-`.\scripts\launch.ps1` is blocked by PowerShell.)
+Bypass` is needed because PowerShell's default policy is `Restricted`; a
+bare `.\scripts\launch.ps1` is blocked.)
 
 The launcher is safe to re-run. It:
 
 1. starts Docker Desktop if it is not already running, and waits for it;
 2. brings up Postgres, Redis, MinIO and Mailpit, the whole stack; the
    API process runs everything else itself (`docs/02`);
-3. creates `.env.local` with a fresh `NOCTORNAL_TOTP_KEK` on first run,
-   **keep that file.** It seals every TOTP secret; lose it and all users
-   must re-enrol;
+3. creates `.env.local` on first run, with a fresh TOTP key and persona key.
+   **Keep that file.** The TOTP key seals every authenticator secret and the
+   other secrets the database stores encrypted; lose it and all users must
+   re-enrol and no stored sample can be decrypted;
 4. applies migrations (`alembic upgrade head`);
 5. serves the API and UI at <http://127.0.0.1:8000/ui/>.
 
-Stop it with Ctrl-C. Add `-SkipDocker` if the stack is already up, or
-`-Port 8010` to move the API. (Not 8080. It is among the most contended
-ports on a workstation; it was also OpenFGA's published port until that service was removed from the compose file on 2026-07-26.)
+Stop it with Ctrl-C. Add `-SkipDocker` (`--skip-docker` for `launch.sh`) if
+the stack is already up, or `-Port 8010` (`--port 8010`) to move the API.
+Not 8080: it is among the most contended ports on a workstation.
 
 ## 2. Create your account (first run only)
 
 **The easy way:** open <http://127.0.0.1:8000/ui/>. While no account
-exists, the sign-in screen offers **First-run setup** instead, enter an
+exists, the sign-in screen offers **First-run setup** instead. Enter an
 email and a display name, and it creates the administrator (SYS_ADMIN +
 SECURITY_OFFICER + CASE_OWNER + ANALYST, clearance RED) and shows a
 generated password and a TOTP secret **once**, with a QR code for the
@@ -47,17 +50,18 @@ sends anything, and keeps the password and secret on screen until that
 sign-in works. It then shows ten single-use recovery codes, once; a new set
 can be issued later from **Account** (your name, top right). That door
 closes permanently the moment the first account exists; every later
-account is created from **Admin** in the rail, or with `bootstrap.py`.
+account is created from **Admin** in the rail, or with `bootstrap.py`. (A
+production deployment opens this door only to someone holding its setup
+token, and has no such door when none is set: `infra/production/README.md`.)
 
-Once you are in, the **Admin** tab (rail, bottom group) creates further
-analysts (each replaces the password they were given at their first sign-in),
-grants and revokes global roles, sets clearance and compartment
-read-ins, unlocks accounts after failed logins, re-issues a TOTP secret for
-an analyst whose phone is gone, and resets a forgotten password: the
-analyst gets a one-time password and chooses their own at their next
-sign-in. It needs `user.manage`. SYS_ADMIN holds it, and it is step-up, so
-a stale session is re-challenged. Everyone changes their own password from
-**Account** (your name, top right).
+Once you are in, the **Admin** tab creates further analysts (each replaces
+the password they were given at their first sign-in), grants and revokes
+global roles, sets clearance and compartment read-ins, unlocks accounts
+after failed logins, re-issues a TOTP secret for an analyst whose phone is
+gone, and resets a forgotten password: the analyst gets a one-time
+password and chooses their own at their next sign-in. It needs
+`user.manage`. SYS_ADMIN holds it, and it is step-up, so a stale session
+is re-challenged. Everyone changes their own password from **Account**.
 
 **The shell way** (works even with accounts present), in a second
 terminal from the repo root:
@@ -133,8 +137,8 @@ the audit trail will:
 docker compose -f infra/docker-compose.yml exec -T postgres psql -U noctornal -d noctornal -c "SELECT occurred_at, detail->>'reason' AS reason FROM audit.event WHERE action LIKE 'AUTH%' ORDER BY seq DESC LIMIT 10;"
 ```
 
-`reason` is one of `bad_password`, `bad_totp`, `locked`, `no_totp`,
-`not_enrolled`, `unknown_user`, `replay`.
+`reason` is one of `bad_password`, `bad_totp`, `locked`, `inactive`,
+`no_totp`, `not_enrolled`, `unknown_user`, `replay` or `bad_recovery_code`.
 
 - **`bad_totp` with the right password**, almost always a mistyped secret.
   Re-show the enrolment as a scannable QR:
@@ -213,10 +217,12 @@ Open <http://127.0.0.1:8000/ui/> and sign in.
   and it answers *why do we believe this*: each assertion's basis, its
   Admiralty grading (e.g. "B2" = usually reliable / probably true), the
   ICD-203 analytic confidence, the rationale, and the source reference.
-- **Add entity / Add relationship**, both require the assertion fields,
+- **Add entity / Add link**, both require the assertion fields,
   because nothing is a fact. Edge types are filtered to those the ontology
   permits between the endpoints you chose, so an illegal edge cannot be
   attempted.
+
+[`release/MANUAL.md`](release/MANUAL.md) explains every pane.
 
 ## Useful commands
 
@@ -224,13 +230,19 @@ Open <http://127.0.0.1:8000/ui/> and sign in.
 .venv\Scripts\python -m pytest packages/ontology/tests apps/api/tests -q
 ```
 
+Without `DATABASE_URL` in the environment the database-backed tests skip. To
+run them, use a scratch database, as `release/INSTALL.md` (Verifying the
+install) explains.
+
 ```bash
 .venv\Scripts\alembic current
 ```
 
-Interactive API docs are **off** by default (the schema maps every route of
-a case system). Enable for a session with `NOCTORNAL_ENABLE_DOCS=1`, then
-<http://127.0.0.1:8000/api/v1/docs>.
+The API schema is **off** by default (it maps every route of a case
+system). Enable it for a session with `NOCTORNAL_ENABLE_DOCS=1`, then read
+<http://127.0.0.1:8000/api/v1/openapi.json>. The interactive page at
+`/api/v1/docs` is served under the API's own `default-src 'none'` policy, so
+a browser cannot run its scripts.
 
 MinIO console: <http://localhost:9001>. Mailpit: <http://localhost:8025>.
 
@@ -253,38 +265,23 @@ not hidden:
   them, and run the API under a database role that does *not* own the
   tables, the append-only audit and custody triggers can be disabled by a
   table owner.
-- **No TLS.** The console runs on the API's cookie session: `POST
-  /auth/login` answers 204 and sets `__Host-session` (HttpOnly) and a
-  readable `__Host-csrf`, and every unsafe request copies that cookie
-  into the `x-csrf-token` header. Both are `Secure` and `__Host-`
-  prefixed, which a browser accepts from `localhost` or over HTTPS and
-  from nowhere else. On plain HTTP from any other address the browser
-  refuses the pair, and since 2026-09-10 there is no body token to fall
-  back on, so a sign-in there leaves the tab holding nothing: use
-  `bootstrap.py session` (above), whose `#token=` link the tab keeps for
-  its own life, or put the console behind TLS, which is what you should
-  do with anything real anyway.
-- **A sign-in returns no token at all** (2026-09-10). It used to, for
-  the two paths that could not read the cookie, and both now can: the
-  live websocket authenticates from `__Host-session` on the upgrade, and
-  the Lab download (cross-origin by design, so no `__Host-` cookie
-  reaches it) crosses on a one-shot ticket minted under the cookie
-  session, good for one sample, one redemption and sixty seconds. A
-  session restored from the cookie after a reload is therefore live and
-  can download, with no second sign-in. What still hands out a bearer is
-  `scripts/bootstrap.py session`, deliberately: it is the way in when the
-  host clock makes TOTP impossible, and the console exchanges its token
-  once for the cookie pair.
+- **No TLS.** The session cookies are `Secure` and `__Host-` prefixed,
+  which a browser accepts from `localhost` or over HTTPS and from nowhere
+  else. On plain HTTP from any other address the browser refuses them, and
+  a sign-in leaves the tab holding nothing: use `bootstrap.py session`
+  (above), whose `#token=` link the tab keeps for its own life, or put the
+  console behind TLS, which is what you should do with anything real
+  anyway. [`SECURITY.md`](SECURITY.md) says how a session works.
 - **Session binding is recorded, not enforced, unless you say so.** Every
   session carries the address and client it was minted from (0058);
   `NOCTORNAL_SESSION_STRICT_BINDING=1` refuses a session presented from
   anywhere else. Behind a proxy, set `NOCTORNAL_TRUSTED_PROXY_HOPS` or the
   bound address (and the one in the login audit) is the proxy's.
-- **Still missing:** WebAuthn. Row-level security under a non-owner
-  database role, rate limiting (Redis GCRA) and the destination-aware TLP
-  egress gate all shipped; this development instance connects as the schema
-  owner, which row security does not bind, so it shows none of that
-  protection. See `docs/17-flagged-for-review.md` for the current list.
+- **Row-level security does not bind this instance.** It stands on 82
+  tables, but this development instance connects as the schema owner, which
+  row security does not bind, so it shows none of that protection. Rate
+  limiting (Redis GCRA) and the destination-aware TLP egress gate are built.
+  WebAuthn is not. See `docs/17-flagged-for-review.md` for the current list.
 - **It is unaudited.** `docs/08-governance.md` sets the bar for evidence
   that has to survive a challenge; treat this as a working model of it, not
   as it.
