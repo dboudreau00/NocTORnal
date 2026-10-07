@@ -113,7 +113,7 @@ Actor × forum, actor × thread, actor × wallet, actor × campaign.
 - Co-affiliation is how you find cells that never communicate directly on
   the record
 
-**Built (2026-09-24) for forums and wallets**, as a projection option of
+**Built for forums and wallets**, as a projection option of
 the Analysis pane and the analytics routes (`one_mode=forum`,
 `one_mode=wallet`), never as a rewritten preset (decision 33):
 
@@ -153,7 +153,7 @@ same pattern of ties to the same kinds of others, are playing the same
 role. This finds the *second* money launderer, the *replacement* developer.
 Genuinely powerful and rarely available outside UCINET.
 
-**CONCOR is built (2026-09-24)**: the Analysis pane's Roles card and
+**CONCOR is built**: the Analysis pane's Roles card and
 `GET /cases/{case_id}/analytics/concor`, its own run stored for each depth
 (one to four splits). Profiles are ties sent and received per valence, the
 pair's own entries left out of each correlation (Wasserman and Faust); only
@@ -165,7 +165,7 @@ the depth, not found in the data. "Alike but not tied" pairs are leads, never
 proposals. Capped at 1,000 entities with ties, 50 rounds per split, one BLAS
 thread per process.
 
-**REGE is built (2026-10-02)**: the Analysis pane's Regular roles card and
+**REGE is built**: the Analysis pane's Regular roles card and
 `GET /cases/{case_id}/analytics/rege`, its own run stored for each number
 of roles (two to eight) and each way of counting ties. Regular equivalence
 asks for the same kinds of ties to the same kinds of others, so two

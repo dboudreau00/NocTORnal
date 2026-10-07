@@ -28,12 +28,10 @@ Violating any of these is a bug even if tests pass.
 
 3. **Machines propose, analysts dispose.** Extractors and inference jobs
    write to `proposal`. They never write to `node` or `edge` directly.
-   There is no direct-write exception: a strong (`is_strong`) selector
-   already attributed to another node raises `StrongSelectorConflict` as
-   a merge *lead*, and the merge is made by an analyst (`merges.py`),
-   reversibly and with an audit event. (The 2026-07 text allowed an
-   automatic merge on a strong match; it was never built and is
-   superseded as of 2026-09-09.)
+   There is no direct-write exception and no automatic merge: a strong
+   (`is_strong`) selector already attributed to another node raises
+   `StrongSelectorConflict` as a merge *lead*, and the merge is made by an
+   analyst (`merges.py`), reversibly and with an audit event.
 
 4. **Inferred edges stay visually and structurally distinct.** `is_inferred
    = true` renders dashed and is excluded from metrics unless the
@@ -42,31 +40,29 @@ Violating any of these is a bug even if tests pass.
 
 5. **History is superseded, never overwritten.** No destructive `UPDATE` on
    `assertion`: a claim's own columns are never written again. The one
-   exception, decided 2026-09-09: a retraction is a *marked row*, not a
-   supersession. `retract_assertion` stamps `retracted_at`,
-   `retracted_by` and `retraction_reason` once, from NULL (`WHERE
-   retracted_at IS NULL`; zero rows is an error), and the projection
-   drops the row. There is nothing to supersede it with, a retraction
-   withdraws a claim rather than replacing one. A correction is a new
-   assertion. `superseded_at`/`superseded_by` exist (0007) and the read
-   side honours them. One code path writes them (2026-10-02): a claim
-   accepted before it carried an observation date is dated by recording a
-   new claim that cites it (`supersedes_id`, 0131) and stamping the old
+   exception is that a retraction is a *marked row*, not a supersession.
+   `retract_assertion` stamps `retracted_at`, `retracted_by` and
+   `retraction_reason` once, from NULL (`WHERE retracted_at IS NULL`; zero
+   rows is an error), and the projection drops the row. There is nothing to
+   supersede it with, a retraction withdraws a claim rather than replacing
+   one. A correction is a new assertion. `superseded_at`/`superseded_by`
+   exist (0007) and the read side honours them. One code path writes them: a
+   claim accepted before it carried an observation date is dated by recording
+   a new claim that cites it (`supersedes_id`, 0131) and stamping the old
    one once, from NULL (`supersede_assertion`). The old claim's own columns
-   are never written, so the invariant is not amended. The database holds
-   it against the runtime roles since 2026-10-03: they cannot UPDATE a claim
-   except to stamp one of its five mark columns once, nor DELETE or TRUNCATE
-   it (0135), a correction records the value it replaced (0136), and a claim
-   inserted by the request role is live, authored by the bound user and dated
-   by the database's clock (0171). The schema owner and the system role are
-   exempt, because migrations and the machine paths run as them.
+   are never written, so the invariant is not amended. The database holds it
+   against the runtime roles: they cannot UPDATE a claim except to stamp one
+   of its five mark columns once, nor DELETE or TRUNCATE it (0135), a
+   correction records the value it replaced (0136), and a claim inserted by
+   the request role is live, authored by the bound user and dated by the
+   database's clock (0171). The schema owner and the system role are exempt,
+   because migrations and the machine paths run as them.
 
 6. **The audit log is append-only.** No code, migration or admin tool
-   gains `UPDATE` or `DELETE` on `audit.event`. Since 2026-10-03 the audit
-   and custody chains also take their number inside the chain lock, so
-   concurrent writers cannot fork them (0149), and the request role cannot
-   name another user as the actor, date a row or draw the ledger sequences
-   (0150, 0151, 0169).
+   gains `UPDATE` or `DELETE` on `audit.event`. The audit and custody
+   chains take their number inside the chain lock, so concurrent writers
+   cannot fork them (0149), and the request role cannot name another user as
+   the actor, date a row or draw the ledger sequences (0150, 0151, 0169).
 
 7. **Credentials never leave the vault.** `collection_account.secret_*`
    is envelope-encrypted at rest (AES-256-GCM, the same scheme as TOTP
@@ -83,10 +79,8 @@ Violating any of these is a bug even if tests pass.
    the store credentials (`docs/17`), so a compromised collector host is a
    compromised vault. In development one process runs both
    (`NOCTORNAL_COLLECTOR_INLINE=1`), and the guarantee is about the SHAPE
-   of the code. (Reworded 2026-09-09 and 2026-10-03. Until 2026-09-09 it
-   described a collector the topology did not have; the collector service
-   was built on 2026-10-02, and `docs/02` says what it does and does not
-   separate.)
+   of the code. `docs/02` says what the collector does and does not
+   separate.
 
 8. **TLP gates egress.** Every outbound path (SMTP, Jira, webhook,
    export) checks classification first. `AMBER_STRICT` and `RED` never
@@ -113,7 +107,7 @@ Violating any of these is a bug even if tests pass.
 
 ## Concept vs decided
 
-`docs/00`-`19` carry the domain reasoning: why an identifier is durable
+`docs/00` to `docs/20` carry the domain reasoning: why an identifier is durable
 or displayed, why a capture is or is not lawful, what an analyst is
 actually doing. The migrations are authoritative for the schema and
 `db/schema.sql` is a generated mirror of them (`db/README.md`).
@@ -121,8 +115,7 @@ actually doing. The migrations are authoritative for the schema and
 ## Build order
 
 All ten phases are built. `docs/09-roadmap.md` is what each was for and
-the exit criterion it was held to; `ROADMAP-REMAINING.md` is what is left
-of each. The ordering principle still applies to anything new: nothing
+the exit criterion it was held to; `ROADMAP-REMAINING.md` is what is left. The ordering principle still applies to anything new: nothing
 feeds the graph before the graph and assertion layer work end to end. A
 firehose into a half-built model produces a landfill.
 
@@ -142,7 +135,7 @@ firehose into a half-built model produces a landfill.
   and runs every persona act and every scheduled collection poll; the API
   hands it an act through one Postgres table, `collect.persona_act`, which
   is the only queue and no broker. Celery, Arq and NATS are not in the tree
-  (decision 30, qualified 2026-10-03)
+  (decision 30, qualified by decision 174)
 - `igraph` (C core) + `leidenalg` for SNA maths, not NetworkX, which will
   not hold up
 - A vanilla HTML/CSS/JS console: no framework, no build step, no bundler,
@@ -159,7 +152,7 @@ firehose into a half-built model produces a landfill.
   (82 tables, none deferred): requests run as `noctornal_app`, bound to
   their session, and work that must see every row runs as a named system
   purpose on `noctornal_worker`
-- The 2026-07 sketch's Next.js, sigma.js/WebGL, OpenFGA/SpiceDB, NATS and Arq/Celery are not in the tree; they were superseded (decisions 8, 9, 30, 37; compose R13 removed OpenFGA and NATS on 2026-07-26)
+- The 2026-07 sketch's Next.js, sigma.js/WebGL, OpenFGA/SpiceDB, NATS and Arq/Celery are not in the tree; they were superseded (decisions 8, 9, 30, 37; compose R13 removed OpenFGA and NATS)
 
 ## Conventions
 
@@ -179,16 +172,15 @@ firehose into a half-built model produces a landfill.
   invariant. If you need to go back past 0017 on a live database, restore a
   backup. Do not make the downgrade "work".
 - IDs: v4 UUIDs, `uuid4()` app-side, `gen_random_uuid()` as the column
-  default in the database. Nothing sorts on an id. (The 2026-07 convention was UUIDv7 app-side; it was never adopted and is superseded as of 2026-09-09, `pg_uuidv7` is not installed.)
+  default in the database. Nothing sorts on an id. UUIDv7 was the 2026-07 sketch's convention and is superseded; `pg_uuidv7` is not installed.
 - Times: `timestamptz`, UTC in the database, rendered in the user's zone.
 - Money and weights: `numeric`, never float.
 - API: REST under `/api/v1`, `limit`-capped pagination (`limit: int =
   Query(200, le=1000)` in `http/routers/read.py`; no cursors),
   `problem+json` errors (RFC 9457).
-  (Cursor pagination was never implemented: it was the 2026-07 convention
-  and is superseded as of 2026-09-09.)
-  Two case-wide lists exceed 1000 on purpose (2026-10-03, review
-  http_ui-015): `GET /cases/{id}/edges` (2000) and the projected graph
+  Cursor pagination was never implemented; it was a 2026-07 sketch convention
+  and is superseded.
+  Two case-wide lists exceed 1000 on purpose: `GET /cases/{id}/edges` (2000) and the projected graph
   (5000), because the console draws a whole case from them and says when
   an answer is truncated. Every per-element list (an element's assertions,
   selectors, tags, sets, members, the comms lists) is capped at 1000 and
