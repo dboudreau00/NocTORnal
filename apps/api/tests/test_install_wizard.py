@@ -157,6 +157,26 @@ def test_step_one_only_looks_and_reports_what_it_found_before_anything_changes()
     assert "Remove-Item" not in body and "New-Item" not in body
 
 
+def test_the_preview_does_not_promise_new_keys_over_an_existing_env_local():
+    """Step 1's "Next it will" said "write .env.local with fresh random keys"
+    on every run, re-runs and updates included, where the person has just
+    copied their keys in (Beta 1 clean machine, 2026-10-07). Step 3 never
+    replaces them, and the preview now says so when the file is there."""
+    keep = "keep your .env.local as it is (its keys are never replaced)"
+    write = "write .env.local with fresh random keys (the file is yours to keep)"
+    sh = _read(INSTALL_SH)
+    one, two = sh.index("step 'Checking your computer'"), sh.index("step 'Building the Python environment'")
+    body = sh[one:two]
+    assert body.index('if [[ -f "$REPO_ROOT/.env.local" ]]; then') < body.index(keep) < body.index(write)
+    ps = _read(INSTALL_PS1)
+    one, two = ps.index("Write-Step 'Checking your computer'"), ps.index("Write-Step 'Building the Python environment'")
+    body = ps[one:two]
+    assert body.index("if (Test-Path -LiteralPath (Join-Path $RepoRoot '.env.local')) {") < body.index(keep) < body.index(write)
+    # Step 3 is still the only place the file is written, and only when absent.
+    assert "good '.env.local already exists - left untouched'" in sh
+    assert "Write-Good '.env.local already exists - left untouched'" in ps
+
+
 def test_the_port_is_checked_in_step_one_in_both_installers():
     sh = _read(INSTALL_SH)
     assert sh.index('/dev/tcp/127.0.0.1/$PORT') < sh.index("step 'Building the Python environment'")
@@ -432,6 +452,26 @@ def test_install_sh_makes_the_account_before_it_starts_the_api_and_waits():
 
 
 @pytest.mark.parametrize("path", (INSTALL_SH, INSTALL_PS1), ids=lambda p: p.name)
+def test_the_installers_leave_what_comes_next_to_their_closing_card(path: Path):
+    """bootstrap's own "Next" block, printed inside step 6, told a person to
+    sign in to an API that step 8 had not started and to load OP-SHOWCASE-26
+    just before step 7 offered Latticework (Beta 1 clean machine,
+    2026-10-07). The installers ask create-user to leave it out."""
+    code = _code(path)
+    at = code.index('"$VENV_PY" scripts/bootstrap.py create-user' if path.suffix == ".sh"
+                    else "& $VenvPython $bootstrap create-user")
+    call = code[at:code.index("\n", code.index("--name", at))]
+    assert "--no-next" in call, call
+    bootstrap = _bootstrap()
+    args = bootstrap._build_parser().parse_args(
+        ["create-user", "--email", "a@example.org", "--name", "A", "--no-next"])
+    assert args.no_next is True and args.func is bootstrap.cmd_create_user
+    source = _read(SCRIPTS / "bootstrap.py")
+    body = source[source.index("def cmd_create_user"):source.index("def _print_next")]
+    assert 'if not getattr(args, "no_next", False):\n        _print_next(args.email, roles)' in body
+
+
+@pytest.mark.parametrize("path", (INSTALL_SH, INSTALL_PS1), ids=lambda p: p.name)
 def test_a_failed_account_stops_the_install_with_a_sentence(path: Path):
     assert "the account could not be made." in _read(path)
 
@@ -463,6 +503,38 @@ def test_the_demo_is_the_synthetic_clear_network_and_called_fictional(path: Path
     shown = " ".join(line for _, line in _printed_lines(path))
     assert "fictional" in shown.lower() and "TLP:CLEAR" in shown
     assert "holds nothing real" in shown
+
+
+def _demo_present_snippet() -> str:
+    text = _read(INSTALL_SH)
+    start = text.index("\n", text.index('DEMO_PRESENT="$( cd "$REPO_ROOT"')) + 1
+    return text[start:text.index("\nPY\n", start) + 1]
+
+
+def test_a_demo_case_already_there_is_said_so_and_not_offered_again():
+    """A re-run with --demo printed bootstrap's "case code 'OP-LATTICEWORK-26'
+    is already in use", and the closing card then offered the same command to
+    load it later (Beta 1 clean machine, 2026-10-07). Both installers ask the
+    database first, and a demo that is there counts as loaded."""
+    sh = _read(INSTALL_SH)
+    assert 'if [[ "$DEMO_PRESENT" == "1" ]]; then DEMO_DECISION=present; DEMO_LOADED=1; fi' in sh
+    assert sh.index("DEMO_DECISION=present") < sh.index('if [[ "$DEMO_DECISION" == "ask" ]]; then')
+    assert 'elif [[ "$DEMO_DECISION" == "present" ]]; then' in sh
+    assert "SELECT EXISTS (SELECT 1 FROM core.case WHERE code = %s)" in _demo_present_snippet()
+    ps = _read(INSTALL_PS1)
+    assert "$demoDecision = 'present'; $demoLoaded = $true" in ps
+    assert ps.index("$demoDecision = 'present'") < ps.index("if ($demoDecision -eq 'ask') {")
+    assert "elseif ($demoDecision -eq 'present')" in ps
+    assert "select exists (select 1 from core.case where code = %s)" in ps
+    # The card offers "later" only when nothing was loaded or found.
+    assert 'if [[ "$DEMO_LOADED" -eq 0 ]]; then' in sh and "if (-not $demoLoaded) {" in ps
+
+
+@pytest.mark.skipif(not __import__("os").environ.get("DATABASE_URL"), reason="needs DATABASE_URL")
+def test_the_demo_presence_check_runs_against_the_real_schema():
+    done = subprocess.run([sys.executable, "-", "OP-NO-SUCH-CASE-G60"], input=_demo_present_snippet(),
+                          capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0 and done.stdout.strip() == "0", done.stdout + done.stderr
 
 
 def test_the_demo_command_is_one_bootstrap_accepts_and_its_default_code_matches():
@@ -560,6 +632,21 @@ def test_start_ps1_runs_launch_ps1_and_nothing_else():
     assert "[switch] $SkipDocker" in code and "[int]    $Port = 8000" in code
 
 
+def test_every_command_install_sh_prints_for_a_script_runs_it_through_bash():
+    """An unzipped release has no execute bit (measured on the clean machine,
+    2026-10-07: release/install.sh -rw-r--r--). --skip-launch printed "$0
+    --port", which after `bash release/install.sh` is "release/install.sh
+    --port 8000" and answers "Permission denied"."""
+    printed = [ln for _, ln in _printed_lines(INSTALL_SH)]
+    bare = [ln.strip() for ln in printed
+            if re.search(r"(?<![\w/.-])(\./)?release/\w+\.sh\b", ln)
+            and not re.search(r"bash (\./)?release/\w+\.sh", ln)]
+    assert not bare, bare
+    assert 'detail "To start it:  bash $0 --port $PORT"' in _read(INSTALL_SH)
+    # The same in the two refusals that print the command to run again.
+    assert "    bash release/install.sh --port $((PORT + 1))" in _read(INSTALL_SH)
+
+
 def test_start_sh_help_prints_its_header_and_does_not_start_anything():
     bash = _bash()
     if bash is None:
@@ -592,6 +679,45 @@ def test_the_packager_requires_the_new_files():
     for name in ("release/START-HERE.md", "release/start.sh", "release/start.ps1"):
         assert f"'{name}'" in text, name
     assert "start at release/START-HERE.md" in text
+
+
+def _packager_zip_block() -> str:
+    text = _read(SCRIPTS / "package_release.ps1")
+    start = text.index("        Add-Type -AssemblyName System.IO.Compression\n")
+    end = text.index("finally { $writer.Dispose() }", start) + len("finally { $writer.Dispose() }")
+    return text[start:end]
+
+
+def test_the_packager_names_every_zip_entry_itself_and_refuses_a_backslash():
+    """ZipFile.CreateFromDirectory stores backslashes under Windows PowerShell
+    5.1: the clean-machine zip of 2026-10-07 had them in all 1108 entries, and
+    unzip on Linux warned and exited 1. The packager names each entry with
+    forward slashes and checks the stored names before it reports success."""
+    text = _read(SCRIPTS / "package_release.ps1")
+    assert "CreateFromDirectory(" not in _code(SCRIPTS / "package_release.ps1")
+    block = _packager_zip_block()
+    assert "-replace '\\\\', '/'" in block and "CreateEntryFromFile(" in block
+    assert "$_.FullName.Contains([char]92)" in text
+    assert text.index("if ($backslashed) {") < text.index("Good \"wrote $zipPath")
+
+
+@pytest.mark.skipif(not shutil.which("powershell"), reason="Windows PowerShell 5.1 is the runtime that wrote backslashes")
+def test_the_packager_zip_block_writes_forward_slashes_under_windows_powershell(tmp_path):
+    import zipfile
+    tree = tmp_path / "pkg"
+    (tree / "release").mkdir(parents=True)
+    (tree / "release" / "install.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    (tree / ".gitignore").write_text("x\n", encoding="utf-8")
+    zip_path = tmp_path / "pkg.zip"
+    script = tmp_path / "zipit.ps1"
+    script.write_text(f"$Destination = '{tree}'\n$zipPath = '{zip_path}'\n" + _packager_zip_block() + "\n",
+                      encoding="utf-8")
+    done = subprocess.run([shutil.which("powershell"), "-NoProfile", "-ExecutionPolicy", "Bypass",
+                           "-File", str(script)], capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL, timeout=120)
+    assert done.returncode == 0, done.stdout + done.stderr
+    names = sorted(info.orig_filename for info in zipfile.ZipFile(zip_path).infolist())
+    assert names == ["pkg/.gitignore", "pkg/release/install.sh"], names
 
 
 # ---------------------------------------------------------------------------
@@ -632,6 +758,30 @@ def test_start_here_gives_the_real_install_commands():
     # The commands it prints exist where it says: the project folder has them.
     assert (ROOT / "start.cmd").is_file() and "start.cmd" in text
     assert (ROOT / "infra" / "docker-compose.yml").is_file()
+
+
+def test_start_here_sends_linux_to_the_engine_page_the_installer_names():
+    """The Docker row linked Docker Desktop alone while install.sh sends Linux
+    to the Engine page, and its check passed on a clean Ubuntu before the
+    docker group step, which the installer then stopped on (Beta 1 clean
+    machine, 2026-10-07). Unzip is not on a stock Ubuntu server either."""
+    text = _read(START_HERE)
+    row = next(ln for ln in text.splitlines() if ln.startswith("| **Docker**"))
+    assert "https://docs.docker.com/engine/install/" in row
+    assert "https://docs.docker.com/engine/install/" in _read(INSTALL_SH)
+    assert "sudo usermod -aG docker $USER" in row and "`docker ps`" in row
+    assert "sudo apt install unzip" in text
+
+
+def test_start_here_says_the_analysis_has_to_be_run():
+    """"Open Analysis. It singles out oriel" met an empty pane on the clean
+    machine (2026-10-07): it says "Run the analysis to compute ..." until Run
+    analysis is chosen, and then lists mer_florin first and oriel second."""
+    text = _flat(_read(START_HERE))
+    assert "Open **Analysis** and choose **Run analysis**." in text
+    assert "singles out" not in text
+    index = _read(ROOT / "apps" / "api" / "src" / "noctornal_api" / "http" / "static" / "index.html")
+    assert '<button id="an-run" type="button" class="btn primary">Run analysis</button>' in index
 
 
 def test_start_here_demo_command_is_the_one_the_installer_prints():
@@ -696,6 +846,14 @@ def test_install_md_no_longer_says_windows_hands_off_or_prints_the_command():
     readme = _flat(_read(README))
     assert "on Windows it prints the `create-user` command to run instead" not in readme
     assert "installed on Windows, where the installer prints this command" not in readme
+
+
+def test_install_md_says_how_to_reach_a_console_installed_over_ssh():
+    """The API answers on 127.0.0.1 only, so a server installed over SSH (the
+    clean machine of 2026-10-07 had no desktop) is reached through a tunnel,
+    as INSTALL.md already said for MinIO and Mailpit."""
+    text = _flat(_read(INSTALL_MD))
+    assert "`ssh -L 8000:127.0.0.1:8000 you@the-host`" in text
 
 
 def test_install_md_documents_the_new_flags_and_the_start_scripts():

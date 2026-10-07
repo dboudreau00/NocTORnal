@@ -394,7 +394,12 @@ def cmd_create_user(args: argparse.Namespace) -> None:
     print("  If your authenticator shows something else, the enrolment did not")
     print("  take. Fix it now rather than at the login screen.")
     print()
-    _print_next(args.email, roles)
+    # The installers pass --no-next (Beta 1 clean machine, 2026-10-07): inside
+    # step 6 this block told a person to sign in to an API step 8 had not
+    # started, and to load OP-SHOWCASE-26 just before step 7 offered
+    # Latticework. Their closing card says both, once the API is up.
+    if not getattr(args, "no_next", False):
+        _print_next(args.email, roles)
 
 
 #: The console the installers and launchers start, on their default port.
@@ -1363,6 +1368,10 @@ def _build_parser() -> argparse.ArgumentParser:
     create.add_argument(
         "--roles", default=DEFAULT_ROLES, metavar="R1,R2",
         help=f"comma-separated GLOBAL roles (default {DEFAULT_ROLES})",
+    )
+    create.add_argument(
+        "--no-next", action="store_true",
+        help="leave out the closing 'Next' block; the installers print their own",
     )
     create.set_defaults(func=cmd_create_user)
 

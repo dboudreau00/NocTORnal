@@ -82,7 +82,7 @@ machine with 8 GB of RAM.
 | **Python** | 3.12 | With `venv` and `ensurepip`. On Debian and Ubuntu those are a separate package: `sudo apt update && sudo apt install python3.12-venv`. 3.13 is what it is developed on. |
 | **Docker** | with Compose v2 | Docker Engine and its Compose plugin on Linux; Docker Desktop on Windows and macOS. Runs four containers: Postgres, Redis, MinIO, Mailpit. |
 | **Memory** | 8 GB tested | The four containers used about 300 MB at idle after the showcase seed. Postgres is configured with `shared_buffers=512MB`, so it grows past that under load. |
-| **Disk** | 2 GB free | 1.4 GB was added by the install and the showcase seed: 1.1 GB of images, a 189 MB `.venv`, and the data. Installing Docker Engine on a bare Ubuntu took about 0.75 GB before that. |
+| **Disk** | 2 GB free | 1.5 GB was added by the Beta 1 install alone (measured 2026-10-07): 1.1 GB of images, a 273 MB `.venv`, and the data. Installing Docker Engine and the venv package on a bare Ubuntu took about 0.8 GB before that. |
 | **OS** | Windows 10/11, macOS 12+, Linux | PowerShell 5.1 is supported and specifically tested for. |
 
 Optional, and only for the features that use them:
@@ -166,7 +166,9 @@ because Docker's forwarding rules are applied before ufw's. So do not
 change them to `0.0.0.0` in `infra/docker-compose.yml`: a host firewall
 would not close them again. To reach the MinIO console or Mailpit from
 another machine, use an SSH tunnel, for example
-`ssh -L 9001:127.0.0.1:9001 you@the-host`.
+`ssh -L 9001:127.0.0.1:9001 you@the-host`. The console is the same on a
+machine you installed over SSH: `ssh -L 8000:127.0.0.1:8000 you@the-host`,
+then open <http://127.0.0.1:8000/ui/> on your own computer.
 
 A stack started by an earlier release keeps its old bindings, on every
 interface, until its containers are recreated from this file.

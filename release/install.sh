@@ -310,7 +310,7 @@ fi
   "Clone or download the whole repository, then run this installer again from
 the project root:
 
-    ./release/install.sh
+    bash release/install.sh
 
 install.sh expects to live in the release/ directory of the project, so
 that its parent contains alembic.ini. That parent has no alembic.ini. The
@@ -432,7 +432,7 @@ if [[ $PORT_BUSY -eq 1 && $SKIP_LAUNCH -eq 0 ]]; then
   stop_with "port $PORT is already in use." \
     "Open http://127.0.0.1:$PORT/ui/ if an earlier copy is still running there, or choose another port.
 
-    ./release/install.sh --port $((PORT + 1))
+    bash release/install.sh --port $((PORT + 1))
 
 To stop an earlier copy, press Ctrl-C in the window it runs in."
 fi
@@ -461,7 +461,14 @@ fi
 printf '\n'
 detail 'All good. Next it will:'
 detail '  build a private Python environment in the .venv folder'
-detail '  write .env.local with fresh random keys (the file is yours to keep)'
+# On a re-run or an update the file is already there, and "write .env.local
+# with fresh random keys" read as if the keys just copied in were about to be
+# replaced (Beta 1 clean machine, 2026-10-07). Step 3 never replaces them.
+if [[ -f "$REPO_ROOT/.env.local" ]]; then
+  detail '  keep your .env.local as it is (its keys are never replaced)'
+else
+  detail '  write .env.local with fresh random keys (the file is yours to keep)'
+fi
 detail '  start four containers: Postgres, Redis, MinIO and Mailpit'
 detail '  set up the database and make your account'
 
@@ -799,7 +806,9 @@ export EVIDENCE_BUCKET="${EVIDENCE_BUCKET:-noctornal-evidence}"
 
 if [[ $SKIP_LAUNCH -eq 1 ]]; then
   heading 'Done (nothing was started, because --skip-launch was given)'
-  detail "To start it:  $0 --port $PORT"
+  # Through bash: the zip carries no execute bit, so the bare "$0" this printed
+  # answered "Permission denied" after START-HERE's `bash release/install.sh`.
+  detail "To start it:  bash $0 --port $PORT"
   printf '\n'
   exit 0
 fi
@@ -944,7 +953,7 @@ if [[ "$USERS" == "0" ]]; then
   else
     detail 'Your password and the QR code are printed next. They are shown once.'
     ( cd "$REPO_ROOT" && "$VENV_PY" scripts/bootstrap.py create-user \
-        --email "$ADMIN_EMAIL" --name "$ADMIN_NAME" ) \
+        --email "$ADMIN_EMAIL" --name "$ADMIN_NAME" --no-next ) \
       || stop_with 'the account could not be made.' \
 "Fix what the lines above name, then run this installer again.
 Everything before this step is kept, so it picks up where it stopped."
@@ -977,6 +986,22 @@ DEMO_CODE_NAME="OP-LATTICEWORK-26"
 DEMO_DECISION="$(decide_demo "$DEMO_MODE" "$INTERACTIVE" "$ACCOUNT_CREATED")"
 DEMO_LOADED=0
 DEMO_OWNER="$ADMIN_EMAIL"
+# Already there from an earlier run: said so, and neither loaded again nor
+# offered "later" on the card. A re-run with --demo printed bootstrap's "case
+# code 'OP-LATTICEWORK-26' is already in use", then the card's command to load
+# it, which fails the same way (Beta 1 clean machine, 2026-10-07). An answer
+# that cannot be read changes nothing.
+DEMO_PRESENT="$( cd "$REPO_ROOT" && "$VENV_PY" - "$DEMO_CODE_NAME" 2>/dev/null <<'PY'
+import os
+import sys
+import psycopg
+url = os.environ["DATABASE_URL"].replace("postgresql+psycopg", "postgresql")
+with psycopg.connect(url) as c:
+    print(int(c.execute("SELECT EXISTS (SELECT 1 FROM core.case WHERE code = %s)",
+                        (sys.argv[1],)).fetchone()[0]))
+PY
+)" || DEMO_PRESENT=""
+if [[ "$DEMO_PRESENT" == "1" ]]; then DEMO_DECISION=present; DEMO_LOADED=1; fi
 if [[ "$DEMO_DECISION" == "ask" ]]; then
   detail 'A fictional case with made-up people and ties, so there is something'
   detail 'to look at straight away. It is marked TLP:CLEAR and holds nothing real.'
@@ -1014,6 +1039,8 @@ PY
     note 'The demo case was not loaded. The lines above say why.'
     detail 'If it is already there from an earlier run, that is fine.'
   fi
+elif [[ "$DEMO_DECISION" == "present" ]]; then
+  good "the demo case is already here from an earlier run: Operation Latticework, code $DEMO_CODE_NAME"
 elif [[ "$DEMO_MODE" == "no" ]]; then
   detail 'Skipped, because --no-demo was given.'
 else

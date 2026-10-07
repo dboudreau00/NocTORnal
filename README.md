@@ -226,7 +226,7 @@ checks Python and Docker; it does not check memory or disk.
 | **Python** | 3.12 | With `venv` and `ensurepip`. On Debian and Ubuntu those are a separate package: `sudo apt update && sudo apt install python3.12-venv`. 3.13 is what it is developed on. |
 | **Docker** | with Compose v2 | Docker Engine and its Compose plugin on Linux; Docker Desktop on Windows and macOS. Runs four containers: Postgres, Redis, MinIO, Mailpit. |
 | **Memory** | 8 GB tested | The four containers used about 300 MB at idle after the showcase seed. Postgres is configured with `shared_buffers=512MB`, so it grows past that under load. |
-| **Disk** | 2 GB free | 1.4 GB was added by the install and the showcase seed: 1.1 GB of images, a 189 MB `.venv`, and the data. Installing Docker Engine on a bare Ubuntu took about 0.75 GB before that. |
+| **Disk** | 2 GB free | 1.5 GB was added by the Beta 1 install alone (measured 2026-10-07): 1.1 GB of images, a 273 MB `.venv`, and the data. Installing Docker Engine and the venv package on a bare Ubuntu took about 0.8 GB before that. |
 | **OS** | Windows 10/11, macOS 12+, Linux | PowerShell 5.1 is supported and specifically tested for. |
 | **GnuPG** | optional | Only for verifying PGP signatures on contact blocks. |
 
@@ -293,7 +293,7 @@ suite writes permanent rows into append-only tables, and some tests migrate
 the database they are given.
 
 ```bash
-set -a; . ./.env.local; set +a    # REDIS_URL, MinIO and Mailpit
+eval "$(.venv/bin/python scripts/_env.py export)"    # REDIS_URL, MinIO and Mailpit, read as data
 docker compose -f infra/docker-compose.yml exec -T postgres createdb -U noctornal noctornal_scratch
 docker compose -f infra/docker-compose.yml exec -T postgres psql -U noctornal -d noctornal_scratch -q -f /docker-entrypoint-initdb.d/00-extensions.sql
 export DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:5432/noctornal_scratch
