@@ -486,6 +486,13 @@
     <button id="btn-inbox" type="button" class="btn ghost small hdr-inbox"
             title="Your notifications, across every case">Inbox<span
             id="hdr-inbox-badge" class="hdr-badge" hidden></span></button>
+    <!-- Help (first-sign-in walkthrough, 2026-10-06). Opens Getting started,
+         which also holds the way back into the six-step tour. Always shown
+         while signed in: the tour is shown by itself once per browser and
+         this is how anybody finds it again. -->
+    <button id="btn-help" type="button" class="btn ghost small"
+            aria-haspopup="dialog"
+            title="Getting started, and the tour of the console">Help</button>
     <!-- A button since 2026-09-22: it opens Account, the one place the
          recovery codes the sign-in form mentions can be issued. The flag
          shows when there are none, because that is when a lost phone
@@ -5726,6 +5733,30 @@
         Change status</button>
     </div>
   </form>
+</div>
+
+<!-- The walkthrough (2026-10-06): one dialog, two views. "tour" is the six
+     steps shown once after a first sign-in; "help" is Getting started, the
+     Help button's page, with the way back into the tour. Every word in the
+     body is written by app.js through textContent from its TOUR_STEPS, so
+     this shell holds only the controls. -->
+<div id="tour-scrim" class="palette-scrim tour-scrim" hidden>
+  <div id="tour-sheet" class="palette tour-sheet" role="dialog"
+       aria-modal="true" aria-labelledby="tour-title">
+    <div class="tour-head">
+      <p id="tour-step" class="tour-step muted small"></p>
+      <button id="tour-close" type="button" class="btn ghost small">Close</button>
+    </div>
+    <h2 id="tour-title" class="h-sm" tabindex="-1"></h2>
+    <div id="tour-body" class="tour-body"></div>
+    <p id="tour-live" class="sr-only" role="status" aria-live="polite"></p>
+    <div class="tour-actions">
+      <button id="tour-skip" type="button" class="btn ghost tour-skip">Skip tour</button>
+      <button id="tour-back" type="button" class="btn">Back</button>
+      <button id="tour-next" type="button" class="btn primary">Next</button>
+      <button id="tour-take" type="button" class="btn primary" hidden>Take the tour</button>
+    </div>
+  </div>
 </div>
 
 <div id="keys-scrim" class="palette-scrim" hidden>

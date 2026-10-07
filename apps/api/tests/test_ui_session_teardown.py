@@ -144,6 +144,9 @@ let me = { user_id: 'admin' };
 const stub = (n) => function () { log.push(n); };
 const hideIdleWarning = stub('hideIdleWarning'), guardUnsaved = stub('guard');
 const disconnectLive = stub('disconnectLive'), closePalette = stub('closePalette');
+// The walkthrough (2026-10-06): not under test here.
+function closeTour() {}
+function maybeShowWelcomeTour() {}
 const rememberResume = stub('rememberResume'), openReauth = stub('openReauth');
 const describeLapse = stub('describeLapse'), adoptStepUp = stub('adoptStepUp');
 const noteSessionActivity = stub('activity'), renderAccountChip = stub('chip');
@@ -213,6 +216,9 @@ const watchPresence = stub('watch'), forgetHeldLive = stub('forgetHeld');
 const halfSession = () => false, adoptSessionFacts = stub('facts');
 const applyResume = stub('resume'), clearSessionBanners = stub('banners');
 const clearSessionSecrets = stub('secrets'), showCaseList = async () => {};
+// The walkthrough (2026-10-06): not under test here.
+function closeTour() {}
+function maybeShowWelcomeTour() {}
 const api = async () => ({ user_id: 'u' });
 const rememberResume = stub('rememberResume'), closePalette = stub('closePalette');
 const stopGraph = stub('stopGraph'), disconnectLive = stub('disconnectLive');
