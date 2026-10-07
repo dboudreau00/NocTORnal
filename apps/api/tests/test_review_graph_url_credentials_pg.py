@@ -492,6 +492,51 @@ def test_the_scrub_writes_audit_events_that_name_no_value(owner):
         pass
 
 
+def test_the_scrub_finds_a_credential_in_a_context_window_that_cut_its_link(owner):
+    """Upgrade gate, 2026-10-07, on an Alpha 7a estate: the extractor's context
+    window (45 characters either side) cut links before their scheme, and what
+    was left in the rationale was no URL to the text redaction, so a token in
+    a query, a fragment or a path parameter, and a `//user:pass@` authority,
+    survived the upgrade in the triage queue."""
+    from psycopg.types.json import Json
+    m = _migration("0137")
+    try:
+        with owner.transaction():
+            boss = s.user(owner, "RED", prefix=PREFIX)
+            case_id = s.case(owner, boss)
+            payload = {"node_type": "SELECTOR", "label": "https://plain.example/about",
+                       "classification": "AMBER",
+                       "attrs": {"selector_type": "URL",
+                                 "raw_value": "https://plain.example/about"}}
+            cut = {
+                "query": "URL, found at characters 1-9. Context: ....zip?token=tk111&v=2 plus...",
+                "fragment": "Context: ...example.org/room#access_token=fr222 and http://x.example/...",
+                "path": "Context: ...io/;jsessionid=PP333/x and more...",
+                "authority": "Context: ...//admin:au444@files.example.net/drop and https://site...",
+                "clean": "Context: ...example/p?id=42&v=2 and http://plain.example/about...",
+            }
+            ids = {k: owner.execute(
+                """INSERT INTO collect.proposal (case_id, kind, payload, origin,
+                       rationale, state)
+                   VALUES (%s, 'NODE', %s, 'paste_selector_regex/1', %s, 'PROPOSED')
+                   RETURNING id""", (case_id, Json(payload), r)).fetchone()[0]
+                for k, r in cut.items()}
+            done = m.scrub(owner)
+            assert done["proposals"] == 4, done
+            got = {k: owner.execute("SELECT rationale FROM collect.proposal WHERE id = %s",
+                                    (ids[k],)).fetchone()[0] for k in ids}
+            for secret in ("tk111", "fr222", "PP333", "au444"):
+                assert secret not in " ".join(got.values()), secret
+            assert "?token=REDACTED&v=2" in got["query"]
+            assert "#access_token=REDACTED and" in got["fragment"]
+            assert "//REDACTED@files.example.net/drop" in got["authority"]
+            assert got["clean"] == cut["clean"]
+            assert m.scrub(owner)["proposals"] == 0
+            raise _RollBack
+    except _RollBack:
+        pass
+
+
 def test_a_deployment_with_nothing_to_scrub_changes_nothing_and_says_nothing(owner):
     m = _migration("0137")
     try:
