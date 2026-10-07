@@ -138,10 +138,10 @@ or `require_step_up` in `http/deps.py`. The inputs come from `iam.*` via
 `PgAccessResolver`; the relationship-shaped part of the model (*you may
 read this because you are assigned to the case that owns it*) is the
 assignment leg, one join. No external authorisation engine is involved
-(see the last section). `docs/05` warned that hand-rolling scatters the
-logic across forty endpoints; the warning is honoured by having one
-function, one resolver, and a fail-closed `AccessResolutionError` for
-anything unresolvable.
+(see the last section). Scattering these checks across endpoints is how
+access-control bugs get shipped (`docs/05`), so there is one function, one
+resolver, and a fail-closed `AccessResolutionError` for anything
+unresolvable.
 
 **MinIO with object lock** for evidence. S3-compatible, self-hostable, and
 object lock gives real WORM semantics for chain of custody, COMPLIANCE
