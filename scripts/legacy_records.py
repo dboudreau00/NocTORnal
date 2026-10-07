@@ -38,7 +38,9 @@ from _env import load_env_local  # noqa: E402
 
 load_env_local()
 
-SECTIONS = ("undated", "underlabelled", "captures", "victim-captures",
+from noctornal_api.wording import count_of  # noqa: E402
+
+SECTIONS =("undated", "underlabelled", "captures", "victim-captures",
             "url-fragments")
 
 UNDATED_FOOTER = (
@@ -100,8 +102,9 @@ def utc(value: datetime | None) -> str:
     return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%MZ")
 
 
-def plural(n: int, one: str, many: str) -> str:
-    return f"{n} {one if n == 1 else many}"
+#: The one count-and-noun helper (wording.py), under the name this script
+#: has always called it by.
+plural = count_of
 
 
 def _labels(cls: str | None, keys) -> str:

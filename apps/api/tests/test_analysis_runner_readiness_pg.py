@@ -56,7 +56,7 @@ def _stale(conn) -> bool:
     depth, oldest, last_done = conn.execute(
         """SELECT count(*) FILTER (WHERE status = 'QUEUED'),
                   min(queued_at) FILTER (WHERE status = 'QUEUED'),
-                  max(finished_at) FILTER (WHERE status = 'DONE')
+                  max(finished_at)
              FROM lab.static_run""").fetchone()
     now = datetime.now(timezone.utc)
     stale = timedelta(minutes=readiness._TRIAGE_STALE_MINUTES)

@@ -100,13 +100,17 @@ def test_no_inline_style_and_no_style_from_script():
         'id="smp-hash-search"')[1][:2000]
 
 
-def test_the_handling_pane_says_what_runs_and_what_is_not_built():
+def test_the_handling_pane_says_what_runs_and_calls_nothing_unbuilt():
+    """The pane told analysts that archive expansion, screening and the
+    sandbox were "not built yet" below the bullets describing two of them;
+    all three ship (beta gate, 2026-10-07)."""
     html = _html()
     pane = html[html.index('id="smp-handling-pane"'):html.index('id="smp-rules-pane"')]
-    assert "not built" not in pane.split("Static triage, and the gaps")[1].split(
-        "Archive expansion")[0]
-    assert "Archive expansion, prohibited-content screening and sandbox" in pane
-    assert "access ledger" in pane
+    flat = " ".join(pane.split())
+    assert "not built" not in flat
+    assert "each member it stores becomes a sample of its own" in flat
+    assert "detonated only by the sandbox this deployment configured" in flat
+    assert "access ledger" in flat
 
 
 def test_the_css_uses_tokens_only_for_the_new_rules():

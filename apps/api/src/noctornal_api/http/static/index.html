@@ -4450,8 +4450,12 @@
                 an analyst proposes it and the case accepts it.
               </p>
               <p class="help">
-                Archive expansion, prohibited-content screening and sandbox
-                detonation are not built yet. What any check could not do is
+                An archive is expanded after its static triage, within
+                limits on depth, member count, size and ratio, and each
+                member it stores becomes a sample of its own, screened and
+                triaged like any other. Nothing here runs a sample: it is
+                detonated only by the sandbox this deployment configured,
+                if any. What any check could not do is
                 written onto the sample as a gap with a reason, because a
                 missing imphash reads as &ldquo;this sample has no
                 imports&rdquo; and a recorded gap says nobody looked.

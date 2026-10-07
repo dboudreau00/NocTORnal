@@ -242,3 +242,23 @@ def session_store() -> InMemorySessionStore:
 @pytest.fixture
 def new_uuid():
     return uuid4
+
+
+@pytest.fixture
+def invalid_names_fail_fast(monkeypatch):
+    """A name under `.invalid` fails to resolve at once, as RFC 6761 asks of
+    a resolver, instead of through the host's: on the development machine
+    that asked upstream and answered after 11 seconds, and a test that
+    "does not touch the network" sent a DNS query out (beta gate,
+    2026-10-07). Every other name resolves as before."""
+    import socket
+
+    real = socket.getaddrinfo
+
+    def getaddrinfo(host, *args, **kwargs):
+        name = host.decode() if isinstance(host, bytes) else str(host or "")
+        if name.rstrip(".").lower().endswith(".invalid"):
+            raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+        return real(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
