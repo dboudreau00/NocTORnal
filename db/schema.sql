@@ -1,7 +1,7 @@
 -- =====================================================================
 -- NocTORnal -- db/schema.sql
 --
--- GENERATED MIRROR of the schema at Alembic revision 0171.
+-- GENERATED MIRROR of the schema at Alembic revision 0173.
 -- Produced by scripts/dump_schema.py from
 --   pg_dump --schema-only --no-owner --no-privileges
 -- with session SET lines, version comments and pg_dump's per-run
@@ -26,7 +26,7 @@
 -- superseded, never overwritten; edges are signed and time-bounded;
 -- the ontology lives in reference tables, not enums.
 --
--- Alembic revision: 0171
+-- Alembic revision: 0173
 -- =====================================================================
 
 --
@@ -10413,6 +10413,12 @@ CREATE INDEX assertion_case_idx ON core.assertion USING btree (case_id);
 CREATE INDEX assertion_document_id_idx ON core.assertion USING btree (document_id);
 
 --
+-- Name: assertion_edge_any_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX assertion_edge_any_idx ON core.assertion USING btree (edge_id) WHERE (edge_id IS NOT NULL);
+
+--
 -- Name: assertion_edge_id_idx; Type: INDEX; Schema: core; Owner: -
 --
 
@@ -10435,6 +10441,18 @@ CREATE INDEX assertion_embedding_due ON core.assertion_embedding USING btree (sl
 --
 
 CREATE INDEX assertion_embedding_space_status ON core.assertion_embedding USING btree (space_id, status);
+
+--
+-- Name: assertion_evidence_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX assertion_evidence_idx ON core.assertion USING btree (evidence_id) WHERE (evidence_id IS NOT NULL);
+
+--
+-- Name: assertion_node_any_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX assertion_node_any_idx ON core.assertion USING btree (node_id) WHERE (node_id IS NOT NULL);
 
 --
 -- Name: assertion_node_id_idx; Type: INDEX; Schema: core; Owner: -
@@ -10561,6 +10579,12 @@ CREATE INDEX evidence_hostile_idx ON core.evidence USING btree (case_id) WHERE i
 --
 
 CREATE INDEX evidence_link_edge_id_idx ON core.evidence_link USING btree (edge_id);
+
+--
+-- Name: evidence_link_evidence_idx; Type: INDEX; Schema: core; Owner: -
+--
+
+CREATE INDEX evidence_link_evidence_idx ON core.evidence_link USING btree (evidence_id);
 
 --
 -- Name: evidence_link_node_id_idx; Type: INDEX; Schema: core; Owner: -

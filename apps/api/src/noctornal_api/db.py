@@ -57,8 +57,30 @@ def connect() -> psycopg.Connection:
     # Found 2026-09-01 when the dev stack was down and a read-only audit
     # hung for five minutes with no message. A connect that cannot complete
     # in ten seconds is not going to; say so.
-    return psycopg.connect(dsn(), autocommit=True,
-                           connect_timeout=connect_timeout_seconds())
+    url = dsn()
+    return psycopg.connect(url, autocommit=True,
+                           connect_timeout=connect_timeout_seconds(),
+                           options=session_options(url))
+
+
+#: Server settings every application connection is opened with (G62 load
+#: gate, 2026-10-07). JIT compiles a query's expressions once the planner's
+#: cost estimate passes `jit_above_cost`, and row security's policies inflate
+#: that estimate on every case read: on a 1,000,000-claim database the search,
+#: the triage queue and the graph view each spent 1.5 to 2.4 s compiling for
+#: 0.1 to 0.5 s of work. JIT never changes an answer, only how it is
+#: computed, and nothing this process asks Postgres is an analytical scan
+#: that would repay it (the graph maths runs in igraph).
+SESSION_OPTIONS = "-c jit=off"
+
+
+def session_options(conninfo: str) -> str:
+    """The `options` a connection to `conninfo` is opened with: whatever the
+    DSN already names, then SESSION_OPTIONS, so an operator's own settings
+    in DATABASE_URL are kept rather than replaced."""
+    from psycopg.conninfo import conninfo_to_dict
+    named = conninfo_to_dict(conninfo).get("options")
+    return f"{named} {SESSION_OPTIONS}" if named else SESSION_OPTIONS
 
 
 def connect_timeout_seconds() -> int:
@@ -323,7 +345,8 @@ def connect_system(purpose: SystemPurpose) -> psycopg.Connection:
     else:
         conn = psycopg.connect(
             target, autocommit=True, connect_timeout=connect_timeout_seconds(),
-            application_name=f"noctornal:system:{purpose.value}")
+            application_name=f"noctornal:system:{purpose.value}",
+            options=session_options(target))
     try:
         if _assume_role():
             conn.execute(f"SET ROLE {WORKER_ROLE}")
