@@ -83,31 +83,44 @@ links. There is nothing to store as a selector.
 This is worth handling explicitly rather than pretending otherwise:
 model it as a `CHANNEL` node with no selector, linked to identities only
 through observed conversation participation. Coverage against a SimpleX
-user is inherently poor, and the interface should say so rather than
-implying an absence of data means an absence of activity.
+user is inherently poor, and the platform's note (`comms.platform`) says so
+rather than implying an absence of data means an absence of activity.
 
 ## Onsite chat and forum private messaging
 
-You called this out specifically and it is under-served everywhere.
+Private messaging inside a forum or marketplace is under-served everywhere.
 
 **Systems:** XenForo Conversations, MyBB/phpBB PM, Discourse PM, Flarum,
 Invision, plus custom marketplace chat, escrow chat, vendor support
 widgets and ticket systems.
 
 **The provenance distinction that matters most.** A private message can
-reach you three ways, and they are not equivalent, legally, evidentially,
-or in reliability grading:
+reach you several ways, and they are not equivalent, legally, evidentially,
+or in reliability grading. Every conversation carries a `provenance_class`
+(NOT NULL), and a class other than the three that need none carries a
+written authority:
 
 | Provenance class | How | Reliability | Legal standing |
 |---|---|---|---|
-| `PARTY` | Our persona was a participant | Usually high, we saw it directly | Strongest. First-party |
-| `LEAK` | Forum database dump | Variable, dumps get salted and forged | Weak. Unlawfully obtained by someone; may be inadmissible |
-| `SEIZURE` | Law enforcement seizure, cooperating admin | High | Depends entirely on the authority |
-| `DISCLOSED` | A third party shared their own conversation | Medium: one-sided, self-serving | Usable, needs corroboration |
+| `PERSONA_PARTY` | Our persona was a participant (and is named) | Usually high, we saw it directly | Strongest. First-party |
+| `OPEN_GROUP` | Read in a semi-public room without joining | High for what it shows | Public, no authority needed |
+| `SEIZED_DEVICE` | Device seizure or extraction | High | Depends entirely on the authority |
+| `PLATFORM_DISCLOSURE` | The platform's, or a cooperating admin's, return to legal process | High | Depends entirely on the authority |
+| `THIRD_PARTY_REPORT` | A third party shared their own conversation | Medium: one-sided, self-serving | Usable, needs corroboration |
+| `UNKNOWN` | Not recorded | None | Cannot be relied on |
 
-Store this on every captured conversation. Do not let the four blur into
-a single "we have the PMs" state, because the answer to "how did you get
-this" differs enormously and will be asked.
+`SEIZED_DEVICE`, `PLATFORM_DISCLOSURE` and `THIRD_PARTY_REPORT` refuse to be
+recorded without a `legal_authority` (a CHECK). A forum database dump is
+not a class of its own: dumps get salted and forged and may be inadmissible,
+because someone obtained them unlawfully. Store the class on every captured
+conversation. Do not let them blur into a single "we have the PMs" state,
+because the answer to "how did you get this" differs enormously and will be
+asked.
+
+A conversation is recorded with `POST /cases/{id}/comms/conversations`
+whichever route produced it. A persona reading a forum's private messages is
+not built: the authenticated forum adapters read posts and member profiles
+(docs/04).
 
 **XenForo conversation specifics:** stable `conversation_id`, an explicit
 participant list (excellent graph data, a multi-party conversation is a
@@ -158,10 +171,10 @@ Requirements:
 wholesale. The same block under two handles means *either* one operator
 *or* one impersonating the other. Distinguish:
 
-- `CLAIMED_SELECTOR`, the identity published it
-- `CONFIRMED_SELECTOR`, corroborated by an independent channel: signed
-  message, forum verification thread, admin-confirmed vendor list, or
-  observed use
+- `CLAIMED`, the identity published it
+- `OBSERVED`, seen in use
+- `CONFIRMED`, corroborated by an independent channel: signed message, forum
+  verification thread, admin-confirmed vendor list
 
 Only `CONFIRMED` should carry weight in automatic identity resolution.
 `CLAIMED` is a lead.
@@ -193,8 +206,8 @@ The shipped tables are `comms.*`; see `db/schema.sql`.
 ## Collection posture
 
 Most of these are end-to-end encrypted with no server-side history. That
-constrains collection to four realistic routes, and the interface should
-be honest about which one produced each artefact:
+constrains collection to four realistic routes, and the provenance class
+records which one produced each artefact:
 
 1. **Our persona is a party**, a persona in the room or conversation
 2. **Semi-public rooms**, XMPP MUCs, Session communities, Matrix public
@@ -203,23 +216,28 @@ be honest about which one produced each artefact:
 4. **Legal process or seizure**, device extraction, provider return
 
 There is no fifth route. A platform that implies otherwise sets false
-expectations. Where coverage is impossible, say so in the UI, an actor
-with a Session ID and no captured messages should read as *unmonitored*,
-not *inactive*.
+expectations. Where coverage is impossible, say so: an actor with a Session
+ID and no captured messages is *unmonitored*, not *inactive*. The console
+does not derive that state; the platform note carries the warning.
 
 ## Open questions
 
-1. Do you need message-level capture, or is channel-set and metadata
-   enough for the MVP? Metadata-only is dramatically cheaper and covers
-   most analytic value.
-2. Device extraction ingest (Cellebrite/GrayKey/UFED reports), in scope?
-   It changes the evidence model substantially.
-3. Do you have a lawful route to any forum PM data, or is `PARTY` the
-   only provenance class you will ever populate?
+1. Message-level capture, or channel set and metadata only? Both are built.
+   Bodies are captured (Telegram polls, recorded conversations), and
+   minimisation (`comms.minimise`, docs/16 L4) drops the bodies and keeps the
+   metadata graph, which covers most analytic value.
+2. Device extraction ingest (Cellebrite/GrayKey/UFED reports): not built and
+   not decided. It changes the evidence model substantially.
+3. A lawful route to forum private messages: a determination for counsel
+   (docs/16 L3, L4). The software records which route produced a
+   conversation and refuses to leave the authority empty; it does not judge
+   it.
 4. Live monitoring of channels our personas sit in, or periodic export?
-   Live is far more useful and far more operationally risky.
+   Periodic: the collector polls at a five-minute resolution (docs/04), and
+   nothing is streamed live. Live is far more useful and far more
+   operationally risky.
 
-## PGP: detached signatures, a key registry, attribution and key lookups (2026-09-24)
+## PGP: detached signatures, a key registry, attribution and key lookups
 
 **Detached signatures (F10a).** A check is CLEARSIGNED (as before) or
 DETACHED: a signature file beside the data it signs. The data is best
@@ -236,20 +254,20 @@ are on the row.
 
 **A fingerprint copied from gpg (F37).** gpg prints a fingerprint as ten
 groups of four hex digits (sixteen for a v5 key) with a second space in the
-middle, and the parser used to cut a value at the first run of two spaces, so
-such a line kept twenty of its forty hex characters and could neither confirm a
-key nor attribute a signature. On a PGP fingerprint line the parser now keeps
-whole hex groups, whatever whitespace separates them, and only what follows the
-last group is cut as a comment. The change is narrow: it applies to a line a
-label resolves to PGP_FPR, or one with no recognised label whose shape is a
-fingerprint, to exactly ten or sixteen groups, and to no other kind of line. It
-changes the digest `block_fingerprint` for a block that carries such a line, so
-`parser_version` moved from `cb-1` to `cb-2`: a block parsed under cb-1 keeps
-its reading, and two blocks of one text under the two versions are not compared
-as copies of each other. Nothing re-reads a stored block (the same text
-submitted to the same case returns the first parse), so the blocks parsed
-before are found by `parser_version` and are corrected by parsing the text
-again in a case of its own.
+middle. On a PGP fingerprint line the parser keeps whole hex groups, whatever
+whitespace separates them, and cuts only what follows the last group as a
+comment; cutting at the first run of two spaces would keep twenty of the forty
+hex characters, and such a line could neither confirm a key nor attribute a
+signature. The rule is narrow: it applies to a line a label resolves to
+PGP_FPR, or one with no recognised label whose shape is a fingerprint, to
+exactly ten or sixteen groups, and to no other kind of line. It changes the
+digest `block_fingerprint` for a block that carries such a line, so
+`parser_version` is `cb-2`: a block parsed under `cb-1` keeps
+its reading, and two blocks of one text under the two versions are not
+compared as copies of each other. Nothing re-reads a stored block (the same
+text submitted to the same case returns the first parse), so the blocks
+parsed before are found by `parser_version` and are corrected by parsing the
+text again in a case of its own.
 
 **The key registry (F10b).** A vendor key is added to the case by paste or
 file with where it was obtained. It is filed at the floor of what it

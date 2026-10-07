@@ -22,14 +22,12 @@ All five, every time, in one function. Scattering these checks across
 endpoints is how access-control bugs get shipped.
 
 This is relationship-shaped authorisation, the shape Zanzibar-style
-engines exist for, and the 2026-07 sketch of this document said to use one
-rather than hand-roll it (decision 8: OpenFGA or SpiceDB, superseded, see below).
-What shipped is the hand-rolled version done the way that warning demands.
-ONE pure function, `evaluate(ctx) -> Decision` in
-`apps/api/src/noctornal_api/security/access.py`, runs all five checks with
-no short-circuit, so `failed_checks` names every reason a request failed.
-ONE resolver, `PgAccessResolver` in `stores.py`, reads the inputs from
-`iam.*`, `permission.requires_step_up`, `app_user.tlp_clearance` and
+engines exist for. No engine is used (decision 8, superseded): the gate is
+hand-rolled as ONE pure function, `evaluate(ctx) -> Decision` in
+`apps/api/src/noctornal_api/security/access.py`, which runs all five checks
+with no short-circuit, so `failed_checks` names every reason a request
+failed. ONE resolver, `PgAccessResolver` in `stores.py`, reads the inputs
+from `iam.*`, `permission.requires_step_up`, `app_user.tlp_clearance` and
 `.compartments`, `case_assignment` with its expiry, `role_permission`.
 Every case-scoped router depends on it through `require()`,
 `require_global()` or `require_step_up` in `http/deps.py`.
@@ -40,55 +38,17 @@ raises `AccessResolutionError`, which the HTTP layer turns into a 403:
 resolution fails closed, never 500. A failed assignment check answers 404,
 not 403, so a status code is not an existence oracle.
 
-### Why not the engine (recorded 2026-09-09)
+### Why not the engine
 
-OpenFGA (removed from the compose file on 2026-07-26 (R13), with NATS) had
-sat there for six weeks, provisioned and never called by a line of the API.
-The relationship the engine would have modelled (*assigned to the case
-that owns it*) is one row in `iam.case_assignment` and one leg of the
-gate, and TLP and compartments are ordinal and set comparisons that would
-have sat outside the engine as an application-side filter regardless. An
-engine earns its place when relationships nest (folders, teams,
-delegations); this model has one relationship, so an engine would have been
-a second source of truth for a single join. If nested relationships arrive,
-decision 8 is where to reopen the question. The model sketch is kept below
-for that day.
-
-### The 2026-07 OpenFGA model sketch (superseded: kept for history)
-
-```
-type user
-type role
-  relations
-    define assignee: [user]
-
-type case
-  relations
-    define owner: [user]
-    define deputy: [user]
-    define analyst: [user]
-    define reader: [user]
-    define can_read:   owner or deputy or analyst or reader
-    define can_write:  owner or deputy or analyst
-    define can_grant:  owner or deputy
-    define can_delete: owner
-
-type node
-  relations
-    define parent_case: [case]
-    define can_read:  can_read from parent_case
-    define can_write: can_write from parent_case
-
-type evidence
-  relations
-    define parent_case: [case]
-    define can_read:   can_read from parent_case
-    define can_export: can_write from parent_case
-```
-
-TLP and compartments would have layered on top as an application-side
-filter, because they are ordinal/set comparisons rather than relationships,
-which is how the shipped gate treats them too (legs 3 and 4 above).
+The relationship an engine would model (*assigned to the case that owns
+it*) is one row in `iam.case_assignment` and one leg of the gate, and TLP
+and compartments are ordinal and set comparisons that would sit outside an
+engine as an application-side filter regardless. An engine earns its place
+when relationships nest (folders, teams, delegations); this model has one
+relationship, so an engine would be a second source of truth for a single
+join. If nested relationships arrive, decision 8 is where to reopen the
+question. OpenFGA and NATS were removed from the compose file (R13), and no
+engine is in the tree.
 
 ## Compartments
 
@@ -101,42 +61,38 @@ or retires a key under Administration, Compartments
 column at once and changes no access decision; a key still carried cannot
 be retired, and the refusal counts what carries it.
 
-### Collected documents carry compartments (2026-09-24)
+### Collected documents carry compartments
 
-`collect.document` hangs off a source, not a case, and until 2026-09-24 a
-document was listed, searched and cited by its classification alone, so a
-capture into a compartmented case was refused outright. A document now
-carries `compartments` (0070): a capture copies its case's, and a
-collected document carries what its collection path assigns (none, until a
-source carries compartments). **Every read of a document checks both
-labels and the compartments**: the document's and its source's
-classification within the reader's clearance, and `d.compartments <@` the
-reader's own set. That holds on the collection list, document search and
-the combined search, watch hits and their verbs, document triage, the
-inspector's claim card, and every Triage read (the queue, its counts, the
-source view and the waiting badges read `proposals._READABLE`, which
-checks the document's and the contact block's compartments together). A
-proposal raised from a compartmented document is read only by holders,
-and an accepted element carries the material's compartments beyond its
-case's. A capture into a case carrying a compartment an ingest feed uses
-for third-party personal data stays refused (docs/16 L2, decision 52: a
-captured document is in the free-text index). test_document_reads_check_compartments.py
-holds every reader in the code to the predicate; captures made before
-2026-09-24 were labelled from the cases that cite them (0071), and the
-readiness row `captured_documents_compartmented` counts any that no lock
-fits.
+`collect.document` hangs off a source, not a case, so it carries its own
+`compartments` (0070): a capture copies its case's, and a collected
+document carries what its collection path assigns (none, until a source
+carries compartments). **Every read of a document checks both labels and
+the compartments**: the document's and its source's classification within
+the reader's clearance, and `d.compartments <@` the reader's own set. That
+holds on the collection list, document search and the combined search,
+watch hits and their verbs, document triage, the inspector's claim card,
+and every Triage read (the queue, its counts, the source view and the
+waiting badges read `proposals._READABLE`, which checks the document's and
+the contact block's compartments together). A proposal raised from a
+compartmented document is read only by holders, and an accepted element
+carries the material's compartments beyond its case's. A capture into a
+case carrying a compartment an ingest feed uses for third-party personal
+data is refused (docs/16 L2, decision 52: a captured document is in the
+free-text index). test_document_reads_check_compartments.py holds every
+reader in the code to the predicate. Captures made before 0070 were
+labelled from the cases that cite them (0071), and the readiness row
+`captured_documents_compartmented` counts any that no lock fits.
 
 ### Binding a compartment column
 
 0059's list of bound columns was a released constant, so no later
-migration could extend the registry's guard; three later features would
-each have restated `iam.compartment_in_use` with their own column added,
-and whichever restatement ran last would have dropped the others'. Since
-0069 **the triggers are the registry**: `iam.compartment_bindings()` reads
-every binding from the catalog, and `iam.compartment_in_use` asks each of
-them and refuses while any cannot be read. The contract, for every
-migration that adds a column storing compartment keys (docs/00
-decision 71, 2026-09-24):
+migration could extend the registry's guard without restating
+`iam.compartment_in_use`, and whichever restatement ran last would have
+dropped the others' columns. Since 0069 **the triggers are the registry**:
+`iam.compartment_bindings()` reads every binding from the catalog, and
+`iam.compartment_in_use` asks each of them and refuses while any cannot be
+read. The contract, for every migration that adds a column storing
+compartment keys (docs/00 decision 71):
 
 1. A column that stores compartment keys, whatever its name and INCLUDING
    a copy derived from another bound column (a copy deleted whenever its
@@ -209,12 +165,12 @@ Seeded in Alembic revisions `0017` (the roles) and `0021` (the matrix), and
 extended by later revisions as each surface got a permission. The console
 shows each role by its name; permission checks, the API and these documents
 use the key, and a rename moves only the name (migration 0062 renamed
-`CASE_OWNER` to Lead investigator on 2026-09-22 and moved no check).
+`CASE_OWNER` to Lead investigator and moved no check).
 
 | Key | Shown as | Holds, among others | Deliberately does not hold |
 |---|---|---|---|
 | `CASE_OWNER` | **Lead investigator** | Full control of their cases: `case.grant`, `case.close`, `case.delete`, `evidence.export`, `evidence.purge`, `retention.manage`, `proposal.review`, `break_glass.invoke`, `victim_pii.reveal`, `sample.preserved.retrieve`, `lookup.request`, `lookup.authorise` (step-up: signs off a colleague's lookup to a vendor or the public), `comms.key.lookup` and `comms.key.lookup.approve` (step-up: ask for, or approve and send, a Web Key Directory lookup) | `victim_pii.authorise`, `sample.preserved.authorise`, `break_glass.review`: the other half of every two-person control below |
-| `SECURITY_OFFICER` | Security officer | `audit.read`, `break_glass.review`, `victim_pii.authorise`, `sample.preserved.authorise`, `dual_control.countersign`, `egress.log.read`, `collection.authority.confirm`, `sample.yara.activate`, `sample.screening.manage`, `sample.screening.review` (each step-up) | **Any case content**, and every permission it authorises or reviews |
+| `SECURITY_OFFICER` | Security officer | `audit.read`, `break_glass.review`, `victim_pii.authorise`, `sample.preserved.authorise`, `dual_control.countersign`, `egress.log.read`, `collection.authority.confirm`, `sample.yara.activate`, `sample.screening.manage`, `sample.screening.review` (step-up on all but `audit.read` and `egress.log.read`) | **Any case content**, and every permission it authorises or reviews |
 | `SYS_ADMIN` | System administrator | `user.manage`, `role.manage`, `integration.manage` (SMTP, Jira, webhooks and outbound lookup providers), `ingest.manage`, `retention.manage`, `retention.purge`, `break_glass.invoke`, `dual_control.manage`, `egress.manage`, `egress.log.read`, `embedding.manage` | Case content by default |
 | `ANALYST` | Analyst | Graph, assertion and evidence work on assigned cases, `analytics.run`, `report.generate`, `sample.read`, `sample.submit`, `lookup.request` | Grants, export, purge, break-glass, any reveal, signing off a lookup |
 | `REVIEWER` | Reviewer | `proposal.review`, `graph.merge`, `graph.unmerge`, `case.read`, `comms.key.lookup.approve` | Originating graph content |
@@ -230,9 +186,14 @@ The two worth calling out:
 **SECURITY_OFFICER** reads the audit trail and reviews break-glass events
 but has **no case content access**. Separation of duties: the person
 watching the watchers must not be an analyst, or the oversight is theatre.
-The owner confirmed the split on 2026-09-22 ("keep the split"): the Lead
-investigator controls their case, and the Security Officer stays the
-independent overseer.
+The owner confirmed the split ("keep the split"): the Lead investigator
+controls their case, and the Security Officer stays the independent
+overseer.
+
+**LIAISON** is for external sharing. Time-boxed by default (`expires_at`
+required), capped at a TLP level, export disabled, single case. Most
+platforms bolt external sharing on later and it becomes the leak path;
+model it from the start.
 
 ### Two-person controls, and the guard that keeps them two
 
@@ -244,7 +205,7 @@ different roles:
 | Reveal a masked victim credential | `victim_pii.authorise` (Security officer) | `victim_pii.reveal` (Lead investigator) | docs/17 F16 |
 | Emergency access | `break_glass.invoke` (Lead investigator, System administrator) | `break_glass.review` (Security officer) | docs/17 F14 |
 | Retrieve a preserved rejected sample | `sample.preserved.authorise` (Security officer) | `sample.preserved.retrieve` (Lead investigator) | docs/17 F2 |
-| Change which operations need two people | `dual_control.manage` (System administrator) | `dual_control.countersign` (Security officer who is not also an administrator) | F9, 2026-09-24 |
+| Change which operations need two people | `dual_control.manage` (System administrator) | `dual_control.countersign` (Security officer who is not also an administrator) | F9 |
 
 The case gate reads the permission off the caller's ONE role on the case,
 so even a person who holds both roles globally (the first-run operator
@@ -252,23 +213,22 @@ does) cannot perform both halves on one case: on their own case they are
 the Lead investigator, and to authorise they would have to be assigned to it
 as `SECURITY_OFFICER` instead, which confers no case content. The services
 refuse `granted_to = granted_by` as well, and `ingest.pii_authorisation`
-carries that as a CHECK. Authorisations a Lead investigator granted while
-`CASE_OWNER` still held `victim_pii.authorise` were revoked by migration
-0062 itself, each with a `PII_AUTHORISATION_REVOKED` audit event, because
-the reveal lookup matches an authorisation on its grantee and never on who
-granted it (docs/17 F16).
+carries that as a CHECK. Migration 0062 revoked every authorisation a Lead
+investigator had granted while `CASE_OWNER` held `victim_pii.authorise`,
+each with a `PII_AUTHORISATION_REVOKED` audit event, because the reveal
+lookup matches an authorisation on its grantee and never on who granted it
+(docs/17 F16).
 
 Emergency access is the exception to "one role per case": both
 `break_glass.invoke` and `break_glass.review` are GLOBAL verbs, so the
 first-run operator, who holds SYS_ADMIN, SECURITY_OFFICER and CASE_OWNER,
 holds both halves at once. What keeps it two people is the service, in two
 places. `review()` refuses the invoker's own grant, and `invoke()` refuses
-unless an active SECURITY_OFFICER OTHER THAN THE INVOKER exists. Until the
-final review (C6, 2026-09-23) the second check counted the invoker too, so
-a sole officer could create a grant nobody could ever review, and its alert
-reached nobody, because a notification never tells someone what they just
-did. The 409 now says "the only active SECURITY_OFFICER is you". Readiness
-still asks only for one active officer, which is true for everybody but
+unless an active SECURITY_OFFICER OTHER THAN THE INVOKER exists (C6): a sole
+officer would otherwise create a grant nobody could ever review, and its
+alert would reach nobody, because a notification never tells someone what
+they just did. The 409 says "the only active SECURITY_OFFICER is you".
+Readiness asks only for one active officer, which is true for everybody but
 that officer: they need a second one before they can invoke.
 
 What no request-time check can see is a ROLE DEFINITION that holds both
@@ -280,14 +240,14 @@ one account can hold two roles (the first-run operator holds both halves
 of every pair above), so where the halves are global verbs the service
 keeps them in two people as well. For a change to the two-person policy
 itself, an account holding `dual_control.manage` through any role never
-countersigns, whoever proposed (F9, 2026-09-24).
+countersigns, whoever proposed (F9).
 
 ### Which operations need two people, and how that changes
 
-Administration, Two-person controls shows the whole policy (F9,
-2026-09-24): each operation in `approvals.OPERATIONS` with who asks, who
-signs second, how long a signature lasts, whether it is raised in a case or
-for the deployment, and whether anything enforces it yet; every pair in
+Administration, Two-person controls shows the whole policy (F9): each
+operation in `approvals.OPERATIONS` with who asks, who signs second, how
+long a signature lasts, whether it is raised in a case or for the
+deployment, and whether anything enforces it yet; every pair in
 `iam.separated_duty`; the changes waiting; and the history. A Security
 officer who administers nothing reads the same section under Oversight,
 Two-person changes.
@@ -369,23 +329,22 @@ Two-person changes.
   A pure administrator sees no number, and no deployment-wide total is
   returned anywhere.
 
-**The case switch takes two people to turn off** (F9b, 2026-09-24). Under
-`PER_CASE`, a Lead investigator turns a case's second signature on merges
-on with one signature, under Triage, Dual control. Turning it off takes a
-second person holding `case.update` on the case (a deputy or a second Lead
-investigator): a `case.policy.relax` request raised against the switch as
-it stands, approved by them, and spent by the one who asked. The database
-refuses the change without one consumed in the same transaction, and the
-switch carries an epoch that moves with every change, so an approval
-cannot be kept across an off and on again. Under `ALWAYS` a case cannot
-turn it off at all.
+**The case switch takes two people to turn off** (F9b). Under `PER_CASE`, a
+Lead investigator turns a case's second signature on merges on with one
+signature, under Triage, Dual control. Turning it off takes a second person
+holding `case.update` on the case (a deputy or a second Lead investigator):
+a `case.policy.relax` request raised against the switch as it stands,
+approved by them, and spent by the one who asked. The database refuses the
+change without one consumed in the same transaction, and the switch carries
+an epoch that moves with every change, so an approval cannot be kept across
+an off and on again. Under `ALWAYS` a case cannot turn it off at all.
 
-**The second person is seasoned** (F39, settled by the owner 2026-10-02).
-An account holding SYS_ADMIN and CASE_OWNER could otherwise create a second
-Lead investigator, assign it to the case and approve its own relax within
-the minute. So the second person must have held `case.update` on the case
-for at least `NOCTORNAL_RELAX_SEASONING_DAYS` days (7 unless declared, and
-0 turns the rule off; a value that is not a whole number from 0 to 365 is
+**The second person is seasoned** (F39, settled by the owner). An account
+holding SYS_ADMIN and CASE_OWNER could otherwise create a second Lead
+investigator, assign it to the case and approve its own relax within the
+minute. So the second person must have held `case.update` on the case for
+at least `NOCTORNAL_RELAX_SEASONING_DAYS` days (7 unless declared, and 0
+turns the rule off; a value that is not a whole number from 0 to 365 is
 held to 7 and refused at a production boot). The age is the assignment's
 `granted_at`, compared with the database's clock in one statement, so the
 request never supplies the time that counts; a re-grant restarts it, and
@@ -403,12 +362,7 @@ colleague who is already seasoned and signs in as them: the deployment-wide
 policy's seven-day countersigner rule covers that for policy changes, and
 this switch has no equivalent.
 
-**LIAISON** is for external sharing. Time-boxed by default (`expires_at`
-required), capped at a TLP level, export disabled, single case. Most
-platforms bolt external sharing on later and it becomes the leak path;
-model it from the start.
-
-### Telegram collection (roadmap F5.2 and F5.3, 2026-09-24)
+### Telegram collection (F5.2, F5.3)
 
 No new permission. Every route under `/collection/telegram` answers a
 source the caller may not see (its label above the caller's clearance)
@@ -457,23 +411,27 @@ rows make (docs/16 D2).
 
 **MFA is mandatory.** Not optional, not admin-only.
 
-- **WebAuthn / passkeys** preferred, phishing-resistant, and this user
-  population is a phishing target
-- **TOTP (RFC 6238)** as the floor: 30 s step, SHA-1 for authenticator
+- **WebAuthn / passkeys** are the preferred second factor in the design
+  (phishing-resistant, and this user population is a phishing target) and
+  are **not built**: TOTP is the floor and the only second factor, a
+  deliberate absence (docs/17; SECURITY.md says reporting it is not a
+  finding). `iam.webauthn_credential` exists from 0012 and nothing writes
+  it.
+- **TOTP (RFC 6238)**: 30 s step, SHA-1 for authenticator
   compatibility, ±1 window drift, secret encrypted at rest with the same
   envelope scheme as persona credentials
 - Replay protection: store the last accepted TOTP counter per user and
   reject reuse. Frequently omitted, trivially exploitable.
 - Recovery codes: 10, single-use, Argon2id-hashed, regenerated as a set
-- Passwords: Argon2id (t=3, m=64 MiB, p=4), breach-list checked at set
-  time, no rotation policy, no composition rules. A chosen password is at
-  least 12 characters, is not the one it replaces and is not the account's
-  own email address; length is the only strength rule. (No breach list is
-  bundled yet, so that check is not made.)
-- Password reset is administrator issued, with no email path (decided
-  2026-09-23). An administrator resets a colleague's password from Admin,
-  Accounts (`POST /admin/users/{id}/password`: `user.manage`, step-up,
-  audited as `PASSWORD_RESET`, refused for oneself); `scripts/bootstrap.py
+- Passwords: Argon2id (t=3, m=64 MiB, p=4), no rotation policy, no
+  composition rules. A chosen password is at least 12 characters, is not
+  the one it replaces and is not the account's own email address; length is
+  the only strength rule. No breach list is bundled, so a breach-list check
+  at set time is not made.
+- Password reset is administrator issued, with no email path. An
+  administrator resets a colleague's password from Admin, Accounts
+  (`POST /admin/users/{id}/password`: `user.manage`, step-up, audited as
+  `PASSWORD_RESET`, refused for oneself); `scripts/bootstrap.py
   reset-password` does the same for the last administrator. The reset
   generates a one-time password, shows it once, revokes every live session,
   clears the lockout and sets `must_change_password` (0066). Sign-in with
@@ -505,8 +463,8 @@ walked-away laptop becoming an exfiltration event.
 purge, role definition changes, persona credential reveal. Two distinct
 humans, enforced by constraint. Which of them is enforced today, and how
 the list changes, is "Which operations need two people" above; the
-`iam.permission.requires_dual_control` column that once claimed this was
-never read by anything and was retired (F9c, 2026-09-24).
+`iam.permission.requires_dual_control` column, which claimed this and was
+never read by anything, is retired (F9c).
 
 **Break-glass** exists because refusing emergency access gets the platform
 bypassed entirely. Make it available, loud and short: mandatory
@@ -514,15 +472,14 @@ justification, hard expiry, immediate alert to the security officer, and
 mandatory post-hoc review. The access is granted; the visibility is what
 makes it safe.
 
-How that is held in `break_glass.py` and `stores.py` (final review,
-2026-09-23):
+How that is held in `break_glass.py` and `stores.py`:
 
 - **Post-hoc means after.** A grant that is still live cannot be reviewed
   (409: end it now, or wait for it to expire). The officer's queue lists
-  unreviewed grants only and End it now sits on those cards, so a verdict
-  on a live grant hid it from every officer while the analyst kept the
-  raised clearance, and every later access was counted against a grant
-  nobody would open again.
+  unreviewed grants only and End it now sits on those cards, because a
+  verdict on a live grant would hide it from every officer while the
+  analyst kept the raised clearance, and every later access would be
+  counted against a grant nobody would open again.
 - **A use is a request the grant let through.** `PgAccessResolver.resolve`
   counts one when the gate ALLOWS the request and the object's label sits
   above the invoker's own clearance and within the grant's. Refused
@@ -544,8 +501,6 @@ How that is held in `break_glass.py` and `stores.py` (final review,
   accepted onto an entity) is counted only by whichever gate needed the
   grant first: `deps.authorize_object(..., after_case_gate=True)` passes
   `count_use` through and counts only when the case's own gate did not.
-  Until 2026-09-23 those requests counted twice
-  (sec-breakglass-double-count).
 - **A case grant raises that case's content, not the deployment's.**
   Collected documents and sources belong to no case, so the names an
   assertion carries for them are filtered at the invoker's case-less
@@ -554,78 +509,124 @@ How that is held in `break_glass.py` and `stores.py` (final review,
 ## Sessions
 
 - Server-side sessions, opaque tokens, hash stored not the token
-- `HttpOnly; Secure; SameSite=Strict`, `__Host-` prefix
+- `HttpOnly; Secure; SameSite=Strict`, `__Host-` prefix (`__Host-session`)
 - Absolute expiry 12 h, idle expiry 30 min, both enforced server-side
-- Bind to a hashed IP/UA fingerprint; on mismatch require re-auth rather
-  than silently killing the session
-- Global revocation for a user; visible active-session list with kill
-  buttons
+- Each session records the address and User-Agent it was minted with
+  (0058). A presentation that does not match is refused under
+  `NOCTORNAL_SESSION_STRICT_BINDING`, which a production start requires and
+  development leaves off: the answer is the same generic 401 as any invalid
+  session, the session is refused and not revoked (so a holder of a stolen
+  token cannot sign the victim out on demand), and the audit row names
+  which binding failed. A session with no recorded address, such as one
+  minted by `scripts/bootstrap.py session`, is refused under strict
+  binding: "cannot verify" is not "verified". The HTTP check and the
+  websocket handshake run the same check in the same order, and the idle
+  window slides only after it.
+- Global revocation for a user: a password reset or change, and
+  deactivation, revoke every live session. There is no active-session list
+  in the console.
 
 ## Hardening checklist
 
 **Transport and headers**
-- TLS 1.3 only, HSTS with preload
-- CSP with per-request nonces, `strict-dynamic`, no `unsafe-inline`
-- `frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`
-- `Referrer-Policy: no-referrer`, restrictive `Permissions-Policy`
-- CSRF: double-submit token plus `SameSite=Strict`
+- TLS 1.3 only: Caddy, the production terminator, speaks nothing older, so
+  a client that cannot speak TLS 1.3 cannot reach the console. It sends
+  HSTS for a year with subdomains and without `preload`, which cannot be
+  taken back and is the operator's to choose. The application sends no
+  HSTS itself.
+- CSP: the API sends `default-src 'none'; frame-ancestors 'none'`; the
+  console is served under `default-src 'self'`, `script-src 'self'`,
+  `style-src 'self'`, `img-src 'self' data:`, `connect-src 'self'` (plus the
+  sample origin when one is configured), `form-action 'none'`,
+  `base-uri 'none'` and `frame-ancestors 'none'`. There is no `unsafe-inline`
+  and no nonce: the console ships separate `.css` and `.js` files, so
+  nothing inline runs.
+- Every response carries `X-Content-Type-Options: nosniff`,
+  `Referrer-Policy: no-referrer`, `Cache-Control: no-store` and
+  `Permissions-Policy: geolocation=(), camera=(), microphone=()`.
+- CSRF: double-submit token (the `__Host-csrf` cookie and the
+  `X-CSRF-Token` header) plus `SameSite=Strict`, required for a
+  cookie-derived credential.
 
 **Application**
 - Parameterised queries only; no string-built SQL anywhere
-- Postgres row-level security as a second line behind application authz
+- Postgres row-level security as a second line behind application authz:
+  enabled, not forced, on every case-scoped table (`rls_registry.py` lists
+  each table as under a policy or exempt with the reason, and none is
+  deferred). The schema owner is not bound, so a production start refuses a
+  request role that is the owner.
 - Per-user and per-endpoint rate limits; hard limits on export and search
-- Uploads: content-type sniffing, size caps, extension allowlist, served
-  from a separate origin with `Content-Disposition: attachment`
-- SSRF protection on any user-supplied URL (watch targets are exactly this)
-- Structured logging with a field-level redaction allowlist; assume logs
-  are lower-trust than the database
+  (`ratelimit.py`, `http/limits.py`): a blanket per-credential ceiling on
+  every request, and a named limit per cost-bearing class (sign-in,
+  analytics, export, capture, merge, search). The class limits fail closed
+  when Redis is down; the blanket ceiling fails open and says so in the log,
+  because denying it would turn a Redis restart into a total outage.
+- Uploads: a body ceiling on every route before anything reads the body
+  (`http/body_ceiling.py`), a declared cap per upload kind, exhibits stored
+  as opaque bytes and served as attachments with `nosniff`. There is no
+  content-type sniffing or extension allowlist on exhibits. Samples are
+  served from a separate origin (invariant 10, docs/11).
+- SSRF protection on any user-supplied URL (watch targets are exactly this):
+  one client, `pinned_http.fetch_response`, which connects only to the
+  address it checked (docs/20).
+- Logs are lower-trust than the database. A validation error is built from
+  location and message only, never the submitted value; adapter errors go
+  through `redact()` before storage; Caddy's log drops `X-Csrf-Token` and
+  `X-Setup-Token`. There is no field-level redaction allowlist layer.
 
 **Data**
-- Postgres TDE or encrypted volumes at rest
+- Encrypted volumes at rest are the operator's: the product does not
+  encrypt the database or object-store volumes.
 - Field-level envelope encryption for persona credentials, TOTP secrets,
-  egress endpoints, the Jira credential and lookup provider keys, shipped
+  egress endpoints, the Jira credential and lookup provider keys
   (`security/envelope.py`, AES-256-GCM under `NOCTORNAL_TOTP_KEK`; the
   sealed columns are listed once, in `security/sealed.py`)
-- **Lookup provider keys (2026-09-24, roadmap F15):** `ProviderVault` has
-  PersonaVault's shape. It stores, clears and uses, audits
-  PROVIDER_SECRET_USED before a key is opened, yields it inside
-  `secret_in_scope` so every message is redacted, and has no method that
-  returns a key. A key is bound to the origin and route it was entered
-  with, and changing either destroys it. The same host-compromise caveat
-  as persona credentials applies: a second class of secret in the same
-  blast radius
-- **Persona credentials, invariant 7 as it actually holds (reworded
-  2026-09-09):** decrypted only inside `PersonaVault.use()`, which yields
-  the plaintext to one block, drops it and audits the use; no
-  `get_secret()`, no plaintext in a response, adapter errors redacted
-  before storage. Since 2026-10-02 the vault opens only with
+- **Lookup provider keys (F15):** `ProviderVault` has PersonaVault's shape.
+  It stores, clears and uses, audits PROVIDER_SECRET_USED before a key is
+  opened, yields it inside `secret_in_scope` so every message is redacted,
+  and has no method that returns a key. A key is bound to the origin and
+  route it was entered with, and changing either destroys it. The same
+  host-compromise caveat as persona credentials applies: a second class of
+  secret in the same blast radius
+- **Persona credentials, invariant 7 as it holds:** decrypted only inside
+  `PersonaVault.use()`, which yields the plaintext to one block, drops it
+  and audits the use; no `get_secret()`, no plaintext in a response,
+  adapter errors redacted before storage. The vault opens only with
   `NOCTORNAL_PERSONA_KEK`, a key of its own that in production only the
   collector service holds (`scripts/collector.py`); the API process holds
   no persona key and queues every persona act (`persona_acts.py`), so a
-  compromised API host is no longer a compromised vault, while a
-  compromised collector host still is. Until then the vault ran inside the
-  API process and this was a guarantee about the shape of the code alone.
-- Key rotation runbook with re-wrap, not re-encrypt, **shipped
-  2026-09-11**: the envelope selects the key by each blob's recorded
-  `key_id`, retired keys stay in `NOCTORNAL_TOTP_KEK_RETIRED` until
-  `scripts/rewrap_secrets.py --apply` has moved every row under the
-  active key, and the readiness check `kek_ring_opens_stored_secrets`
-  says when that is (the runbook is in `security/envelope.py`)
-- Backups encrypted, restore tested quarterly, backup access separately
-  permissioned
+  compromised API host is not a compromised vault, while a compromised
+  collector host is. In development one process runs both, and the
+  guarantee is about the shape of the code.
+- Key rotation re-wraps, it does not re-encrypt: the envelope selects the
+  key by each blob's recorded `key_id`, retired keys stay in
+  `NOCTORNAL_TOTP_KEK_RETIRED` until `scripts/rewrap_secrets.py --apply` has
+  moved every row under the active key, and the readiness check
+  `kek_ring_opens_stored_secrets` says when that is (the runbook is in
+  `security/envelope.py`)
+- Backups are the operator's: encrypt them, test the restore, and keep
+  access to them separately permissioned. `infra/production/README.md`
+  gives the commands (the dump is encrypted with `age` in the pipe) and
+  says plainly that nothing runs them or verifies a restore.
 
 **Network**
-- Collectors in their own segment with egress-only rules, **not yet**:
-  today the collectors are the API process (above). This line describes
-  the segment a split-out collector would get, not one that exists
-- Database reachable only from the API tier
-- Admin surfaces behind a separate ingress with source restrictions
-- Egress allowlist from the core zone (SMTP relay, Jira, nothing else)
+- Collectors have no network segment of their own. The collector service
+  shares the internal `noctornal` network with the API and the cron loop,
+  and like them reaches the internet only through the egress proxy. The
+  boundary is the process and the persona key, not a network zone (docs/02).
+- Postgres publishes no port in production and sits on the internal
+  network, reachable from the application processes in the compose file.
+- Admin surfaces are not behind a separate ingress: the console, the API
+  and the administration pane share one hostname. The sample origin has
+  its own. Restricting source addresses is the operator's, at Caddy or the
+  host firewall.
+- Egress leaves only through the egress proxy (docs/20), from an internal
+  network with no route out of its own.
 - Outbound lookups leave only by their own integration route
   (`lookup-<key>`, docs/00 decision 68), an administrator's step-up, audited
   allowlist entry, and only while the host switch
   `NOCTORNAL_OUTBOUND_LOOKUPS` is on; SMTP, the webhook and Jira leave by
-  the routes `smtp`, `webhook` and `jira` the same way
+  the routes `smtp`, `webhook` and `jira` the same way (docs/07, docs/20)
 
 ## Audit
 
@@ -633,43 +634,43 @@ How that is held in `break_glass.py` and `stores.py` (final review,
 previous row's hash, so deletion or modification of history is detectable.
 `REVOKE UPDATE, DELETE` from every role including the application user.
 
-Since Alembic 0168 (F51, 2026-10-02) the log is under row-level security.
-A request reads a row in a case it may read, a case-less row its user
-wrote, every row under a global `audit.read` (the Security Officer's
-search), or a case-less ingest row under a global `ingest.manage` (the
-operator's quarantine queue), and appends any row, whatever case it names:
-the log is append-only and every writer appends, including one that may read
-none of it. What a request may NAME on a row is not the policy's to say. A
-trigger pins it (0150): an actor must be the user the connection is bound to,
-or the holder of a ticket it spent; another user is refused; a claim from a
-connection bound to nobody is kept in `detail` as `unverified_actor_id` with no
-actor. So a request cannot write history in another user's name, and an event
-about a user the connection is not bound to (a session refused before the
-binding, a sign-out whose session has just ended) is written on a system
-connection, or on a side connection bound to the caller's own session, or kept
-as a claim, so the attribution check does not cost the row. The chain trigger
-(0149) and the countersigning rule (0166) read the whole log as the definer, so
-an append chains to the true tail whoever makes it, and the chain and custody
+The log is under row-level security (0168, F51). A request reads a row in a
+case it may read, a case-less row its user wrote, every row under a global
+`audit.read` (the Security Officer's search), or a case-less ingest row
+under a global `ingest.manage` (the operator's quarantine queue), and
+appends any row, whatever case it names: the log is append-only and every
+writer appends, including one that may read none of it. What a request may
+NAME on a row is not the policy's to say. A trigger pins it (0150): an actor
+must be the user the connection is bound to, or the holder of a ticket it
+spent; another user is refused; a claim from a connection bound to nobody is
+kept in `detail` as `unverified_actor_id` with no actor. So a request cannot
+write history in another user's name, and an event about a user the
+connection is not bound to (a session refused before the binding, a
+sign-out whose session has just ended) is written on a system connection, or
+on a side connection bound to the caller's own session, or kept as a claim,
+so the attribution check does not cost the row. The chain trigger (0149) and
+the countersigning rule (0166) read the whole log as the definer, so an
+append chains to the true tail whoever makes it, and the chain and custody
 verification walk every row as the AUDIT_VERIFY system purpose.
 
-Since Alembic 0149 (2026-10-03) the chain trigger takes its lock first, then
-draws the sequence, reads the clock and reads the tail, so concurrent writers
-form one chain (before it they forked it in ordinary traffic), and the same
-holds for the custody ledger. The time of a request's row is the database
-server's clock at the append, read inside the lock: never the caller's, and
-never the start of a transaction a request holds open (`now()` is that start,
-and a request-role transaction held open stamped its row in the past by its
-own age). The owner and the system role keep the time they supply. Time
-order is therefore chain order, unless the server's own clock steps back; the
-verifier orders by `seq` and does not read time as evidence. The tail read is
-exact only where each statement takes a new snapshot, so the trigger refuses
-an append from a transaction that is not READ COMMITTED (REPEATABLE READ and
-SERIALIZABLE, which a request may choose for itself, would chain off a stale
-tail and fork the log). A fork whose rows were all written since 0149 makes
-`GET /audit/verify` answer not intact; forks with a row from before it are
-listed and not counted. Since 0169 the two ledger sequences are the triggers'
-alone: the runtime roles hold no privilege on them, because
-`SELECT last_value` read the size of a log they may read none of.
+The chain trigger (0149) takes its lock first, then draws the sequence,
+reads the clock and reads the tail, so concurrent writers form one chain,
+and the same holds for the custody ledger. The time of a request's row is
+the database server's clock at the append, read inside the lock: never the
+caller's, and never the start of a transaction a request holds open
+(`now()` is that start, so a request-role transaction held open would stamp
+its row in the past by its own age). The owner and the system role keep the
+time they supply. Time order is therefore chain order, unless the server's
+own clock steps back; the verifier orders by `seq` and does not read time as
+evidence. The tail read is exact only where each statement takes a new
+snapshot, so the trigger refuses an append from a transaction that is not
+READ COMMITTED (REPEATABLE READ and SERIALIZABLE, which a request may choose
+for itself, would chain off a stale tail and fork the log). A fork whose
+rows were all written since 0149 makes `GET /audit/verify` answer not
+intact; forks with a row from before it are listed and not counted. The two
+ledger sequences are the triggers' alone (0169): the runtime roles hold no
+privilege on them, because `SELECT last_value` read the size of a log they
+may read none of.
 
 `intact` is relative: it cannot see rows removed from the end of the log, or a
 rewrite that recomputes every later hash (the hash is unkeyed, and the schema
@@ -689,4 +690,6 @@ cannot answer it.
 
 Ship the audit trail to append-only external storage on a schedule. An
 attacker with database access should still not be able to erase their
-tracks.
+tracks. The product does not do this itself: a copy of the log kept
+somewhere the database host cannot write is the operator's, and the
+anchor above is the product's own check against truncation.

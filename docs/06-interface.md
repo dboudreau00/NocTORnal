@@ -106,6 +106,11 @@ tokens here to the theme's values.
 
 ## Type
 
+Nothing is fetched (a webfont would breach the CSP and leak a request), so
+`theme.css` names the faces first and falls back to system stacks: `--ui` is
+Söhne, then Inter, then the system sans; `--mono` is JetBrains Mono, then the
+system mono.
+
 - **Display / headings:** Söhne, or GT America. Something with a real grotesk
   personality rather than Inter, which is the sans-serif equivalent of not
   choosing. Tight tracking on headings.
@@ -121,7 +126,7 @@ tokens here to the theme's values.
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│ CASE OP-KESTREL-24        TLP:AMBER    ⏱ as-of: now    ⌘K      │  40px
+│ CASE OP-KESTREL-24        TLP:AMBER    ⏱ as-of: now    ⌘K      │  44px
 ├──────┬───────────────────────────────────────────┬─────────────┤
 │      │                                           │             │
 │ RAIL │            SOCIOGRAM CANVAS               │  INSPECTOR  │
@@ -132,7 +137,7 @@ tokens here to the theme's values.
 │ ⚑    │                                           │  assertions │
 │ ⚙    │                                           │  evidence   │
 │      │                                           │  metrics    │
-│ 56px ├───────────────────────────────────────────┤  360px      │
+│ 64px ├───────────────────────────────────────────┤  380px      │
 │      │  TIMELINE SCRUBBER  ◄──────●───────────►  │             │
 └──────┴───────────────────────────────────────────┴─────────────┘
 ```
@@ -257,7 +262,8 @@ they fit. Everything visible at once is a hairball.
 
 ## Other surfaces
 
-- **Triage**: three-pane: watch hits, document, extractions. Keyboard
+- **Triage**: a queue of suggestions, one card each (Awaiting review,
+  Deferred, Accepted, Rejected), with Capture text above it. Keyboard
   driven: `J`/`K` navigate, `A` accept, `R` reject (with a reason), `D`
   defer (park it as unresolved, with a note). Someone works this queue
   for an hour at a time; every mouse trip is a tax. The keys act only
@@ -271,9 +277,16 @@ they fit. Everything visible at once is a hairball.
   capture's TLP marking and accepts at it or stricter, never below, and
   opens the captured document at the match. An entity a waiting proposal
   is about is ringed on the canvas until the proposal is decided here.
-- **Entity page**, the Obsidian-like view. Backlinks panel showing every
-  assertion, document and evidence item referencing this entity. Analysts
-  navigate by association, not hierarchy.
+- **Entity page**, the Obsidian-like view, is the inspector. Opened from the
+  canvas, the entity table, the palette or a search hit, it shows the entity's
+  type, label and TLP, its First and last seen, and sections for its
+  Assertions (every claim, with the retracted and superseded ones on request),
+  its Evidence (the exhibits that cite it), its Relationships (every tie at
+  the entity, each a button into that tie's own inspector), Metrics, Tags,
+  Selectors and Entity resolution (the merge panel). Analysts navigate by
+  association, not hierarchy. There is no separate backlinks pane, and no
+  list of the collected documents that mention an entity: the Search pane
+  finds documents by their text.
 - **Assertion inspector**, every claim with source, grading, rationale,
   and a retract control. Reachable in one click from any edge, because
   "why do we believe this?" is the most-asked question in the product.
@@ -304,12 +317,12 @@ they fit. Everything visible at once is a hairball.
   entity's Relationships list a PROPOSED or DISPUTED tie is marked with
   its state (and says it to a screen reader), an ACCEPTED one is not, and
   the PROPOSED ties come first among the drawn ones, so the ties that
-  count asks about are the first rows to open. Ties entered
-  before Alpha 6 were all left PROPOSED, whoever entered them;
-  migration 0067 gives them the state
-  the same rule would have given them, with an EDGE_REVIEWED row each
-  that the section shows as "by the Alpha 6 upgrade", and leaves a
-  machine's unaccepted tie, and any tie a person has reviewed, alone.
+  count asks about are the first rows to open. Ties entered before the
+  review existed (Alpha 6) were all left PROPOSED, whoever entered them;
+  migration 0067 gave them the state the same rule would have given them,
+  with an EDGE_REVIEWED row each that the section shows as "by the Alpha 6
+  upgrade", and left a machine's unaccepted tie, and any tie a person has
+  reviewed, alone.
 - **First and last seen** of an entity (the entity list's First seen
   column, the inspector's header line) are the earliest and latest
   observed times among its live claims. A retracted claim stops counting,
@@ -374,8 +387,7 @@ they fit. Everything visible at once is a hairball.
   routes read this case only, so a break-glass grant on it raises them;
   the combined `GET /search` does not, because its collected documents
   belong to every source.
-- **Words.** One name for each thing, in every pane (ux19-copy,
-  2026-09-23): an *entity* (a person, persona, group, wallet, host; "node"
+- **Words.** One name for each thing, in every pane: an *entity* (a person, persona, group, wallet, host; "node"
   only inside metric tables, never "actor"); a *relationship* between two
   entities, recorded on the *Add link* pane ("link" is the one word for it
   a rail tile has room for, and the pane says what a link is), a

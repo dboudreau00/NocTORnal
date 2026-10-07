@@ -2,13 +2,15 @@
 
 These are product features, not paperwork. Every one of them is something a
 real unit will be asked for, usually at the worst possible moment, and each
-is far cheaper to build in now than to retrofit.
+is far cheaper to build in than to retrofit. Where a section describes
+something the product does not do yet, it says so.
 
 ## Handling and classification
 
 **TLP v2.0** on every case, node, edge, evidence item and document.
 Inheritance flows down from the case, and a child may be *more* restricted
-than its parent but never less. Enforce that in a constraint.
+than its parent but never less: a trigger refuses a child below its case's
+classification.
 
 - `CLEAR`, freely shareable
 - `GREEN`, community, not public
@@ -28,21 +30,32 @@ migration. This is deliberate: a case that nobody can articulate a lawful
 basis for is a liability, and making the field optional means it will be
 empty on ninety percent of cases within a year.
 
-Prompt at case creation, and again at review:
+The case form requires the legal basis, the retention date and the review
+date, and takes the authority reference; the service refuses a case with no
+lawful basis or with a review date after the retention date. These are the
+questions a review should answer, and the product does not ask them one by one:
 - What authority permits this collection?
 - What is the least intrusive method that answers the question?
 - What is the retention period, and what triggers earlier deletion?
 - Who are the incidentally-collected third parties, and how are they
   minimised?
 
-`case.review_due` drives a scheduled prompt. An ACTIVE case past its review
-date should be visibly flagged in the case list, not silently rolling on.
+`case.review_due` drives a prompt: the notification drain tells each owner of
+an ACTIVE case whose review falls within 14 days, once per due date
+(`notify_events.case_reviews_due`), and the case list flags an ACTIVE case
+past its review date rather than letting it roll on silently.
 
 ## Retention and purge
 
 - Per-case `retention_until`, per-source retention for the bucket
 - `legal_hold` overrides all deletion, everywhere
-- Purge is a scheduled job requiring dual control to run outside schedule
+- Purge does not run itself: nothing in the compose stack schedules it,
+  because a purge that runs on a timer nobody watches is how data disappears
+  on a Sunday. `RetentionService.due()` reports what has expired and a
+  person acts, a case at a time from the console or, for collected documents,
+  with `scripts/retention_sweep.py`. A purge of exhibits whose retention has
+  not expired (out of schedule) needs a second person (`evidence.purge`,
+  docs/05)
 - Purge writes a tombstone to the audit log: what was destroyed, under what
   authority, by whom. The record of destruction survives the data. The
   console's Destroyed list shows each batch's count, actor, rule and
@@ -75,7 +88,7 @@ date should be visibly flagged in the case list, not silently rolling on.
 - Documents supporting an accepted assertion are pinned past source
   retention, otherwise you delete the evidence and leave the conclusion,
   which is the worst possible outcome
-- Outbound lookups (roadmap F15, 2026-09-24): lookups, their answers and
+- Outbound lookups (F15): lookups, their answers and
   batches follow the case clock and the case's legal hold, as exhibits do.
   A purge empties the value, the notes and the answer's bytes, and keeps
   every row, its fingerprint and every attempt, with one tombstone per
@@ -88,12 +101,17 @@ date should be visibly flagged in the case list, not silently rolling on.
 Even in criminal intelligence, incidental third parties exist and have
 rights in most jurisdictions.
 
-- Flag nodes as `is_incidental` where the person is not a subject of
-  interest, a victim, a family member, a bystander in a group chat
-- Minimisation review at case closure: incidental entities are deleted
-  unless specifically justified
+- Flag participants as `is_incidental` where the person is not a subject of
+  interest, a victim, a family member, a bystander in a group chat. The flag
+  is built on a conversation's participants (`comms.participant`), not on
+  graph entities.
+- Minimisation at case closure (docs/16 L4): `comms.minimise` drops a
+  conversation's message bodies and keeps its metadata graph, records the
+  authority, and works in a closed case. Deleting incidental entities is not
+  built.
 - A subject access request procedure, even if the answer is usually a
-  lawful exemption. You need to be able to *find* the data to exempt it.
+  lawful exemption. You need to be able to *find* the data to exempt it. The
+  product has no subject access tooling.
 
 ## Analytic tradecraft
 
@@ -110,9 +128,10 @@ The assertion model does this structurally. The UI has to keep it visible,
 a report that renders all four the same way has thrown away the model's
 main benefit.
 
-**Words of estimative probability.** Standardise them, and show the
-numeric band on hover so "likely" means the same thing to writer and
-reader:
+**Words of estimative probability.** The product records confidence as LOW,
+MODERATE or HIGH (ICD 203) and does not render these words or their bands.
+They are the standard a report should be written to, so that "likely" means
+the same thing to writer and reader:
 
 | Term | Band |
 |---|---|
@@ -135,10 +154,13 @@ damage. A team that has spent eight months on one theory will read every
 new post as supporting it. The tool should make the competing hypothesis
 visible in the same view as the favoured one.
 
-**Assumptions register.** Per case, list the load-bearing assumptions
-explicitly, with a review flag. "We assume the same PGP key means the same
-operator" is an assumption that has been wrong, and if it is written down
-it can be challenged.
+**Assumptions register** (`assumptions.py`, migration 0056). Per case, list
+the load-bearing assumptions explicitly, with a review flag. "We assume the
+same PGP key means the same operator" is an assumption that has been wrong,
+and if it is written down it can be challenged. Every change is audited
+(ASSUMPTION_MADE, ASSUMPTION_REVIEWED, ASSUMPTION_WITHDRAWN); REFUTED is a
+finding, so re-opening or confirming a refuted assumption demands a note;
+WITHDRAWN is terminal; and the report states the assumptions still standing.
 
 ## Exhibit size policy
 
@@ -193,18 +215,22 @@ answers:
 6. **What did you consider and reject?** → retracted assertions are
    retained with reasons; ACH matrix preserved.
 
-**Disclosure pack generator** (post-MVP but design toward it): given a case
-and a date range, produce a package containing every assertion with its
-provenance chain, evidence manifest with hashes, the access log, and a list
-of retracted material with reasons. Redaction applied by rule, with a
-redaction log.
+**Disclosure pack.** The report builder (`reports.py`) is the part that is
+built: a report built at a target TLP, with a redaction statement, an evidence
+register of every exhibit's SHA-256 and BLAKE3 and the custody chain's head
+hash, the assumptions still standing and the hypotheses. The full pack is
+not built: given a case and a date range, a package containing every
+assertion with its provenance chain, the access log, and a list of retracted
+material with reasons, with redaction applied by rule and a redaction log.
 
 ## Bias and quality controls
 
+- **Coverage gaps** on the timeline are built: density markers show
+  collection volume, so a quiet period is not misread as inactivity (docs/06).
+
+Not built, and wanted:
 - **Source diversity indicator** per case, a network built entirely from
   one forum is a picture of that forum, not of the criminal ecosystem
-- **Coverage gaps** on the timeline, visible collection outages, so a
-  quiet period is not misread as inactivity
 - **Single-source assertions** flagged in the UI. Not wrong, but they
   should be visible as what they are.
 - **Stale confidence**, an assertion graded HIGH three years ago with no
