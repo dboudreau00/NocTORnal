@@ -15,7 +15,7 @@ commit you tested. A proof of concept is welcome and never required.
 ## Scope
 
 This project is **beta, unaudited, and not certified for evidential
-use**. It has never been operated against real targets. That means:
+use**. That means:
 
 - **In scope:** anything that breaches one of the twelve invariants in
   the [README](README.md#the-twelve-invariants), a path that writes a

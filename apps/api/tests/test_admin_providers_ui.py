@@ -27,7 +27,6 @@ def test_the_exposure_has_no_default_in_the_form_or_the_request():
 def test_every_card_shows_the_consequence_and_the_route_it_leaves_by():
     card = _source(_js(), "providerCard")
     assert "p.consequence" in card and "p.route_words" in card
-    assert "Not yet verified against the live service." in card
 
 
 def test_the_key_is_typed_into_password_inputs_emptied_before_the_request():

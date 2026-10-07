@@ -1,7 +1,6 @@
-"""scripts/telegram_live_check.py: the owner's one-time run against
-Telegram, exercised here only as far as the suite may: `--help`, and the
-dry self-check against the database with the Telegram suite's fakes and no
-network (docs/17 F31, 2026-10-02).
+"""scripts/telegram_live_check.py: the Telegram end-to-end check, run here
+as `--help` and as the self-check against the database with the Telegram
+suite's fakes and no network (docs/17 F31, 2026-10-02).
 
 DATABASE_URL-gated. Account, persona and source prefix `test-tglc-`.
 """

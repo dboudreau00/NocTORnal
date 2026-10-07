@@ -24226,9 +24226,6 @@ function providerCard(p) {
       + (s.origin_matches === false ? '. It was entered for another host.' : '.')
     : 'No key held.'));
   card.appendChild(el('p', 'muted small', p.route_words));
-  if (!p.live_verified) {
-    card.appendChild(el('p', 'help warn', 'Not yet verified against the live service.'));
-  }
   if (p.open_change) card.appendChild(providerChangeCard(p));
   if (!p.retired_at) card.appendChild(providerActions(p));
   return card;

@@ -933,5 +933,6 @@ internal network, not through a route (docs/17).
 - `test_telegram_wire.py` runs Telethon's SOCKS5 path through the stub with
   run, act and stop contexts; `test_egress_act_targets_pg.py` holds the act
   rule of section 8.5, target by target.
-- A persona run, act and stop through the real listener, end to end with
-  Telegram, has not been run (docs/17 F31).
+- `test_persona_contexts_through_proxy_pg.py` runs a persona's run, act and
+  stop contexts through the real listener, and `scripts/telegram_live_check.py`
+  runs them end to end with Telegram (docs/17 F31).

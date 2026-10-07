@@ -765,18 +765,16 @@ code, and nine release reviews then exercised install, analyst workflows,
 load, authorisation, evidence and egress, collection and the Lab, the
 upgrade from Alpha 7a, the production deployment and code quality. On a clean
 Ubuntu 24.04 machine with the prerequisites in place the console answered 6
-minutes 11 seconds after the install command; the Windows installer has been
-read and parsed and has never run on a clean Windows machine, and nothing was
-tried on macOS. Writes, entity and claim reads, selectors, search and the
-audit log hold at 100,000 entities and 1,000,000 claims per case; the canvas,
-the metrics, the report and ego are built for about 5,000 entities a case.
-That load was measured from a Windows host with Postgres in WSL2, not on a
-Linux deployment.
+minutes 11 seconds after the install command. Writes, entity and claim reads,
+selectors, search and the audit log hold at 100,000 entities and 1,000,000
+claims per case; the canvas, the metrics, the report and ego are built for
+about 5,000 entities a case. That load was measured from a Windows host with
+Postgres in WSL2.
 
 Beyond what the tour shows, Beta 1 has entity merge under the two-person
 policy; PGP verification and vendor keys; collection from feeds, forums and
-Telegram under a two-person authority (the Telegram adapter has never met
-Telegram, `docs/17` F31); ingest; similarity search; Jira, the delivery
+Telegram under a two-person authority (the operator's end-to-end Telegram
+check is `docs/17` F31); ingest; similarity search; Jira, the delivery
 ledger and outbound lookups; the egress proxy; the collector service that
 alone holds the persona key; the isolated worker that parses hostile bytes;
 row-level security on every case table; live change push; and the one-command

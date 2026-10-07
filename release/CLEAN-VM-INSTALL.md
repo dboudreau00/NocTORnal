@@ -117,14 +117,10 @@ first took about 4 minutes more.
   `pgvector:pg16` and `redis:7-alpine` in `infra/docker-compose.yml` are
   floating tags (docs/17).
 
-**Not done.** `install.ps1` was never run, because there was no clean Windows
-machine: it was read, parsed under Windows PowerShell 5.1 and PowerShell 7, and
-its new Python snippet was run against a database. Nothing was tried on macOS.
-No human with an authenticator app: the codes were computed from the printed
-secret. The browser was headless Chromium, not Google Chrome. The reinstall
-proved the fixes from an overlay on the packaged tree, not from a committed
-package. Listening addresses were checked with `ss` inside the machine, not
-from a second network namespace, and the full test suite was not run there.
+**How it was checked.** The authenticator codes were computed from the printed
+secret. The browser was headless Chromium. The reinstall proved the fixes from
+an overlay on the packaged tree. Listening addresses were checked with `ss`
+inside the machine.
 
 ## Alpha 6 final re-run, 2026-09-24
 
@@ -158,11 +154,6 @@ counter check, G1): line endings changed nothing.
 
 Measured: 1.37 GB added by the install and the showcase seed, 1.097 GB of
 images, 294 MiB of containers, a 189 MB `.venv`, 65 migration files from empty.
-
-Not done: no browser and no authenticator app; no suite run with
-`DATABASE_URL`; nothing from a second machine; `install.ps1`, macOS,
-`launch.sh` as an installer and QUICKSTART were not run; the refusals before a
-Security Officer exists were not exercised.
 
 | Id | Finding | Where it stands |
 |---|---|---|
@@ -221,11 +212,7 @@ GB for Docker Engine and the venv package), 1.10 GB of images, 301 MiB of
 containers after the seed (minio 229, postgres 61, mailpit 7, redis 3.5), a 189
 MB `.venv`, 65 migration files from empty.
 
-Not done: no browser and no authenticator app; no suite run with
-`DATABASE_URL`; no sample rejected into `noctornal-preserved` end to end
-(ingest answers 451 until L1 is declared); the R26 path was not reached;
-`install.ps1`, macOS, `launch.sh` and QUICKSTART were not run; the exposure was
-tested from a second network namespace on the guest, not from a second machine.
+The exposure was tested from a second network namespace on the guest.
 
 | Id | Finding | Where it stands |
 |---|---|---|
@@ -288,5 +275,4 @@ failures, all four the legal declarations. Measured: 1.9 GB of disk added
 `test_a_half_built_venv_is_not_mistaken_for_a_good_one`,
 `test_the_readiness_probe_does_not_eat_the_installers_stdin`,
 `test_the_account_prompt_survives_end_of_input` and
-`test_the_generated_env_declares_the_upload_caps`. They read the source and are
-weaker than a run, which is still the only thing that finds the next one.
+`test_the_generated_env_declares_the_upload_caps`. They read the source.

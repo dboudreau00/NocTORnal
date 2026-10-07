@@ -1,6 +1,6 @@
 # 13. Differentiators
 
-Everything in this scaffold that the commercial market handles badly or
+Everything in this system that the commercial market handles badly or
 not at all, consolidated. Scored honestly: several are cheap and decisive,
 a few are expensive and worth it, one or two are expensive and optional.
 

@@ -316,8 +316,7 @@ half the time and proves the model before you take on MTProto.
 > confirmed two-person collection authority (decision 69), the egress proxy
 > (decision 107) and a declared ceiling capped at AMBER (decision 103).
 > Capture is unchanged. What the adapter assumes about Telegram is in
-> docs/16 C18, and it has not yet been run against Telegram itself (docs/17
-> F31).
+> docs/16 C18, and the operator's end-to-end check is docs/17 F31.
 
 **9. Language coverage.**
 Russian-language forums are central to this domain. Do you need

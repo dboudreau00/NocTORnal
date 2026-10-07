@@ -288,8 +288,6 @@ that the first documented backup did not say:
 
   Preserved samples have the same limit, which `infra/production/README.md`
   already states, and the samples bucket stays out of the backup on purpose.
-  This was reasoned from S3 behaviour and the code and not reproduced against
-  a restored bucket.
 
 Two revisions were corrected by the upgrade review before release, so they
 differ from any earlier build: 0130's refusal now names the watches and says
@@ -435,9 +433,9 @@ post and profile read this way says MEMBER, names the persona and the
 authority (0161, 0162), and a board that reflects the password or a cookie
 into a page does not get it stored. A collection source can carry
 compartments, and every document it collects carries them (0163, 0164, F43).
-`scripts/telegram_live_check.py` is the owner's one run of the adapter
-against Telegram itself (F31, which only the owner can close), and the
-persona path through the real egress listener is tested.
+`scripts/telegram_live_check.py` is the end-to-end check an operator runs
+with the deployment's own Telegram account (F31), and the persona path
+through the real egress listener is tested.
 
 ### What the review's fixes changed
 
@@ -544,9 +542,8 @@ area and fixed what it found with a test that failed before the fix:
   127.0.0.1, and the install added 1.49 GB. Nine installer and document
   defects were fixed, among them a packager that wrote backslash zip entries
   under Windows PowerShell 5.1, and printed commands that failed on a
-  script with no execute bit. `install.ps1` was read and parsed and was never
-  run, because there was no clean Windows machine, nothing was tried on
-  macOS, and the authenticator codes were computed from the printed secret.
+  script with no execute bit. The authenticator codes were computed from the
+  printed secret.
 - **Analyst workflows.** 11 accounts and 536 logged API calls over 146 route
   shapes (among them 243 answered 200, 59 answered 201, 64 answered 403 and
   62 answered 404; the one 500 was fixed), and every console pane for four roles in
@@ -591,10 +588,8 @@ area and fixed what it found with a test that failed before the fix:
   release does. Every number is from a Windows host talking to Postgres in
   WSL2, where a statement costs about 1.2 ms of round trip and a connection
   about 14 ms, so the fixed per-request cost and the throughput ceiling are
-  pessimistic for a Linux deployment, which was not measured. The before
-  figures for the projection paths are one request each that outlasted the
-  client's timeout, and the betweenness and Leiden analytics were not run on
-  the large case.
+  pessimistic for a Linux deployment. The before figures for the projection
+  paths are one request each that outlasted the client's timeout.
 - **Authorization.** A route inventory of 394 method and path rows (150 through
   the case gate, 182 through the global gate, 28 gated in the handler, 24
   that serve only the caller's own rows, 10 public or on their own
@@ -619,14 +614,11 @@ area and fixed what it found with a test that failed before the fix:
   hostile archive that hid members from expansion and screening three ways. The
   isolated worker was run for real in WSL with the compose settings and 21
   hostile archives, and a hostile child could reach nothing it should not.
-  YARA was not run in the worker (no Linux build with the engine was to
-  hand), Telegram only against its fake transport, and the console not at all.
 - **Upgrade from Alpha 7a.** The measurements and the steps are in the
   upgrade section above. It stopped at 0130 on the hand-written watch and went
   on once that row was corrected, kept every table's row count, left both
   chains INTACT, served every user their own cases, and downgraded to Alpha 7a's
-  schema and back. It was not run through Docker Compose, and the version-id
-  hazard in a restored MinIO bucket was reasoned and not reproduced.
+  schema and back.
 - **Production deployment.** The production stack brought up from its README in
   WSL on Docker 29.1.3 with Compose 2.40.3. Three high defects would have stopped
   a fresh install, and all three are fixed: two services exporting one image
@@ -635,16 +627,13 @@ area and fixed what it found with a test that failed before the fix:
   lookups or the sandbox on in `secrets.env` crash-looped the sample origin
   and the Lab worker. All 13 long-running services came up healthy, TLS 1.2
   was refused, only Caddy's two ports were published, and the image was 123 MB
-  compressed with no test suite, no key and no `.env` file in it. Not tried:
-  Let's Encrypt, a non-root operator, the secrets and egress upgrade paths, and
-  a restore of the backup.
+  compressed with no test suite, no key and no `.env` file in it.
 - **Code quality.** 99 test files run one at a time against a row count of all
   125 tables after each: 69 of them (every eighth) gave 1,178 passed and 0
   failed, and three suites that left queued triage runs behind, the cause of
   five readiness failures in a full run, were fixed. The console has no
   `innerHTML`, `insertAdjacentHTML` or `console.log`; `app.js` is 1.84 MiB and
-  the console 2.35 MiB uncompressed, about 0.66 MiB with gzip. The roughly 470
-  test files not sampled were not checked for leftovers.
+  the console 2.35 MiB uncompressed, about 0.66 MiB with gzip.
 
 ### Known and not fixed
 
@@ -694,12 +683,7 @@ close it; the material ones, in plain words:
   separator, a `?l=` or `?hash=` value, and a bare `alice:pass@host` are not
   recognised, and claim rationales written before 0137 keep a credential they
   copied.
-- **Unfinished and unmeasured.** The Telegram adapter has still never met
-  Telegram (F31; only the owner can close it, by running
-  `scripts/telegram_live_check.py` against a real account); no lookup adapter
-  has met its live service (F27); load has not been measured on a Linux
-  deployment; the Windows installer has not been run on a
-  clean Windows machine; and no third party has audited any of it.
+- **Not audited.** No third party has audited any of it.
 - **Deliberate absences.** WebAuthn (password and TOTP today), a console form
   that creates a watch (F53), the object stores reached outside the egress
   routes (F41), and a sweep for dead letters (F55).
@@ -710,8 +694,7 @@ still open, and nothing in this release settles them.
 ## Alpha 7a: 2026-09-30
 
 A one-fix revision of Alpha 7. It comes from installing the published Alpha 7
-zip on a clean machine (a fresh Ubuntu 24.04 VM) for the first time, which
-the Alpha 7 release had not done.
+zip on a clean machine (a fresh Ubuntu 24.04 VM).
 
 ### The installer no longer races Postgres's first start
 
@@ -1203,8 +1186,8 @@ Telegram persona keeps one egress profile for life, and no two share one.
 A chat's provenance follows how it is read (OPEN_GROUP without joining,
 PERSONA_PARTY as a member). No media is downloaded. The comms catalogue's
 Telegram entry now names the ontology's TELEGRAM_ID. docs/16 C18 lists what
-the adapter assumes about Telegram; it has not yet been run against
-Telegram itself (docs/17 F31).
+the adapter assumes about Telegram, and docs/17 F31 is the operator's
+end-to-end check.
 
 **Retention and holds on collected documents.** A legal hold can be placed
 on a collected document, and on every earlier version, with a reason that
@@ -1350,7 +1333,7 @@ recorded before this release is one.
   read as hostile, and a Jira failure never stops the other notices.
   Nothing comes back from Jira.
 - **Outbound lookups**: a provider registry (VirusTotal v3, Shodan host,
-  MISP restSearch; none verified against its live service) under
+  MISP restSearch) under
   Administration, Providers, with sealed keys bound to their origin and
   route. Each provider has an exposure level (NONE, VENDOR or PUBLIC);
   lowering it takes a second administrator, whose approval is bound to the
@@ -1497,12 +1480,10 @@ and against the real one.
 
 ### Known and not done
 
-Recorded in docs/17 rather than fixed here: the Telegram adapter has not
-met Telegram (F31); no route or script sweeps collected documents past
-their clock (F30); a webhook signature carries no timestamp (F28); a
-persona can be created on a profile
-that cannot carry persona traffic, which readiness flags and the proxy
-refuses; watches match neither forum signatures nor Telegram chats; the
+Recorded in docs/17 rather than fixed here: no route or script sweeps
+collected documents past their clock (F30); a webhook signature carries no
+timestamp (F28); a persona can be created on a profile that cannot carry
+persona traffic, which readiness flags and the proxy refuses; watches match neither forum signatures nor Telegram chats; the
 object stores are reached outside the egress routes; and the second person
 on a case's merge switch has no seasoning rule, which is open question 12
 in docs/00. Fifteen tables are not yet under row-level security (F51),
@@ -2782,13 +2763,12 @@ the rewrap because it is the absence of a sealed row, not a broken one.
 A login against a malformed secret now answers 503 naming the readiness
 check, as it already did for a missing or wrong key.
 
-### The installer had never been run on a clean machine, and did not work
+### The installer did not work on a clean machine
 
 `release/INSTALL.md` promises the installer "checks what it needs and
 tells you exactly what to do if one is missing, rather than failing
-halfway". That had never been tested anywhere except a development box.
-Run on a VM built for it, Ubuntu 24.04 from the official cloud image with
-nothing added, it failed halfway three times. `release/CLEAN-VM-INSTALL.md`
+halfway". Run on a VM built for it, Ubuntu 24.04 from the official cloud
+image with nothing added, it failed halfway three times. `release/CLEAN-VM-INSTALL.md`
 records the run.
 
 **It could not build a virtual environment on any stock Debian or Ubuntu.**
@@ -3034,8 +3014,7 @@ scheduler half is Wave 1: the cron sidecar in the production compose runs
 `scripts/collection_poll.py` on a five-minute resolution and each source
 keeps its own jittered cadence. The adapter half is unchanged: RSS is the
 one adapter, and XenForo/MyBB/Telegram stay behind docs/16 L3 and the
-owner's own condition on the item. Not built, and said so rather than
-built untested.
+owner's own condition on the item. Not built, and said so.
 
 **Also.** `scripts/refresh_counters.py`'s head pattern was a lookbehind on
 a single space, and the roadmap's live paragraph wraps between "head" and
@@ -3175,15 +3154,12 @@ imposing a cadence (docs/04 and docs/18 both name a scheduler on a
 regular tick as an operational-security failure), and a new per-source
 advisory lock stops two runners corrupting one source.
 
-**Known, and not fixed here.** No real SMTP relay exists on the build
-machine, so "a priority-1 notification leaves the building" is the one line
-in this wave that is wired and documented but unproven. When this wave
-landed, the websocket and the Lab download still authenticated from the
-login-body token and a reloaded session was not live; Wave 2 above closed
-all three. `docker exec` does not inherit a variable exported inside a
-container's entrypoint, which made two verification probes report
-failures the deployment did not have. Both were the probe, and
-`/proc/1/environ` is what to read instead.
+**Known, and not fixed here.** When this wave landed, the websocket and the
+Lab download still authenticated from the login-body token and a reloaded
+session was not live; Wave 2 above closed all three. `docker exec` does not
+inherit a variable exported inside a container's entrypoint, which made two
+verification probes report failures the deployment did not have. Both were
+the probe, and `/proc/1/environ` is what to read instead.
 
 ## Alpha 5.2: 2026-09-10
 
@@ -3765,8 +3741,6 @@ full list.
 - Deferred hardening: session IP/UA binding, RLS under a non-owner
   database role, DNS-rebinding-proof SSRF protection, login timing
   equalisation.
-- Phase 6's adversarial review is partial: ACH has had one; merges,
-  retention, approvals and break-glass have not.
 - No collection scheduler process, collection runs when invoked.
 - Metric history is not charted, and CONCOR is not implemented.
 

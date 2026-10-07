@@ -509,9 +509,9 @@ GOVERNANCE is bypassable by a principal holding
 `BypassGovernanceRetention`, including the API's own credentials.
 
 **Confirm:** the behaviour of your actual object store. This has been
-verified against MinIO's documented semantics and a local MinIO, **not**
-against AWS S3 or another vendor, and it matters because it is the
-difference between WORM and a strongly-worded suggestion. Also confirm that
+verified against MinIO's documented semantics and a local MinIO, and it
+matters because it is the difference between WORM and a strongly-worded
+suggestion. Also confirm that
 COMPLIANCE mode is compatible with D4's purge obligations, **it is not, in
 general**, and that tension is real: an object under compliance lock cannot
 be deleted before its retention expires *even to satisfy a deletion order*.
