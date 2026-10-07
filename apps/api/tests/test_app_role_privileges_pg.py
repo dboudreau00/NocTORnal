@@ -528,6 +528,25 @@ def test_a_column_confined_table_is_updatable_in_exactly_its_columns(conn):
     assert not wrong, wrong
 
 
+#: Reference vocabulary nothing writes at run time (0172, Beta 1
+#: authorization gate, 2026-10-07): the ontology, the comms catalogue and the
+#: ingest categories. A row here decides which identifier is a merge lead
+#: and which one a platform is indexed on, for every case at once.
+VOCABULARY = ("core.node_type", "core.edge_type", "core.selector_type",
+              "comms.platform", "ingest.category_rule")
+
+
+def test_the_vocabulary_is_readable_and_not_writable(conn):
+    for table in VOCABULARY:
+        got = _table_privileges(conn, table)
+        assert got["SELECT"], (table, got)
+        assert not (got["INSERT"] or got["UPDATE"] or got["DELETE"]), (
+            f"{table} is reference vocabulary and the runtime role can "
+            f"write it: {got}")
+        assert _read_only(table), (
+            f"{table} is not declared read-only by any migration")
+
+
 def test_the_version_table_is_readable_and_not_writable(conn):
     """`readiness.py`'s `migrations_at_head` check reads `alembic_version` on
     the API's own connection. Alembic creates that table, so it belongs to the

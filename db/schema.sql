@@ -1,7 +1,7 @@
 -- =====================================================================
 -- NocTORnal -- db/schema.sql
 --
--- GENERATED MIRROR of the schema at Alembic revision 0171.
+-- GENERATED MIRROR of the schema at Alembic revision 0172.
 -- Produced by scripts/dump_schema.py from
 --   pg_dump --schema-only --no-owner --no-privileges
 -- with session SET lines, version comments and pg_dump's per-run
@@ -26,7 +26,7 @@
 -- superseded, never overwritten; edges are signed and time-bounded;
 -- the ontology lives in reference tables, not enums.
 --
--- Alembic revision: 0171
+-- Alembic revision: 0172
 -- =====================================================================
 
 --
@@ -344,7 +344,7 @@ END $$;
 
 CREATE FUNCTION audit.chain_ordered_after() RETURNS bigint
     LANGUAGE sql IMMUTABLE
-    AS $$SELECT 2::bigint$$;
+    AS $$SELECT 727::bigint$$;
 
 --
 -- Name: FUNCTION chain_ordered_after(); Type: COMMENT; Schema: audit; Owner: -
@@ -1881,7 +1881,7 @@ END $$;
 
 CREATE FUNCTION core.custody_chain_ordered_after() RETURNS bigint
     LANGUAGE sql IMMUTABLE
-    AS $$SELECT 0::bigint$$;
+    AS $$SELECT 15::bigint$$;
 
 --
 -- Name: FUNCTION custody_chain_ordered_after(); Type: COMMENT; Schema: core; Owner: -
