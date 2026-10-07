@@ -29,7 +29,10 @@ here and frozen: a migration does not import application code).
   label, and `attrs.raw_value`. Each rewritten entity gets a SYSTEM audit
   event naming the fields and no value.
 - `collect.proposal`: the label, the `attrs.raw_value` and the rationale of
-  a proposal, in every state.
+  a proposal, in every state. A rationale's context window may have cut a
+  link before its scheme; the credential-bearing pairs of its query,
+  fragment or path, and a `//user:pass@` authority, are found there too
+  (upgrade gate, 2026-10-07, on an Alpha 7a estate).
 - `collect.extraction`: `raw_value` and `norm_value` of URL rows.
 - `core.assertion.prior_value` (0136): the label or `attrs.raw_value` a
   correction replaced, when it carried a credential. 0136 copied them from the
@@ -49,7 +52,8 @@ One summary SYSTEM audit event carries the counts.
 - The captured document's text, which is the pasted source as received, and
   `audit.event` detail (invariant 6).
 - A credential that is not inside a URL: a password in a pasted `user:pass`
-  line has no shape to find.
+  line has no shape to find. Nor does a proposal's context window that cut
+  a link inside its userinfo.
 - A selector read out of the userinfo of a link that is not http or https
   (`mysql://root:Secret123@db.example/app` was read as the e-mail address
   `Secret123@db.example`). Nothing stored says so: it looks like any
@@ -281,6 +285,24 @@ def _redact_text(text, depth=0):
     return _URL_IN_TEXT.sub(one, text)
 
 
+#: A context window the extractor cut before a link's scheme (upgrade gate,
+#: 2026-10-07): what is left is no URL to `_redact_text`, but its query,
+#: fragment and path-parameter pairs, and a `//user:pass@` authority, still
+#: read as such. A window cut inside the userinfo itself has no shape left.
+_CUT_PAIR = re.compile(r"(?<=[?&#;])([^=&#;?\s]+)=([^&#;\s]+)")
+_CUT_USERINFO = re.compile(r"(?<![a-z0-9+.-]:)//[^/\s@]+@", re.I)
+
+
+def _redact_cut(text):
+    """A proposal's rationale with the credential of a link its context
+    window cut redacted as well; a pair with a plain name is left as it is."""
+    text = _CUT_PAIR.sub(
+        lambda m: (m.group(1) + "=" + _REDACTED
+                   if _secret_query_key(m.group(1)) and m.group(2) != _REDACTED
+                   else m.group(0)), text)
+    return _CUT_USERINFO.sub("//" + _REDACTED + "@", text)
+
+
 def _scrub_url(v):
     """A stored canonical URL without any credential; everything else byte
     for byte."""
@@ -377,8 +399,8 @@ def scrub(conn):
                 WHERE rationale ~ '://' OR payload::text ~ '://'
                 ORDER BY id""").fetchall():
         payload = dict(payload or {})
-        new_rationale = _redact_text(rationale) if isinstance(rationale, str) \
-            else rationale
+        new_rationale = _redact_cut(_redact_text(rationale)) \
+            if isinstance(rationale, str) else rationale
         changed = new_rationale != rationale
         if kind == "NODE":
             label = payload.get("label")

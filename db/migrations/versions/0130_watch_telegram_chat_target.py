@@ -25,8 +25,9 @@ two equal).
 A row that already says TELEGRAM_CHAT (in any spelling) and does not name a
 typed chat id cannot be made valid by this migration without choosing what it
 meant, and a migration does not rewrite what it cannot be sure of. The
-upgrade counts them first and stops with a sentence that says how many and
-what to do. None can exist from the application: nothing in this tree
+upgrade counts them first and stops with a sentence that says how many,
+names up to five by id, and what to do (upgrade gate, 2026-10-07: the count
+alone left the operator to find the rows). None can exist from the application: nothing in this tree
 creates a watch, and the kind was not recognised before this revision, so
 the count is of rows somebody wrote by hand.
 
@@ -68,17 +69,24 @@ def upgrade_sql() -> str:
 DO $pre$
 DECLARE
   bad bigint;
+  ids text;
 BEGIN
   SELECT count(*) INTO bad FROM collect.watch WHERE {OFFENDING};
   IF bad > 0 THEN
+    SELECT string_agg(w.id::text, ', ' ORDER BY w.id) INTO ids
+      FROM (SELECT id FROM collect.watch WHERE {OFFENDING} ORDER BY id LIMIT 5) w;
     RAISE EXCEPTION USING MESSAGE =
       'refusing to upgrade 0130: ' || bad
       || CASE WHEN bad = 1 THEN ' watch targets' ELSE ' watches target' END
       || ' a Telegram chat without being written as TELEGRAM_CHAT with a '
       || 'typed chat id (c:<id> or g:<id>). Correct '
       || CASE WHEN bad = 1 THEN 'it' ELSE 'each' END
-      || ' by hand first: a watch on a chat by its @username follows whoever '
-      || 'holds the name next.';
+      || ' by hand first ('
+      || CASE WHEN bad = 1 THEN 'watch id: ' ELSE 'watch ids: ' END || ids
+      || CASE WHEN bad > 5 THEN ' and ' || (bad - 5) || ' more' ELSE '' END
+      || '): a watch on a chat by its @username follows whoever '
+      || 'holds the name next. The upgrade stopped at 0129, with every '
+      || 'earlier revision applied; run the upgrade again once corrected.';
   END IF;
 END
 $pre$;

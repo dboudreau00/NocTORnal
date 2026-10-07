@@ -436,6 +436,13 @@ def test_0130_goes_down_refuses_over_a_bad_row_and_comes_back_up(conn):
         assert "refusing to upgrade 0130: 2 watches target a Telegram chat" in text
         assert "typed chat id (c:<id> or g:<id>)" in text and "Correct each by hand" in text
         assert "(es)" not in text and "—" not in text and " -- " not in text
+        # The operator is told which rows, and that the run stopped at 0129
+        # (upgrade gate, 2026-10-07: the count alone sent them hunting).
+        bad = [str(r[0]) for r in conn.execute(
+            "SELECT id FROM collect.watch WHERE upper(target_kind) = 'TELEGRAM_CHAT' "
+            "AND name = %s ORDER BY id", (f"{PF}chk",)).fetchall()]
+        assert len(bad) == 2 and f"watch ids: {', '.join(bad)}" in text
+        assert "stopped at 0129" in text and "run the upgrade again" in text
         conn.execute("DELETE FROM collect.watch WHERE name = %s", (f"{PF}chk",))
         m.upgrade()
         assert _has_constraint(conn)
@@ -456,6 +463,24 @@ def test_0130_refuses_a_single_row_in_the_singular(conn):
             m.upgrade()
         assert "refusing to upgrade 0130: 1 watch targets a Telegram chat" in str(caught.value)
         assert "Correct it by hand" in str(caught.value)
+        assert "(watch id: " in str(caught.value)
+        raise _RollBack
+
+
+def test_0130_names_at_most_five_watches_and_counts_the_rest(conn):
+    w = _forum(conn)
+    m = _migration("0130")
+    m.run = lambda sql: conn.execute(sql)
+    with pytest.raises(_RollBack), conn.transaction():
+        m.downgrade()
+        for _ in range(7):
+            _insert_watch(conn, w["source"], w["owner"], "TELEGRAM_CHAT", "@bychance")
+        with pytest.raises(psycopg.errors.RaiseException) as caught, conn.transaction():
+            m.upgrade()
+        text = str(caught.value)
+        assert "refusing to upgrade 0130: 7 watches target" in text
+        listed = text.split("(watch ids: ", 1)[1].split(")", 1)[0]
+        assert listed.count(", ") == 4 and listed.endswith(" and 2 more")
         raise _RollBack
 
 
