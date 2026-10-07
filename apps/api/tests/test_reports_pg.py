@@ -259,7 +259,15 @@ def test_exhibits_above_the_target_are_withheld_and_counted(conn, builder):
     report = builder.build(case_id, target_tlp="GREEN", generated_by=owner)
     titles = [e["title"] for e in report.evidence]
     assert titles == ["open"]
-    assert report.redaction.evidence_withheld == 1
+    # The default setting is PRESENCE: the document says some exhibits are
+    # above the ceiling and not how many (group C, C2; this asserted the
+    # exact figure under the default before, which is what C2 closed).
+    assert report.redaction.evidence_some_withheld
+    assert report.redaction.evidence_withheld == 0
+    conn.execute('UPDATE core."case" SET withheld_disclosure = %s '
+                 'WHERE id = %s', ("COUNT", case_id))
+    counted = builder.build(case_id, target_tlp="GREEN", generated_by=owner)
+    assert counted.redaction.evidence_withheld == 1
 
 
 def test_the_report_states_its_authority_and_retention(conn, builder):
@@ -344,6 +352,135 @@ def test_a_destination_ceiling_still_binds(conn, builder):
     assert report.redaction.built_at_tlp == "AMBER"
     assert check_egress(report, Destination.JIRA,
                         destination_ceiling="GREEN").denied
+
+
+def _register(conn, *keys):
+    # Since 0059 every compartment column is bound to iam.compartment.
+    for key in keys:
+        conn.execute(
+            "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
+            "ON CONFLICT (key) DO NOTHING", (key, f"{key} (report test)"))
+
+
+def _tie(conn, case_id, actor, src, dst, **kw):
+    from noctornal_api.graph import AssertionInput, GraphWriteService
+    return GraphWriteService(conn).create_edge(
+        case_id=case_id, edge_type="VOUCHED_FOR", src_node_id=src,
+        dst_node_id=dst, created_by=actor,
+        assertion=AssertionInput(basis="DIRECT_OBSERVATION", created_by=actor,
+                                 reliability="B", credibility="2"), **kw)
+
+
+def test_a_compartmented_entity_makes_the_document_compartmented(conn, builder):
+    """The egress gate judges the DOCUMENT's compartments, and the builder
+    unioned the header's, the exhibits' and the matrix's but not the
+    entities' or the ties' (Beta 1 verification, group C, C1). A node
+    carrying a compartment, read by a requester cleared for it, went out to
+    `export` and `smtp` with its label in the document and
+    `DENY_COMPARTMENTED` never fired."""
+    from noctornal_api.egress import DENY_COMPARTMENTED, Destination
+    from noctornal_api.reports import check_egress, render_markdown
+
+    owner = _user(conn)
+    _register(conn, "RPT-C1-N")
+    case_id = _case(conn, owner, classification="GREEN")
+    _node(conn, case_id, owner, "plain actor")
+    from noctornal_api.graph import AssertionInput, GraphWriteService
+    GraphWriteService(conn).create_node(
+        case_id=case_id, node_type="IDENTITY", label="compartmented actor",
+        created_by=owner, classification="GREEN", compartments=["RPT-C1-N"],
+        assertion=AssertionInput(basis="DIRECT_OBSERVATION", created_by=owner,
+                                 reliability="B", credibility="2"))
+
+    inside = builder.build(case_id, target_tlp="AMBER", generated_by=owner,
+                           include_hypotheses=False,
+                           compartments=frozenset({"RPT-C1-N"}))
+    assert "compartmented actor" in render_markdown(inside)
+    assert inside.compartments == frozenset({"RPT-C1-N"})
+    for destination in (Destination.EXPORT, Destination.SMTP):
+        decision = check_egress(inside, destination)
+        assert decision.denied and decision.reason == DENY_COMPARTMENTED
+
+    # Not read in: the entity is not in the document, the document carries
+    # no compartment, and the gate has nothing to refuse on.
+    outside = builder.build(case_id, target_tlp="AMBER", generated_by=owner,
+                            include_hypotheses=False,
+                            compartments=frozenset())
+    assert "compartmented actor" not in render_markdown(outside)
+    assert outside.compartments == frozenset()
+    assert check_egress(outside, Destination.SMTP).allowed
+
+
+def test_a_compartmented_tie_makes_the_document_compartmented(conn, builder):
+    """The same, for a tie whose two ends are both plain: the tie's own
+    compartment is the only thing in the document that carries it."""
+    from noctornal_api.egress import DENY_COMPARTMENTED, Destination
+    from noctornal_api.reports import check_egress
+
+    owner = _user(conn)
+    _register(conn, "RPT-C1-E")
+    case_id = _case(conn, owner, classification="GREEN")
+    a = _node(conn, case_id, owner, "end one")
+    b = _node(conn, case_id, owner, "end two")
+    _tie(conn, case_id, owner, a, b, classification="GREEN",
+         compartments=["RPT-C1-E"])
+
+    inside = builder.build(case_id, target_tlp="AMBER", generated_by=owner,
+                           include_hypotheses=False,
+                           compartments=frozenset({"RPT-C1-E"}))
+    assert len(inside.relationships) == 1
+    assert inside.compartments == frozenset({"RPT-C1-E"})
+    for destination in (Destination.EXPORT, Destination.SMTP):
+        decision = check_egress(inside, destination)
+        assert decision.denied and decision.reason == DENY_COMPARTMENTED
+
+    outside = builder.build(case_id, target_tlp="AMBER", generated_by=owner,
+                            include_hypotheses=False,
+                            compartments=frozenset())
+    assert outside.relationships == []
+    assert outside.compartments == frozenset()
+
+
+def _exhibits(conn, case_id, owner, *classifications):
+    for i, tlp in enumerate(classifications):
+        conn.execute(
+            """INSERT INTO core.evidence
+                   (case_id, title, media_type, byte_size, sha256, blake3,
+                    storage_key, storage_bucket, acquired_by, acquired_at,
+                    acquisition_method, classification)
+               VALUES (%s, %s, 'text/plain', 1, %s, %s, 'k', 'b', %s, now(),
+                       'MANUAL_UPLOAD', %s)""",
+            (case_id, f"exhibit {i}", os.urandom(32), os.urandom(32), owner,
+             tlp))
+
+
+@pytest.mark.parametrize("mode, count, some", [
+    ("NONE", 0, False), ("PRESENCE", 0, True), ("COUNT", 2, False)])
+def test_the_hidden_exhibit_figure_follows_the_cases_disclosure_setting(
+        conn, builder, mode, count, some):
+    """The report stated the exact number of exhibits above the ceiling
+    whatever `withheld_disclosure` said (Beta 1 verification, group C, C2):
+    a case set to NONE has an analyst's register showing 0 and the report
+    saying "2 exhibits are above that level". NONE says nothing, PRESENCE
+    says there are some, and only COUNT gives the figure."""
+    owner = _user(conn)
+    case_id = _case(conn, owner, classification="GREEN")
+    conn.execute('UPDATE core."case" SET withheld_disclosure = %s WHERE id = %s',
+                 (mode, case_id))
+    _exhibits(conn, case_id, owner, "GREEN", "RED", "RED")
+
+    report = builder.build(case_id, target_tlp="GREEN", generated_by=owner,
+                           include_hypotheses=False)
+    assert [e["title"] for e in report.evidence] == ["exhibit 0"]
+    assert report.redaction.evidence_withheld == count
+    assert report.redaction.evidence_some_withheld is some
+    statement = report.redaction.statement()
+    body = report.as_dict()["redaction"]
+    assert body["evidence_withheld"] == count
+    assert body["evidence_some_withheld"] is some
+    assert ("2 exhibits" in statement) is (mode == "COUNT")
+    assert ("some exhibits" in statement) is (mode == "PRESENCE")
+    assert report.redaction.anything_withheld is (mode != "NONE")
 
 
 # --- the hypotheses section --------------------------------------------

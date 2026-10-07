@@ -762,3 +762,169 @@ def test_a_purged_cases_sample_is_not_handed_out(conn, lab):
         CaseService(conn).transition_status(case_id, state, actor_id=boss)
     with pytest.raises(SampleError, match="purged"):
         svc._downloadable(sample.id, clearance="RED")
+
+
+# --- Beta 1 verification, group C (2026-10-07) ------------------------------
+#
+# C4: a case hold committed while a destroying rejection deletes the sample's
+#     bytes was missed, because the hold was reread with a plain read.
+# C5: the store's delete and the exhibit's `purged_at` shared one
+#     transaction with everything after them, so a failure after a delete
+#     left the object destroyed and the row unmarked.
+# C6: a case hold entered mid-purge landed after the whole sweep had run.
+#     (`test_g44_races_pg.py` holds the two-connection test.)
+# C8: a sweep that names no case never reread the case hold of a record.
+
+def test_a_case_hold_entered_while_a_sample_is_destroyed_waits_for_it(conn, lab):
+    """`SampleService._reject_destroying` reread the hold under the sample's
+    row lock only, and `set_case_legal_hold` writes the case row, so a case
+    hold committed during the store's delete went unseen: the sample was
+    REJECTED, its bytes gone and the case held. The case row is now held
+    FOR SHARE before the reread, so the hold waits for the rejection."""
+    boss = g.user(conn, "RED")
+    case_id = g.case(conn, boss)
+    _active(conn, case_id, boss)
+    sample = _sample(conn, lab, case_id, boss)
+    seen: dict = {}
+    real_delete = lab.delete
+
+    def delete_with_a_hold_entered_meanwhile(key):
+        racer = s.owner_conn()
+        try:
+            racer.execute("SET lock_timeout = '700ms'")
+            try:
+                _service(racer).set_case_legal_hold(
+                    case_id, actor_id=boss, on=True, reason=REASON,
+                    lifter_ceiling=("RED", []))
+                seen["hold"] = "placed"
+            except psycopg.errors.LockNotAvailable:
+                seen["hold"] = "waited"
+        finally:
+            racer.close()
+        real_delete(key)
+
+    lab.delete = delete_with_a_hold_entered_meanwhile
+    _sample_service(conn, lab).reject(
+        sample.id, actor_id=boss, reason="prohibited content, policy POL-2026-014")
+
+    assert seen["hold"] == "waited", (
+        "a case hold was committed while the sample's bytes were destroyed")
+    assert conn.execute("SELECT state FROM lab.sample WHERE id = %s",
+                        (sample.id,)).fetchone()[0] == "REJECTED"
+
+
+def test_a_case_hold_already_written_still_refuses_to_destroy_a_sample(conn, lab):
+    from noctornal_api.samples import SampleError
+    boss = g.user(conn, "RED")
+    case_id = g.case(conn, boss)
+    _active(conn, case_id, boss)
+    sample = _sample(conn, lab, case_id, boss)
+    _service(conn).set_case_legal_hold(case_id, actor_id=boss, on=True,
+                                       reason=REASON, lifter_ceiling=("RED", []))
+    with pytest.raises(SampleError, match="legal hold"):
+        _sample_service(conn, lab).reject(
+            sample.id, actor_id=boss, reason="prohibited content, policy POL-2026-014")
+    assert lab.objects, "the bytes were destroyed under a hold"
+
+
+class _Crash(BaseException):
+    """What a dropped connection or a killed worker looks like to the code
+    above it: not an `Exception` the purge counts, a failure it cannot
+    catch."""
+
+
+def test_a_failure_part_way_leaves_the_destroyed_exhibits_marked(conn):
+    """Each exhibit is marked destroyed in the transaction that destroyed it
+    (Beta 1, C5). The object store's delete cannot be rolled back, so a
+    purge that fails on the second of three exhibits must not take the
+    first one's mark with it: before, the first object was gone, its row
+    read live, and every later read raised an integrity alarm for it."""
+    store = g.VersionedStore()
+    boss = g.user(conn, "RED")
+    case_id = g.case(conn, boss)
+    ids = sorted(g.lodge(conn, store, case_id, boss, title=f"e{i}")[0].evidence_id
+                 for i in range(3))
+    g.age_case(conn, case_id, g.expired())
+    keys = {i: g.evidence_row(conn, i)[0] for i in ids}
+
+    def crash_on_the_second(key):
+        if key == keys[ids[1]]:
+            raise _Crash()
+
+    store.on_delete = crash_on_the_second
+    with pytest.raises(_Crash):
+        _service(conn, store).purge_due(actor_id=boss, authority=AUTHORITY,
+                                        case_id=case_id)
+    assert _purged(conn, ids[0]), (
+        "an exhibit whose object the store had deleted was left unmarked")
+    assert not _purged(conn, ids[1]) and not _purged(conn, ids[2])
+    assert store.deleted == [keys[ids[0]]]
+    # What is left is due again, and the destroyed one is not.
+    due = {i.object_id for i in _service(conn, store).due(case_id=case_id)}
+    assert due == {ids[1], ids[2]}
+
+
+def test_a_tombstone_that_fails_does_not_undo_the_marks_and_says_what_happened(conn):
+    """The failure the verifier simulated: everything after the store's
+    delete failed. The marks stand (the objects are gone), and the error
+    names what was destroyed without a tombstone, so nobody reads a retry
+    as a way to record it."""
+    from noctornal_api.retention import RetentionError
+    store = g.VersionedStore()
+    boss, case_id, one, two = _expired_case_with_two_exhibits(conn, store)
+    svc = _service(conn, store)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("the audit chain lock timed out")
+
+    svc._tombstone = boom
+    with pytest.raises(RetentionError, match="tombstone") as caught:
+        svc.purge_due(actor_id=boss, authority=AUTHORITY, case_id=case_id)
+    assert "2 exhibits" in str(caught.value)
+    assert _purged(conn, one) and _purged(conn, two)
+    assert conn.execute(
+        "SELECT count(*) FROM core.purge_tombstone WHERE case_id = %s",
+        (case_id,)).fetchone()[0] == 0
+
+
+def test_a_later_leg_that_fails_does_not_undo_the_exhibits(conn):
+    """The exhibit leg no longer shares a transaction with the documents,
+    records and lookups after it."""
+    store = g.VersionedStore()
+    boss, case_id, one, two = _expired_case_with_two_exhibits(conn, store)
+    svc = _service(conn, store)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("a later leg failed")
+
+    svc._purge_lookups = boom
+    with pytest.raises(RuntimeError, match="later leg"):
+        svc.purge_due(actor_id=boss, authority=AUTHORITY, case_id=case_id)
+    assert _purged(conn, one) and _purged(conn, two)
+    assert len(svc.tombstones(case_id)) == 1
+
+
+def test_a_case_hold_placed_after_a_caseless_sweep_keeps_a_record(conn, monkeypatch):
+    """`purge_due(case_id=None)` never reread the case hold (Beta 1, C8): a
+    record the sweep had listed was emptied although a case hold had
+    committed since. Only `retention_sweep.py` calls it without a case, and
+    it restricts itself to documents, so this was latent."""
+    boss = g.user(conn, "RED")
+    case_id = g.case(conn, boss)
+    record_id, _ = g.record_in_case(conn, boss, case_id)
+    g.age_case(conn, case_id, g.expired())
+    svc = _service(conn, g.VersionedStore())
+    swept = [i for i in svc.due() if i.object_id == record_id]
+    assert [i.held for i in swept] == [False]
+
+    _service(conn).set_case_legal_hold(case_id, actor_id=boss, on=True,
+                                       reason=REASON, lifter_ceiling=("RED", []))
+    monkeypatch.setattr(svc, "due", lambda **_kw: swept)  # the stale sweep
+    result = svc.purge_due(actor_id=boss, authority=AUTHORITY,
+                           kinds=frozenset({"ingest_record"}))
+
+    assert result.records_purged == 0
+    assert conn.execute("SELECT purged_at FROM ingest.record WHERE id = %s",
+                        (record_id,)).fetchone()[0] is None
+    assert result.held_back >= 1
+    assert any("legal hold" in w for w in result.warnings)

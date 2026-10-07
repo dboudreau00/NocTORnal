@@ -63,6 +63,7 @@ itself on a timer nobody watches is how data disappears on a Sunday.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
@@ -72,6 +73,8 @@ from psycopg.types.json import Json
 
 from noctornal_api.evidence import is_retention_refusal
 from noctornal_api.wording import agree, count_of
+
+log = logging.getLogger("noctornal.retention")
 
 #: A category with no rule falls back to the case's own retention. Never
 #: to "forever" and never to a default period -- an unknown category is a
@@ -728,6 +731,14 @@ class RetentionService:
         `retention_sweep.py`, which must reach collected documents (the one
         family no case-scoped route can) without also destroying every
         case's exhibits under a tombstone that names no case.
+
+        The exhibits go first, each in a transaction of its own that marks
+        it destroyed as soon as the store has deleted it, and the tombstone
+        for the batch is written after them in another (C5): the store's
+        delete cannot be rolled back, so nothing that fails later may take
+        a mark back. The documents, records, dead letters and lookups then
+        share one transaction, in which every case they belong to has its
+        hold read again under a share lock (C8).
         """
         if not authority or not authority.strip():
             raise RetentionError(
@@ -849,108 +860,49 @@ class RetentionService:
             if keyed:
                 raise RetentionError(_NO_DOCUMENT_RAW_STORE)
 
+        # The exhibits first, each in a transaction of its own (C5, C6).
+        if evidence_ids:
+            self._purge_evidence_leg(evidence_ids, result, case_id=case_id,
+                                     authority=authority, actor_id=actor_id)
+
         with self._c.transaction():
-            if case_id is not None and self._case_held_now(case_id):
-                # The case's hold, read under a share lock on its row, so a
-                # case hold placed since the sweep keeps everything the case
-                # clock governs; a hold placed after this waits for the
-                # purge to commit (evidence-purge-hold-race,
-                # evidence-case-hold-unreachable, 2026-10-03).
-                kept = (len(evidence_ids) + len(record_ids) + len(lookup_ids)
-                        + len(result_ids) + len(batch_ids) + len(sample_ids))
-                result.held_back += kept
-                result.warnings.append(
-                    f"the case came under a legal hold between the sweep and "
-                    f"the purge, so nothing it holds was destroyed "
-                    f"({count_of(kept, 'item', 'items')} kept).")
-                evidence_ids, record_ids, sample_ids = [], [], []
-                lookup_ids, result_ids, batch_ids = [], [], []
-            if evidence_ids:
-                storage = self._purge_evidence(evidence_ids)
-                outcome = storage.outcome
-                if storage.held:
-                    # Reread under the rows' locks (evidence-purge-hold-race,
-                    # 2026-10-03): a hold placed since the sweep keeps its
-                    # exhibit, and is never acknowledged on one destroyed.
-                    kept = len(storage.held)
-                    result.held_back += kept
+            # The case hold, read under a share lock on the case's row, for
+            # every case whose records, lookups or samples this sweep is
+            # about to empty: a hold placed since the sweep keeps what the
+            # case clock governs, and one placed after this waits for the
+            # purge to commit (evidence-purge-hold-race,
+            # evidence-case-hold-unreachable, 2026-10-03). Per case and not
+            # only for the case a caller named, so a sweep that names none
+            # does not destroy what a hold committed since `due()` read
+            # (Beta 1 verification, group C, C8). The exhibits were claimed
+            # above, each reading its case's hold under its own locks.
+            by_case = {i.object_id: i.case_id for i in actionable}
+            clocked = (record_ids + lookup_ids + result_ids + batch_ids
+                       + sample_ids)
+            cases = ({case_id} if case_id is not None else
+                     {by_case[i] for i in clocked if by_case.get(i) is not None})
+            held_cases = {c for c in sorted(cases, key=str)
+                          if self._case_held_now(c)}
+            if held_cases:
+                kept_ids = {i for i in clocked
+                            if case_id in held_cases
+                            or by_case.get(i) in held_cases}
+                if kept_ids:
+                    result.held_back += len(kept_ids)
                     result.warnings.append(
-                        f"{count_of(kept, 'exhibit', 'exhibits')} came under a "
-                        f"legal hold between the sweep and the purge and "
-                        f"{agree(kept, 'was', 'were')} kept.")
-                    held_ids = set(storage.held)
-                    evidence_ids = [i for i in evidence_ids if i not in held_ids]
-                if storage.gone:
-                    gone = set(storage.gone)
-                    result.warnings.append(
-                        f"{count_of(len(gone), 'exhibit was', 'exhibits were')} "
-                        f"already destroyed by another purge and "
-                        f"{agree(len(gone), 'was', 'were')} skipped.")
-                    evidence_ids = [i for i in evidence_ids if i not in gone]
-                result.evidence_purged = len(evidence_ids)
-                # All three counts, always. Until 2026-09-02 `storage_failed`
-                # was only copied when the batch verdict was FAILED, so a
-                # batch with one lock and one transport failure reported the
-                # lock and lost the failure -- the verdict is the WORST
-                # outcome, not the only one.
-                result.storage_deleted = storage.deleted
-                result.storage_locked = storage.locked
-                result.storage_failed = storage.failed
-                result.warnings.extend(storage.warnings)
-                if storage.locked:
-                    # The REFUSAL count in EXHIBIT ROWS, not the batch size
-                    # and not the number of object versions -- see
-                    # `_StorageOutcome`. The per-key version detail is in
-                    # the warnings copied above.
-                    result.warnings.append(
-                        f"{storage.locked} of {len(evidence_ids)} evidence "
-                        f"rows are under a retention lock and could not be "
-                        f"deleted. The retention schedule says destroy; the "
-                        f"object store disagrees. Those rows are NOT marked "
-                        f"purged and stay due, so the sweep after the lock "
-                        f"expires finishes the job. Check the lock's expiry "
-                        f"on the object store before telling anybody the "
-                        f"bytes are gone.")
-                if storage.failed:
-                    # Distinct from LOCKED on purpose: a lock is a lawful
-                    # refusal that will expire, a failure is a store that
-                    # did not answer -- or had nothing under the key -- and
-                    # somebody has to look before the next sweep retries it.
-                    result.warnings.append(
-                        f"{storage.failed} of {len(evidence_ids)} evidence "
-                        f"objects could not be deleted, and NOT because of a "
-                        f"retention lock. Those rows are NOT marked purged. "
-                        f"The bytes may still be there; do not report this "
-                        f"as a completed destruction.")
-                if outcome == STORAGE_NA:
-                    # NO OBJECT STORE WAS CONTACTED AT ALL, and the caller
-                    # has to be told. `RetentionService(conn)` takes
-                    # `storage=None` and the HTTP routers construct it that
-                    # way, so every purge through the API marks the rows
-                    # purged and never reaches the bytes. The tombstone
-                    # records NOT_APPLICABLE, which is honest, but the
-                    # RESPONSE said `evidence_purged: N`, `storage_locked:
-                    # 0` and nothing else -- which reads as "destroyed, no
-                    # problems" to anyone who is not reading tombstones.
-                    #
-                    # This is the same class of lie the LOCKED branch below
-                    # already guards against, and the more dangerous one:
-                    # LOCKED at least says the store disagreed. This said
-                    # nothing.
-                    result.warnings.append(
-                        "evidence rows are marked purged but NO OBJECT "
-                        "STORE WAS CONFIGURED for this purge, so the bytes "
-                        "were never touched. The record says destroyed; "
-                        "nothing asked the object store. Do not report this "
-                        "as a destruction.")
-
-                if evidence_ids:
-                    result.tombstones.append(self._tombstone(
-                        case_id=case_id, object_type="evidence",
-                        ids=evidence_ids, authority=authority,
-                        actor_id=actor_id, rule="case.retention_until",
-                        storage_outcome=outcome))
-
+                        f"the case came under a legal hold between the sweep "
+                        f"and the purge, so nothing it holds was destroyed "
+                        f"({count_of(len(kept_ids), 'item', 'items')} kept)."
+                        if case_id is not None else
+                        f"{count_of(len(kept_ids), 'item', 'items')} came "
+                        f"under a case's legal hold between the sweep and "
+                        f"the purge and {agree(len(kept_ids), 'was', 'were')} "
+                        f"kept.")
+                record_ids = [i for i in record_ids if i not in kept_ids]
+                sample_ids = [i for i in sample_ids if i not in kept_ids]
+                lookup_ids = [i for i in lookup_ids if i not in kept_ids]
+                result_ids = [i for i in result_ids if i not in kept_ids]
+                batch_ids = [i for i in batch_ids if i not in kept_ids]
             if document_ids:
                 # The row survives; the CONTENT does not. Keeping the row
                 # is what lets a later question about coverage be answered
@@ -1023,6 +975,151 @@ class RetentionService:
                                 result=result)
         self._jira_note(result, touched, actor_id=actor_id, dry_run=False)
         return result
+
+    def _purge_evidence_leg(self, evidence_ids: list[UUID], result: PurgeResult, *,
+                            case_id: UUID | None, authority: str,
+                            actor_id: UUID) -> None:
+        """The exhibits `purge_due` found due: destroyed one at a time, each
+        in a transaction of its own (`_purge_evidence_each`), then the
+        counts, the warnings and the tombstone.
+
+        This ran inside the transaction that also emptied the documents,
+        records and lookups, and held every exhibit and the case until it
+        committed. The object store's delete cannot be rolled back, so a
+        failure anywhere after a delete (a later exhibit, a later leg, the
+        tombstone, the commit) left objects destroyed, their rows unmarked,
+        an integrity alarm on each of them and every later sweep reporting
+        "no object found" (Beta 1 verification, group C, C5). And a case hold
+        entered during the first delete waited for ALL of it and then landed
+        on destroyed exhibits with no word (C6): now it waits for the exhibit
+        in flight, and every exhibit after that reads it and is kept."""
+        storage = self._purge_evidence_each(evidence_ids)
+        outcome = storage.outcome
+        if storage.held:
+            # Reread under the rows' locks (evidence-purge-hold-race,
+            # 2026-10-03): a hold placed since the sweep keeps its
+            # exhibit, and is never acknowledged on one destroyed.
+            kept = len(storage.held)
+            result.held_back += kept
+            result.warnings.append(
+                f"{count_of(kept, 'exhibit', 'exhibits')} came under a "
+                f"legal hold between the sweep and the purge and "
+                f"{agree(kept, 'was', 'were')} kept.")
+            held_ids = set(storage.held)
+            evidence_ids = [i for i in evidence_ids if i not in held_ids]
+        if storage.gone:
+            gone = set(storage.gone)
+            result.warnings.append(
+                f"{count_of(len(gone), 'exhibit was', 'exhibits were')} "
+                f"already destroyed by another purge and "
+                f"{agree(len(gone), 'was', 'were')} skipped.")
+            evidence_ids = [i for i in evidence_ids if i not in gone]
+        result.evidence_purged = len(evidence_ids)
+        # All three counts, always. Until 2026-09-02 `storage_failed`
+        # was only copied when the batch verdict was FAILED, so a
+        # batch with one lock and one transport failure reported the
+        # lock and lost the failure -- the verdict is the WORST
+        # outcome, not the only one.
+        result.storage_deleted = storage.deleted
+        result.storage_locked = storage.locked
+        result.storage_failed = storage.failed
+        result.warnings.extend(storage.warnings)
+        if storage.locked:
+            # The REFUSAL count in EXHIBIT ROWS, not the batch size
+            # and not the number of object versions -- see
+            # `_StorageOutcome`. The per-key version detail is in
+            # the warnings copied above.
+            result.warnings.append(
+                f"{storage.locked} of {len(evidence_ids)} evidence "
+                f"rows are under a retention lock and could not be "
+                f"deleted. The retention schedule says destroy; the "
+                f"object store disagrees. Those rows are NOT marked "
+                f"purged and stay due, so the sweep after the lock "
+                f"expires finishes the job. Check the lock's expiry "
+                f"on the object store before telling anybody the "
+                f"bytes are gone.")
+        if storage.failed:
+            # Distinct from LOCKED on purpose: a lock is a lawful
+            # refusal that will expire, a failure is a store that
+            # did not answer -- or had nothing under the key -- and
+            # somebody has to look before the next sweep retries it.
+            result.warnings.append(
+                f"{storage.failed} of {len(evidence_ids)} evidence "
+                f"objects could not be deleted, and NOT because of a "
+                f"retention lock. Those rows are NOT marked purged. "
+                f"The bytes may still be there; do not report this "
+                f"as a completed destruction.")
+        if outcome == STORAGE_NA:
+            # NO OBJECT STORE WAS CONTACTED AT ALL, and the caller
+            # has to be told. `RetentionService(conn)` takes
+            # `storage=None` and the HTTP routers construct it that
+            # way, so every purge through the API marks the rows
+            # purged and never reaches the bytes. The tombstone
+            # records NOT_APPLICABLE, which is honest, but the
+            # RESPONSE said `evidence_purged: N`, `storage_locked:
+            # 0` and nothing else -- which reads as "destroyed, no
+            # problems" to anyone who is not reading tombstones.
+            #
+            # This is the same class of lie the LOCKED branch below
+            # already guards against, and the more dangerous one:
+            # LOCKED at least says the store disagreed. This said
+            # nothing.
+            result.warnings.append(
+                "evidence rows are marked purged but NO OBJECT "
+                "STORE WAS CONFIGURED for this purge, so the bytes "
+                "were never touched. The record says destroyed; "
+                "nothing asked the object store. Do not report this "
+                "as a destruction.")
+
+        if evidence_ids:
+            # In a transaction of its own, after the marks are committed:
+            # a tombstone that cannot be written must not take back the
+            # `purged_at` of objects the store has already deleted. Said
+            # loudly instead, because these exhibits are no longer due and a
+            # second purge will not record them.
+            try:
+                with self._c.transaction():
+                    result.tombstones.append(self._tombstone(
+                        case_id=case_id, object_type="evidence",
+                        ids=evidence_ids, authority=authority,
+                        actor_id=actor_id, rule="case.retention_until",
+                        storage_outcome=outcome))
+            except Exception as exc:
+                # `from None`: a router replaces the message of an error
+                # chained to a database error (`safe_detail`), and this one
+                # has to reach the operator. The cause is logged.
+                log.error("exhibits were destroyed and marked purged but "
+                          "their tombstone could not be written", exc_info=exc)
+                raise RetentionError(
+                    f"{count_of(len(evidence_ids), 'exhibit', 'exhibits')} "
+                    f"{agree(len(evidence_ids), 'was', 'were')} destroyed and "
+                    f"marked purged, but the tombstone that records it could "
+                    f"not be written ({type(exc).__name__}). "
+                    f"{agree(len(evidence_ids), 'It is', 'They are')} no "
+                    f"longer due, so another purge will not write it: tell "
+                    f"an administrator, because the purged_at stamps are "
+                    f"the only record of this destruction.") from None
+
+    def _purge_evidence_each(self, ids: list[UUID]) -> "_StorageOutcome":
+        """`_purge_evidence` over `ids`, one exhibit per transaction, in id
+        order. Each exhibit is claimed (its row and its case held, its holds
+        reread), asked of the store and marked purged inside one transaction
+        that commits before the next exhibit is touched; the answers are
+        added up, so the three counts still account for the batch and the
+        outcome is still the worst of them."""
+        parts = []
+        for evidence_id in sorted(set(ids)):
+            with self._c.transaction():
+                parts.append(self._purge_evidence([evidence_id]))
+        locked = sum(p.locked for p in parts)
+        failed = sum(p.failed for p in parts)
+        return _StorageOutcome(
+            outcome=(STORAGE_LOCKED if locked else
+                     STORAGE_FAILED if failed else STORAGE_DELETED),
+            deleted=sum(p.deleted for p in parts), locked=locked, failed=failed,
+            warnings=tuple(w for p in parts for w in p.warnings),
+            held=tuple(h for p in parts for h in p.held),
+            gone=tuple(g for p in parts for g in p.gone))
 
     def purge_out_of_schedule(self, *, actor_id: UUID, authority: str,
                               approval_request_id: UUID,
@@ -1341,7 +1438,12 @@ class RetentionService:
         `refuse_held`), and a hold written later waits for this transaction
         and then finds the exhibit destroyed (`set_legal_hold` refuses a
         purged row; 0142 refuses it in the database too). The document leg
-        has done the same since decision 74.
+        has done the same since decision 74. The transaction is the caller's:
+        `purge_due` calls this once per exhibit (`_purge_evidence_each`), so
+        a hold waits for one exhibit and not for the sweep, and the exhibit's
+        mark is committed before the next is touched; `purge_out_of_schedule`
+        calls it once for the whole batch, because the approval is spent
+        with the destruction.
 
         Until 2026-09-02 this marked every row `purged_at` up front and
         then asked the store, on the theory that the store's answer
@@ -1561,9 +1663,12 @@ class RetentionService:
         0142 refuses it in the database).
 
         Scheduled sweep (`refuse_held` False): one exhibit at a time, in id
-        order. A court order entered while the sweep is part way through
-        lands at once on every exhibit the sweep has not reached, and is
-        honoured there; it waits only on the exhibits already locked.
+        order, each in a transaction of its own (`_purge_evidence_each`). A
+        court order entered while the sweep is part way through lands at once
+        on every exhibit the sweep has not reached, and is honoured there; it
+        waits only on the exhibit in flight. So does a case hold, which
+        takes the case row FOR UPDATE: it is read by every exhibit after the
+        one being destroyed (Beta 1 verification, group C, C6).
 
         Out-of-schedule purge (`refuse_held` True): every row and case
         locked first, in the same order, and the whole batch refused if any
@@ -1967,8 +2072,12 @@ class RetentionService:
         wrote the column, so a preservation order covering a case could not
         be honoured; only the tests set it. A reason is required both ways,
         the audit keeps the one replaced, and the row is locked first, so a
-        hold sent while a purge of the case runs waits for it (the purge
-        holds the row FOR SHARE).
+        hold sent while a purge of the case runs waits for the exhibit the
+        purge is destroying at that moment (each is claimed in a transaction
+        of its own, holding the case row FOR SHARE) and every exhibit after
+        that is read as held and kept. The exhibit already being destroyed
+        is destroyed: a hold cannot reach back into a delete in flight
+        (Beta 1 verification, group C, C6).
 
         PLACING a hold is open to whoever holds `retention.manage` on the
         case: preservation never waits for a clearance. LIFTING one is what
@@ -2002,11 +2111,7 @@ class RetentionService:
                 raise RetentionNotFound("no such case")
             if not on and not self._ceiling_covers_case(
                     case_id, lifter_ceiling, document_ceiling):
-                raise RetentionError(
-                    "a case-level hold is lifted only by somebody cleared for "
-                    "everything the case holds, and you are not. The hold "
-                    "stays; ask a colleague cleared for the whole case. "
-                    "Nothing was changed.")
+                raise RetentionError(self._lift_refusal(case_id))
             self._c.execute(
                 """UPDATE core."case" SET legal_hold = %s, legal_hold_reason = %s
                     WHERE id = %s""", (on, reason if on else None, case_id))
@@ -2017,6 +2122,25 @@ class RetentionService:
                          "prior_reason": prior[1]})
         return {"case_id": str(case_id), "legal_hold": bool(on),
                 "legal_hold_reason": reason if on else None}
+
+    def _lift_refusal(self, case_id: UUID) -> str:
+        """What a refused lift says. Under NONE (0030) it says nothing about
+        why: "cleared for everything the case holds" tells a lead that
+        something above them exists, which that case has chosen not to say
+        (Beta 1 verification, group C, C7). Under PRESENCE and COUNT the
+        sentence is the one it always was. A mode that cannot be read is
+        NONE."""
+        row = self._c.execute(
+            "SELECT withheld_disclosure FROM iam.case_facts(%s)",
+            (case_id,)).fetchone()
+        if row is None or row[0] == "NONE":
+            return ("the hold was not lifted and stays in force. Nothing was "
+                    "changed. If it should be lifted, ask the person who "
+                    "placed it or the case's owner.")
+        return ("a case-level hold is lifted only by somebody cleared for "
+                "everything the case holds, and you are not. The hold "
+                "stays; ask a colleague cleared for the whole case. "
+                "Nothing was changed.")
 
     def _ceiling_covers_case(self, case_id: UUID, ceiling: tuple | None,
                              document_ceiling: tuple | None = None) -> bool:

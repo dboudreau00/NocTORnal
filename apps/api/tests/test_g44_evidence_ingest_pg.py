@@ -150,6 +150,51 @@ def test_an_exhibit_the_uploader_may_see_is_still_deduplicated(conn, store, clie
     assert len(store.objects[g.evidence_row(conn, first.json()["evidence_id"])[0]]) == 1
 
 
+def test_the_same_bytes_at_other_labels_are_an_exhibit_of_their_own(conn, store, client):
+    """Beta 1 verification, group C, C3: the lookup ignored the labels the
+    uploader asked for, so AMBER bytes and then the same bytes as RED came
+    back 201 `deduplicated: true` with the AMBER exhibit, and the RED request
+    was dropped without a word. 0141 allows one exhibit per labels."""
+    boss = g.user(conn, "RED", roles=("CASE_OWNER",))
+    case_id = g.case(conn, boss)
+    headers = g.token(conn, boss)
+    data = b"g56-labels-" + uuid4().hex.encode()
+    amber = _upload(client, headers, case_id, data, classification="AMBER")
+    red = _upload(client, headers, case_id, data, classification="RED")
+    assert amber.status_code == 201 and red.status_code == 201, (amber.text, red.text)
+    assert amber.json()["deduplicated"] is False
+    assert red.json()["deduplicated"] is False
+    assert red.json()["evidence_id"] != amber.json()["evidence_id"]
+    assert g.evidence_row(conn, red.json()["evidence_id"])[2] == "RED"
+    assert g.evidence_row(conn, amber.json()["evidence_id"])[2] == "AMBER"
+    assert len(_rows_for(conn, case_id, data)) == 2
+    # Each label set still deduplicates onto its own exhibit.
+    again_amber = _upload(client, headers, case_id, data, classification="AMBER")
+    again_red = _upload(client, headers, case_id, data, classification="RED")
+    assert again_amber.json()["deduplicated"] is True
+    assert again_amber.json()["evidence_id"] == amber.json()["evidence_id"]
+    assert again_red.json()["deduplicated"] is True
+    assert again_red.json()["evidence_id"] == red.json()["evidence_id"]
+    assert len(_rows_for(conn, case_id, data)) == 2
+
+
+def test_the_same_bytes_in_another_compartment_are_an_exhibit_of_their_own(conn, store):
+    boss = g.user(conn, "RED", compartments=("G56-C3",))
+    case_id = g.case(conn, boss)
+    first, data = g.lodge(conn, store, case_id, boss, classification="AMBER",
+                          reader_ceiling=("RED", frozenset({"G56-C3"})))
+    second, _ = g.lodge(conn, store, case_id, boss, data=data,
+                        classification="AMBER", compartments=["G56-C3"],
+                        reader_ceiling=("RED", frozenset({"G56-C3"})))
+    assert second.deduplicated is False
+    assert second.evidence_id != first.evidence_id
+    third, _ = g.lodge(conn, store, case_id, boss, data=data,
+                       classification="AMBER", compartments=["G56-C3"],
+                       reader_ceiling=("RED", frozenset({"G56-C3"})))
+    assert third.deduplicated is True and third.evidence_id == second.evidence_id
+    assert len(_rows_for(conn, case_id, data)) == 2
+
+
 def test_a_reader_cleared_for_both_is_deduplicated_onto_the_older_one(conn, store):
     boss = g.user(conn, "RED")
     analyst = g.user(conn, "AMBER")

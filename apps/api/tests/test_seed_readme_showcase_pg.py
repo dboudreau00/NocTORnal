@@ -630,7 +630,11 @@ def test_everything_is_clear_but_the_one_green_exhibit(estate):
     # no case: it is a notification about a grant, not case material.
     assert officer_alert == [("GREEN", None)]
     r = report.redaction
-    assert (r.nodes_withheld, r.edges_withheld, r.evidence_withheld) == (0, 0, 1)
+    # The seeded case discloses PRESENCE (the default), so the document says
+    # that some exhibits are above CLEAR and not how many (Beta 1, group C,
+    # C2): this asserted the exact figure 1 before.
+    assert (r.nodes_withheld, r.edges_withheld, r.evidence_withheld,
+            r.evidence_some_withheld) == (0, 0, 0, True)
 
 
 # ------------------------------------------------------ triage and inbox

@@ -29321,8 +29321,11 @@ function renderRedaction(prepared) {
     r.nodes_withheld ? 'warn' : ''));
   facts.appendChild(fact('relationships withheld', r.edges_withheld || 0,
     r.edges_withheld ? 'warn' : ''));
-  facts.appendChild(fact('exhibits withheld', r.evidence_withheld || 0,
-    r.evidence_withheld ? 'warn' : ''));
+  /* The case's disclosure setting decides the figure: under PRESENCE the
+     document says some exhibits are above the ceiling and not how many. */
+  facts.appendChild(fact('exhibits withheld',
+    r.evidence_some_withheld ? 'some' : (r.evidence_withheld || 0),
+    r.evidence_withheld || r.evidence_some_withheld ? 'warn' : ''));
   /* Only when there is some: the matrix's scores leave these out (C2). */
   if (r.hypothesis_evidence_withheld) {
     facts.appendChild(fact('hypothesis evidence withheld',
@@ -29330,8 +29333,9 @@ function renderRedaction(prepared) {
   }
   card.appendChild(facts);
 
-  const anything = withheld || r.header_withheld || r.assumptions_withheld
-    || r.hypotheses_withheld || r.hypothesis_evidence_withheld;
+  const anything = withheld || r.evidence_some_withheld || r.header_withheld
+    || r.assumptions_withheld || r.hypotheses_withheld
+    || r.hypothesis_evidence_withheld;
   /* The statement is the document's own Markdown sentence, which bolds
      "Every figure below is computed over the redacted graph" with `**`.
      Printed through textContent, the card showed the asterisks the moment

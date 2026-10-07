@@ -802,7 +802,13 @@ class EvidenceService:
         # indistinguishable from novel bytes. A purged exhibit is never
         # reused (evidence-reingest-after-purge-dropped, same date): its
         # bytes are gone, so lodging them again stores them again.
-        existing, keys_taken = self._existing_for(case_id, digest, reader_ceiling)
+        # Nor is one at other labels than the ones asked for (Beta 1
+        # verification, group C, C3): AMBER bytes and then the same bytes as
+        # RED used to answer `deduplicated` with the AMBER exhibit, and the
+        # RED request was dropped without a word. One live exhibit per
+        # labels is what 0141 keeps.
+        existing, keys_taken = self._existing_for(
+            case_id, digest, reader_ceiling, classification, compartments)
         if existing is not None:
             return self._reacquired(existing, case_id, shahex, acquired_by,
                                     provenance)
@@ -903,7 +909,8 @@ class EvidenceService:
                     self._record_orphan(evidence_id, case_id, storage_key,
                                         shahex, acquired_by, exc)
                     raise
-                existing, _keys = self._existing_for(case_id, digest, reader_ceiling)
+                existing, _keys = self._existing_for(
+                    case_id, digest, reader_ceiling, classification, compartments)
                 if existing is not None:
                     return self._reacquired(existing, case_id, shahex, acquired_by,
                                             provenance)
@@ -921,11 +928,14 @@ class EvidenceService:
                 raise
 
     def _existing_for(self, case_id: UUID, digest: bytes,
-                      reader_ceiling: tuple | None) -> tuple[UUID | None, set[str]]:
-        """(the live exhibit of these bytes this uploader may see, or None;
-        every storage key any exhibit of these bytes holds). Read on a
-        system connection, so an exhibit above the uploader is seen here and
-        never written on, and is never named to them (rls-4, 2026-10-03)."""
+                      reader_ceiling: tuple | None, classification: str,
+                      compartments: list[str]) -> tuple[UUID | None, set[str]]:
+        """(the live exhibit of these bytes this uploader may see AT THE
+        LABELS ASKED FOR, or None; every storage key any exhibit of these
+        bytes holds). Read on a system connection, so an exhibit above the
+        uploader is seen here and never written on, and is never named to
+        them (rls-4, 2026-10-03). `compartments` is the sorted set `ingest`
+        writes."""
         from noctornal_api.db import SystemPurpose, system_connection
         from noctornal_api.security.access import tlp_from_name
 
@@ -938,7 +948,9 @@ class EvidenceService:
                     ORDER BY created_at, storage_key""",
                 (case_id, digest)).fetchall()
         keys = {r[4] for r in rows}
-        live = [r for r in rows if r[3] is None]
+        wanted = frozenset(compartments)
+        live = [r for r in rows if r[3] is None
+                and r[1] == classification and frozenset(r[2] or ()) == wanted]
         if reader_ceiling is None:
             seen = {r[0] for r in self._c.execute(
                 """SELECT id FROM core.evidence

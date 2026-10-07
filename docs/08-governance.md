@@ -57,6 +57,17 @@ date should be visibly flagged in the case list, not silently rolling on.
   the same case under the same written authority, then a confirmation
   that repeats the dry run's counts and asks for the case code to be
   typed. The dry run is the default every time the pane opens.
+- A hold on an exhibit or on a whole case is placed and lifted through the
+  API, not the console (the console has a hold control for collected
+  documents only): `POST /api/v1/retention/legal-hold` with `evidence_id`,
+  `on` and `reason`, and `POST /api/v1/retention/cases/{id}/legal-hold` with
+  `on` and `reason`. Both need `retention.manage` with a fresh second
+  factor and a written reason of at least five characters whichever way
+  the hold goes, and both are audited.
+  Lifting is one person and is refused below the material: a case-level
+  lift needs the lifter cleared for everything the case holds. A purge that
+  is running when a case hold arrives finishes the exhibit it is destroying
+  and keeps every one after it
 - Documents supporting an accepted assertion are pinned past source
   retention, otherwise you delete the evidence and leave the conclusion,
   which is the worst possible outcome
