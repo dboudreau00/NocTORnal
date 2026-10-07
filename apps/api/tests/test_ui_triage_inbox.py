@@ -803,7 +803,7 @@ console.log(JSON.stringify(log));
     blocks = blocks[:blocks.index("\n}\n")]
     assert "e.proposal_id)) loadTriage();" in blocks
     events = (SRC / "proposals.py").read_text(encoding="utf-8")
-    assert "announce(self._c, case_id)" in events
+    assert "announce(self._c, case_id, made)" in events
 
 
 def test_nothing_new_puts_a_dash_or_a_lazy_plural_in_front_of_a_reader():

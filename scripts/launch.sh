@@ -500,4 +500,4 @@ printf "      docker compose -f '%s' down\n" "$COMPOSE_FILE"
 printf '\n'
 
 # exec so signals reach uvicorn directly and Ctrl+C is not swallowed by bash.
-exec "$PYTHON" -m uvicorn noctornal_api.http.app:app --host 127.0.0.1 --port "$PORT"
+exec "$PYTHON" -m uvicorn noctornal_api.http.app:app --host 127.0.0.1 --port "$PORT" --ws-max-size 8192

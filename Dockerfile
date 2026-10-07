@@ -183,4 +183,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
 # production command adds workers and the proxy-header settings; this
 # default exists so `docker run` on the image alone does something
 # sensible and single-process.
-CMD ["uvicorn", "noctornal_api.http.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "noctornal_api.http.app:app", "--host", "0.0.0.0", "--port", "8000", "--ws-max-size", "8192"]

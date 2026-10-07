@@ -40,12 +40,34 @@ before the route parses it: Postgres cannot store U+0000 in text or
 jsonb, and several routes answered one with a 500 and a logged
 traceback. Routes that cap their own body are left to their own rules
 here too (the ingest dead-letters what it cannot parse).
+
+The same goes for a lone surrogate escape (`\\ud800` to `\\udfff` not
+paired with its other half), refused with a 422 (Beta 1 verification, G1):
+it decodes to a string no UTF-8 encoder will take, so Postgres' driver
+raised `UnicodeEncodeError` and an unconstrained text field answered 500.
+
+And a `body_cap` route is refused with its own 401 before a byte is read
+when the request presents no session credential at all (Beta 1
+verification, G2). FastAPI parses a multipart form before it resolves a
+single dependency and Starlette spools the parse to disk, so an upload
+route with a 256 MiB cap wrote up to 256 MiB for a caller that was never
+going to be let in, and nothing in front of the API bounds a body. This
+refuses only a request that presents NOTHING: a junk bearer or cookie
+still reads as it always did and is judged by the route, because telling a
+live session from a junk one takes the database and this layer is
+deliberately database-free (docs/17 records the residual). A route whose
+caller presents its credential in the body (the one-shot ticket of a
+download) is marked `credential_in_body` and is left alone.
 """
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Awaitable, Callable
 
+from starlette.requests import Request
+
+from noctornal_api.http.deps import NO_SESSION_DETAIL, presents_session_credential
 from noctornal_api.http.errors import Problem
 from noctornal_api.http.limits import body_too_large
 
@@ -65,6 +87,34 @@ _NUL_ESCAPE = re.compile(rb"(?<!\\)(?:\\\\)*\\u0000")
 NUL_DETAIL = ("a text field contains a NUL character (U+0000), which "
               "cannot be stored; remove it and send the request again")
 
+#: A JSON escape for a surrogate code unit (`\uD800` to `\uDFFF`), after an
+#: even run of backslashes. Only a screen: a properly paired high and low
+#: escape is how JSON spells a character outside the BMP and is fine, so a
+#: body that matches is parsed and its strings tried (`_lone_surrogate`).
+_SURROGATE_ESCAPE = re.compile(rb"(?<!\\)(?:\\\\)*\\u[dD][89a-fA-F][0-9a-fA-F]{2}")
+
+#: The 422 for text that is not text (Beta 1 verification, G1). An unpaired
+#: surrogate decodes to a string no UTF-8 encoder accepts, so it can be
+#: neither stored nor logged; paired escapes are accepted.
+SURROGATE_DETAIL = ("a text field contains an unpaired surrogate escape "
+                    "(a lone \\ud800 to \\udfff), which is not text and "
+                    "cannot be stored; remove it and send the request again")
+
+
+def _lone_surrogate(body: bytes) -> bool:
+    """Whether `body` is JSON with a lone surrogate in any string or key.
+    Anything that is not readable JSON is not this check's to judge: the
+    route answers it as it always has."""
+    if not _SURROGATE_ESCAPE.search(body):
+        return False
+    try:
+        json.dumps(json.loads(body), ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:
+        return True
+    except (ValueError, RecursionError):
+        return False
+    return False
+
 
 def _is_json(scope) -> bool:
     for name, value in scope.get("headers") or ():
@@ -79,6 +129,7 @@ _OWN_ATTR = "__own_body_cap__"
 #: `limits.body_cap`'s marker, read here so a route's own cap holds even
 #: where the router class would not enforce it.
 _BODY_CAP_ATTR = "__body_cap__"
+_BODY_CREDENTIAL_ATTR = "__body_credential__"
 
 
 def raise_body_ceiling(cap: int, *, what: str):
@@ -94,6 +145,26 @@ def own_body_cap(endpoint):
     after authenticating, so the ceiling here does not apply to it."""
     setattr(endpoint, _OWN_ATTR, True)
     return endpoint
+
+
+def credential_in_body(endpoint):
+    """Mark a `body_cap` route whose caller may present its credential in
+    the BODY (a one-shot ticket in a form field, on the sample origin where
+    no session exists), so the check for a header or cookie credential
+    before the body is read does not apply to it. The body is a few
+    hundred bytes, so there is nothing to spool."""
+    setattr(endpoint, _BODY_CREDENTIAL_ATTR, True)
+    return endpoint
+
+
+def _unauthenticated_upload(scope) -> bool:
+    """True for a request to a `body_cap` route that presents no session
+    credential, on a route that takes none from its body."""
+    endpoint = scope.get("endpoint")
+    if getattr(endpoint, _BODY_CAP_ATTR, None) is None \
+            or getattr(endpoint, _BODY_CREDENTIAL_ATTR, False):
+        return False
+    return not presents_session_credential(Request(scope))
 
 
 def ceiling_for(endpoint) -> tuple[int, str] | None:
@@ -159,6 +230,9 @@ class BodyCeilingMiddleware:
                     refused.append(body_too_large(ceiling[0], ceiling[1],
                                                   declared=declared))
                     raise refused[0]
+                if ceiling is not None and _unauthenticated_upload(scope):
+                    refused.append(Problem(401, "Unauthenticated", NO_SESSION_DETAIL))
+                    raise refused[0]
             message = await receive()
             ceiling = limit[0]
             if ceiling is not None and message.get("type") == "http.request":
@@ -170,10 +244,14 @@ class BodyCeilingMiddleware:
                     raise refused[0]
                 if seen is not None:
                     seen.extend(chunk)
-                    if not message.get("more_body", False) \
-                            and _NUL_ESCAPE.search(seen):
-                        refused.append(Problem(422, "Validation failed", NUL_DETAIL))
-                        raise refused[0]
+                    if not message.get("more_body", False):
+                        if _NUL_ESCAPE.search(seen):
+                            refused.append(Problem(422, "Validation failed", NUL_DETAIL))
+                            raise refused[0]
+                        if _lone_surrogate(seen):
+                            refused.append(Problem(422, "Validation failed",
+                                                   SURROGATE_DETAIL))
+                            raise refused[0]
             return message
 
         async def guarded_send(message: dict) -> None:

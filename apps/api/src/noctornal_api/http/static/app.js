@@ -13923,8 +13923,10 @@ function rememberTour() {
   catch (_e) { /* storage blocked: the tour shows again at the next sign-in */ }
 }
 
-/** The demo case's recipe, as `scripts/bootstrap.py` and the installer's
- *  closing card give it. The owner is the signed-in address when that is
+/** The demo case's recipe, as `scripts/bootstrap.py` (its default code) and
+ *  the installer's closing card give it: Operation Latticework, the one
+ *  case the installer offers, not the larger showcase the README builds
+ *  from OP-SHOWCASE-26. The owner is the signed-in address when that is
  *  a plain address, and the placeholder YOU otherwise: a value pasted into
  *  a shell is never taken from anywhere that could hold a metacharacter. */
 const TOUR_SAFE_EMAIL = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$/;
@@ -13932,7 +13934,7 @@ const TOUR_SAFE_EMAIL = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$/;
 function tourDemoCommand(email) {
   const owner = TOUR_SAFE_EMAIL.test(email || '') ? email : 'YOU';
   return '.venv/bin/python scripts/bootstrap.py demo-network --owner-email '
-    + owner + ' --code OP-SHOWCASE-26 --classification CLEAR';
+    + owner + ' --code OP-LATTICEWORK-26 --classification CLEAR';
 }
 
 /** What the steps may depend on, read when a step is drawn. */

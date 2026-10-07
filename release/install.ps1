@@ -1140,7 +1140,7 @@ if ($openDecision -eq 'open') {
 Set-Location -LiteralPath $RepoRoot
 $ErrorActionPreference = 'Continue'
 try {
-    & $VenvPython -m uvicorn 'noctornal_api.http.app:app' --host 127.0.0.1 --port $Port
+    & $VenvPython -m uvicorn 'noctornal_api.http.app:app' --host 127.0.0.1 --port $Port --ws-max-size 8192
     $apiExit = $LASTEXITCODE
 }
 finally {

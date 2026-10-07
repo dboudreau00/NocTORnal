@@ -1008,7 +1008,7 @@ services:
         cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt
         export SSL_CERT_FILE=/tmp/ca-bundle.crt
         exec uvicorn noctornal_api.http.app:app \
-          --host 0.0.0.0 --port 8000 --workers 4 \
+          --host 0.0.0.0 --port 8000 --workers 4 --ws-max-size 8192 \
           --proxy-headers --forwarded-allow-ips "$$NOCTORNAL_TRUSTED_PROXY_IP"
 
   # ------------------------------------------------------------------------
@@ -1093,7 +1093,7 @@ services:
         export SSL_CERT_FILE=/tmp/ca-bundle.crt
         export NOCTORNAL_PUBLIC_ORIGIN="$$NOCTORNAL_SAMPLE_ORIGIN"
         exec uvicorn noctornal_api.http.app:app \
-          --host 0.0.0.0 --port 8000 --workers 2 \
+          --host 0.0.0.0 --port 8000 --workers 2 --ws-max-size 8192 \
           --proxy-headers --forwarded-allow-ips "$$NOCTORNAL_TRUSTED_PROXY_IP"
 
   # ------------------------------------------------------------------------

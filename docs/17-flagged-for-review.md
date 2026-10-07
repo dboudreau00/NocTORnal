@@ -1041,3 +1041,37 @@ from the request role.
   can difference a weight to learn that someone they cannot see is in it. The
   explicit count is gone under NONE; the weight is not. Migration 0030 already
   concedes that differencing is possible.
+
+---
+
+## Beta 1 verification residuals (Group G)
+
+Seven independent readers re-checked the 82 fixes of the 2026-10-03 review
+against the merged beta build (migration head 0170, 2026-10-07). The one
+that took HTTP, sessions and the live socket found 13 of its 15 ids closed,
+rls-6 closed for credentials only, and http_ui-006 closed for size. What it
+found that was new, and what it left open, is here. The status rewrite of
+the review ids above is a separate pass; this section is written so it can
+be folded into it.
+
+### Closed in the same pass
+
+| Id | What was wrong | What changed |
+|---|---|---|
+| G1 | A lone surrogate escape (`\ud800` to `\udfff` with no partner) in an unconstrained text field answered 500, and in the live socket's hello it logged a traceback and closed 1011 for a peer with no session. | `http/body_ceiling.py` refuses an unpaired escape in a UTF-8 JSON body with 422 (paired escapes and an escaped backslash are untouched), `http/errors.py` answers the encoding failure that remains with 422, and `_handshake` closes 1008 unless the token is ASCII and at most 512 characters. |
+| G2 | An unauthenticated multipart upload was read and spooled to disk up to the route's cap (256 MiB for exhibits, 64 MiB for samples) before the 401. | `BodyCeilingMiddleware` answers the route's own 401 before the first read when a `body_cap` route is asked with no Bearer value and no session cookie. The two ticket routes, whose credential is in the form body, are marked and unchanged. See the residual below. |
+| G3 | A proposal queued above a reader's labels still woke their console: the hint named no labels, so only node and edge hints were filtered. | `proposals.announce` carries the proposal's read label and source compartments, and the live socket drops the hint for a reader who could not read the proposal. A hint with no labels is dropped. |
+| G4 | The live socket's first frame was buffered whole (uvicorn's default limit is 16 MiB) before the 4096 character check ran. | `--ws-max-size 8192` on every uvicorn start line: both launchers, both installers, the image's default command and the two production commands. The server closes 1009 and the application never sees the frame. |
+| G5 | A failed sign-in stored the submitted email verbatim up to 64 characters, so a password typed into the wrong box for an unknown account sat in the audit log in clear. | `_audit_email` keeps a value as typed only when it is shaped like an address (one `@`, no whitespace, a dot in the domain). Anything else is recorded as its length and a sha256 prefix. |
+| G6 | The first-sign-in tour printed `OP-SHOWCASE-26` as the demo case's code while the installer loads it as `OP-LATTICEWORK-26`, and a test pinned the installer to the wrong one. | The tour and its test now give `OP-LATTICEWORK-26`: the code `bootstrap.py demo-network` creates when it is given none, and the one the installers and `release/START-HERE.md` print. `OP-SHOWCASE-26` stays what it was, the README's larger showcase recipe. |
+
+### Residuals
+
+| Id | Area | What is left, and what it costs | Smallest fix, if wanted |
+|---|---|---|---|
+| rls-6 (part) | Row-level security, membership and session metadata | The request role, even with no session bound, can still read every `iam.case_assignment` row (who holds which role on which case), `iam.session` (`token_hash`, `rls_binding_hash`, `ip`, `user_agent`) and `iam.break_glass.justification`. The credential columns of `iam.app_user` are closed (0143). `token_hash` is a sha256 of a 256-bit random token and the binding proof is derived from the raw token, not from that hash, so neither opens a session; what is disclosed is who works which case and from where. It takes a statement injected into a request. 0109 made the IAM plane read-only to the request role instead of filtered, because the policies read it on every request. | A column-level `REVOKE` of the session and break-glass columns from the request role with definer functions for the legitimate readers. Filtering `iam.case_assignment` needs its readers moved to definer functions first. Each is a migration. |
+| NEW-4 | Row-level security, sealed columns outside IAM | The unbound request role can read these as ciphertext or a keyed hash: `collect.collection_account.secret_ciphertext` and `session_ciphertext`, `ingest.api_key.secret_hmac`, `ingest.provider.secret_ciphertext`, `lab.download_ticket.token_hash`, and, for a bound caller with no assignment, `lab.sample.data_key_ciphertext`. No plaintext follows without the key encryption key or the pepper, which live in the process environment, and the persona key is held only by the collector in production. The API reads `secret_hmac` and the provider ciphertext legitimately. rls-6 sealed `iam.app_user` only. | A column-level `REVOKE` on those columns, with definer readers for the length and null checks the API makes. A migration. |
+| session clock | Sessions | The request role may move its own session's `last_seen_at` forward by up to five minutes past the database's clock (`CLOCK_SKEW` in 0144, stated there as intended: it keeps an API host with a fast clock from failing every request). A forged value gains five minutes of idle window, once per write. | None proposed: the margin is deliberate, and the store clamps its own writes inside it. |
+| notify.enqueue | Notifications | A caller bound to a live session can send arbitrary text to any eligible recipient, as itself, with a pending mail delivery. 0145 stops it being sent as anyone else and stops it forging delivery rows; it does not limit what a bound account may say. | A kind and template allowlist inside the function, so only the notice kinds the product raises are accepted. A migration. |
+| G2 (left) | HTTP, uploads | The pre-read refusal is about a request that presents nothing. A request that carries any Bearer value or a session cookie is still read, and spooled to disk up to the route's cap, before the route judges it, because telling a live session from a junk one takes the database and the layer that refuses is deliberately free of it. The API container has no size-limited `/tmp` and the proxy sets no body limit, so one request can still write up to 256 MiB, bounded by the per-address request meter. | A size-limited `tmpfs` for `/tmp` on the API service, and a `request_body` `max_size` in the Caddyfile for the upload routes. |
+| G5 (left) | Audit log | A password that is itself shaped like an address (`Hunter2@home.net`) is not told apart from an address and is stored as typed. For everything else the sha256 prefix is unsalted, so a short typed secret can be guessed from it by anyone who can read the audit log. The same hashing already stands in `ip_hash`. | A keyed hash (an HMAC under a server secret) in place of the bare sha256, which needs a secret the audit path does not hold today. |

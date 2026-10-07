@@ -106,6 +106,7 @@ from noctornal_api.http.deps import (
     system_conn,
     user_ceiling,
 )
+from noctornal_api.http.body_ceiling import credential_in_body
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import (
     BodyCappedRoute,
@@ -1334,6 +1335,7 @@ def _download_actor(request: Request, conn: psycopg.Connection,
 @router.post("/{sample_id}/download",
              dependencies=[Depends(_meter_download)])
 @body_cap(_TICKET_BODY_CAP, what="a download ticket")
+@credential_in_body
 def download(
     sample_id: UUID,
     request: Request,

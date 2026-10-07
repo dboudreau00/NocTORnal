@@ -187,6 +187,22 @@ _HELLO_SECONDS = float(os.environ.get("NOCTORNAL_LIVE_HELLO_SECONDS", "10"))
 #: keeps the nesting a JSON parser can be made to walk short of absurd.
 _HELLO_MAX_CHARS = 4096
 
+#: The longest session token a hello may name, and it must be ASCII (a real
+#: one is 43 URL-safe characters). A token is hashed before it is looked up,
+#: and the hash encodes the text as UTF-8: a lone surrogate escape in the
+#: hello (`"\ud800"`) decodes to text that cannot be encoded, so a peer with
+#: no session made the handshake log a traceback and close 1011 (Beta 1
+#: verification, G1). Anything else is the same refusal as no token.
+_TOKEN_MAX_CHARS = 512
+
+#: The largest WebSocket frame the server reads, in bytes: the value every
+#: launch line gives uvicorn as `--ws-max-size` (uvicorn's own default is
+#: 16 MiB, and the length check on the hello above runs only after the
+#: whole frame has been buffered). Nothing larger than the hello is ever
+#: sent by a client, and after the hello the channel is one-way
+#: (`test_ws_max_size_is_on_every_launch_line` holds the lines to this).
+WS_MAX_SIZE = 8192
+
 
 class _UnusableHello(Exception):
     """The first frame cannot be read as a hello at all. `reason` is the
@@ -955,7 +971,8 @@ async def _handshake(ws: WebSocket, ip: str | None):
     # dropping the key. Both spellings arrive as `raw_case = None`, which
     # is why neither needs handling of its own.
     token = ws.cookies.get(SESSION_COOKIE) or frame_token
-    if not isinstance(token, str) or not token:
+    if (not isinstance(token, str) or not token or not token.isascii()
+            or len(token) > _TOKEN_MAX_CHARS):
         await ws.close(code=_CLOSE_UNAUTHENTICATED, reason="no credentials")
         return None
     try:
@@ -1088,9 +1105,12 @@ def _recheck(user_id: UUID, case_id: UUID, mfa_at) -> bool:
         conn.close()
 
 
-#: The change kinds `core.announce_change` raises, whose payload names the
-#: labels of what the statement wrote (0146).
-_LABELLED_KINDS = frozenset({"node", "edge"})
+#: The change kinds whose payload names the labels of what changed: node and
+#: edge from `core.announce_change` (0146), and proposal from
+#: `proposals.announce` (G3, Beta 1 verification). Every other kind is
+#: delivered on the case alone. A labelled kind that arrives with no labels
+#: is dropped: what cannot be placed is not announced.
+_LABELLED_KINDS = frozenset({"node", "edge", "proposal"})
 
 
 def _labels_readable(conn: psycopg.Connection, user_id: UUID, case_id: UUID,

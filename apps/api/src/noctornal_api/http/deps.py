@@ -123,6 +123,21 @@ def _bearer(authorization: str | None) -> str | None:
     return None
 
 
+#: The 401 for a request that presents no session credential at all. One
+#: sentence in one place: `session_token` raises it and
+#: `http/body_ceiling.py` answers an unauthenticated upload with it before
+#: reading a byte (Beta 1 verification, G2), and the two must agree.
+NO_SESSION_DETAIL = "no session token"
+
+
+def presents_session_credential(request: Request) -> bool:
+    """Whether `session_token` would find a token on this request: a
+    non-empty Bearer value, else the session cookie. Nothing is validated;
+    this is only the question of whether anything was presented."""
+    return bool(_bearer(request.headers.get("authorization"))
+                or request.cookies.get(SESSION_COOKIE))
+
+
 def session_token(
     request: Request,
     authorization: str | None = Header(default=None),
@@ -144,7 +159,7 @@ def session_token(
         return bearer
     cookie = request.cookies.get(SESSION_COOKIE)
     if not cookie:
-        raise Problem(401, "Unauthenticated", "no session token")
+        raise Problem(401, "Unauthenticated", NO_SESSION_DETAIL)
     if request.method in _UNSAFE_METHODS:
         sent = request.headers.get(CSRF_HEADER)
         expected = request.cookies.get(CSRF_COOKIE)
