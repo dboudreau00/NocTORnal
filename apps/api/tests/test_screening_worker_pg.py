@@ -63,9 +63,9 @@ def conn():
 @pytest.mark.parametrize("name", ["sample_screen", "sandbox_dispatch"])
 def test_the_worker_refuses_a_bad_production_environment_before_any_connection(
         name, monkeypatch, capsys):
-    """Exit 2 and the refusals on stderr since the lab jobs' Beta 1 change
-    (`config.JOB_REFUSAL_EXIT`); this test still expected the RuntimeError
-    they used to raise (beta gate, 2026-10-07)."""
+    """A refusal is the job's exit 2 (`config.JOB_REFUSAL_EXIT`) with one
+    line per problem on stderr, naming the variable and never its value,
+    and no traceback, as every job gives it."""
     import noctornal_api.db as db
     from noctornal_api.config import JOB_REFUSAL_EXIT
     module = _script(name)
@@ -81,6 +81,7 @@ def test_the_worker_refuses_a_bad_production_environment_before_any_connection(
     err = capsys.readouterr().err
     assert f"{name}: refusing to run: NOCTORNAL_HASH_SET_AUTHORITY" in err
     assert "replace-me" not in err
+    assert "Traceback" not in err
 
 
 def _list_file(tmp_path, *blobs):

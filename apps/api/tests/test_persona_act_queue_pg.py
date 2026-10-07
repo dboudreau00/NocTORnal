@@ -1384,6 +1384,29 @@ def test_an_acts_session_must_belong_to_the_person_who_asked(conn, api, world):
     assert api.factory.methods() == sent, "nothing new reached Telegram"
 
 
+def test_a_forged_second_factor_on_the_act_row_does_not_pass_the_step_up(
+        conn, api, world):
+    """The request role writes the act row, `mfa_satisfied_at` included, and
+    nothing pins that copy. A join (a step-up act) queued with a fresh copy
+    for a session whose own second factor is stale is refused: the collector
+    reads the session's time, which only a sign-in writes (beta 1 gate 6)."""
+    ch = _member_chat(conn, world, peer_type="MEGAGROUP", username="auto",
+                      access_hash=55)
+    api.telegram(tp.fixture_for(ch["spec"], world["uid"]), allow_join=True)
+    other, other_email = h.user(conn, P, clearance="RED", roles=("COLLECTOR",))
+    h.session(conn, other_email, fresh=False)
+    forged = conn.execute(_FORGE, {
+        "kind": "TELEGRAM_JOIN", "src": ch["source"], "cls": "AMBER",
+        "params": '{"acknowledge_overt": true, "note": "for the operation now"}',
+        "key": "e" * 64, "who": other, "sess": _session_id(conn, other)}).fetchone()[0]
+    counters = _drain(conn, api)
+    act = _act(conn, forged)
+    assert act["status"] == "REFUSED", (act, counters)
+    problem = act["result"]["problem"]
+    assert problem["status"] == 403 and "re-authentication" in problem["detail"]
+    assert "join" not in api.factory.methods()
+
+
 def test_a_forged_low_label_over_a_higher_chat_is_not_run(conn, api, world):
     """An act dated CLEAR by a caller whose ceiling is GREEN, over a chat
     the caller may not see, does not run: the label on the row is the

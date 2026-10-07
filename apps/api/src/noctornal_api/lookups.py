@@ -841,12 +841,16 @@ class LookupService:
             raise SystemContextUnavailable(
                 "a lookup's reservation counts every attempt on its provider and "
                 "must run on a system connection")
-        now = now or self._c.execute("SELECT clock_timestamp()").fetchone()[0]
         row = self._c.execute(
             "SELECT provider_id, attempts, exposure_level, subject_kind, state "
             "FROM ingest.lookup WHERE id = %s FOR UPDATE", (lookup_id,)).fetchone()
         provider_id, attempts, _level, _kind, _state = row
         provider = providers.get_provider(self._c, provider_id, for_update=True)
+        # The clock is read once the provider is locked: read before it, a
+        # reservation that waited on the lock counted the windows up to a
+        # moment earlier than the attempt the holder had just written, missed
+        # it, and sent past a full quota (beta 1 gate 6, 2026-10-07).
+        now = now or self._c.execute("SELECT clock_timestamp()").fetchone()[0]
         if provider.cooldown_until and provider.cooldown_until > now:
             raise CoolingDown("cooling_down", "The provider asked to slow down; it is "
                               f"cooling down until {provider.cooldown_until:%Y-%m-%d %H:%M} "
@@ -1949,6 +1953,11 @@ def _drain_lock(provider_id: UUID) -> str:
     return f"ingest.lookup_drain:{provider_id}"
 
 
+class _Changed(Exception):
+    """A queued lookup or its provider changed under the drain between its
+    reading and its reservation; the pass stops for that provider."""
+
+
 def drain(conn: psycopg.Connection, *, limit: int = 200, max_seconds: float = 240.0,
           dry_run: bool = False, clock: Callable | None = None,
           service: LookupService | None = None) -> dict:
@@ -2061,9 +2070,32 @@ def _drain_one(conn, svc: LookupService, lookup_id: UUID, provider, *,
         return "cached"
     if dry_run:
         return "sent"
+    # The provider was read once for the pass, and a pass may run for minutes:
+    # an exposure raised, a provider disabled or a lookup cancelled since then
+    # is read again here, under the locks the reservation takes, so nothing is
+    # sent on a stale reading (beta 1 gate 6, 2026-10-07).
+    live = conn.execute(
+        """SELECT l.state, p.enabled AND p.retired_at IS NULL, p.exposure_level::text
+             FROM ingest.lookup l JOIN ingest.provider p ON p.id = l.provider_id
+            WHERE l.id = %s""", (lookup_id,)).fetchone()
+    if live is None or live[0] != "QUEUED":
+        return "skipped"
+    if live[2] != level:
+        return refuse("exposure_changed")
+    if not live[1]:
+        return "stop"
     try:
         with conn.transaction():
+            if conn.execute(
+                    """SELECT 1 FROM ingest.lookup l JOIN ingest.provider p
+                           ON p.id = l.provider_id
+                        WHERE l.id = %s AND l.state = 'QUEUED' AND p.enabled
+                          AND p.retired_at IS NULL AND p.exposure_level::text = %s
+                          FOR UPDATE OF l, p""", (lookup_id, level)).fetchone() is None:
+                raise _Changed
             svc._reserve(lookup_id, interactive=False, actor_id=None)
+    except _Changed:
+        return "stop"
     except (QuotaExhausted, CoolingDown) as exc:
         # This provider is done for the pass: its remaining queued rows wait
         # for the window.

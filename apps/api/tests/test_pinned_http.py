@@ -139,6 +139,52 @@ def server():
     s.server_close()
 
 
+class _ChunkedHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self):  # noqa: N802 - the stdlib's naming
+        self.send_response(200)
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(b"2\r\nab\r\n" * self.server.chunks + b"0\r\n\r\n")
+
+    def log_message(self, *_args):
+        pass
+
+
+def test_a_body_of_tiny_chunks_is_read_in_pieces(monkeypatch):
+    """`http.client` reads a chunked body into a list of one object per
+    chunk and joins it at the end, so one `read(max_bytes + 1)` of 16 MiB
+    served as two-byte chunks held about a gigabyte (measured in memory: 2
+    MiB of them peaked at 125 MiB, read in 64 KiB pieces at 6 MiB; beta 1
+    gate 6, 2026-10-07). No read asks for more than a piece."""
+    import http.client
+
+    asked: list[int | None] = []
+    real_read = http.client.HTTPResponse.read
+
+    def read(self, amt=None):
+        asked.append(amt)
+        return real_read(self, amt)
+
+    monkeypatch.setattr(http.client.HTTPResponse, "read", read)
+    s = _Server()
+    s.RequestHandlerClass = _ChunkedHandler
+    s.chunks = 64 * 1024  # 128 KiB of body
+    try:
+        route = _dev_integration(Rule.for_host("localhost", {s.server_port}))
+        body = pinned_http.fetch_response(f"http://localhost:{s.server_port}/",
+                                          route=route, max_redirects=0,
+                                          timeout=20).body
+    finally:
+        s.shutdown()
+        s.server_close()
+    assert body == b"ab" * (64 * 1024)
+    piece = getattr(pinned_http, "READ_PIECE", 64 * 1024)
+    assert asked and all(a is not None and a <= piece for a in asked), asked[:3]
+
+
 def _dev_integration(*rules: Rule, name="webhook") -> EgressRoute:
     return EgressRoute.direct("integration", name, RoutePolicy(
         "integration", rules, any_public=False, allow_loopback=True))

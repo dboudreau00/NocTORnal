@@ -356,6 +356,99 @@ def test_bytes_skipped_over_the_member_cap_count_against_the_total():
     assert [m["path"] for m in report["members"]] == ["tail.bin"]
 
 
+# --- members a reader would never have seen (beta 1 gate 6, 2026-10-07) -------
+#
+# Each of these left members of the archive unexpanded and unscreened with
+# nothing refused, so the archive's card said every member was compared.
+
+def test_a_zip_appended_to_another_zip_is_refused_whole():
+    first = zip_of([("payload.exe", b"MZ" + bytes(4000))])
+    second = zip_of([("readme.txt", b"nothing to see")])
+    report, payloads = expand(first + second)
+    assert report["refusal"]["code"] == "corrupt", report
+    assert report["members"] == [] and payloads == []
+
+
+def test_a_zip_link_or_device_mode_on_a_payload_does_not_hide_it():
+    link = zipfile.ZipInfo("invoice.exe")
+    link.external_attr = 0o120777 << 16
+    dev = zipfile.ZipInfo("tool.exe")
+    dev.external_attr = 0o020644 << 16
+    payload = b"MZ" + bytes(100_000)
+    report, payloads = expand(zip_of([(link, payload), (dev, b"MZ" + bytes(10)),
+                                      ("plain", b"x" * 5)]))
+    assert report["refused"] == []
+    assert [m["path"] for m in report["members"]] == ["invoice.exe", "tool.exe", "plain"]
+    assert payloads[0] == payload
+
+
+def test_a_bad_tar_header_after_the_first_does_not_hide_the_members_behind_it():
+    head = tar_of([("a.txt", b"a" * 10)])[:1024]  # one member, no end blocks
+    rest = tar_of([("hidden.exe", b"MZ" + bytes(100)), ("hidden2.exe", b"MZ" + bytes(9))])
+    report, _payloads = expand(head + b"\xff" * 512 + rest)
+    assert report["refusal"]["code"] == "corrupt", report
+    assert report["refusal"]["detail"]["error"] == "data_after_last_member"
+
+
+@pytest.mark.parametrize("module", [gzip, __import__("bz2"), __import__("lzma")])
+def test_every_stream_of_a_multi_stream_compressed_tar_is_read(module):
+    """One tar split across two compressed streams (what `cat a.gz b.gz`
+    makes) expands whole, as `tar xzf` reads it."""
+    whole = tar_of([("a.txt", b"first " * 20), ("b.exe", b"MZ" + bytes(300))])
+    cut = 512 + 512  # a.txt's header and its one block of data
+    data = module.compress(whole[:cut]) + module.compress(whole[cut:])
+    report, _payloads = expand(data)
+    assert report["refusal"] is None, report
+    assert [m["path"] for m in report["members"]] == ["a.txt", "b.exe"]
+
+
+def test_a_second_tar_in_a_second_stream_is_refused_not_dropped():
+    data = gzip.compress(tar_of([("a.txt", b"a" * 10)])) + gzip.compress(
+        tar_of([("hidden.exe", b"MZ" + bytes(100))]))
+    report, _payloads = expand(data)
+    assert report["refusal"]["code"] == "corrupt", report
+
+
+def test_a_tar_member_of_an_unknown_type_is_held_to_the_ratio_before_it_is_skipped():
+    info = tarfile.TarInfo("odd")
+    info.type = b"Z"
+    info.size = 96 << 20
+    raw = bytearray(tar_of([]))
+    header = info.tobuf(format=tarfile.GNU_FORMAT)
+    data = gzip.compress(bytes(header) + bytes(96 << 20) + bytes(raw), compresslevel=9)
+    report, _payloads = expand(data, {**CAPS, "total_bytes": 256 << 20,
+                                      "member_bytes": 128 << 20})
+    assert report["refusal"]["code"] == "ratio", report
+
+
+def test_nul_padding_after_the_end_of_a_tar_is_not_data():
+    data = tar_of([("a.txt", b"a" * 10)]) + bytes(20480)
+    report, _payloads = expand(data)
+    assert report["refusal"] is None and [m["path"] for m in report["members"]] == ["a.txt"]
+
+
+@pytest.mark.parametrize("module", [gzip, __import__("bz2"), __import__("lzma")])
+def test_a_tiny_honest_compressed_tar_with_a_large_record_is_not_a_ratio_bomb(module):
+    """A one-byte member in a tar written with 64 KiB records compresses to
+    about a hundred bytes; the record's NUL padding is not held to the ratio."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        info = tarfile.TarInfo("a.txt")
+        info.size = 1
+        tf.addfile(info, io.BytesIO(b"x"))
+    raw = buf.getvalue()
+    raw += bytes(-len(raw) % 65536)
+    report, _payloads = expand(module.compress(raw))
+    assert report["refusal"] is None, report
+    assert [m["path"] for m in report["members"]] == ["a.txt"]
+
+
+def test_megabytes_of_nul_padding_still_count_against_the_ratio():
+    data = gzip.compress(tar_of([("a.txt", b"a" * 10)]) + bytes(64 << 20))
+    report, _payloads = expand(data, {**CAPS, "total_bytes": 256 << 20})
+    assert report["refusal"]["code"] == "ratio", report
+
+
 def test_nothing_in_the_child_extracts_to_a_path():
     import ast
     import inspect

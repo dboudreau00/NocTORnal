@@ -38,6 +38,7 @@ worker will not run on exits 2 (the code every job gives that refusal,
 """
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 
@@ -52,6 +53,12 @@ load_env_local()
 
 
 def main(argv: list[str] | None = None) -> int:
+    # It takes no options, and says so: `argv` was never read, so `--help`
+    # sent the queued detonations (beta 1 gate 6, 2026-10-07).
+    argparse.ArgumentParser(
+        description="Send the queued detonations to the configured sandbox, "
+                    "once, and record the reports of those already sent."
+    ).parse_args(argv or [])
     from noctornal_api.config import JOB_REFUSAL_EXIT, refuse_unsafe_job_environment
     refusals = refuse_unsafe_job_environment("sandbox_dispatch", whole_environment=True)
     if refusals:
@@ -82,4 +89,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

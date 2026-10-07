@@ -64,6 +64,9 @@ log = logging.getLogger("noctornal.forum_session")
 MAX_COOKIES = 20
 MAX_COOKIE_NAME = 256
 MAX_COOKIE_VALUE = 4096
+#: The longest Cookie header a jar may make: under the 8192 characters
+#: pinned_http sends as one header value (MAX_HEADER_VALUE).
+MAX_COOKIE_HEADER = 8000
 #: The boards one persona may hold a live session on at once.
 MAX_ORIGINS = 8
 #: The sealed blob's shape; an older one is dropped (see the module text).
@@ -131,20 +134,36 @@ def take_cookies(jar: dict[str, str], set_cookie_values, *,
                 out.pop(name, None)
                 continue
             value = morsel.value
-            if not isinstance(value, str) or len(value) > MAX_COOKIE_VALUE \
-                    or not value.isprintable() or ";" in value:
+            if not _sendable(name, value):
                 continue
             if name not in out and len(out) >= MAX_COOKIES:
                 continue
+            before = out.get(name)
             out[name] = value
+            if len(cookie_header(out) or "") > MAX_COOKIE_HEADER:
+                # Kept, it would make every later request of this jar one
+                # the client refuses, and the jar is sealed as it stands.
+                if before is None:
+                    out.pop(name)
+                else:
+                    out[name] = before
     return out
+
+
+def _sendable(name, value) -> bool:
+    """Whether a cookie can ride in a request: a printable name and an ASCII
+    value within the caps (beta 1 gate 6, 2026-10-07: a value printable but
+    not ASCII, or a jar whose header outgrew what the client sends, made
+    every later request of the persona's session fail, and the poisoned jar
+    was sealed, so every later run failed the same way)."""
+    return (_printable(name, MAX_COOKIE_NAME) and isinstance(value, str)
+            and len(value) <= MAX_COOKIE_VALUE and value.isascii()
+            and value.isprintable() and ";" not in value)
 
 
 def cookie_header(jar: dict[str, str]) -> str | None:
     """The Cookie header for `jar`, or None when it is empty."""
-    parts = [f"{k}={v}" for k, v in jar.items()
-             if _printable(k, MAX_COOKIE_NAME) and isinstance(v, str)
-             and len(v) <= MAX_COOKIE_VALUE and v.isprintable() and ";" not in v]
+    parts = [f"{k}={v}" for k, v in jar.items() if _sendable(k, v)]
     return "; ".join(parts) if parts else None
 
 
@@ -153,10 +172,10 @@ def _clean_jar(jar) -> dict[str, str]:
         return {}
     out: dict[str, str] = {}
     for k, v in jar.items():
-        if (_printable(k, MAX_COOKIE_NAME) and isinstance(v, str)
-                and len(v) <= MAX_COOKIE_VALUE and v.isprintable()
-                and ";" not in v and len(out) < MAX_COOKIES):
+        if _sendable(k, v) and len(out) < MAX_COOKIES:
             out[k] = v
+            if len(cookie_header(out) or "") > MAX_COOKIE_HEADER:
+                out.pop(k)
     return out
 
 

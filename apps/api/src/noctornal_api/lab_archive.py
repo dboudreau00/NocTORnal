@@ -982,7 +982,8 @@ def _expand(conn, storage, c, data: bytes, analysis,
     # Entries refused with bytes behind them were not compared by anything;
     # the derived "members were not compared" gap says so (g40 verify
     # major 3, 2026-10-03). A link, a device, a directory and an empty
-    # entry hold no content.
+    # entry hold no content (a zip entry marked as one that carries more than
+    # a link target is read as a member: lab_archive_child._zip_kind).
     unscreened = sum(1 for r in expansion.refused
                      if r["code"] not in CONTENT_FREE_REFUSALS)
     stopped: tuple | None = None

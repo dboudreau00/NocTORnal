@@ -344,14 +344,20 @@ def main() -> int:
     args = parser.parse_args()
     # S2, the egress proxy (2026-09-24). A production cron with
     # outbound uses and no egress proxy stops here, as the API does.
-    from noctornal_api.egress_routes import enforce_production_egress
-    enforce_production_egress()
     # A collector process (2026-10-02): in production a pass runs in the
     # collector, the one process that holds the persona key and carries
     # NOCTORNAL_COLLECTOR; anywhere else a persona's poll could not open
-    # its credential, and the cron loop must not hold it.
+    # its credential, and the cron loop must not hold it. Each refusal is
+    # this job's refusal, exit 2 with its sentence, where it was a traceback
+    # and exit 1, the code of a pass that ran (beta 1 gate 6, 2026-10-07).
     from noctornal_api.config import enforce_persona_key_boundary
-    enforce_persona_key_boundary(collector=True)
+    from noctornal_api.egress_routes import enforce_production_egress
+    try:
+        enforce_production_egress()
+        enforce_persona_key_boundary(collector=True)
+    except RuntimeError as exc:
+        print(f"collection_poll: refusing to run: {exc}", file=sys.stderr)
+        return JOB_REFUSAL_EXIT
     # Read before anything else, so the pass's clock includes the
     # readiness probes and the listing, which are part of how long the
     # compose loop waits for this process.

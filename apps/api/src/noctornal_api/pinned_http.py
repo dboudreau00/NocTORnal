@@ -90,6 +90,9 @@ MAX_REDIRECTS = 5
 #: this system holding every persona credential should not have a code
 #: path whose memory use is chosen by a monitored source.
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+#: A body is read this much at a time, so what one read holds beside the
+#: body itself is bounded whatever the chunking (beta 1 gate 6, 2026-10-07).
+READ_PIECE = 64 * 1024
 
 #: The whole of one call, by the wall clock, when the caller names no
 #: allowance: every hop, every connect attempt, the TLS handshake, the
@@ -1314,8 +1317,18 @@ def _one_exchange(hop: Hop, *, route: EgressRoute, method: str,
             # between "exactly at the limit" and "more coming" is
             # knowable. The cap bounds the MEMORY; the time is bounded by
             # `deadline`, whose watchdog ends this read wherever it has got
-            # to (c2, 2026-09-24).
-            data = response.read(max_bytes + 1)
+            # to (c2, 2026-09-24). In pieces: one read of a chunked body
+            # holds an object per chunk until the end, so 16 MiB served as
+            # two-byte chunks cost a gigabyte in one call (beta 1 gate 6,
+            # 2026-10-07); a piece holds at most READ_PIECE of them.
+            held = bytearray()
+            while len(held) <= max_bytes:
+                piece = response.read(min(READ_PIECE, max_bytes + 1 - len(held)))
+                if not piece:
+                    break
+                held += piece
+            data = bytes(held)
+            del held
             if deadline.spent():
                 raise deadline.exceeded()
             if len(data) > max_bytes:
