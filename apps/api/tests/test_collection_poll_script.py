@@ -468,7 +468,7 @@ def test_a_second_runner_is_refused_while_the_first_holds_the_source(conn):
 
 
 @pg
-def test_two_different_sources_do_not_block_each_other(conn):
+def test_two_different_sources_do_not_block_each_other(conn, invalid_names_fail_fast):
     """Why the key is the source and not one global collector lock.
 
     Two different sources are two different sites: the politeness that
@@ -499,7 +499,7 @@ def test_two_different_sources_do_not_block_each_other(conn):
 
 
 @pg
-def test_the_lock_is_released_when_the_poll_fails(conn):
+def test_the_lock_is_released_when_the_poll_fails(conn, invalid_names_fail_fast):
     """A session lock outlives the statement that took it.
 
     So an exception escaping the poll would strand it for the life of the

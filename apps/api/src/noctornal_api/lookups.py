@@ -20,8 +20,8 @@ caller by its anchor source, and it offers the operation for the type;
 not declared below what the case already holds for it, and no hash of an
 unscreened sample leaves by any subject kind; (5) the egress gate at the
 subject's current labels and the provider's ceiling; (6) personal data is
-refused outright (docs/16 L2); (7) a SAMPLE subject needs screening that
-is not built yet (docs/16 L1); (8) a fresh cached answer at or above the
+refused outright (docs/16 L2); (7) a SAMPLE subject leaves only once
+prohibited-content screening has cleared it (docs/16 L1); (8) a fresh cached answer at or above the
 subject's label is served and nothing is sent; (9) the exposure echo; (10)
 a lookup that is not NONE names an eligible authoriser with a note; (11)
 the row.
@@ -449,8 +449,8 @@ class LookupService:
 
     def _sample_hashes(self, subject: Subject, clearance: str,
                        held: frozenset[str]) -> str | None:
-        """Any lab.sample holding this hash, in any case or none: screening
-        is absent everywhere, so the hash of never-screened material leaves
+        """Any lab.sample holding this hash, in any case or none, that
+        screening has not cleared: the hash of unscreened material leaves
         by no subject kind. The sentence is the sample one only when the
         caller can see the sample."""
         column = _HASH_TYPES.get(subject.selector_type)

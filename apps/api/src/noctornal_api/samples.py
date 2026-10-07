@@ -131,8 +131,10 @@ analyst proposes it.
 
 ## What is NOT built, and is not pretended
 
-- **No archive expansion.** docs/11 asks for it with depth and ratio caps,
-  and an uncapped expander is a zip bomb waiting for someone to send one.
+- **No uncapped archive expansion.** An archive is expanded after its
+  static triage by `lab_archive` (phase 8, 2026-10-02), under the depth,
+  count, size and ratio caps docs/11 asks for, and each stored member is a
+  sample of its own.
 - **No sandbox of its own.** docs/11 is emphatic that you integrate rather
   than build one. A request is recorded (RECORD_ONLY) or, where an
   operator configured a self-hosted CAPEv2, sent by the sandbox worker
@@ -141,7 +143,9 @@ analyst proposes it.
 - **No perceptual matching.** Prohibited-content screening (`screening.py`,
   F13, 2026-09-24) compares exact hashes against the lists this deployment
   imported under a recorded authority, and says so on every sample: a
-  re-encoded copy does not match, and archive members are not compared.
+  re-encoded copy does not match, and an archive member is compared only
+  once expansion has stored it as a sample (`derived_gaps` says which
+  entries were not).
 
 ## Seams the Lab features share (F11-core, 2026-09-24)
 

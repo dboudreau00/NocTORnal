@@ -97,54 +97,74 @@ def test_the_meter_expires_on_its_own(backend, key):
     assert backend.measure(key, emission, tolerance).allowed
 
 
-def test_redis_and_python_agree_request_for_request(backend, key):
+#: The production script's one clock read, which the agreement test below
+#: replaces with an argument.
+_CLOCK_READ = ("local now = redis.call('TIME')\n"
+               "local now_us = tonumber(now[1]) * 1000000 + tonumber(now[2])\n")
+
+
+def test_redis_and_python_agree_request_for_request(key):
     """The test that matters. One algorithm, two implementations, one
-    verdict sequence.
+    decision sequence, asserted at the boundaries.
 
-    Timing is kept away from the boundaries deliberately: this asserts the
-    two implementations agree, not that either can resolve a microsecond.
+    Both sides run on ONE injected clock (beta gate, 2026-10-07). Until then
+    each read its own wall clock, every Redis round trip added elapsed time
+    to the Redis side only, and on a loaded machine the two drifted across
+    a boundary the other had not reached: the test failed with nothing
+    wrong (known since 2026-07-30). The production script reads Redis's
+    TIME and `measure` takes no clock, by design (the next test asserts
+    both), so the Redis side here runs the production script's own text
+    with that one read replaced by an argument, called through
+    `RedisBackend`'s own parsing; every other line is what production runs.
+    Time being exact, requests land ON the boundary (allow_at == now),
+    which wall time could never place, and whole decisions are compared,
+    not just the verdict.
 
-    ## KNOWN TO FAIL ON A SLOW OR LOADED REDIS LINK (2026-07-30)
-
-    It fails deterministically on this development machine, diverging at
-    iteration 23 of 30, and the assertion is NOT the thing to loosen.
-
-    The two backends are not measured over the same timeline. Every
-    `backend.measure` is a round trip to Redis; every `local.measure` is a
-    function call. Thirty iterations therefore accumulate thirty round
-    trips of extra elapsed time on the Redis side only, and with
-    `emission = 0.05s` a few tens of milliseconds of drift is enough to
-    put one implementation on the far side of a boundary the other has not
-    reached. Windows' ~15.6ms timer granularity coarsens `time.sleep(0.12)`
-    on top of that.
-
-    So the failure says the HARNESS cannot compare them fairly here, not
-    that the implementations disagree — the algorithm is identical and the
-    single-backend tests above all pass. Widening the tolerance would make
-    it green while destroying what it checks, which is agreement at the
-    boundary; the boundary is the only interesting part.
-
-    Fixing it properly means driving both backends from an injected clock
-    rather than wall time, so neither pays for the transport. That is a
-    real change to `ratelimit.py`'s shape and is not attempted here.
+    The clock is whole seconds at a realistic epoch, so the in-process
+    side's float clock converts exactly and the Redis side carries numbers
+    the size production does; an emission of a minute keeps every meter's
+    real TTL far longer than the test.
     """
+    import random
+
     from noctornal_api.ratelimit import InProcessBackend
+    from noctornal_api.ratelimit_redis import _GCRA_LUA, RedisBackend
 
-    emission, tolerance = 50_000, 250_000  # 0.05s each, burst 5
-    local = InProcessBackend()
-    local_key = "mirror"
+    assert _GCRA_LUA.count(_CLOCK_READ) == 1
+    clock_s = [1_790_000_000]
+    backend = RedisBackend(REDIS_URL)
+    timed = backend._redis.register_script(
+        _GCRA_LUA.replace(_CLOCK_READ, "local now_us = tonumber(ARGV[4])\n"))
+    backend._script = lambda keys, args: timed(
+        keys=keys, args=[*args, clock_s[0] * 1_000_000])
+    local = InProcessBackend(now=lambda: float(clock_s[0]))
 
-    redis_verdicts, local_verdicts = [], []
-    for i in range(30):
-        redis_verdicts.append(backend.measure(key, emission, tolerance).allowed)
-        local_verdicts.append(local.measure(local_key, emission, tolerance).allowed)
-        if i % 7 == 6:
-            time.sleep(0.12)  # two and a bit emissions of recovery
+    emission, tolerance = 60_000_000, 300_000_000  # a minute each, burst 5
+    # (seconds to advance, operation): a burst to refusal, the far side of
+    # the boundary, the boundary itself, peeks that must consume nothing, a
+    # partial drain and an emptied meter; then a seeded random tail.
+    script = ([(0, "measure")] * 6 + [(59, "measure"), (1, "peek"),
+              (0, "measure"), (0, "measure"), (59, "measure"),
+              (1, "measure"), (150, "measure"), (0, "peek"), (0, "measure"),
+              (0, "measure"), (1000, "measure")])
+    rng = random.Random(20261007)
+    script += [(rng.choice((0, 0, 1, 59, 60, 61, 150)),
+                rng.choice(("measure", "measure", "peek"))) for _ in range(60)]
 
-    assert redis_verdicts == local_verdicts
-    # And the sequence has to actually exercise both branches, or the test
-    # passes vacuously on a limit nobody reached.
-    assert True in redis_verdicts and False in redis_verdicts
+    redis_side, local_side, at_boundary = [], [], 0
+    for advance, op in script:
+        clock_s[0] += advance
+        before = local.peek("mirror", emission, tolerance)
+        redis_side.append(getattr(backend, op)(key, emission, tolerance))
+        local_side.append(getattr(local, op)("mirror", emission, tolerance))
+        # Allowed with the meter then exactly full: allow_at == now.
+        at_boundary += before.allowed and before.reset_us == tolerance
+    assert redis_side == local_side
+    # The sequence has to exercise both branches and the boundary itself,
+    # or it passes vacuously on a limit nobody reached.
+    verdicts = [d.allowed for d in redis_side]
+    assert True in verdicts and False in verdicts
+    assert at_boundary
 
 
 def test_time_comes_from_redis_not_from_the_caller(backend, key):

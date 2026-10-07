@@ -111,6 +111,11 @@ def conn():
         c.execute(f"DELETE FROM core.evidence_link WHERE evidence_id IN {esub}")
         c.execute(f"DELETE FROM core.evidence WHERE case_id IN {csub} "
                   f"AND id NOT IN {pinned_evidence}")
+        # That sample's triage run is a queue entry, not a ledger: left
+        # QUEUED it went stale over a long run and failed the readiness
+        # tests that read the whole queue (beta gate, 2026-10-07).
+        c.execute(f"DELETE FROM lab.static_run WHERE status = 'QUEUED' AND "
+                  f"sample_id IN (SELECT id FROM lab.sample WHERE submitted_by IN {sub})")
         c.execute(f"DELETE FROM iam.case_assignment WHERE case_id IN {csub}")
         c.execute(f'DELETE FROM core."case" WHERE id IN {csub} '
                   f"AND id NOT IN {pinned_cases}")

@@ -245,11 +245,15 @@ def test_blocking_failures_send_nothing(conn, stub):
 def test_outside_this_host_without_authority_nothing_at_all_is_sent(conn, stub):
     svc = _service(conn, stub, local=False)
     _doc(conn, "anything")
+    # Before and after, not "== 0": a row another suite left is not this
+    # pass's write (beta gate, 2026-10-07).
+    before = conn.execute("SELECT count(*) FROM collect.document_embedding").fetchone()[0]
     result = svc.run_pass("MEANING", max_seconds=0)
     assert result.refused == "no_authority"
     assert stub.requests == []
     assert svc.active("MEANING") is None
-    assert conn.execute("SELECT count(*) FROM collect.document_embedding").fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT count(*) FROM collect.document_embedding").fetchone()[0] == before
 
 
 def test_a_changed_model_stops_the_space_and_a_restored_one_resumes_it(conn, stub):

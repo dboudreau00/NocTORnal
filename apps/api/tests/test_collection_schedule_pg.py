@@ -76,7 +76,7 @@ def test_the_schedule_is_rolled_once_and_stored_not_re_rolled_on_read(conn):
     assert again == first, "reading the schedule must not change it"
 
 
-def test_a_failed_run_still_reschedules(conn):
+def test_a_failed_run_still_reschedules(conn, invalid_names_fail_fast):
     """A source that only reschedules on success retries as fast as the
     scheduler runs the moment it breaks -- a hammering pattern aimed at a
     site that has just started refusing us."""

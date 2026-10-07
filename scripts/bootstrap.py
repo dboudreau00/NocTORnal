@@ -1249,8 +1249,9 @@ def cmd_session(args: argparse.Namespace) -> None:
     and NOCTORNAL_TOTP_KEK, and anyone holding those could write this row by
     hand. The session it creates is an ordinary one — same 12 hour absolute
     and 30 minute idle expiry, same revocation — so nothing downstream is
-    weakened. The proper fix on a real deployment is recovery codes (see
-    docs/05), which are not built yet.
+    weakened. The proper fix on a real deployment is a recovery code
+    (`security/recovery.py`, docs/05), which signs a person in without the
+    authenticator.
 
     It is UNBOUND, and that is deliberate. 0058 records the address and
     User-Agent a session was minted from, and `SessionService.create` takes
