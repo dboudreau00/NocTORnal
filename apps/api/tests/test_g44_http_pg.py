@@ -460,3 +460,91 @@ def test_every_release_destination_is_a_gate_destination_that_crosses_the_bounda
     from noctornal_api.http.routers.reports import RELEASE_DESTINATIONS
     assert set(RELEASE_DESTINATIONS) < set(Destination)
     assert Destination.IN_APP not in RELEASE_DESTINATIONS
+
+
+# --- Beta 1 verification, group C, C7 ---------------------------------------
+#
+# Two answers told a lead below some material that it exists, whatever the
+# case's withheld-disclosure setting (0030): a refused case-hold lift said the
+# lead was "not cleared for everything the case holds", and the purge dry run
+# counted the exhibits above the caller in its totals.
+
+def _set_disclosure(conn, case_id, mode):
+    conn.execute('UPDATE core."case" SET withheld_disclosure = %s WHERE id = %s',
+                 (mode, case_id))
+
+
+def test_a_refused_case_hold_lift_names_nothing_above_the_lead_under_none(conn, client):
+    boss, lead, case_id, _exhibit = _setup_red_exhibit(conn)
+    _set_disclosure(conn, case_id, "NONE")
+    assert _case_hold(client, g.token(conn, lead), case_id).status_code == 200
+    r = _case_hold(client, g.token(conn, lead), case_id, on=False,
+                   reason="lifting this on my own authority")
+    assert r.status_code == 400, r.text
+    detail = r.json()["detail"]
+    assert "cleared" not in detail and "everything" not in detail, detail
+    assert "stays" in detail and "Nothing was changed" in detail
+    assert _case_held(conn, case_id)
+    # The same refusal, worded as it was, where the case says that it is
+    # incomplete to a reader below something.
+    _set_disclosure(conn, case_id, "PRESENCE")
+    r = _case_hold(client, g.token(conn, lead), case_id, on=False,
+                   reason="lifting this on my own authority")
+    assert "cleared for everything" in r.json()["detail"]
+
+
+def _case_with_hidden_exhibits(conn, mode):
+    """An AMBER lead who sees one AMBER exhibit in a case that also holds two
+    RED exhibits, one of them under a hold, all of them past the case's
+    retention."""
+    boss = g.user(conn, "RED", roles=("CASE_OWNER",))
+    lead = g.user(conn, "AMBER", roles=("CASE_OWNER",))
+    case_id = g.case(conn, boss)
+    s.assign(conn, case_id, boss, "CASE_OWNER")
+    s.assign(conn, case_id, lead, "CASE_OWNER")
+    visible = s.exhibit(conn, case_id, boss, "AMBER")
+    s.exhibit(conn, case_id, boss, "RED")
+    held = s.exhibit(conn, case_id, boss, "RED")
+    conn.execute("UPDATE core.evidence SET legal_hold = true, "
+                 "legal_hold_reason = 'g44 informant' WHERE id = %s", (held,))
+    g.age_case(conn, case_id, g.expired())
+    _set_disclosure(conn, case_id, mode)
+    return boss, lead, case_id, visible
+
+
+def _dry_run(client, headers, case_id):
+    r = client.post(f"{API}/retention/purge", headers=headers,
+                    json={"case_id": str(case_id), "dry_run": True,
+                          "authority": "g44 schedule review"})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+@pytest.mark.parametrize("mode", ["NONE", "PRESENCE", "COUNT"])
+def test_the_dry_run_counts_only_what_the_caller_may_know_of(conn, client, mode):
+    _boss, lead, case_id, visible = _case_with_hidden_exhibits(conn, mode)
+    assert client.get(f"{API}/cases/{case_id}/evidence",
+                      headers=g.token(conn, lead)).json()["total"] == 1
+    out = _dry_run(client, g.token(conn, lead), case_id)
+    # The totals are the caller's own: the one exhibit they can see, and
+    # nothing held back (the held exhibit is RED).
+    assert out["evidence_purged"] == 1, out
+    assert out["held_back"] == 0, out
+    assert {i["object_id"] for i in out["items"]} == {str(visible)}
+    said = out.get("withheld")
+    if mode == "NONE":
+        assert said is None, "a case that discloses nothing said something"
+    elif mode == "PRESENCE":
+        assert said == [{"case_id": str(case_id), "mode": "PRESENCE",
+                         "incomplete": True}]
+    else:
+        assert said == [{"case_id": str(case_id), "mode": "COUNT",
+                         "incomplete": True, "items": 2}]
+
+
+def test_a_dry_run_by_somebody_cleared_for_everything_counts_it_all(conn, client):
+    boss, _lead, case_id, _visible = _case_with_hidden_exhibits(conn, "NONE")
+    out = _dry_run(client, g.token(conn, boss), case_id)
+    assert out["evidence_purged"] == 1 + 1 and out["held_back"] == 1, out
+    assert "withheld" not in out
+    assert out["preview"], "the dry run issued no preview to confirm"

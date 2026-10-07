@@ -100,7 +100,9 @@ from noctornal_api.assumptions import AssumptionService
 from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.egress import Destination, can_egress
 from noctornal_api.projections import (
+    DISCLOSURE_COUNT,
     DISCLOSURE_NONE,
+    DISCLOSURE_PRESENCE,
     GraphService,
     Projection,
     Subgraph,
@@ -172,11 +174,19 @@ class Redaction:
     #: Like those counts it follows the case's withheld-disclosure setting,
     #: and is 0 under NONE.
     hypothesis_evidence_withheld: int = 0
+    #: Exhibits above the ceiling exist, said without a number. The case's
+    #: withheld-disclosure setting (0030) decides what the document may say
+    #: about them: nothing under NONE, that there are some under PRESENCE
+    #: (this flag, with `evidence_withheld` left at 0), the figure only under
+    #: COUNT (Beta 1 verification, group C, C2: the figure used to be stated
+    #: whatever the setting).
+    evidence_some_withheld: bool = False
 
     @property
     def anything_withheld(self) -> bool:
         return bool(self.nodes_withheld or self.edges_withheld
-                    or self.evidence_withheld or self.header_withheld
+                    or self.evidence_withheld or self.evidence_some_withheld
+                    or self.header_withheld
                     or self.assumptions_withheld or self.hypotheses_withheld
                     or self.hypothesis_evidence_withheld)
 
@@ -222,9 +232,11 @@ class Redaction:
                 f"matrix {'rests' if n == 1 else 'rest'} on that material, so "
                 f"the hypothesis scores below leave "
                 f"{'it' if n == 1 else 'them'} out.")
+        exhibits = ("some exhibits" if self.evidence_some_withheld
+                    else _count(self.evidence_withheld, 'exhibit', 'exhibits'))
         withheld = (f"{_count(self.nodes_withheld, 'entity', 'entities')}, "
                     f"{_count(self.edges_withheld, 'relationship', 'relationships')} "
-                    f"and {_count(self.evidence_withheld, 'exhibit', 'exhibits')}")
+                    f"and {exhibits}")
         return (
             f"This document is marked TLP:{self.built_at_tlp} and was prepared "
             f"to include material up to TLP:{self.ceiling_tlp}, from a case "
@@ -268,6 +280,7 @@ class Report:
                 "nodes_withheld": self.redaction.nodes_withheld,
                 "edges_withheld": self.redaction.edges_withheld,
                 "evidence_withheld": self.redaction.evidence_withheld,
+                "evidence_some_withheld": self.redaction.evidence_some_withheld,
                 "statement": self.redaction.statement(),
                 "header_withheld": self.redaction.header_withheld,
                 "assumptions_withheld": self.redaction.assumptions_withheld,
@@ -461,12 +474,21 @@ class ReportBuilder:
         assumptions = register.for_report(case_id) if header_ok else []
         assumptions_withheld = 0 if header_ok else register.count_reportable(case_id)
 
+        # The exhibit figure follows the case's withheld-disclosure setting
+        # (0030): NONE says nothing, PRESENCE that some are above the
+        # ceiling, and only COUNT the number. It was stated exactly under
+        # all three (Beta 1 verification, group C, C2), so a case set to NONE
+        # had a register showing 0 beside a document saying "2 exhibits".
+        hidden_exhibits = evidence_total - len(evidence_rows)
         redaction = Redaction(
             built_at_tlp=marking.name, ceiling_tlp=target.name,
             case_tlp=case_tlp,
             nodes_withheld=withheld.nodes or 0,
             edges_withheld=withheld.edges or 0,
-            evidence_withheld=evidence_total - len(evidence_rows),
+            evidence_withheld=(hidden_exhibits
+                               if withheld.mode == DISCLOSURE_COUNT else 0),
+            evidence_some_withheld=(withheld.mode == DISCLOSURE_PRESENCE
+                                    and hidden_exhibits > 0),
             header_withheld=not header_ok,
             assumptions_withheld=assumptions_withheld,
             hypotheses_withheld=hypotheses_withheld,
@@ -530,14 +552,18 @@ class ReportBuilder:
                 if header_ok and case[9] else None,
             },
             # The union of what actually went in: the case header when it
-            # is included, plus every exhibit's own. The projection's nodes
-            # and edges cannot contribute beyond the requester's read-in
-            # because `GraphService` filtered on it, and an exhibit is in
-            # the register for the same reason — so this is bounded by
+            # is included, plus every exhibit's, entity's and tie's own
+            # (Beta 1 verification, group C, C1: the last two were left out,
+            # so a compartmented entity left through `export` and `smtp`
+            # with its label in the document). The projection's nodes and
+            # edges cannot contribute beyond the requester's read-in because
+            # `GraphService` filtered on it, and an exhibit is in the
+            # register for the same reason, so this is bounded by
             # `compartments` and is the honest subset of it, not the whole.
             compartments=frozenset(
                 (case_compartments if header_ok else frozenset())
                 | {c for r in evidence_rows for c in (r[9] or [])}
+                | sub.compartments
                 | matrix.compartments),
             redaction=redaction,
             summary={

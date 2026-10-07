@@ -180,6 +180,7 @@ import struct
 import threading
 import time
 import zlib
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import NamedTuple
@@ -2082,9 +2083,17 @@ class SampleService:
         Under the row lock, with the hold read again under it, so neither a
         concurrent rejection nor a hold placed since `reject` looked can be
         destroyed through (U5). There is no audit append here, so the
-        delete holding the row lock holds up only this sample."""
+        delete holding the row lock holds up only this sample.
+
+        The sample's CASE row is held FOR SHARE for the whole of it (Beta 1
+        verification, group C, C4). The row lock covers the sample and a case
+        hold writes the case, so the reread alone could not see a hold
+        committed during the store's delete: the sample was left REJECTED,
+        its bytes gone and the case held. `set_case_legal_hold` takes the case
+        row FOR UPDATE, so a hold entered meanwhile waits for this rejection
+        and one written earlier is read below."""
         try:
-            with self._c.transaction():
+            with self._case_row_shared(sample_id), self._c.transaction():
                 self._lock_unrejected(sample_id, nothing="Nothing was "
                                       "destroyed.")
                 held, storage_key = self._hold_and_key(sample_id)
@@ -2112,6 +2121,28 @@ class SampleService:
         except psycopg.errors.LockNotAvailable:
             raise _row_busy() from None
         return _record(row)
+
+    @contextmanager
+    def _case_row_shared(self, sample_id: UUID):
+        """The sample's case row held FOR SHARE for the length of the block,
+        on a system connection of its own: that needs no case assignment, and
+        a Lab analyst holds none, so under row security a plain
+        `SELECT ... FOR SHARE` on the case would lock nothing at all (the case
+        is hidden from them, as `_hold_and_key` reads it through
+        `iam.case_facts` for the same reason). The lock is released when the
+        block ends. A sample with no case has no case hold to wait for."""
+        from noctornal_api.db import SystemPurpose, system_connection
+
+        row = self._c.execute("SELECT case_id FROM lab.sample WHERE id = %s",
+                              (sample_id,)).fetchone()
+        if row is None or row[0] is None:
+            yield
+            return
+        with system_connection(SystemPurpose.RETENTION) as holder:
+            with holder.transaction():
+                holder.execute(
+                    'SELECT 1 FROM core."case" WHERE id = %s FOR SHARE', (row[0],))
+                yield
 
     def _reject_keeping(self, sample_id: UUID, *, actor_id: UUID,
                         reason: str) -> Sample:

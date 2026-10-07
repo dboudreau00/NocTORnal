@@ -661,6 +661,29 @@ def _counted(items: list[DueItem]) -> dict[str, int]:
     return out
 
 
+def _dry_counts(items: list[DueItem]) -> dict[str, int]:
+    """A dry run's totals over the due items the caller may know of, in the
+    names `_purge_response` publishes them under, the way `purge_due`'s own
+    dry run counts the whole list. The service's totals include the exhibits
+    above the caller, so an AMBER lead with an empty register was told
+    `evidence_purged: 2, held_back: 1` whatever the case's withheld-disclosure
+    setting said (Beta 1 verification, group C, C7)."""
+    live = [i for i in items if not i.held]
+
+    def n(kind: str) -> int:
+        return sum(1 for i in live if i.object_type == kind)
+
+    return {"evidence_purged": n("evidence"), "documents_purged": n("document"),
+            "records_purged": n("ingest_record"),
+            "dead_letters_purged": n("dead_letter"),
+            "lookups_purged": n("lookup"),
+            "lookup_results_purged": n("lookup_result"),
+            "lookup_batches_purged": n("lookup_batch"),
+            "samples_purged": n("sample"),
+            "held_back": sum(1 for i in items
+                             if i.held and i.object_type != "document")}
+
+
 def _result_counts(result: PurgeResult) -> dict[str, int]:
     return {"evidence": result.evidence_purged,
             "document": result.documents_purged,
@@ -772,8 +795,15 @@ def purge(
         # read at the same instant as the digest, exhibits above the caller
         # left out as `/due` leaves them (evidence-due-leaks-hold-reason,
         # 2026-10-03); the counts above are the destruction's own.
-        visible, _withheld = _visible_due(conn, user, items, [body.case_id])
+        visible, withheld = _visible_due(conn, user, items, [body.case_id])
         out["items"] = _due_rows(conn, user, visible)
+        # The totals are the caller's too, and the case's setting says how
+        # much more is said: nothing under NONE, that the list is
+        # incomplete under PRESENCE, how many are left out under COUNT, as
+        # `/due` says it.
+        out.update(_dry_counts(visible))
+        if withheld:
+            out["withheld"] = withheld
     # The check above and the service's own read of what is due are two
     # statements, not one snapshot. The counts are compared afterwards so
     # that a change landing between them is SAID rather than papered over:
@@ -1067,8 +1097,10 @@ def case_legal_hold(
     no hold of their own, and an exhibit lodged after the order had none.
     `retention.manage` on the case through the full gate (step-up included,
     and a closed case too: a hold works on a closed case). A purge of the
-    case running when the hold arrives finishes first; the purge reads the
-    hold under a share lock on the case row. Placing is open to the gate
+    case running when the hold arrives finishes the exhibit it is destroying
+    and keeps every one after it: the purge claims each exhibit in a
+    transaction of its own and reads the hold under a share lock on the case
+    row. Placing is open to the gate
     above; lifting also needs the caller cleared for everything the case
     holds, the collected documents it cites included, so a lead below an
     exhibit or a document cannot release a hold through the case that they
