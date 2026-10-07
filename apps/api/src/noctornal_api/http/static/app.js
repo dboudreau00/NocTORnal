@@ -2744,6 +2744,19 @@ async function refreshMetrics(seq, q) {
   const key = metricsKey(q);
   const hit = key && state.metricsCache.get(key);
   if (hit) { applyMetrics(hit); metricsUp(); return; }
+  /* A role the case record says lacks analytics.run is not asked: the
+     server refuses it every time, and every refusal is a permanent
+     AUTHZ_DENIED row, a hum from each case open by a reader or a liaison
+     (Beta 1 gate 61; the reason `refreshFeedsBadge` stops asking). */
+  if (!caseCan(state.caseRec, 'analytics.run')) {
+    applyMetrics(null);
+    $('sel-metric').disabled = true;
+    const why = roleWords('they need analytics.run on this case');
+    state.metricsDown = { why: why, retryIn: 0 };
+    state.metricsNote = 'metrics unavailable (' + why + '), so nodes are sized by ' +
+      'the ties drawn, which is not the same number as the projection metric';
+    return;
+  }
   try {
     const m = await api(cpath('/graph/metrics?' + q.toString()));
     if (seq !== state.graphSeq) return;
@@ -35967,16 +35980,28 @@ function fillSampleCase() {
  *  samples were theirs (ux19-copy:lab-shows-other-case-samples), so it
  *  says in its title what it counts. Silent on failure, like the inbox
  *  counter: an analyst without `sample.read` gets no badge, not an error.
+ *  Refused once, it is not asked again this session: `sample.read` is a
+ *  global grant, and each refusal is an AUTHZ_DENIED row (Beta 1 gate 61,
+ *  as `refreshFeedsBadge`).
  */
+const SAMPLE_BADGE = { refusedFor: null };
+
 async function refreshSampleBadge() {
+  if (SAMPLE_BADGE.refusedFor && SAMPLE_BADGE.refusedFor === state.userId) {
+    show($('samples-badge'), false);
+    return;
+  }
   const token = caseToken();
   const scoped = state.caseId;
   let rows;
   try {
     rows = (await api('/samples'
       + (scoped ? '?case_id=' + encodeURIComponent(scoped) : ''))).samples || [];
-  } catch (_e) {
+  } catch (err) {
     if (!caseChanged(token)) show($('samples-badge'), false);
+    if (err instanceof ApiError && err.status === 403) {
+      SAMPLE_BADGE.refusedFor = state.userId;
+    }
     return;
   }
   if (caseChanged(token)) return;

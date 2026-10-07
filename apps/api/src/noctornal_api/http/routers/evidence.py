@@ -189,7 +189,7 @@ def _authorize_export(conn: psycopg.Connection, user: CurrentUser,
     row = (facts[1], facts[2])
     # The case's gate has passed, step-up included, so a refusal here is the
     # exhibit's labels: answered as a missing exhibit, as `_authorize_exhibit`
-    # answers it (Beta 1 authorization gate, 2026-10-07).
+    # answers it.
     try:
         gate(row[0], frozenset(row[1] or []),
              count_use=not counted_at_case_gate(conn, user, case_id))

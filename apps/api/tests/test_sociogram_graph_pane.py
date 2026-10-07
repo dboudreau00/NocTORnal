@@ -169,7 +169,7 @@ function clearTimeout() {}
 const SIZE_METRICS = [['degree', 'Degree']];
 function roleWords(s) { return s; }   // a 403's wording (ux19-copy)
 """ + "\n".join(_fn(f) for f in (
-    "subgraphKey", "metricsKey", "metricsUp", "holdMetrics", "refreshMetrics",
+    "caseCan", "subgraphKey", "metricsKey", "metricsUp", "holdMetrics", "refreshMetrics",
     "retryMetrics", "applyMetrics", "computeRanks")) + "\n" \
     + _const("METRICS_CACHE_MAX") + _const("METRICS_RETRY_DEFAULT") + r"""
 const M = { nodes: [{ id: 'a', degree: 1 }, { id: 'b', degree: 1 }] };

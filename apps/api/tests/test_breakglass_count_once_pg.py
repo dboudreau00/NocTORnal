@@ -329,7 +329,7 @@ def test_a_second_gate_refusal_keeps_the_case_gates_use(conn, client):
     analyst on an AMBER case under an AMBER grant asks for a RED exhibit:
     the grant let the request past the case's gate, and the exhibit's gate
     refuses. One use, not two, and not none. The refusal answers as a
-    missing exhibit does (Beta 1 authorization gate, 2026-10-07), so the
+    missing exhibit does, so the
     status no longer tells the two apart; the count still does, to the
     officer reviewing the grant, which is what it is for."""
     owner, case_id, auth, _officer = _setting(

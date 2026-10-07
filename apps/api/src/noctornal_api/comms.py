@@ -696,6 +696,13 @@ class CommsService:
                 f"{provenance_class} needs a written authority. Capturing a "
                 f"conversation nobody in it consented to is not something "
                 f"this system will record without one")
+        # As `bind` asks it: an unknown key was the foreign key's violation
+        # and a 500 (Beta 1 gate 61).
+        exists = self._c.execute(
+            "SELECT 1 FROM comms.platform WHERE key = %s", (platform_key,)
+        ).fetchone()
+        if not exists:
+            raise CommsError(f"unknown platform {platform_key!r}")
 
         row = self._c.execute(
             """INSERT INTO comms.conversation
@@ -781,17 +788,21 @@ class CommsService:
             (conversation_id, handle, when, when))
 
     def mark_incidental(self, conversation_id: UUID, handle: str,
-                        *, incidental: bool = True) -> None:
+                        *, incidental: bool = True) -> bool:
         """Flag a participant as not a subject.
 
         docs/08 and docs/16 L4: a third party in a group channel has rights,
         and minimisation at closure has to be able to find them. Flagging is
         cheap; discovering afterwards that nobody did is not.
+
+        False when no participant of the conversation has that handle, so a
+        mistyped handle is not reported as flagged (Beta 1 gate 61).
         """
-        self._c.execute(
+        cur = self._c.execute(
             """UPDATE comms.participant SET is_incidental = %s
                 WHERE conversation_id = %s AND observed_handle = %s""",
             (incidental, conversation_id, handle))
+        return cur.rowcount > 0
 
     def minimise(self, conversation_id: UUID, *, actor_id: UUID,
                  authority: str) -> int:

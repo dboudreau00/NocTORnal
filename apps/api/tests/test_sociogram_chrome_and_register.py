@@ -517,7 +517,7 @@ function api(path) {
 }
 function clearTimeout() {}
 const SIZE_METRICS = [['degree', 'Degree']];
-""" + "\n".join(_fn(f) for f in ("subgraphKey", "metricsKey", "metricsUp", "refreshMetrics",
+""" + "\n".join(_fn(f) for f in ("caseCan", "subgraphKey", "metricsKey", "metricsUp", "refreshMetrics",
                                  "applyMetrics", "computeRanks", "backedCount",
                                  "coverageLine")) + "\n" + _const("METRICS_CACHE_MAX") + r"""
 (async () => {
