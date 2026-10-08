@@ -33,6 +33,7 @@ import psycopg
 import pytest
 import review_graph_support as g
 import rls_support as s
+from db_clock import wait_until_after
 
 pytestmark = s.GATED
 
@@ -97,6 +98,13 @@ def _patch(w, kind: str, element, **body) -> str:
     assert r.status_code == 200, r.text
     new = [i for i in _ids(w["owner"], column, element) if i not in before]
     assert len(new) == 1, new
+    # A retraction finds the oldest correction of a field, and the newest one
+    # still live, by when each was recorded (`_supported_value`). So the next
+    # correction has to be recorded later by the database's own clock, which a
+    # host that steps its clock does not promise for two writes a moment apart.
+    recorded = w["owner"].execute(
+        "SELECT recorded_at FROM core.assertion WHERE id = %s", (new[0],)).fetchone()[0]
+    wait_until_after(w["owner"], recorded)
     return new[0]
 
 

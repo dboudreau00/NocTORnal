@@ -85,6 +85,35 @@ def pytest_collection_modifyitems(config, items):
     if first:
         items[:] = first + [item for item in items if item.name not in _RUN_FIRST]
 
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """After a run with failures, say so when the database's clock and this
+    host's disagree by seconds (2026-10-08). A host whose clock steps stamps
+    a row of the suites that write several within a second five or six
+    seconds ahead of the next, so a test that reads "the newest" or "the
+    oldest" of them fails now and then, alone as well as in the suite, and a
+    failure list read without this line looks like state one suite leaves for
+    another. A run with no failure says nothing (db_clock.py)."""
+    if not terminalreporter.stats.get("failed") or not os.environ.get("DATABASE_URL"):
+        return
+    try:
+        from db_clock import DISAGREEMENT_SECONDS, clock_offset
+        from noctornal_api.db import connect
+
+        with connect() as conn:
+            offset = clock_offset(conn)
+    except Exception:  # noqa: BLE001 - a summary never decides a verdict
+        return
+    if offset > DISAGREEMENT_SECONDS:
+        terminalreporter.write_sep(
+            "=", "the database's clock disagrees with this host's", yellow=True)
+        terminalreporter.write_line(
+            f"They differ by {offset:.1f} s. If the clock steps, rows written a moment apart "
+            "are stamped out of order and a test that orders by their timestamps can fail "
+            "with nothing wrong. A failure that passes again when its file is run alone may "
+            "be this, not state another suite left: fix the host's time sync first "
+            "(apps/api/tests/db_clock.py).")
+
 from noctornal_api.security.auth import AuthUser, UserStore
 from noctornal_api.security.sessions import SessionRecord, SessionStore
 

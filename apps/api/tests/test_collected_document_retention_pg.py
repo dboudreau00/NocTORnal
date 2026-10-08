@@ -110,6 +110,21 @@ def _purged(conn, doc):
                         "WHERE id = %s", (doc,)).fetchone()[0]
 
 
+def _tombstone(conn, owner):
+    """(storage_outcome, object_count) of the one document tombstone the
+    purge run by `owner` wrote. Tombstones are append-only, so every earlier
+    purge in the database has left its own, and "the newest of them all" is
+    whichever was stamped last, which need not be this one: on a host whose
+    clock steps, a purge run in the seconds BEFORE this one can be stamped
+    after it (db_clock.py). A purge names the account that ran it, and each
+    test has an account of its own."""
+    rows = conn.execute(
+        """SELECT storage_outcome, object_count FROM core.purge_tombstone
+            WHERE object_type = 'document' AND purged_by = %s""", (owner,)).fetchall()
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
 def _node_and_assertion(conn, case, owner, doc, *, retracted=False):
     node = uuid4()
     with conn.transaction():
@@ -462,9 +477,7 @@ def test_raw_markup_goes_with_its_document_and_a_shared_object_stays(conn, owner
     assert _purged(conn, alone) and _purged(conn, shared)
     assert not store.exists("collect/aa/one") and store.exists("collect/bb/shared")
     assert any("still used by other documents" in w for w in result.warnings)
-    outcome = conn.execute(
-        """SELECT storage_outcome, object_count FROM core.purge_tombstone
-            WHERE object_type = 'document' ORDER BY purged_at DESC LIMIT 1""").fetchone()
+    outcome = _tombstone(conn, owner)
     assert outcome[0] == "DELETED"
 
 
@@ -570,9 +583,7 @@ def test_the_tombstone_names_only_the_purged_ids_and_what_happened_to_markup(con
     conn.execute("""UPDATE collect.document SET legal_hold = true,
                            legal_hold_reason = 'hold' WHERE id = %s""", (held,))
     _purge(conn, owner)
-    count, outcome = conn.execute(
-        """SELECT object_count, storage_outcome FROM core.purge_tombstone
-            WHERE object_type = 'document' ORDER BY purged_at DESC LIMIT 1""").fetchone()
+    outcome, count = _tombstone(conn, owner)
     assert _purged(conn, purged) and not _purged(conn, held)
     assert outcome == "NOT_APPLICABLE" and count >= 1
 
