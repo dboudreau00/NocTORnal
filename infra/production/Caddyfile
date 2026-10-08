@@ -74,7 +74,7 @@
 # with the problem+json the application sends, in place of Caddy's bare 413,
 # which named nothing. The pattern follows the application's own routes: a
 # test reads the route table and fails on a file route it does not cover
-# (apps/api/tests/test_g80_proxy_spool.py).
+# (apps/api/tests/test_proxy_upload_limits.py).
 #
 # ## Compression (2026-10-08)
 #

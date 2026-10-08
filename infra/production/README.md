@@ -1664,8 +1664,9 @@ both names resolve to the same digest, which is how that is checked.
   actions (`actions/checkout`, `actions/setup-python`) are pinned to commits,
   and the workflow has no `permissions:` block. The installers
   `pip install` an unpinned `pip`, and the Dockerfile installs whatever `gnupg`
-  Debian ships that day (`docs/17` F34 depends on its version). What each tag
-  resolved to on 2026-10-03, which is the digest the files named below pin:
+  Debian ships that day (`docs/17` F34 depends on its version). The digest each
+  tag resolves to in its registry, which the files named below pin and CI's
+  "Pinned images resolve" job asks the registry about on every push:
 
   | Image (tag) | Pinned in | Digest |
   |---|---|---|
