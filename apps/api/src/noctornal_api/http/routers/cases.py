@@ -58,6 +58,7 @@ from noctornal_api.http.deps import (
     check_writable_labels,
     current_user,
     get_conn,
+    holds_global,
     require,
     require_global,
 )
@@ -124,6 +125,15 @@ class CaseOut(BaseModel):
     my_role: str | None = None
     my_role_name: str | None = None
     my_permissions: list[str] = []
+    # Whether the case is under a legal hold, for the header's chip and its
+    # Hold control (2026-10-08). The reason it was placed for goes only to a
+    # caller who holds `retention.manage` on the case, as the due list's
+    # does, and `may_hold` says whether the Hold control is offered: the
+    # global role and the case's, asked as if the sign-in were fresh (the
+    # route asks for one). A hint for the console, never a gate.
+    legal_hold: bool = False
+    legal_hold_reason: str | None = None
+    may_hold: bool = False
 
 
 def _out(c) -> CaseOut:
@@ -136,10 +146,12 @@ def _out(c) -> CaseOut:
         authority_ref=c.authority_ref,
         allowed_transitions=allowed_transitions(c.status),
         read_only=c.status in CONTENT_READ_ONLY_STATES,
+        legal_hold=c.legal_hold,
     )
 
 
-def _with_caller(conn: psycopg.Connection, cases: list, user_id: UUID) -> list[CaseOut]:
+def _with_caller(conn: psycopg.Connection, cases: list, user_id: UUID, *,
+                 holds: bool = True) -> list[CaseOut]:
     """`_out` for each case, with the owner's name and the caller's live
     role on it, read in two queries whatever the number of cases.
 
@@ -164,12 +176,19 @@ def _with_caller(conn: psycopg.Connection, cases: list, user_id: UUID) -> list[C
             WHERE a.user_id = %s AND a.case_id = ANY(%s)
               AND (a.expires_at IS NULL OR a.expires_at > now())""",
         (user_id, ids)).fetchall()}
+    # The hold's controls and reason are drawn for one case and not for a
+    # list (`holds=False`): a listing is not where the text a court order
+    # rests on is handed to everyone who may open the page.
+    may_hold_globally = holds and holds_global(conn, user_id, "retention.manage")
     for row, case in zip(out, cases, strict=True):
         row.owner_name = names.get(case.owner_user_id)
         role = mine.get(case.id)
         if role:
             row.my_role, row.my_role_name, row.my_permissions = (
                 role[0], role[1] or role[0], role[2])
+            if holds and "retention.manage" in role[2]:
+                row.legal_hold_reason = case.legal_hold_reason
+                row.may_hold = may_hold_globally
     return out
 
 
@@ -206,7 +225,7 @@ def list_cases(user: CurrentUser = Depends(current_user),
     # With the caller's role on each, for the case list's "Your role"
     # column (ux02-cases:case-list-lacks-triage-fields, 2026-09-23).
     return _with_caller(conn, CaseService(conn).list_for_user(user.user_id),
-                        user.user_id)
+                        user.user_id, holds=False)
 
 
 @router.get("/cases/{case_id}", response_model=CaseOut,

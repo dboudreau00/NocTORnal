@@ -58,8 +58,15 @@ class _Purger:
         self.swept += 1
         actionable = [i for i in self.due(case_id=case_id, as_of=as_of)
                       if not i.held]
-        return PurgeResult(evidence_purged=len(actionable),
-                           held_back=len(self.items) - len(actionable))
+        result = PurgeResult(evidence_purged=len(actionable),
+                             held_back=len(self.items) - len(actionable))
+        # The objects each count stands for, as the real service records
+        # them: a real run's answer is drawn from these (2026-10-08), and
+        # this stand-in used to leave them out.
+        result.count("evidence_purged", [i.object_id for i in actionable])
+        result.count("held_back", [(i.object_type, i.object_id)
+                                   for i in self.items if i.held])
+        return result
 
 
 @pytest.fixture
@@ -77,6 +84,17 @@ def route(monkeypatch):
     # test_g44_http_pg.py.
     monkeypatch.setattr(governance, "_visible_due",
                         lambda conn, user, items, scope: (list(items), []))
+    # A real run's answer is drawn from the objects the caller may know of
+    # (2026-10-08), read from the database; this caller may know of all.
+    monkeypatch.setattr(governance, "_visible_ids",
+                        lambda conn, user, case_id, result: {
+                            who for ids in result.members.values()
+                            for entry in ids
+                            for who in ([entry[1]] if isinstance(entry, tuple)
+                                        else [entry])})
+    # And the meter is spent in the handler, after the gate (2026-10-08),
+    # on the request's limiter: this half has no request.
+    monkeypatch.setattr(governance, "enforce", lambda *a, **k: None)
     user = governance.CurrentUser(user_id=UUID(int=7), session_id=UUID(int=8),
                                   session_mfa_at=AT)
 
@@ -84,7 +102,7 @@ def route(monkeypatch):
         return governance.purge(
             body=governance.PurgeBody(case_id=CASE, authority=AUTHORITY,
                                       **body),
-            user=user, conn=None)
+            request=None, response=None, user=user, conn=None)
     return governance, purger, call
 
 

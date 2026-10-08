@@ -71,10 +71,11 @@ def client():
     app = create_app()
     # The destruction meter allows a burst of three, and one test here
     # makes six purge calls in a second. What is under test is the binding,
-    # not the meter, so this client's meter is widened and nothing else is.
+    # not the meters, so this client's two (the real run's, and since
+    # 2026-10-08 the dry run's own) are widened and nothing else is.
     limits = dict(LIMITS)
-    limits["retention.destroy"] = dataclasses.replace(
-        LIMITS["retention.destroy"], quota=100, burst=50)
+    for name in ("retention.destroy", "retention.dry_run"):
+        limits[name] = dataclasses.replace(LIMITS[name], quota=100, burst=50)
     app.state.limiter = RateLimiter(InProcessBackend(), limits=limits)
     return TestClient(app)
 

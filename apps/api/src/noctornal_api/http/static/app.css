@@ -439,7 +439,11 @@ select.select:disabled { color: var(--text-tertiary); cursor: default; }
 .session-warn[hidden] { display: none; }
 .session-warn-text { flex: 1 1 260px; }
 .session-warn-actions { display: flex; gap: var(--s-2); }
-.reauth-scrim { z-index: 86; }
+/* Two classes, so it beats `.palette-scrim`'s 80, which comes later in this
+   file. With one the sign-in question stood UNDER any dialog that was open
+   when it was asked (the case Hold dialog, 2026-10-08), where it could be
+   seen and not clicked. */
+.palette-scrim.reauth-scrim { z-index: 86; }
 /* Two classes, so the width beats `.palette`'s, which comes later. */
 .palette.reauth-sheet, .palette.account-sheet {
   width: min(460px, 100%); max-height: 88vh; overflow: auto; gap: var(--s-3);

@@ -305,15 +305,18 @@ def test_the_case_chrome_and_the_live_dot_leave_with_the_case():
     got = _run(_DOM + r"""
 function closeCaseRecord() { log.push('closeRecord'); }
 function closeStatus() { log.push('closeStatus'); }
+function closeCaseHold() { log.push('closeHold'); }
 """ + _fn("hideCaseChrome") + r"""
-for (const id of ['btn-case-edit', 'btn-case-share', 'btn-case-status', 'live-dot']) $(id).hidden = false;
+const chrome = ['btn-case-edit', 'btn-case-share', 'btn-case-status',
+  'btn-case-hold', 'hdr-hold', 'live-dot'];
+for (const id of chrome) $(id).hidden = false;
 hideCaseChrome();
-console.log(JSON.stringify({
-  hidden: ['btn-case-edit', 'btn-case-share', 'btn-case-status', 'live-dot'].map((id) => $(id).hidden),
-  log }));
+console.log(JSON.stringify({ hidden: chrome.map((id) => $(id).hidden), log }));
 """)
-    assert got["hidden"] == [True, True, True, True]
-    assert got["log"] == ["closeRecord", "closeStatus"]
+    # The Hold… button and the LEGAL HOLD chip leave with the case too
+    # (2026-10-08), and the hold dialog closes.
+    assert got["hidden"] == [True] * 6
+    assert got["log"] == ["closeRecord", "closeStatus", "closeHold"]
     listing = _fn("showCaseList")
     assert "hideCaseChrome();" in listing and "disconnectLive();" in listing, (
         "the list keeps the case's buttons, or its live socket")

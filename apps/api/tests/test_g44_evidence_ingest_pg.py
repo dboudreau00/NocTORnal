@@ -347,8 +347,13 @@ def test_a_failed_put_leaves_no_row(conn, store):
         raise ConnectionError("the object store went away")
 
     store.on_put = boom
-    with pytest.raises(ConnectionError):
+    # A store that did not answer is `StoreUnavailable` since 2026-10-08 (the
+    # HTTP layer's 503), with the store's own error kept as its cause; this
+    # test pinned the raw ConnectionError escaping.
+    from noctornal_api.evidence import StoreUnavailable
+    with pytest.raises(StoreUnavailable) as raised:
         g.lodge(conn, store, case_id, boss, data=data)
+    assert isinstance(raised.value.__cause__, ConnectionError)
     assert _rows_for(conn, case_id, data) == []
 
 

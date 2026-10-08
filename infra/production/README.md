@@ -1414,10 +1414,12 @@ the older release. Nothing in the database changes in either direction.
 
 ## Retention sweep
 
-Collected documents (a Telegram group's messages, a forum's posts) carry a
-retention clock, and nothing in this stack destroys them when it runs out
-unless somebody runs the sweep. The console's purge is case-scoped and a
-collected document belongs to no case, so it never reaches them.
+Collected documents (a Telegram group's messages, a forum's posts), dead
+letters (the fragments the ingest could not parse) and the ingest records
+attached to no case carry a retention clock, and nothing in this stack
+destroys them when it runs out unless somebody runs the sweep. The console's
+purge is case-scoped and none of these belongs to a case, so it never reaches
+them.
 
 The sweep is `scripts/retention_sweep.py`, and it is **not in the cron loop**:
 no compose service, installer or launcher runs it. It destroys third-party
@@ -1425,19 +1427,23 @@ personal data, so who runs it, how often and under which authority is the
 owner's decision (`docs/16` L4), and a purge that runs itself on a timer
 nobody watches is how data disappears on a Sunday. What keeps the gap from
 going quiet is the readiness row `retention_sweep_current`: it turns red when
-a document no hold keeps has been past its clock for more than seven days, and
-it counts them without naming one.
+a document, a dead letter or an unattached ingest record that no hold keeps has
+been past its clock for more than seven days, and it counts them without naming
+one.
 
-It destroys collected documents past their clock that nothing holds, by the
-same purge the other families use. A hold on the document or on any version of
-it, a case under legal hold that cites any version, and an unretracted
-assertion that rests on it each keep a document, and a hold placed while a
-sweep runs wins. Exhibits, ingest records, lookups and dead letters are not
-touched: they keep the case-scoped route in the console.
+It destroys collected documents, dead letters and ingest records attached to no
+case that are past their clock and that nothing holds, by the same purge the
+other families use. A hold on the document or on any version of it, a case
+under legal hold that cites any version, and an unretracted assertion that
+rests on it each keep a document, and a hold placed while a sweep runs wins.
+Exhibits, lookups and every ingest record attached to a case are not touched:
+they keep the case-scoped route in the console, with the case's clock and its
+hold.
 
 **Look first.** A dry run is the default. It changes nothing, writes nothing
-and needs no declaration. The one line it prints counts what is past its
-clock, what a hold keeps and what a sweep would destroy:
+and needs no declaration. The one line it prints counts the documents past
+their clock, the ones a hold keeps and the ones a sweep would destroy, and the
+dead letters and unattached ingest records a sweep would destroy:
 
 ```sh
 docker compose -p noctornal-prod -f infra/production/compose.yml \
@@ -1445,7 +1451,7 @@ docker compose -p noctornal-prod -f infra/production/compose.yml \
     cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt
     export SSL_CERT_FILE=/tmp/ca-bundle.crt
     python scripts/retention_sweep.py'
-# mode=dry-run past_clock=140 sweepable=120 held=20
+# mode=dry-run past_clock=140 sweepable=120 held=20 dead_letters=3 unattached_records=17
 ```
 
 **Then destroy.** The same command with `--apply`, an authority and an account:
@@ -1457,7 +1463,7 @@ docker compose -p noctornal-prod -f infra/production/compose.yml \
     cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt
     export SSL_CERT_FILE=/tmp/ca-bundle.crt
     python scripts/retention_sweep.py --apply --actor you@example.org'
-# mode=apply passes=2 documents_purged=120 tombstones=1 held=20 remaining=0
+# mode=apply passes=2 documents_purged=120 dead_letters_purged=3 records_purged=17 tombstones=3 held=20 remaining=0
 ```
 
 A real run needs all three, and refuses with exit 2, destroying nothing,
@@ -1479,8 +1485,8 @@ without any of them:
   session and no step-up, so name your own account, never a colleague's.
 
 The exit code is the only channel a scheduler has back. `0`: the run did what
-it was asked (a dry run always). `1`: a real run left documents it could have
-destroyed, because the object store refused to delete their markup (the
+it was asked (a dry run always). `1`: a real run left something it could have
+destroyed, because the object store refused to delete a document's markup (the
 warnings say which key, never what it held) or the pass limit was reached; read
 the warnings and run it again. `2`: it refused to run, for a missing or
 placeholder authority, no named account, no store for collected markup (set
@@ -1488,15 +1494,16 @@ placeholder authority, no named account, no store for collected markup (set
 cannot delete the markup and will not record a destruction that did not happen)
 or a credential in the environment that carries a published value (the check every unattended job makes in production).
 
-What a real run writes: the purge's tombstone for each pass of up to 500
-documents (`core.purge_tombstone`, object type `document`, authority
-`retention sweep under <your reference>`), the purge's `PURGE_EXECUTED` audit
-rows, and one `RETENTION_SWEEP` audit event per run: counts, the reference and
-where it ran, never a document, an id or a key. It writes that event when
-nothing was due too, so the log shows that a sweep ran. `passes` counts the
-last pass, the one that finds nothing left to destroy. A backlog bigger than
-one pass is cleared in the one run, up to `--max-passes` (100 by default, so
-50,000 documents).
+What a real run writes: the purge's tombstone for each family in each pass of
+up to 500 items (`core.purge_tombstone`, object type `document`, `dead_letter`
+or `ingest_record`, authority `retention sweep under <your reference>`, no
+case), the purge's `PURGE_EXECUTED` audit rows, and one `RETENTION_SWEEP` audit
+event per run: counts (`documents_purged`, `dead_letters_purged`,
+`records_purged`), the reference and where it ran, never a document, an id or
+a key. It writes that event when nothing was due too, so the log shows that a
+sweep ran. `passes` counts the last pass, the one that finds nothing left to
+destroy. A backlog bigger than one pass is cleared in the one run, up to
+`--max-passes` (100 by default, so 50,000 of each family).
 
 Unlike the console's purge, the script does not ask for a preview digest of an
 earlier dry run: the dry run is for you, and the declared authority and the

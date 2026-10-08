@@ -105,6 +105,11 @@ class CaseRow:
     review_due: date
     created_at: datetime
     closed_at: datetime | None
+    #: Whether the case is under a legal hold, and the reason it was placed
+    #: for. The reason is for those who hold `retention.manage` on the case,
+    #: and the route that draws the record decides who they are.
+    legal_hold: bool = False
+    legal_hold_reason: str | None = None
 
 
 class CaseService:
@@ -177,7 +182,8 @@ class CaseService:
         row = self._c.execute(
             """SELECT id, code, title, summary, status, classification, compartments,
                       owner_user_id, deputy_user_id, legal_basis, authority_ref,
-                      retention_until, review_due, created_at, closed_at
+                      retention_until, review_due, created_at, closed_at,
+                      legal_hold, legal_hold_reason
                  FROM core."case" WHERE id = %s""",
             (case_id,),
         ).fetchone()
@@ -280,7 +286,7 @@ class CaseService:
             """SELECT c.id, c.code, c.title, c.summary, c.status, c.classification,
                       c.compartments, c.owner_user_id, c.deputy_user_id, c.legal_basis,
                       c.authority_ref, c.retention_until, c.review_due, c.created_at,
-                      c.closed_at
+                      c.closed_at, c.legal_hold, c.legal_hold_reason
                  FROM core."case" c
                  JOIN iam.case_assignment a ON a.case_id = c.id
                  JOIN iam.app_user u ON u.id = a.user_id
@@ -482,5 +488,6 @@ def _row(r) -> CaseRow:
         id=r[0], code=r[1], title=r[2], summary=r[3], status=r[4], classification=r[5],
         compartments=list(r[6] or []), owner_user_id=r[7], deputy_user_id=r[8],
         legal_basis=r[9], authority_ref=r[10], retention_until=r[11], review_due=r[12],
-        created_at=r[13], closed_at=r[14],
+        created_at=r[13], closed_at=r[14], legal_hold=bool(r[15]),
+        legal_hold_reason=r[16],
     )

@@ -879,6 +879,16 @@ def destination_for(channel: str) -> Destination:
             JIRA: Destination.JIRA}[channel]
 
 
+def configured_ceiling(channel: str) -> str | None:
+    """The ceiling the deployment set for the SMTP or webhook channel
+    (`NOCTORNAL_SMTP_CEILING`, `NOCTORNAL_WEBHOOK_CEILING`), or None when it
+    set none. The drain judges every delivery against it, and a report's
+    release judges the document against it too (2026-10-08): the release
+    used the caller's typed ceiling alone, so it allowed what the drain then
+    refused. One reader, so the two cannot differ."""
+    return os.environ.get(f"NOCTORNAL_{channel}_CEILING") or None
+
+
 def dispatch_due(conn: psycopg.Connection, *, limit: int = MAX_PER_DRAIN,
                  send_mail=send_smtp, post_webhook=send_webhook,
                  route_for: Callable | None = None, jira_client=None) -> dict:
@@ -977,8 +987,7 @@ def dispatch_due(conn: psycopg.Connection, *, limit: int = MAX_PER_DRAIN,
             decision = can_egress(
                 out.classification, destination_for(out.channel),
                 compartments=out.compartments,
-                destination_ceiling=os.environ.get(
-                    f"NOCTORNAL_{out.channel}_CEILING") or None,
+                destination_ceiling=configured_ceiling(out.channel),
             )
             redacted = decision.denied
             route = routes.get(out.channel)

@@ -425,6 +425,11 @@
          2026-09-22). It was on the case list and nowhere else, so a
          CLOSED case looked exactly like an ACTIVE one once opened. -->
     <span id="hdr-state" class="chip case-state" hidden></span>
+    <!-- A case under a legal hold says so on every screen, to everyone who
+         can open it (docs/17 "no console control for a hold", 2026-10-08).
+         The reason it was placed for is for those who place and lift holds,
+         and is in the Hold… dialog. -->
+    <span id="hdr-hold" class="chip flag" role="status" hidden>LEGAL HOLD</span>
 
     <span class="spacer"></span>
     <span id="hdr-asof" class="hdr-asof mono" hidden>as-of: now</span>
@@ -463,6 +468,12 @@
             hidden title="Who is on this case, and adding a colleague">Share…</button>
     <button id="btn-case-status" type="button" class="btn ghost small"
             hidden title="Move this case through its lifecycle">Status…</button>
+    <!-- Hold… places or lifts a legal hold on the whole case. Shown only to
+         a reader who may (the case record's `may_hold`); governance, so it
+         stays on a closed case. -->
+    <button id="btn-case-hold" type="button" class="btn ghost small"
+            hidden aria-haspopup="dialog"
+            title="Place a legal hold on this whole case">Hold…</button>
     <button id="btn-cases" type="button" class="btn ghost" hidden>All cases</button>
     <!-- Administration is deployment-wide, so it is reachable from the case
          list rather than only from a rail tab inside a case: an account
@@ -5736,6 +5747,29 @@
       <button id="status-cancel" type="button" class="btn">Cancel</button>
       <button id="status-save" type="submit" class="btn primary" disabled>
         Change status</button>
+    </div>
+  </form>
+</div>
+
+<!-- Legal hold on the case (2026-10-08). One reason, a sign-in from the last
+     15 minutes, and the server's answer said as it is: a lift below the
+     material is refused, and a purge that was running when a hold arrived
+     says what it had already destroyed. -->
+<div id="hold-scrim" class="palette-scrim" hidden>
+  <form id="hold-form" class="palette stance-sheet" role="dialog"
+        aria-modal="true" aria-labelledby="hold-title"
+        aria-describedby="hold-now" novalidate>
+    <h2 id="hold-title" class="h-sm">Legal hold on the case</h2>
+    <p id="hold-now"></p>
+    <p id="hold-help" class="help"></p>
+    <label class="field">
+      <span class="label">Why</span>
+      <input id="hold-why" type="text" autocomplete="off" maxlength="1000">
+    </label>
+    <p id="hold-msg" class="msg" role="status" hidden></p>
+    <div class="stance-actions">
+      <button id="hold-cancel" type="button" class="btn">Cancel</button>
+      <button id="hold-save" type="submit" class="btn primary">Place the hold</button>
     </div>
   </form>
 </div>
