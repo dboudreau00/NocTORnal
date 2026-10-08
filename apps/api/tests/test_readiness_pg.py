@@ -59,6 +59,8 @@ EXPECTED_CHECKS = (
     # this repository (or MinIO) publishes, on any process.
     "credentials_not_published",
     "rate_limiting_enabled",
+    # 2026-10-08, docs/17 "a missing hop count": the proxies in front are counted.
+    "proxy_hops_declared",
     "redis_limiter_store",
     # 2026-09-23, sec-redis-isolation: docs/16 C8's other half.
     "redis_limiter_isolated",

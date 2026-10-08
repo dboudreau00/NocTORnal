@@ -99,7 +99,11 @@ Nothing alerts on them; an `ingest.manage` holder looks.
   unvetted bytes); nothing is parsed in the request.
 - Parsing is a separate step: `POST /ingest/batches/{id}/parse`, by an
   `ingest.manage` holder, so a malformed 50MB dump is a background problem
-  rather than a request timeout.
+  rather than a request timeout. It parses into the unattached queue and
+  takes no case: a record goes into a case afterwards, with
+  `POST /ingest/records/{id}/attach`, on the word of somebody who works that
+  case (`ingest.replay` on it). A parse request that names a case is refused
+  with a 400 that says so.
 
 ---
 

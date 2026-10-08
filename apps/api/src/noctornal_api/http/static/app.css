@@ -1429,8 +1429,17 @@ button.hdr-user.codes-low::before { background: var(--alert); }
 #pane-analytics .card p:last-child { margin-bottom: 0; }
 
 /* A wide metric table must scroll inside its own box rather than push the
-   whole pane sideways. */
-.scroll-x { overflow-x: auto; max-width: 100%; }
+   whole pane sideways. `position: relative` is what makes the box clip
+   everything inside it: an absolutely positioned descendant is clipped only
+   by an overflow box that is (or sits inside) its containing block, and
+   `.sr-only` is `position: absolute`. The case list's visually hidden "Open"
+   heading sits at the table's 740th pixel, with no positioned ancestor to
+   hold it, so it was drawn against the page, which grew to 741px and
+   scrolled sideways by 280 to 390px on a phone (docs/17 "the case list at
+   375 px", 2026-10-08). Measured in a browser at 320 to 768px: the page was
+   741px wide on the list and is the window's width now, and the seventeen
+   panes of an open case did not scroll the page before and do not after. */
+.scroll-x { position: relative; overflow-x: auto; max-width: 100%; }
 
 /* Caveats. docs/03: flag approximation explicitly, and never present a
    number as more certain than it is. A warning changes what the number is

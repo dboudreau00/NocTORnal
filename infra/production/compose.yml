@@ -850,15 +850,22 @@ services:
           fi
           sleep 1
         done
-        mc mb --ignore-existing --with-lock "local/$$EVIDENCE_BUCKET"
-        mc mb --ignore-existing "local/$$INGEST_BUCKET"
-        mc mb --ignore-existing "local/$$SAMPLE_BUCKET"
+        # The three names the code falls back to (EvidenceStorage,
+        # RawBatchStorage, SampleStorage) when secrets.env leaves one out, so
+        # this creates the bucket the API will look for. Empty counts as left
+        # out: `mc mb "local/"` made the bucket of no name and failed the init.
+        EVIDENCE="$${EVIDENCE_BUCKET:-noctornal-evidence}"
+        INGEST="$${INGEST_BUCKET:-noctornal-raw}"
+        SAMPLE="$${SAMPLE_BUCKET:-noctornal-samples}"
+        mc mb --ignore-existing --with-lock "local/$$EVIDENCE"
+        mc mb --ignore-existing "local/$$INGEST"
+        mc mb --ignore-existing "local/$$SAMPLE"
         # Collected raw markup (docs/00 decision 74). NO lock: a retention
         # clock or a deletion order must be able to remove it, and the
         # purge does.
         mc mb --ignore-existing "local/$${COLLECT_RAW_BUCKET:-noctornal-collect-raw}"
-        mc retention set --default COMPLIANCE 365d "local/$$EVIDENCE_BUCKET"
-        printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject"],"Resource":["arn:aws:s3:::%s/*"]},{"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":["arn:aws:s3:::%s"]}]}' "$$SAMPLE_BUCKET" "$$SAMPLE_BUCKET" > /tmp/sample-policy.json
+        mc retention set --default COMPLIANCE 365d "local/$$EVIDENCE"
+        printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject","s3:DeleteObject"],"Resource":["arn:aws:s3:::%s/*"]},{"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":["arn:aws:s3:::%s"]}]}' "$$SAMPLE" "$$SAMPLE" > /tmp/sample-policy.json
         mc admin user svcacct info local "$$SAMPLE_ACCESS_KEY" >/dev/null 2>&1 \
           || mc admin user svcacct add \
                --access-key "$$SAMPLE_ACCESS_KEY" \
@@ -1043,6 +1050,26 @@ services:
     volumes:
       - ./tls:/certs:ro
       - analysis-socket:/run/noctornal-analysis:ro
+    # /tmp is a size-limited tmpfs (2026-10-08, docs/17 "a junk credential is
+    # still read"). Starlette writes a multipart body to a temporary file once
+    # it passes a mebibyte, before the route has looked at who sent it, and a
+    # request that carries any bearer value or a session cookie is read that
+    # way up to the route's cap whether or not the credential is live (telling
+    # a live session from a junk one takes the database, and the layer that
+    # refuses early is free of it on purpose). On the container's own layer
+    # that was up to 256 MiB per request on the host's disk, and as many
+    # requests as the per-address meter allowed. Here it is memory, and all of
+    # it is 1 GiB however many requests come: the four workers below each
+    # spooling one upload at the default cap of 256 MiB. A full tmpfs fails
+    # the upload that found it full and nothing else, and Docker frees it with
+    # the container. The CA bundle this container writes at start (the command
+    # below) is 0.2 MiB of it. A deployment that declares a larger
+    # NOCTORNAL_MAX_EVIDENCE_BYTES or NOCTORNAL_MAX_SAMPLE_BYTES raises this
+    # with it, and the proxy's limit in the Caddyfile (infra/production/
+    # README.md, Upload sizes). Docker mounts a tmpfs noexec, nosuid and nodev
+    # whatever is asked; they are written out so that nobody has to know it.
+    tmpfs:
+      - /tmp:size=1g,mode=1777,noexec,nosuid,nodev
     environment:
       <<: *no-owner-credential
       NOCTORNAL_ENV: production
@@ -1129,6 +1156,15 @@ services:
   # environment override here, and it has not been done.
   sample-origin:
     <<: *noctornal-app
+    # /tmp is a size-limited tmpfs here too, and a small one. This process
+    # refuses everything but the two downloads before it reads a body
+    # (`_allowed_on_sample_origin`), and the downloads carry a ticket in a body
+    # the application caps at 2 KiB, so nothing it receives is spooled
+    # anywhere near a cap. What it holds is the CA bundle its command writes
+    # (0.2 MiB). 64 MiB leaves room for that and for whatever a library
+    # parks there, and is all a request to this origin can ever cost.
+    tmpfs:
+      - /tmp:size=64m,mode=1777,noexec,nosuid,nodev
     environment:
       <<: *no-owner-credential
       NOCTORNAL_ENV: production

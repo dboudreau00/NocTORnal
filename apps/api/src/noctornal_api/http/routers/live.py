@@ -66,7 +66,11 @@ If the socket cannot connect, or the database cannot be listened to, the
 console behaves exactly as it did before: the analyst refreshes. Nothing
 here is load-bearing for correctness, and it must never become so — a
 push-based UI that silently stops pushing is worse than one that never
-pushed, because people stop refreshing.
+pushed, because people stop refreshing. That is also why "ready" is sent
+only once the hub's LISTEN is registered: a socket that said it before, or
+that said it over a listener that never registered, would stand green over a
+channel nobody is listening on. A hub that cannot register closes the socket
+(1013) and the console shows it off.
 
 ## The socket takes the session COOKIE, and therefore checks `Origin`
 
@@ -115,7 +119,7 @@ import psycopg
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 # The request role's connections (S1, 2026-09-25), as HTTP's are.
-from noctornal_api.db import connect_request
+from noctornal_api.db import connect_request, connect_timeout_seconds
 from noctornal_api.http.deps import (
     SESSION_COOKIE,
     refuse_unbindable_session,
@@ -413,6 +417,17 @@ def _refused(reason: str, ip: str | None) -> None:
                     _pending.count, _pending.count_for(ip))
 
 
+class ListenerUnavailable(Exception):
+    """The hub could not register its LISTEN, so a write made now would
+    reach nobody. `subscribe` raises it instead of handing back a queue
+    nothing will ever fill."""
+
+
+#: Seconds beyond the database connect timeout a socket waits for the hub's
+#: LISTEN to be registered before it is told the channel is unavailable.
+_LISTEN_GRACE_SECONDS = 5.0
+
+
 class _Hub:
     """One LISTEN connection per process, fanned out in memory.
 
@@ -425,19 +440,55 @@ class _Hub:
         self._subscribers: set[asyncio.Queue] = set()
         self._task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
+        # One stop flag and one registration future per RUN of the listener,
+        # not one pair for the hub (2026-10-08): a subscriber arriving while
+        # the previous run was still winding down used to clear the flag the
+        # old run was about to read, and two listeners then fanned out every
+        # event twice.
         self._stop = asyncio.Event()
+        self._registered: asyncio.Future | None = None
 
     @property
     def count(self) -> int:
         return len(self._subscribers)
 
     async def subscribe(self) -> asyncio.Queue:
+        """Add a subscriber and return its queue once the LISTEN is registered.
+
+        Not before: the socket tells its client "ready" on this return, and a
+        write made between "ready" and the registration was missed, which is
+        why the tests waited a second after it (docs/17 "the socket says
+        ready early"). A listener that cannot register (the database is down,
+        the connect times out) raises `ListenerUnavailable` and leaves no
+        subscriber behind, so the socket is closed for the console to retry
+        and say so, and does not stand green over a channel that is not
+        listening.
+
+        The wait is outside the lock: `unsubscribe` takes it.
+        """
         queue: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_DEPTH)
         async with self._lock:
             self._subscribers.add(queue)
             if self._task is None or self._task.done():
-                self._stop.clear()
-                self._task = asyncio.create_task(self._run())
+                self._stop = stop = asyncio.Event()
+                self._registered = registered = (
+                    asyncio.get_running_loop().create_future())
+                self._task = asyncio.create_task(self._run(stop, registered))
+            registered = self._registered
+        try:
+            listening = await asyncio.wait_for(
+                asyncio.shield(registered),
+                timeout=connect_timeout_seconds() + _LISTEN_GRACE_SECONDS)
+        except TimeoutError:
+            listening = False
+        except BaseException:
+            # Cancelled while waiting (the socket went away): leave nothing
+            # behind, or the hub's count and its listener never come down.
+            await self.unsubscribe(queue)
+            raise
+        if not listening:
+            await self.unsubscribe(queue)
+            raise ListenerUnavailable("the change channel could not be listened to")
         return queue
 
     async def unsubscribe(self, queue: asyncio.Queue) -> None:
@@ -470,12 +521,19 @@ class _Hub:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(task, timeout=_POLL_SECONDS * 5)
 
-    async def _run(self) -> None:
-        """Hold the one LISTEN connection and fan out what arrives."""
-        listener = await asyncio.to_thread(connect_request)
+    async def _run(self, stop: asyncio.Event, registered: asyncio.Future) -> None:
+        """Hold the one LISTEN connection and fan out what arrives.
+
+        `registered` is resolved True once the LISTEN has run, and False if
+        this run ends without it, so a subscriber waiting on it is released
+        either way (`subscribe`)."""
+        listener = None
         try:
+            listener = await asyncio.to_thread(connect_request)
             await asyncio.to_thread(listener.execute, f"LISTEN {CHANNEL}")
-            while not self._stop.is_set():
+            if not registered.done():
+                registered.set_result(True)
+            while not stop.is_set():
                 events = await asyncio.to_thread(
                     _drain, listener, _POLL_SECONDS)
                 for payload in events:
@@ -492,12 +550,16 @@ class _Hub:
         except Exception:  # noqa: BLE001 — never take the process down
             log.exception("live listener stopped; clients fall back to refresh")
         finally:
+            if not registered.done():
+                registered.set_result(False)
             # The loop has exited, so no worker thread is inside
             # `notifies()` any more and these can actually run.
-            with contextlib.suppress(Exception):
-                await asyncio.to_thread(listener.execute, f"UNLISTEN {CHANNEL}")
-            with contextlib.suppress(Exception):
-                await asyncio.to_thread(listener.close)
+            if listener is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(
+                        listener.execute, f"UNLISTEN {CHANNEL}")
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(listener.close)
 
 
 _hub = _Hub()
@@ -870,7 +932,19 @@ async def live(ws: WebSocket) -> None:
         log.warning("live socket refused: %d already open", _hub.count)
         await ws.close(code=_CLOSE_BUSY, reason="too many live subscribers")
         return
-    queue = await _hub.subscribe()
+    # "ready" is sent after the hub's LISTEN is registered, never before: the
+    # console shows a green Live dot on it, and a write made in the gap
+    # between the two was missed (docs/17 "the socket says ready early",
+    # 2026-10-08). A hub that cannot register ends the socket instead, with
+    # a code the console retries on and a dot that says it is off.
+    try:
+        queue = await _hub.subscribe()
+    except ListenerUnavailable:
+        log.warning("live socket closed: the change channel could not be "
+                    "listened to")
+        with contextlib.suppress(Exception):
+            await ws.close(code=_CLOSE_BUSY, reason="live updates are unavailable")
+        return
     try:
         await ws.send_json({"type": "ready",
                             "case_id": str(case_id) if case_id else None})

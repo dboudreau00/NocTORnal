@@ -500,9 +500,25 @@ def stale_keys(
 # Parsing, and what failed to parse
 # ---------------------------------------------------------------------------
 
+#: What a parse that names a case is told. A batch is parsed into the
+#: unattached queue and a record is attached to a case afterwards, on the word
+#: of someone who works that case (`attach_record`).
+PARSE_NAMES_A_CASE = (
+    "a batch is parsed into the unattached queue, not into a case. Attach "
+    "each record to a case afterwards with POST /ingest/records/{id}/attach, "
+    "which asks for ingest.replay on that case, so that material goes into a "
+    "case on the word of somebody who works it")
+
+
 class ParseBody(BaseModel):
-    #: Where the parsed records land. Optional, because a batch may be
-    #: triaged before anyone decides which case it belongs to.
+    #: Not a parameter any more (2026-10-08, docs/17 "`parse` with a case id").
+    #: It named the case the records land in, and the gate it asked for,
+    #: `ingest.manage` on that case, is a permission that lives only in the
+    #: SYS_ADMIN role: no case assignment carries it, so every call that named
+    #: a case was a 403. The field stays in the model so that a client still
+    #: sending one is told where the case step is (400, `PARSE_NAMES_A_CASE`)
+    #: and not served a parse that ignored it. The service's own `case_id`
+    #: stays, for the operator scripts that seed a case (`seed_feeds_demo.py`).
     case_id: UUID | None = None
     parser_version: str = "1"
 
@@ -514,17 +530,16 @@ def parse_batch(
     user: CurrentUser = Depends(require_global("ingest.manage")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """Parse an accepted batch.
+    """Parse an accepted batch into the unattached queue.
 
     Separate from acceptance so a malformed 50MB dump is a background
     problem rather than a request timeout, and so the dead-letter queue
-    can hold what did not parse.
+    can hold what did not parse. The operator's verb is the only gate, and
+    the records land in no case: the triage flow attaches each one to the
+    case that will work it (`attach_record`).
     """
     if body.case_id is not None:
-        # Parsing INTO a case writes records there, so it needs the case
-        # gate and not just the global ingest verb.
-        authorize_object(conn, user, case_id=body.case_id,
-                         permission_key="ingest.manage")
+        raise Problem(400, "Invalid request", PARSE_NAMES_A_CASE)
     if conn.execute("SELECT 1 FROM ingest.batch WHERE id = %s",
                     (batch_id,)).fetchone() is None:
         raise Problem(404, "Not found", "no such batch")
@@ -550,8 +565,7 @@ def parse_batch(
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
     try:
         result = svc.parse_batch(
-            batch_id, raw=raw, case_id=body.case_id,
-            parser_version=body.parser_version)
+            batch_id, raw=raw, parser_version=body.parser_version)
     except IngestError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
     return {
@@ -593,9 +607,10 @@ def dead_letters(
     partner key, error class, classification and failure rate of every
     other case's feeds: the same over-broad grant `/records` and
     `/quarantine` were split apart to avoid, reachable through the queue
-    next to them. `ingest.dead_letter` carries no `case_id` -- the batch
-    is parsed INTO a case and the case lands on `ingest.record` -- so a
-    dead letter's case is the case its batch's records went to, and the
+    next to them. `ingest.dead_letter` carries no `case_id` -- the case
+    lands on `ingest.record`, when a record is attached or an operator's
+    script parses into one -- so a dead letter's case is the case its
+    batch's records went to, and the
     listing is the union of two scopes, each behind its own verb:
 
     - rows whose batch fed a case the caller is assigned to with
@@ -1536,11 +1551,13 @@ def attach_record(
     `ingest.replay` on it with the record's labels: the verb that already
     puts a repaired dead letter into a case, which is the same act, and
     one the case's own team holds. Not `ingest.manage` on the case, which
-    is what parsing a batch into a case asks for: that permission lives
-    only in the SYS_ADMIN role, and a case assignment carries a case role,
-    so no real assignment ever grants it and the verb could never be used.
-    The upshot is the right one: material goes into a case on the word of
-    somebody who works that case. A record already in a case is refused;
+    is what parsing a batch into a case used to ask for: that permission
+    lives only in the SYS_ADMIN role, and a case assignment carries a case
+    role, so no real assignment ever grants it and the verb could never be
+    used. The parse route takes no case any more (2026-10-08), and this is
+    the one way a record from a feed reaches one. The upshot is the right
+    one: material goes into a case on the word of somebody who works that
+    case. A record already in a case is refused;
     a read-only case (CLOSED, ARCHIVED or PURGED) is refused by the gate.
     """
     current = _authorise_record(conn, user, record_id, "ingest.read")

@@ -181,6 +181,30 @@ describe_os() {
 
 RELEASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Whether this host already holds the production stack's database volume, asked
+# of Docker. Prints exists, new or unknown. Compose labels every volume it
+# makes with the key the compose file gives it (com.docker.compose.volume), so
+# the volume is found by that label and not by the name `<project>_<key>` spelt
+# out here, which was right for the project name the README starts it under and
+# wrong for any other given with `-p` (docs/17 "the volume name"). The key is
+# the one postgres mounts in infra/production/compose.yml, and a test holds the
+# two together. The documented name is asked as well, for a volume made by hand
+# under it, which Compose adopts without labels. "new" needs an engine that
+# answered and listed nothing; no docker, an engine that does not answer or a
+# refusal is "unknown", and the helper then asks the operator to choose the
+# owner's password instead of generating one for a database initdb may already
+# have fixed for good.
+production_database_state() {
+  local listed
+  command -v docker >/dev/null 2>&1 || { echo unknown; return 0; }
+  docker info >/dev/null 2>&1 || { echo unknown; return 0; }
+  listed="$(docker volume ls --quiet --filter 'label=com.docker.compose.volume=prod-pgdata' 2>/dev/null)" \
+    || { echo unknown; return 0; }
+  if [[ -n "$listed" ]]; then echo exists; return 0; fi
+  if docker volume inspect noctornal-prod_prod-pgdata >/dev/null 2>&1; then echo exists; return 0; fi
+  echo new
+}
+
 # ---------------------------------------------------------------------------
 # --production-secrets (docs/17 F52 and the limiter's Redis ACL, 2026-10-02)
 #
@@ -217,9 +241,7 @@ if [[ $PRODUCTION_STEP -eq 1 ]]; then
 The production secrets step runs on the host's own python3, with the
 standard library only. Debian/Ubuntu:  sudo apt update && sudo apt install python3"
   NEW_DATABASE=0
-  if [[ -z "$PROD_DIR" ]] && command -v docker >/dev/null 2>&1 \
-       && docker info >/dev/null 2>&1 \
-       && ! docker volume inspect noctornal-prod_prod-pgdata >/dev/null 2>&1; then
+  if [[ -z "$PROD_DIR" && "$(production_database_state)" == "new" ]]; then
     NEW_DATABASE=1
     detail 'Docker has no database volume for this deployment yet'
   fi

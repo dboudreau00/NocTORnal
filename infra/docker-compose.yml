@@ -33,7 +33,12 @@ services:
   postgres:
     # pgvector image. Ids are uuid4() app-side and gen_random_uuid() in
     # SQL; the pg_uuidv7 idea from the 2026-07 sketch was not taken.
-    image: pgvector/pgvector:pg16
+    # Every image in this file is pinned by digest, as the production stack's
+    # are (2026-10-08, docs/17 "unpinned inputs"): the tag is for the reader and
+    # the digest is what Docker pulls. The digests are the ones
+    # infra/production/compose.yml pins where it shares an image, and
+    # infra/production/README.md, Hardening, says how to move one.
+    image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
     environment:
       POSTGRES_DB: noctornal
       POSTGRES_USER: noctornal
@@ -89,7 +94,7 @@ services:
   # At the 1gb cap Redis now refuses writes instead of deleting meters, and
   # each limit falls back to its declared on_backend_failure.
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
     command: redis-server --appendonly yes --maxmemory 1gb --maxmemory-policy noeviction
     ports: ["127.0.0.1:6379:6379"]
     volumes: [redisdata:/data]
@@ -111,7 +116,7 @@ services:
     # serving MinIO's community builds to anonymous pullers, so the image is
     # the same pinned build, byte for byte, mirrored to this project's GHCR
     # namespace (NOTICE.md names the upstream source).
-    image: ghcr.io/dboudreau00/minio:RELEASE.2025-04-22T22-12-26Z
+    image: ghcr.io/dboudreau00/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: noctornal
@@ -167,7 +172,7 @@ services:
   # if that fails too. `$$` is compose's escape for a literal `$`.
   # test_compose_exposure.py runs this script with a stub `mc`.
   minio-init:
-    image: ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z
+    image: ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
     depends_on: [minio]
     entrypoint: >
       /bin/sh -c "
@@ -198,8 +203,9 @@ services:
     # Docker Hub the day it was pinned, as it did from ghcr.io/axllent/mailpit
     # under the same digest, the mirror to move to if Docker Hub ever goes the
     # way it went for MinIO. CI runs the same tag, and
-    # apps/api/tests/test_dependency_pins.py fails if the two differ.
-    image: axllent/mailpit:v1.31.0
+    # apps/api/tests/test_dependency_pins.py fails if the two differ. The
+    # digest is the one above in full (2026-10-08).
+    image: axllent/mailpit:v1.31.0@sha256:c96991d9bef73594c246d89ca81411d4e916f03e76a7d2d72fa2ab5dd3c9ce24
     # 1025 SMTP, 8025 web UI. install.ps1/install.sh write matching
     # SMTP_HOST/SMTP_PORT/SMTP_ALLOW_PLAINTEXT into .env.local, or the
     # advertised "captured e-mail" demo silently does nothing (R11) --

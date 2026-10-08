@@ -832,6 +832,32 @@ def test_a_parse_writes_records_above_its_operator_and_dedupes_against_hidden_on
     assert not {x["id"] for x in queue.json()["records"]} & {str(earlier)}
 
 
+def test_a_parse_that_names_a_case_is_told_where_the_case_step_is(owner, api):
+    """docs/17 "`parse` with a case id" (2026-10-08). The route took a case and
+    asked `ingest.manage` on it, a permission only SYS_ADMIN holds and no case
+    assignment carries, so every call that named a case was a 403 and the
+    triage flow (parse into the unattached queue, then attach on the word of
+    the case's own team) was the only way in. The field is refused by name,
+    with the way to the case in the sentence, and the batch is left unparsed;
+    the same call without a case parses as it did."""
+    w = _world(owner)
+    operator = _person(owner, "AMBER", "SYS_ADMIN")
+    batch, _raw = _accept(owner, w.amber, [_p("named")])
+    refused = api.client.post(f"{API}/batches/{batch}/parse", headers=operator.hdr,
+                              json={"case_id": str(w.case)})
+    assert refused.status_code == 400, refused.text
+    detail = refused.json()["detail"]
+    assert "unattached queue" in detail and "/ingest/records/{id}/attach" in detail
+    assert "ingest.replay" in detail
+    assert s.count(owner, "SELECT count(*) FROM ingest.record WHERE batch_id = %s",
+                   (batch,)) == 0, "a refused parse stored a record"
+    parsed = api.client.post(f"{API}/batches/{batch}/parse", headers=operator.hdr, json={})
+    assert parsed.status_code == 200, parsed.text
+    assert parsed.json()["records"] == 1
+    assert owner.execute("SELECT case_id FROM ingest.record WHERE batch_id = %s",
+                         (batch,)).fetchall() == [(None,)]
+
+
 def test_the_operator_replays_an_unattached_dead_letter_and_it_is_marked(owner, api):
     boss = s.user(owner, "RED", prefix=P)
     operator = _person(owner, "AMBER", "SYS_ADMIN")

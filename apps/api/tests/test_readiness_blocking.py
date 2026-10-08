@@ -144,7 +144,8 @@ def test_the_register_names_are_unique_and_in_register_order():
     both rest on. A duplicate name would make `_by_name`-style lookups
     silently keep the last one."""
     assert len(readiness.CHECK_NAMES) == len(set(readiness.CHECK_NAMES))
-    assert len(readiness.CHECK_NAMES) == 45, readiness.CHECK_NAMES
+    # proxy_hops_declared (docs/17 "a missing hop count", 2026-10-08), not blocking.
+    assert len(readiness.CHECK_NAMES) == 46, readiness.CHECK_NAMES
     # retention_sweep_current (F30, 2026-10-02), not blocking.
     # collector_split (A collector process, 2026-10-02), not blocking.
     # Row-level security (S1)

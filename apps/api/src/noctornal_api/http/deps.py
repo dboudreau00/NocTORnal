@@ -405,9 +405,11 @@ def effective_labels(
 #: content write under this guard or named there as governance, and no
 #: read route gates on a verb in this set.
 #:
-#: `ingest.manage` and `ingest.replay` reach `authorize_object` only when
-#: they parse or replay records INTO a case; `sample.submit` only when a
-#: sample is attached to one. `comms.minimise` is absent on purpose:
+#: `ingest.replay` reaches `authorize_object` only when it replays or
+#: attaches records INTO a case; `sample.submit` only when a sample is
+#: attached to one. `ingest.manage` reaches it nowhere now: parse no longer
+#: takes a case (2026-10-08), and no case role carries the verb. It stays
+#: here for a role that ever does. `comms.minimise` is absent on purpose:
 #: minimisation is performed at closure (docs/16 L4).
 CONTENT_WRITE_PERMISSIONS: frozenset[str] = frozenset({
     "graph.node.create", "graph.node.update", "graph.node.delete",

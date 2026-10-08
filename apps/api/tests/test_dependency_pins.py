@@ -328,7 +328,9 @@ def test_the_constraints_file_reaches_the_image():
 # Mailpit
 # ---------------------------------------------------------------------------
 
-_MAILPIT = re.compile(r"axllent/mailpit:(\S+)")
+#: The tag, up to the `@sha256:` digest the development file pins it with
+#: (2026-10-08) and CI does not.
+_MAILPIT = re.compile(r"axllent/mailpit:([^\s@]+)")
 
 
 def test_mailpit_is_a_release_tag_and_the_same_one_everywhere():

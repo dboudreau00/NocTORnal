@@ -210,6 +210,28 @@ function Test-AnswerYes {
     return ($text -eq '' -or $text -match '^[Yy]')
 }
 
+# Whether this host already holds the production stack's database volume,
+# asked of Docker: exists, new or unknown. Compose labels every volume it makes
+# with the key the compose file gives it (com.docker.compose.volume), so the
+# volume is found by that label and not by the name <project>_<key> spelt out
+# here, which was right for the project name the README starts it under and
+# wrong for any other given with -p (docs/17 "the volume name"). The documented
+# name is asked as well, for a volume made by hand under it. "new" needs an
+# engine that answered and listed nothing; anything else is "unknown", and the
+# helper then asks the operator to choose the owner's password instead of
+# generating one for a database initdb may already have fixed for good.
+# install.sh's production_database_state is the same question.
+function Get-ProductionDatabaseState {
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { return 'unknown' }
+    if ((Invoke-Capture 'docker' @('info')).Code -ne 0) { return 'unknown' }
+    $listed = Invoke-Capture 'docker' @('volume', 'ls', '--quiet', '--filter',
+                                        'label=com.docker.compose.volume=prod-pgdata')
+    if ($listed.Code -ne 0) { return 'unknown' }
+    if ($listed.Text.Trim()) { return 'exists' }
+    if ((Invoke-Capture 'docker' @('volume', 'inspect', 'noctornal-prod_prod-pgdata')).Code -eq 0) { return 'exists' }
+    return 'new'
+}
+
 # One line from the person, or from standard input when it is piped. Null at
 # the end of input becomes an empty answer.
 function Read-Line {
@@ -351,9 +373,7 @@ library only:
 '@
     }
     $helperArgs = @((Join-Path $RepoRoot 'scripts\production_secrets.py'), '--dir', $target)
-    if (-not $ProductionDir -and (Get-Command docker -ErrorAction SilentlyContinue) -and
-            (Invoke-Capture 'docker' @('info')).Code -eq 0 -and
-            (Invoke-Capture 'docker' @('volume', 'inspect', 'noctornal-prod_prod-pgdata')).Code -ne 0) {
+    if (-not $ProductionDir -and (Get-ProductionDatabaseState) -eq 'new') {
         $helperArgs += '--new-database'
         Write-Detail 'Docker has no database volume for this deployment yet'
     }

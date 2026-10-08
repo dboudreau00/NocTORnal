@@ -2293,6 +2293,12 @@ async function openCase(caseId) {
   state.triageId = null;
   stopWorkerLayout();
   applyMetrics(null);
+  /* Every pane chosen from here on is the analyst's, not this open's: the
+     workspace is on screen well before the case has loaded (on a large case
+     that is seconds), its rail is live, and the Graph this open ends on is a
+     default for an open nobody touched. The choices are counted by
+     `selectTab`, and nothing this function awaits calls it. */
+  const choicesAtOpen = _tabChoices;
   try {
     const [rec, ontology] = await Promise.all([
       api('/cases/' + caseId),
@@ -2355,10 +2361,15 @@ async function openCase(caseId) {
     /* After the first full load, so an event arriving mid-boot cannot
        race the initial fetch and redraw a half-built workspace. */
     connectLive();
-    selectTab('graph');
+    /* The default pane, unless the analyst has already picked one while the
+       case was loading: a click on Evidence at the third second used to be
+       undone by the Graph this ended on. Their pick also outranks a deep
+       link's, which was written before they clicked. */
+    const picked = _tabChoices !== choicesAtOpen;
+    if (!picked) selectTab('graph');
     // After the graph, so a deep-linked pane lands on a workspace that is
     // already populated rather than one still fetching.
-    applyDeepLinkTab();
+    applyDeepLinkTab(picked);
   } catch (err) {
     if (caseChanged(token)) return;
     /* The record itself could not be read: say so in the bar rather than
@@ -2374,7 +2385,13 @@ async function openCase(caseId) {
   }
 }
 
+/** How many times a pane has been chosen, by anyone: a click, a key, a
+ *  palette jump, a link inside the console. `openCase` reads it before and
+ *  after it loads to tell whether the analyst chose a pane meanwhile. */
+let _tabChoices = 0;
+
 function selectTab(name) {
+  _tabChoices += 1;
   state.tab = name;
   /* The pane goes into the address as well, in place: a reload lands on
      it, and a pane change is not a Back step (ux02-cases, 2026-09-23). */
@@ -15620,11 +15637,14 @@ function signInLinkRefused(err) {
  *  case-scoped and selecting one before `state.caseId` exists produces a
  *  pane that renders its empty state and then never refreshes, which looks
  *  exactly like "there is no data".
+ *
+ *  `chosenMeanwhile` is true when the analyst picked a pane while the case was
+ *  loading: the link is spent either way, but it does not take the pane back.
  */
-function applyDeepLinkTab() {
+function applyDeepLinkTab(chosenMeanwhile) {
   const name = state.deepLinkTab;
   state.deepLinkTab = null;
-  if (!name) return;
+  if (!name || chosenMeanwhile) return;
   if (!document.querySelector('.rail-btn[data-tab="' + name + '"]')) return;
   selectTab(name);
 }

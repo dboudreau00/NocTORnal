@@ -45,16 +45,52 @@
 # NOCTORNAL_TRUSTED_PROXY_HOPS=1: with one hop it reads the LAST entry --
 # Caddy's own observation -- and a client that invents earlier entries only
 # lengthens a list nothing reads. Set that variable to 0, or leave it
-# unset, and every request appears to come from Caddy: the rate limiter
-# meters the whole internet as one subject, the sign-in audit records the
-# proxy as the origin of every login, and session IP binding pins every
-# session to the same address.
+# unset, and the client's address is whatever uvicorn reports as the peer:
+# compose.yml starts it with --forwarded-allow-ips for Caddy, which makes that
+# the client's own, and where a process is started any other way every request
+# appears to come from Caddy: the rate limiter meters the whole internet as
+# one subject, the sign-in audit records the proxy as the origin of every
+# login, and session IP binding pins every session to the same address. The
+# readiness register reports the unset count in production (proxy_hops_declared).
 #
-# There is deliberately no `request_body max_size` here. Evidence and
-# sample uploads are large by nature and the application enforces its own
-# declared-length cap before it reads a byte (http/routers/ingest.py); a
-# second limit in the proxy would refuse those uploads with a 413 that
-# names nothing.
+# ## Upload sizes (2026-10-08)
+#
+# `request_body max_size` stands on the five routes that take a multipart
+# file (an exhibit, a sample, an e-mail exhibit, a YARA rule set version, a
+# hash list) and on no other. The application writes such a body to a
+# temporary file before the route has looked at who sent it, and a request
+# that carries any bearer value or a session cookie is read that way to the
+# route's cap whether or not the credential is live (docs/17, "a junk
+# credential is still read"). The caps the application declares stay the
+# authority, and its own refusal names the cap; this is the ceiling in front
+# of them, and the api service's /tmp (compose.yml) is the bound behind.
+#
+# 256MiB is the default of both NOCTORNAL_MAX_EVIDENCE_BYTES and
+# NOCTORNAL_MAX_SAMPLE_BYTES, and like theirs it counts the whole body,
+# framing included. A deployment that declares either above it raises this
+# line with it and the size of /tmp (infra/production/README.md, Upload
+# sizes). Write it as MiB: Caddy reads 256MB as 256,000,000 bytes, which is
+# under the application's own 256 MiB. A body over the limit is answered
+# with the problem+json the application sends, in place of Caddy's bare 413,
+# which named nothing. The pattern follows the application's own routes: a
+# test reads the route table and fails on a file route it does not cover
+# (apps/api/tests/test_g80_proxy_spool.py).
+#
+# ## Compression (2026-10-08)
+#
+# The console, and only the console, is compressed: /ui is 2.3 MiB of
+# static text that crossed the wire whole on every visit and is about 0.7 MiB
+# compressed. An API answer is what the caller may read, with what they sent
+# in it, which is what a compression side channel (BREACH) needs, so none
+# is compressed.
+#
+# ## The Server header (2026-10-08)
+#
+# uvicorn names itself on every answer and Caddy passed it on. `header
+# -Server` takes it off both hostnames (it runs after reverse_proxy has
+# copied the upstream's headers), and the same line under `handle_errors`
+# takes Caddy's own off the answers Caddy makes itself, a 502 while the API
+# restarts among them.
 
 # ## Transport (infra-6, 2026-10-03)
 #
@@ -102,6 +138,28 @@
 		protocols tls1.3
 	}
 	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	header -Server
+
+	# Only the console is compressed (see Compression above).
+	@console path /ui /ui/*
+	encode @console zstd gzip
+
+	# The five routes that take a multipart file (see Upload sizes above).
+	# `[^/]+` is the application's own reading of {case_id} and {ruleset_id}:
+	# it routes a path whose id is not a UUID to the same handler, which reads
+	# the body before it finds that out.
+	@uploads path_regexp ^/api/v1/(cases/[^/]+/(evidence|deception/emails)|samples(/screening/lists|/yara/rulesets/[^/]+/versions)?)/?$
+	request_body @uploads {
+		max_size 256MiB
+	}
+	handle_errors {
+		header -Server
+		@too_large expression {err.status_code} == 413
+		handle @too_large {
+			header Content-Type application/problem+json
+			respond `{"type":"about:blank","title":"Payload too large","status":413,"detail":"an upload is capped by the proxy in front of the application (request_body max_size in infra/production/Caddyfile), and this one was refused at that cap"}` 413
+		}
+	}
 
 	# The API, the console at /ui and the /api/v1/live WebSocket, which
 	# Caddy upgrades without any extra configuration.
@@ -113,6 +171,10 @@
 		protocols tls1.3
 	}
 	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	header -Server
+	handle_errors {
+		header -Server
+	}
 
 	# A SEPARATE upstream, not a path on the one above. If this ever
 	# pointed at api:8000 the deployment would look correct and every

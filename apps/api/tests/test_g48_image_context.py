@@ -1100,14 +1100,27 @@ def test_the_readme_says_how_to_get_the_app_role_on_a_volume_that_was_initialise
 
 # --- infra-7's residual, with the digests in the repository -------------------
 
+CI = ROOT / ".github" / "workflows" / "ci.yml"
+
+
+def _image_refs(path: Path) -> list[str]:
+    return re.findall(r"(?m)^\s+image:\s*(\S+)\s*$", _text(path))
+
+
 def _tag_only_images() -> dict[str, str]:
-    """image -> where, for every image the development stack and CI pull by tag."""
+    """image -> where, for every image CI's `image:` keys pull by tag. The
+    development stack's are pinned by digest since 2026-10-08 (below), and
+    CI's two service containers are still tags, which the README says."""
     found: dict[str, str] = {}
-    for path in (DEV_COMPOSE, ROOT / ".github" / "workflows" / "ci.yml"):
-        for image in re.findall(r"(?m)^\s+image:\s*(\S+)\s*$", _text(path)):
-            assert "@sha256:" not in image, f"{image} in {path.name} is pinned now: update this test"
-            found.setdefault(image, path.name)
+    for image in _image_refs(CI):
+        assert "@sha256:" not in image, f"{image} in {CI.name} is pinned now: update this test"
+        found.setdefault(image, CI.name)
     return found
+
+
+def _pinned(path: Path) -> dict[str, str]:
+    """name:tag -> digest for every `image:` of `path` that carries one."""
+    return dict(image.split("@") for image in _image_refs(path) if "@sha256:" in image)
 
 
 def _readme_digest_table() -> dict[str, str]:
@@ -1118,26 +1131,44 @@ def _readme_digest_table() -> dict[str, str]:
             for m in re.finditer(r"\| `([^`]+)` \| [^|\n]+ \| `(sha256:[0-9a-f]{64})` \|", section)}
 
 
-def test_every_image_pulled_by_tag_is_named_in_the_readme_with_the_digest_it_resolved_to():
+def test_every_image_the_development_stack_pulls_is_pinned_by_digest():
+    """docs/17 "unpinned inputs" (2026-10-08): the development compose file
+    named its five images by tag, where production names them by digest, so a
+    developer's `up` ran whatever the registry said that day."""
+    images = _image_refs(DEV_COMPOSE)
+    assert len(images) == 5, images
+    unpinned = [i for i in images if not _DIGEST.match(i)]
+    assert not unpinned, f"the development stack pulls these by tag: {unpinned}"
+
+
+def test_the_ci_images_still_pulled_by_tag_are_named_in_the_readme_with_a_digest():
     table = _readme_digest_table()
     pulled = _tag_only_images()
-    assert {"pgvector/pgvector:pg16", "redis:7-alpine", "axllent/mailpit:v1.31.0"} <= set(pulled), pulled
+    assert {"pgvector/pgvector:pg16", "redis:7-alpine"} <= set(pulled), pulled
     missing = sorted(set(pulled) - set(table))
     assert not missing, f"README Hardening does not list these tag-only images with a digest: {missing}"
 
 
-def test_the_readme_digests_are_the_ones_the_production_stack_pins():
-    """A tag shared with production must carry production's digest, so a pin
-    moved in compose.yml without the table fails here instead of going stale."""
+def test_the_readme_digests_are_the_ones_both_stacks_pin():
+    """A tag shared with production must carry production's digest, and every
+    image the development stack pins must be in the table with the digest it
+    pins, so a pin moved in either file without the table fails here instead
+    of going stale."""
     table = _readme_digest_table()
-    pinned = {}
+    prod = _pinned(COMPOSE)
+    dev = _pinned(DEV_COMPOSE)
+    assert set(dev) == set(table), (sorted(set(dev) ^ set(table)))
+    assert {n: d for n, d in dev.items() if table[n] != d} == {}
+    shared = sorted(set(table) & set(prod))
+    assert {"pgvector/pgvector:pg16", "redis:7-alpine"} <= set(shared), shared
+    assert {name for name in prod if name.startswith("ghcr.io/dboudreau00/")} <= set(shared)
+    wrong = {name: (table[name], prod[name]) for name in shared if table[name] != prod[name]}
+    assert not wrong, wrong
+    # And what production pins, in the services' own words, is the same set.
+    in_services = {}
     for service in _services().values():
         image = service.get("image", "")
         if "@sha256:" in image:
             name, digest = image.split("@")
-            pinned[name] = digest
-    shared = sorted(set(table) & set(pinned))
-    assert {"pgvector/pgvector:pg16", "redis:7-alpine"} <= set(shared), shared
-    assert {name for name in pinned if name.startswith("ghcr.io/dboudreau00/")} <= set(shared)
-    wrong = {name: (table[name], pinned[name]) for name in shared if table[name] != pinned[name]}
-    assert not wrong, wrong
+            in_services[name] = digest
+    assert in_services == prod
