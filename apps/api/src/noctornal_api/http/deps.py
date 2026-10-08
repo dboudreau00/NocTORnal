@@ -816,6 +816,24 @@ def _fresh(user: CurrentUser) -> bool:
                  - user.session_mfa_at) < STEP_UP_FRESHNESS)
 
 
+def holds_global(conn: psycopg.Connection, user_id: UUID,
+                 permission_key: str) -> bool:
+    """Whether a global role of an active account carries `permission_key`,
+    asked as a question: no AUTHZ_DENIED row (a listing that draws a control
+    or leaves it out has not been denied anything), and no step-up, which the
+    act itself asks for. `require_global`'s own check without its refusals,
+    for the routes that tell the console whether to offer a verb (2026-10-08;
+    the collection router's `_holds` is the same query)."""
+    return conn.execute(
+        """SELECT EXISTS (
+               SELECT 1 FROM iam.user_role ur
+                 JOIN iam.role_permission rp ON rp.role_key = ur.role_key
+                 JOIN iam.app_user u ON u.id = ur.user_id
+                WHERE ur.user_id = %s AND u.is_active
+                  AND rp.permission_key = %s)""",
+        (user_id, permission_key)).fetchone()[0]
+
+
 def authorize_global(conn: psycopg.Connection, user: CurrentUser,
                      permission_key: str, *, force_step_up: bool = False) -> None:
     """`require_global`'s check, callable inside a handler whose permission

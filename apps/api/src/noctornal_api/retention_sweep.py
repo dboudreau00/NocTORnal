@@ -1,4 +1,5 @@
-"""The deployment-wide sweep of collected documents (docs/17 F30, 2026-10-02).
+"""The deployment-wide sweep of what no case governs (docs/17 F30, 2026-10-02;
+F55, 2026-10-08).
 
 A Telegram group's messages and a forum's posts are collected documents. They
 carry a retention clock (CHAT_EXPORT and the other rules), the purge honours
@@ -8,6 +9,13 @@ and a collected document belongs to no case, and no script called
 `RetentionService.purge_due(case_id=None)`. So a group chat's third-party
 messages outlived their clock for as long as nobody decided how a sweep is
 run, by whom and under which authority (docs/16 L4).
+
+F55 (owner, 2026-10-08): dead letters and the ingest records attached to no
+case are in the same position, and join this sweep under the same rules. A
+dead letter has no case, and so no case hold, and carries a 90-day clock and
+third-party victim data; a record attached to no case has a clock and no case
+to govern it. Neither can be held, so every one past its clock is one a sweep
+destroys.
 
 ## What this module decides (docs/00 decisions 171 to 173)
 
@@ -22,15 +30,17 @@ nobody watches is how data disappears on a Sunday". The operator documentation
 (infra/production/README.md) says how to schedule it, and a test holds the
 production cron loop to not containing it.
 
-**It sweeps collected documents and nothing else.** `purge_due(case_id=None)`
+**It sweeps what no case governs, and nothing else.** `purge_due(case_id=None)`
 also reaches every case's exhibits, ingest records, lookups and dead letters,
 and writes their tombstones under no case: the cross-case destruction
 `test_a_purge_cannot_be_run_without_naming_a_case` was written against.
 Exhibits are behind a COMPLIANCE object lock and the case-scoped route's
 preview digest and step-up; a document is the one family with no other way in.
 The family set is `SWEPT_KINDS`, one line, so widening it is a decision with a
-diff. Dead letters are the other family with no case and no sweep; they are
-not covered here (see integration notes).
+diff. Since F55 it holds the documents, the dead letters and the ingest
+records, and the run asks `purge_due` for `unattached_only`, so a record
+attached to a case stays that case's, with its clock and its hold, and is
+reached only by the case-scoped route.
 
 **It does not fork the purge.** The act is `RetentionService.purge_due`, with
 its hold predicate, its locks, its markup deletion and its tombstone, called
@@ -72,12 +82,15 @@ ACTOR_ENV = "NOCTORNAL_RETENTION_SWEEP_ACTOR"
 EVENT = "RETENTION_SWEEP"
 PERMISSION = "retention.purge"
 
-#: The `DueItem.object_type` values this sweep may destroy. Collected
-#: documents only; see the module docstring for why that is the decision.
-SWEPT_KINDS = frozenset({"document"})
+#: The `DueItem.object_type` values this sweep may destroy: collected
+#: documents (F30), and since F55 dead letters and ingest records, the
+#: latter only when attached to no case (`purge_due(unattached_only=True)`).
+#: See the module docstring for why that is the decision.
+SWEPT_KINDS = frozenset({"document", "dead_letter", "ingest_record"})
 
-#: One pass destroys at most what `RetentionService.due` lists (500), so a
-#: group chat with tens of thousands of expired messages needs many passes.
+#: One pass destroys at most what `RetentionService.due` lists (500) of each
+#: family, so a group chat with tens of thousands of expired messages needs
+#: many passes.
 #: The cap is a backstop against a loop that cannot make progress, not a
 #: budget: a run that meets it says so and exits 1, and the next run
 #: continues.
@@ -176,12 +189,19 @@ class SweepReport:
     #: of those no hold kept: what a dry run would destroy.
     past_clock: int = 0
     sweepable: int = 0
+    #: Dead letters, and ingest records attached to no case, past their clock
+    #: when the run began (F55). Neither can be held, so each is one a sweep
+    #: destroys.
+    dead_letters: int = 0
+    unattached_records: int = 0
     passes: int = 0
     documents_purged: int = 0
+    dead_letters_purged: int = 0
+    records_purged: int = 0
     tombstones: int = 0
     #: After a real run: documents past their clock that a hold keeps, and
-    #: documents past their clock that nothing kept and the run did not
-    #: destroy (a store that refused its markup, or the pass cap).
+    #: what is past its clock that nothing kept and the run did not destroy
+    #: (a store that refused a document's markup, or the pass cap).
     held: int = 0
     remaining: int = 0
     #: Why the run stopped before it was done, and whether that was the
@@ -195,13 +215,22 @@ class SweepReport:
         if not self.apply:
             pairs = [("mode", "dry-run"), ("past_clock", self.past_clock),
                      ("sweepable", self.sweepable),
-                     ("held", self.past_clock - self.sweepable)]
+                     ("held", self.past_clock - self.sweepable),
+                     ("dead_letters", self.dead_letters),
+                     ("unattached_records", self.unattached_records)]
         else:
             pairs = [("mode", "apply"), ("passes", self.passes),
                      ("documents_purged", self.documents_purged),
+                     ("dead_letters_purged", self.dead_letters_purged),
+                     ("records_purged", self.records_purged),
                      ("tombstones", self.tombstones), ("held", self.held),
                      ("remaining", self.remaining)]
         return " ".join(f"{key}={value}" for key, value in pairs)
+
+    @property
+    def sweepable_total(self) -> int:
+        """What a dry run would destroy, of every family the sweep reaches."""
+        return self.sweepable + self.dead_letters + self.unattached_records
 
 
 def sweep(conn: psycopg.Connection, *, apply: bool,
@@ -211,8 +240,7 @@ def sweep(conn: psycopg.Connection, *, apply: bool,
           where: Mapping[str, object] | None = None) -> SweepReport:
     """Count what is past its clock, and with `apply` destroy what no hold
     keeps. `conn` must be a system connection: under row-level security a
-    sweep on the request role would see only some documents and report
-    success.
+    sweep on the request role would see only some of it and report success.
 
     A dry run writes nothing at all, not even an audit row: it is a read.
     A real run needs a named actor and a valid authority reference (checked
@@ -233,7 +261,9 @@ def sweep(conn: psycopg.Connection, *, apply: bool,
     now = as_of or datetime.now(timezone.utc)
     service = RetentionService(conn, document_raw=document_raw)
     past, sweepable, _oldest = service.document_backlog(now)
-    report = SweepReport(apply=apply, past_clock=past, sweepable=sweepable)
+    dead, loose, _oldest_loose = service.unattached_backlog(now)
+    report = SweepReport(apply=apply, past_clock=past, sweepable=sweepable,
+                         dead_letters=dead, unattached_records=loose)
 
     if not apply:
         # The purge's own dry run, for its warnings (a placeholder rule, the
@@ -241,7 +271,7 @@ def sweep(conn: psycopg.Connection, *, apply: bool,
         # are not the ones reported.
         preview = service.purge_due(
             actor_id=_NO_ACTOR, authority="dry run", as_of=now, dry_run=True,
-            kinds=SWEPT_KINDS)
+            kinds=SWEPT_KINDS, unattached_only=True)
         report.warnings = list(dict.fromkeys(preview.warnings))
         return report
 
@@ -251,15 +281,18 @@ def sweep(conn: psycopg.Connection, *, apply: bool,
         while report.passes < max_passes:
             result = service.purge_due(
                 actor_id=actor, authority=recorded, as_of=now,
-                kinds=SWEPT_KINDS)
+                kinds=SWEPT_KINDS, unattached_only=True)
             report.passes += 1
             report.documents_purged += result.documents_purged
+            report.dead_letters_purged += result.dead_letters_purged
+            report.records_purged += result.records_purged
             report.tombstones += len(result.tombstones)
             report.warnings = list(dict.fromkeys(
                 [*report.warnings, *result.warnings]))
             # A pass that destroyed nothing has nothing left it can: the
             # rest is held, or a store refused it and the next run retries.
-            if result.documents_purged == 0:
+            if not (result.documents_purged or result.dead_letters_purged
+                    or result.records_purged):
                 break
         else:
             capped = True
@@ -275,12 +308,13 @@ def sweep(conn: psycopg.Connection, *, apply: bool,
                 counted=False)
         raise
     past_after, sweepable_after, _ = service.document_backlog(now)
+    dead_after, loose_after, _ = service.unattached_backlog(now)
     report.held = past_after - sweepable_after
-    report.remaining = sweepable_after
+    report.remaining = sweepable_after + dead_after + loose_after
     if capped and report.remaining:
         report.stopped = (
-            f"stopped at the limit of {max_passes} passes with documents "
-            f"still due; run it again")
+            f"stopped at the limit of {max_passes} passes with items still "
+            f"due; run it again")
     _record(conn, actor, reference, report, where,
             finished=report.stopped is None, counted=True)
     return report
@@ -297,6 +331,8 @@ def _record(conn: psycopg.Connection, actor_id: UUID, reference: str,
         "authority": reference,
         "passes": report.passes,
         "documents_purged": report.documents_purged,
+        "dead_letters_purged": report.dead_letters_purged,
+        "records_purged": report.records_purged,
         "finished": finished,
         **(dict(where) if where else {}),
     }
@@ -324,42 +360,66 @@ def _age_words(age: timedelta) -> str:
     return count_of(days, "day", "days") if days else "under a day"
 
 
+def _unswept(documents: int, dead_letters: int, records: int) -> str:
+    """The unswept things in words, only the kinds there are: a count of
+    collected documents alone reads exactly as it did before F55."""
+    parts = []
+    if documents:
+        parts.append(_documents(documents))
+    if dead_letters:
+        parts.append(count_of(dead_letters, "dead letter", "dead letters"))
+    if records:
+        parts.append(count_of(records, "unattached ingest record",
+                              "unattached ingest records"))
+    return (", ".join(parts[:-1]) + " and " + parts[-1]) if len(parts) > 1 \
+        else parts[0]
+
+
 def readiness_verdict(conn: psycopg.Connection, *,
                       now: datetime | None = None) -> tuple[bool, str, str]:
     """(ok, evidence, action) for the `retention_sweep_current` row: how many
-    collected documents are past their clock and unswept. Counts and an age,
-    never a document, a source or a case.
+    collected documents, dead letters and ingest records attached to no case
+    are past their clock and unswept. Counts and an age, never a document, a
+    source or a case.
 
     Passes with nothing past its clock, with only held documents past it (a
     hold is the purge refusing correctly, and the evidence says how many),
-    and with unheld ones inside `OVERDUE_AFTER`. Fails once an unheld
-    document has waited longer than that: somebody's third-party content is
-    being held past its clock, which is the gap F30 recorded. Not blocking:
-    it names a duty that is late, not a decision that cannot wait."""
+    and with unheld ones inside `OVERDUE_AFTER`. Fails once something no hold
+    keeps has waited longer than that: somebody's third-party content is
+    being held past its clock, which is the gap F30 recorded and F55 widened
+    to dead letters and unattached records. Not blocking: it names a duty
+    that is late, not a decision that cannot wait."""
     now = now or datetime.now(timezone.utc)
-    past, sweepable, oldest = RetentionService(conn).document_backlog(now)
-    if not past:
-        return True, "No collected document is past its retention clock.", ""
+    service = RetentionService(conn)
+    past, sweepable, oldest = service.document_backlog(now)
+    dead, loose, oldest_loose = service.unattached_backlog(now)
+    swept = sweepable + dead + loose
+    if not past and not dead and not loose:
+        return (True, "No collected document, dead letter or unattached "
+                "ingest record is past its retention clock.", "")
     held = past - sweepable
     kept = ""
     if held:
         kept = (f" {held} more {agree(held, 'is', 'are')} kept by a legal hold "
                 f"and {agree(held, 'stays', 'stay')}.")
-    if not sweepable:
+    if not swept:
         return (True,
                 f"{_documents(past)} {agree(past, 'is', 'are')} past "
                 f"{agree(past, 'its', 'their')} retention clock and "
                 f"{agree(past, 'is', 'every one is')} kept by a legal hold, so "
                 f"a sweep keeps {agree(past, 'it', 'them')}.", "")
-    age = now - oldest
-    lead = (f"{_documents(sweepable)} {agree(sweepable, 'is', 'are')} past "
-            f"{agree(sweepable, 'its', 'their')} retention clock and "
+    age = now - min(when for when in (oldest, oldest_loose) if when is not None)
+    lead = (f"{_unswept(sweepable, dead, loose)} "
+            f"{agree(swept, 'is', 'are')} past "
+            f"{agree(swept, 'its', 'their')} retention clock and "
             f"unswept, the oldest by {_age_words(age)}.")
     if age <= OVERDUE_AFTER:
         return (True, lead + f" That is inside the {OVERDUE_AFTER.days} days a "
                 f"weekly sweep allows." + kept, "")
+    scope = ("collected documents" if not dead and not loose else
+             "collected documents, dead letters and unattached ingest records")
     return (False,
-            lead + " No sweep of collected documents is scheduled, or the "
+            lead + f" No sweep of {scope} is scheduled, or the "
             "last one could not finish." + kept,
             "run python scripts/retention_sweep.py to see what a sweep would "
             "destroy, then run it with --apply under a declared authority, and "

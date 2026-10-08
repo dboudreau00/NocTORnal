@@ -323,18 +323,37 @@ def case_blocked(conn: psycopg.Connection, case_id: UUID) -> bool:
         (case_id,)).fetchone() is not None
 
 
-def effective_ceiling(dest: Dest) -> str:
-    """The stricter of the row's ceiling and NOCTORNAL_JIRA_CEILING. An
-    unparseable host cap is passed through, so can_egress fails closed with
+def _under_host_cap(ceiling: str) -> str:
+    """The stricter of `ceiling` and NOCTORNAL_JIRA_CEILING. An unparseable
+    host cap is passed through, so can_egress fails closed with
     unknown_classification rather than this guessing."""
     env = os.environ.get(CEILING_ENV, "").strip()
     if not env:
-        return dest.ceiling
+        return ceiling
     try:
         cap = tlp_from_name(env.upper())
     except AccessResolutionError:
         return env
-    return min(tlp_from_name(dest.ceiling), cap).name
+    return min(tlp_from_name(ceiling), cap).name
+
+
+def effective_ceiling(dest: Dest) -> str:
+    """The stricter of the row's ceiling and NOCTORNAL_JIRA_CEILING."""
+    return _under_host_cap(dest.ceiling)
+
+
+def configured_ceiling(conn: psycopg.Connection) -> str | None:
+    """What this deployment lets Jira hold, for a judgement that sends
+    nothing (a report's release, 2026-10-08): the live destination's ceiling
+    under the host cap, as `effective_ceiling` makes it for the pass that
+    sends; the host cap alone when no destination exists; None when neither
+    is set. Reads the ceiling and nothing else of the destination."""
+    row = conn.execute(
+        "SELECT ceiling::text FROM notify.jira_destination "
+        "WHERE state <> 'RETIRED'").fetchone()
+    if row is not None:
+        return _under_host_cap(row[0])
+    return os.environ.get(CEILING_ENV, "").strip() or None
 
 
 def browse_url(base: str, key: str, comment_id: str | None = None) -> str:

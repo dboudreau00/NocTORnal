@@ -32,8 +32,12 @@ PLAIN_BACKSLASHES = "C:\\evidence\\capture.txt"
 
 def _redaction(**kw):
     from noctornal_api.reports import Redaction
+    # Under COUNT, the setting whose statement states the figures it is
+    # given; a Redaction built by hand says nothing of them otherwise
+    # (2026-10-08).
     base = dict(built_at_tlp="AMBER", ceiling_tlp="AMBER", case_tlp="AMBER",
-                nodes_withheld=0, edges_withheld=0, evidence_withheld=0)
+                nodes_withheld=0, edges_withheld=0, evidence_withheld=0,
+                disclosure="COUNT")
     base.update(kw)
     return Redaction(**base)
 

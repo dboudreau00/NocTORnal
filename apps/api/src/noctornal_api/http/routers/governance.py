@@ -479,6 +479,22 @@ _DUE_LABELS_FROM = {
 }
 
 
+def _read_labels(conn: psycopg.Connection, kind: str,
+                 ids: list[UUID]) -> dict[UUID, tuple]:
+    """(classification, compartments) of each of `ids`, a labelled due kind,
+    by the rule `_DUE_LABELS_FROM` states. An id the caller's connection
+    cannot read is absent from the answer, and absent is hidden."""
+    if kind in _DUE_LABELS_FROM:
+        rows = conn.execute(_DUE_LABELS_FROM[kind], (ids,)).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT x.id, f.classification::text, f.compartments
+                 FROM unnest(%s::uuid[]) AS x(id)
+                 CROSS JOIN LATERAL iam.element_facts(%s, x.id) f""",
+            (ids, kind)).fetchall()
+    return {r[0]: (r[1], r[2]) for r in rows}
+
+
 def _visible_due(conn: psycopg.Connection, user: CurrentUser,
                  items: list[DueItem], scope: list[UUID]
                  ) -> tuple[list[DueItem], list[dict]]:
@@ -500,15 +516,8 @@ def _visible_due(conn: psycopg.Connection, user: CurrentUser,
         ids = [i.object_id for i in items if i.object_type == kind]
         if not ids:
             continue
-        if kind in _DUE_LABELS_FROM:
-            rows = conn.execute(_DUE_LABELS_FROM[kind], (ids,)).fetchall()
-        else:
-            rows = conn.execute(
-                """SELECT x.id, f.classification::text, f.compartments
-                     FROM unnest(%s::uuid[]) AS x(id)
-                     CROSS JOIN LATERAL iam.element_facts(%s, x.id) f""",
-                (ids, kind)).fetchall()
-        labels.update({(kind, r[0]): (r[1], r[2]) for r in rows})
+        labels.update({(kind, who): found for who, found
+                       in _read_labels(conn, kind, ids).items()})
     ceilings: dict[UUID, tuple] = {}
     hidden: dict[UUID, int] = {}
     kept: list[DueItem] = []
@@ -538,6 +547,86 @@ def _visible_due(conn: psycopg.Connection, user: CurrentUser,
             entry["items"] = n
         said.append(entry)
     return kept, said
+
+
+#: The kind of object each count of a purge's answer counts, for
+#: `_visible_ids`. `held_back` counts several and carries its kind with each.
+_COUNTED_KINDS = {
+    "evidence_purged": "evidence", "storage_deleted": "evidence",
+    "storage_locked": "evidence", "storage_failed": "evidence",
+    "records_purged": "ingest_record", "lookups_purged": "lookup",
+    "lookup_results_purged": "lookup_result",
+    "lookup_batches_purged": "lookup_batch", "samples_purged": "sample",
+}
+
+
+def _visible_ids(conn: psycopg.Connection, user: CurrentUser, case_id: UUID,
+                 result: PurgeResult) -> set[UUID]:
+    """Of the objects a purge's answer counts, those this caller may know of:
+    within their ceiling on the case, by the rule the due list applies
+    (`_visible_due`). A batch carries no labels, and is theirs to know.
+
+    The real run's answer was the sweep's own totals, exhibits above the
+    caller included, so a caller who may run a real purge learned afterwards
+    how many exhibits there were that they could not see, whatever the case's
+    withheld-disclosure setting said, and the dry run before it had said
+    nothing (the purge's own answer, 2026-10-08)."""
+    wanted: dict[str, set[UUID]] = {}
+    for name, kind in _COUNTED_KINDS.items():
+        wanted.setdefault(kind, set()).update(result.members.get(name, ()))
+    for kind, who in result.members.get("held_back", ()):
+        wanted.setdefault(kind, set()).add(who)
+    clearance, held = user_ceiling(conn, user.user_id, case_id=case_id)
+    visible: set[UUID] = set()
+    for kind, ids in wanted.items():
+        if kind not in _LABELLED_DUE:
+            visible |= ids
+            continue
+        labels = _read_labels(conn, kind, sorted(ids))
+        for who in ids:
+            found = labels.get(who)
+            if (found is not None and tlp_from_name(found[0]) <= clearance
+                    and frozenset(found[1] or []) <= held):
+                visible.add(who)
+    return visible
+
+
+def _answer_over(out: dict, result: PurgeResult, visible: set[UUID]) -> None:
+    """Redraw a real run's counts, warnings and tombstones from the objects
+    in `visible` alone. For a caller who may know of everything the run
+    touched this changes nothing a word of it; for one who may not, the
+    answer is the answer to a case that holds only what they can see, with no
+    mark of the rest (the case's setting says what else is said, as it does
+    for the dry run: `withheld`)."""
+    def n(name: str) -> int:
+        return sum(1 for who in result.members.get(name, ()) if who in visible)
+
+    out.update(
+        evidence_purged=n("evidence_purged"),
+        storage_deleted=n("storage_deleted"),
+        storage_locked=n("storage_locked"),
+        storage_failed=n("storage_failed"),
+        records_purged=n("records_purged"),
+        lookups_purged=n("lookups_purged"),
+        lookup_results_purged=n("lookup_results_purged"),
+        lookup_batches_purged=n("lookup_batches_purged"),
+        samples_purged=n("samples_purged"),
+        held_back=sum(1 for _kind, who in result.members.get("held_back", ())
+                      if who in visible))
+    shown: list[str] = []
+    for index, text in enumerate(result.warnings):
+        scoped = result.scoped.get(index)
+        if scoped is None:
+            shown.append(text)
+            continue
+        say, members, universe = scoped
+        seen = [who for who in members if who in visible]
+        if seen:
+            shown.append(say(len(seen), sum(1 for who in universe
+                                            if who in visible)))
+    out["warnings"] = shown
+    out["tombstones"] = [str(stone) for stone in result.tombstones
+                         if result.stones.get(stone, frozenset()) & visible]
 
 
 class PurgeBody(BaseModel):
@@ -736,10 +825,9 @@ def _sample_stores():
     preserving = rejected_sample_disposition() == PRESERVE
     return SampleStorage(), (PreservationStorage() if preserving else None)
 
-@router.post("/purge", response_model=dict,
-             dependencies=[Depends(rate_limit("retention.destroy"))])
+@router.post("/purge", response_model=dict)
 def purge(
-    body: PurgeBody,
+    body: PurgeBody, request: Request, response: Response,
     user: CurrentUser = Depends(require_global("retention.purge")),
     conn: psycopg.Connection = Depends(get_conn),
     # A purge must reach every expired row of the case, above the
@@ -752,7 +840,17 @@ def purge(
     `authority` is free text and mandatory: the schedule, the policy
     reference, the instruction. A destruction whose authority nobody
     recorded cannot be defended later, and "the job ran" is not one.
+
+    The meter is spent here, after the global gate (`require_global`, which
+    is where a stale sign-in is refused) and before the case's: as a
+    dependency of the route it ran first of all, so a request refused for a
+    stale sign-in spent from it. A dry run, which destroys nothing and is the
+    first step of every real run, and a real run have meters of their own
+    (2026-10-08).
     """
+    enforce(request, response,
+            "retention.dry_run" if body.dry_run else "retention.destroy",
+            f"u:{user.user_id}", conn=conn, actor_id=user.user_id)
     _case_scoped(conn, user, body.case_id, "retention.purge")
     purger = _purger(sconn)
     # What is due NOW, read before anything is destroyed: a dry run hands
@@ -817,12 +915,21 @@ def purge(
                 "what is due on this case changed while this dry run was "
                 "counting, so it issues no preview to confirm. Run it "
                 "again.")
-    elif not same:
-        out["warnings"].append(
-            "the destruction did not match the dry run it confirmed: what "
-            "was due changed in the moment between the check and the "
-            "sweep. The counts above are what the sweep acted on, and the "
-            "tombstone records the same.")
+    else:
+        # The answer to what this caller may know of, as the dry run's is
+        # (the purge's own answer, 2026-10-08). The tombstone is the record
+        # of destruction and totals what the sweep acted on, whoever reads
+        # this.
+        _answer_over(out, result, _visible_ids(conn, user, body.case_id, result))
+        _items, withheld = _visible_due(conn, user, items, [body.case_id])
+        if withheld:
+            out["withheld"] = withheld
+        if not same:
+            out["warnings"].append(
+                "the destruction did not match the dry run it confirmed: what "
+                "was due changed in the moment between the check and the "
+                "sweep. Run the dry run again for the case as it stands now: "
+                "the tombstone is the record of what was destroyed.")
     return out
 
 
@@ -839,10 +946,9 @@ class OutOfScheduleBody(BaseModel):
     authority: str = Field(min_length=10)
 
 
-@router.post("/purge/out-of-schedule", response_model=dict,
-             dependencies=[Depends(rate_limit("retention.destroy"))])
+@router.post("/purge/out-of-schedule", response_model=dict)
 def purge_out_of_schedule(
-    body: OutOfScheduleBody,
+    body: OutOfScheduleBody, request: Request, response: Response,
     user: CurrentUser = Depends(require_global("retention.purge")),
     conn: psycopg.Connection = Depends(get_conn),
     # The membership check counts every named exhibit and the purge
@@ -855,7 +961,11 @@ def purge_out_of_schedule(
     Separate from the scheduled path on purpose: that one is the system
     enforcing a rule, this one is a person overriding one, and the two
     must never share an audit signature.
+
+    Metered here, after the global gate, for the reason `purge` gives.
     """
+    enforce(request, response, "retention.destroy", f"u:{user.user_id}",
+            conn=conn, actor_id=user.user_id)
     authorize_object(conn, user, case_id=body.case_id,
                      permission_key="retention.purge")
     # Every exhibit must be IN the approved case.
@@ -1008,7 +1118,7 @@ class LegalHoldBody(BaseModel):
 
 def _meter_lift(request: Request, response: Response, conn: psycopg.Connection,
                 user: CurrentUser, on: bool) -> None:
-    """A LIFT spends the destruction meter; a placement does not.
+    """A LIFT spends the lift meter; a placement does not.
 
     The three hold routes were metered on `retention.destroy` whichever way
     the hold went, so placing a fourth hold inside a few minutes was refused
@@ -1016,9 +1126,12 @@ def _meter_lift(request: Request, response: Response, conn: psycopg.Connection,
     meter's store down every placement was refused (2026-10-07).
     Preservation is never the act a loop abuses; releasing is what makes
     destruction lawful, so a lift keeps the tight meter and fails closed, and
-    a placement has the ordinary request meter."""
+    a placement has the ordinary request meter. The meter is the lift's own
+    since 2026-10-08, so a lift and a purge no longer wait on each other.
+    Called from the route's body, after `require_global` has refused a stale
+    sign-in, so that refusal spends nothing."""
     if not on:
-        enforce(request, response, "retention.destroy", f"u:{user.user_id}",
+        enforce(request, response, "retention.lift", f"u:{user.user_id}",
                 conn=conn, actor_id=user.user_id)
 
 

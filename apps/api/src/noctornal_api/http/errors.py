@@ -191,7 +191,7 @@ def install_error_handlers(app) -> None:
     from noctornal_api.cases import CaseError
     from noctornal_api.curation import CurationError
     from noctornal_api.evidence import (
-        EvidenceError, ExhibitUnavailable, IntegrityError)
+        EvidenceError, ExhibitUnavailable, IntegrityError, StoreUnavailable)
     from noctornal_api.graph import GraphWriteError
     from noctornal_api.security.access import AccessResolutionError
     from noctornal_api.selectors import SelectorError, SelectorOwnerConflict
@@ -224,6 +224,14 @@ def install_error_handlers(app) -> None:
         # answer, and never a tamper alarm (verify-destroyed-exhibit,
         # 2026-10-03). The sentence is fixed text, not the exception's cause.
         return problem_response(409, "Exhibit unavailable", str(exc))
+
+    @app.exception_handler(StoreUnavailable)
+    async def _store_unavailable(_: Request, exc: Exception):
+        # The object store did not answer: the caller did nothing wrong and
+        # may try again, which a 400 would not tell them and a 500 would
+        # report as the server's own defect (2026-10-08).
+        return problem_response(503, "Service unavailable", str(exc),
+                                headers={"Retry-After": "5"})
 
     @app.exception_handler(EvidenceError)
     async def _evidence(_: Request, exc: Exception):

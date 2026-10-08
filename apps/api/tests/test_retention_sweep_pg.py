@@ -563,7 +563,8 @@ def test_the_audit_row_carries_counts_and_the_reference_and_no_content(conn, act
 
     (event,) = _events(conn, uid)
 
-    assert set(event) == {"authority", "passes", "documents_purged", "finished",
+    assert set(event) == {"authority", "passes", "documents_purged",
+                          "dead_letters_purged", "records_purged", "finished",
                           "held", "remaining", "via", "host", "os_user"}
     assert event["authority"] == REFERENCE and event["finished"] is True
     assert event["via"] == "scripts/retention_sweep.py"
@@ -578,9 +579,11 @@ def test_the_audit_row_carries_counts_and_the_reference_and_no_content(conn, act
 
 # --- what the sweep does not reach ---------------------------------------------
 
-def test_the_sweep_leaves_a_due_dead_letter_alone(conn, actor, store, capsys):
-    """Dead letters have no case and no sweep, and are not this sweep's: the
-    family set is collected documents (docs/00 decision 172)."""
+def test_the_sweep_destroys_a_due_dead_letter(conn, actor, store, capsys):
+    """F55 (owner, 2026-10-08): dead letters join the sweep, under the same
+    declaration and named account. Until then the family set was collected
+    documents (docs/00 decision 172) and a dead letter outlived its clock;
+    the full set of F55 tests is `test_retention_sweep_unattached_pg.py`."""
     uid, email = actor
     letter = conn.execute(
         """INSERT INTO ingest.dead_letter
@@ -592,8 +595,10 @@ def test_the_sweep_leaves_a_due_dead_letter_alone(conn, actor, store, capsys):
     code, _out, _err = _run(conn, store, email, "--apply", capsys=capsys)
 
     assert code == 0 and _purged(conn, doc)
-    assert conn.execute("SELECT purged_at FROM ingest.dead_letter WHERE id = %s",
-                        (letter,)).fetchone()[0] is None
+    purged_at, fragment = conn.execute(
+        "SELECT purged_at, raw_fragment FROM ingest.dead_letter WHERE id = %s",
+        (letter,)).fetchone()
+    assert purged_at is not None and fragment == "[purged on retention]"
 
 
 def test_kinds_narrows_the_purge_to_the_named_families_and_none_is_every_family(
@@ -657,7 +662,9 @@ def _verdict(conn):
 def test_the_row_passes_when_nothing_is_past_its_clock(conn):
     ok, evidence, action = _verdict(conn)
     assert ok and action == ""
-    assert evidence == "No collected document is past its retention clock."
+    # Dead letters and unattached ingest records join the row (F55).
+    assert evidence == ("No collected document, dead letter or unattached "
+                        "ingest record is past its retention clock.")
 
 
 def test_the_row_passes_inside_the_grace_and_says_how_many_and_how_old(conn):

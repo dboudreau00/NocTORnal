@@ -376,7 +376,9 @@ def _report():
         built_at_tlp="AMBER", ceiling_tlp="AMBER", case_tlp="RED",
         nodes_withheld=2, edges_withheld=1, evidence_withheld=1,
         header_withheld=False, assumptions_withheld=0,
-        hypotheses_withheld=0, hypothesis_evidence_withheld=0)
+        hypotheses_withheld=0, hypothesis_evidence_withheld=0,
+        # The setting whose statement states the figures above.
+        disclosure="COUNT")
     case = {"id": "c", "code": "OP-1", "title": "Escrow ring",
             "summary": None, "status": "ACTIVE", "classification": "RED",
             "legal_basis": "production order 44", "authority_ref": None,

@@ -7253,6 +7253,11 @@ function exhibitCard(ev, page) {
     dcpRuns(desc, ev.description_segments);
     item.appendChild(desc);
   }
+  /* Why it is held, for the people who place and lift holds: the server
+     sends the text to nobody else (2026-10-08). */
+  if (ev.legal_hold && ev.legal_hold_reason) {
+    item.appendChild(el('p', 'help', 'Held: ' + visibleText(ev.legal_hold_reason)));
+  }
   item.appendChild(exhibitIdLine('SHA-256', ev.sha256, 'the SHA-256 digest'));
   item.appendChild(exhibitIdLine('Exhibit id', ev.id, 'the exhibit id'));
   item.appendChild(backsLine(ev));
@@ -7358,10 +7363,55 @@ function exhibitCard(ev, page) {
     });
     actions.appendChild(bChain);
   }
+  /* A hold on this exhibit, for a reader who may place and lift one. A
+     destroyed exhibit has nothing left to hold. */
+  if (page.may_hold && !ev.purged_at) {
+    actions.appendChild(exhibitHoldButton(ev, item));
+  }
   actions.appendChild(verdict);
   item.appendChild(actions);
   item.appendChild(custodyBox);
   return item;
+}
+
+/** Place or lift a legal hold on an exhibit, with a reason either way,
+ *  behind the step-up gate: the exhibit card's half of the console's hold
+ *  controls (docs/17, "no console control for a hold", 2026-10-08), built as
+ *  the collected document's is (`documentHoldActions`). The route is
+ *  `POST /retention/legal-hold`, which decides for itself: this only offers
+ *  the control to a reader whose register said `may_hold`. A lift needs the
+ *  lifter cleared for the exhibit, which a reader of the register is. Holds
+ *  are governance, so the control stays on a CLOSED case. */
+function exhibitHoldButton(ev, card) {
+  const verb = ev.legal_hold ? 'Lift the legal hold' : 'Place a legal hold';
+  const btn = el('button', 'btn small ghost', verb);
+  btn.type = 'button';
+  btn.setAttribute('aria-label', verb + ' on ' + visibleText(ev.title));
+  btn.addEventListener('click', () => rowForm(card, {
+    kind: 'hold', submit: verb,
+    help: ev.legal_hold
+      ? 'Once lifted, this exhibit follows the case\'s retention date again, '
+        + 'unless the case itself is held. A written reason and a sign-in '
+        + 'from the last 15 minutes are needed either way, and the reason '
+        + 'is kept in the audit log.'
+      : 'A hold stops every deletion of this exhibit, whatever the case\'s '
+        + 'retention date says, until somebody lifts it. It needs a written '
+        + 'reason and a sign-in from the last 15 minutes, and the reason is '
+        + 'kept in the audit log.',
+    fields: [{ label: 'Why', grow: true }],
+    check: ([why]) => (why.trim().length < 5
+      ? 'Say why, in at least 5 characters.' : null),
+    submitFn: async ([why]) => {
+      const token = caseToken();
+      const out = await withStepUp('A legal hold needs a recent sign-in.',
+        () => api('/retention/legal-hold', { method: 'POST', json: {
+          evidence_id: ev.id, on: !ev.legal_hold, reason: why.trim() } }));
+      if (!out) throw Object.assign(new Error('cancelled'), { handled: true });
+      if (caseChanged(token)) return;
+      loadEvidence({ pageOnly: true, focus: ev.id });
+    },
+  }));
+  return btn;
 }
 
 /** An exhibit's card with its Similar control (F6.4, 2026-09-24):
@@ -9688,11 +9738,12 @@ function caseRoleWords(rec) {
  *  ux02-cases:case-actions-linger-on-case-list, 2026-09-23). */
 function hideCaseChrome() {
   for (const id of ['btn-case-edit', 'btn-case-share', 'btn-case-status',
-                    'live-dot']) {
+                    'btn-case-hold', 'hdr-hold', 'live-dot']) {
     show($(id), false);
   }
   closeCaseRecord();
   closeStatus();
+  closeCaseHold();
 }
 
 /** And shown for an open case, each saying what the caller's role there
@@ -9717,6 +9768,10 @@ function showCaseChrome(rec) {
     ? 'Move this case through its lifecycle'
     : 'Where this case can go next. Changing its status needs case.close, '
       + 'which ' + caseRoleWords(rec) + ' on this case does not include.';
+  /* The LEGAL HOLD chip and the Hold… button, here with the rest of the
+     case chrome because opening a case draws it through this function and
+     not through `applyCaseRecord` (2026-10-08). */
+  renderCaseHold(rec);
 }
 
 /** Who the signed-in person is here: their role on the open case, and
@@ -10262,7 +10317,149 @@ async function statusAfterSignIn(rec, to) {
 onCaseSwitch(() => {
   closeCaseRecord();
   closeStatus();
+  closeCaseHold();
 });
+
+/* --- Hold…: a legal hold on the whole case ------------------------------
+ *
+ * docs/17, "no console control for a hold" (2026-10-08). A case-level hold
+ * freezes everything the case governs against every deletion path: its
+ * exhibits, those lodged later too, its ingest records, lookups and
+ * samples, and the collected documents it cites. Placing one is open to
+ * whoever holds retention.manage on the case, lifting one to somebody
+ * cleared for everything the case holds, and both take a written reason and
+ * a sign-in from the last 15 minutes. `POST /retention/cases/{id}/legal-hold`
+ * decides all of it; the case record's `may_hold` only says whether to
+ * offer the control. It is governance, so it works on a CLOSED case too.
+ */
+
+/** The header's LEGAL HOLD chip, for every reader of a held case, and the
+ *  Hold… button, for one who may place and lift it. */
+function renderCaseHold(rec) {
+  const chip = $('hdr-hold');
+  const btn = $('btn-case-hold');
+  const held = !!(rec && rec.legal_hold);
+  show(chip, held);
+  if (held) {
+    chip.title = 'This case is under a legal hold. Nothing it governs may be '
+      + 'destroyed while the hold stands, whatever its retention date says.';
+  }
+  show(btn, !!(rec && rec.may_hold));
+  if (rec && rec.may_hold) {
+    btn.title = held ? 'Lift the legal hold on this case'
+      : 'Place a legal hold on this whole case';
+  }
+}
+
+let holdReturn = null;
+
+function openCaseHold() {
+  const rec = state.caseRec;
+  if (!rec || !state.caseId || !rec.may_hold) return;
+  holdReturn = document.activeElement;
+  const held = !!rec.legal_hold;
+  $('hold-title').textContent = (held ? 'Lift the legal hold on '
+    : 'Place a legal hold on ') + rec.code;
+  $('hold-now').textContent = held
+    ? rec.code + ' is under a legal hold'
+      + (rec.legal_hold_reason
+        ? ', placed for: ' + visibleText(rec.legal_hold_reason) : '') + '.'
+    : rec.code + ' is not under a legal hold.';
+  $('hold-help').textContent = held
+    ? 'Lifting the hold lets the case\'s retention dates and rules govern '
+      + 'again, so a purge can destroy what is past its date. Only somebody '
+      + 'cleared for everything the case holds can lift it. A written '
+      + 'reason and a sign-in from the last 15 minutes are needed either way.'
+    : 'A hold stops every deletion of what the case governs: its exhibits, '
+      + 'including any lodged later, its ingest records, lookups and samples, '
+      + 'and the collected documents it cites. A purge already running '
+      + 'finishes the exhibit it is destroying and keeps everything after '
+      + 'it. A written reason and a sign-in from the last 15 minutes are '
+      + 'needed either way.';
+  $('hold-why').value = '';
+  setMsg($('hold-msg'), '');
+  $('hold-save').textContent = held ? 'Lift the hold' : 'Place the hold';
+  show($('hold-scrim'), true);
+  $('hold-why').focus();
+}
+
+function closeCaseHold() {
+  const scrim = $('hold-scrim');
+  if (!scrim || scrim.hidden) return;
+  show(scrim, false);
+  const back = holdReturn;
+  holdReturn = null;
+  if (back && typeof back.focus === 'function' && document.contains(back)
+      && !back.closest('[hidden]')) {
+    back.focus();
+  }
+}
+
+async function submitCaseHold(e) {
+  e.preventDefault();
+  const rec = state.caseRec;
+  const msg = $('hold-msg');
+  setMsg(msg, '');
+  if (!rec || !state.caseId || !rec.may_hold) return;
+  const why = $('hold-why').value.trim();
+  if (why.length < 5) {
+    setMsg(msg, 'Say why, in at least 5 characters.');
+    return;
+  }
+  const btn = $('hold-save');
+  btn.disabled = true;
+  const token = caseToken();
+  const place = !rec.legal_hold;
+  let changed = false;
+  try {
+    const out = await withStepUp('A legal hold needs a recent sign-in.',
+      () => api('/retention/cases/' + rec.id + '/legal-hold',
+        { method: 'POST', json: { on: place, reason: why } }));
+    if (caseChanged(token)) return;
+    if (!out) {
+      setMsg(msg, 'Not changed: the sign-in was cancelled.');
+      return;
+    }
+    changed = true;
+    closeCaseHold();
+    /* Said first, with what a purge that was destroying material when the
+       hold arrived had destroyed (the hold response reports it): the hold
+       stands whatever the re-read below does. */
+    banner(place ? 'Legal hold placed' : 'Legal hold lifted',
+      place ? rec.code + ' is now under a legal hold.'
+        + (out.notice ? ' ' + out.notice : '')
+        : 'The legal hold on ' + rec.code + ' is lifted.',
+      out.notice ? 'warn' : 'info',
+      out.notice ? { sticky: true } : 8000);
+    /* The record again, so the chip and the control follow what the server
+       now holds; the register and the Records pane read the case's hold on
+       their next load. */
+    const fresh = await api('/cases/' + rec.id);
+    if (caseChanged(token)) return;
+    applyCaseRecord(fresh);
+    reloadRegisterIfShown();
+  } catch (err) {
+    if (caseChanged(token) || (err && err.handled)) return;
+    /* Only the re-read failed: the hold is in force, and the dialog's "Not
+       changed" would say the opposite. */
+    if (changed) { fail(err, 'The case record'); return; }
+    setMsg(msg, 'Not changed: ' + (err instanceof ApiError && err.status === 403
+      ? refusalText(err, 'Placing or lifting a hold needs retention.manage on '
+        + 'this case.')
+      : err instanceof ApiError ? (err.detail || err.title) : String(err)));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function wireCaseHold() {
+  const btn = $('btn-case-hold');
+  if (!btn) return;
+  btn.addEventListener('click', openCaseHold);
+  $('hold-form').addEventListener('submit', submitCaseHold);
+  $('hold-cancel').addEventListener('click', closeCaseHold);
+  holdDialogKeys('hold-scrim', closeCaseHold);
+}
 
 function wireCaseActions() {
   const edit = $('btn-case-edit');
@@ -15324,6 +15521,7 @@ function wire() {
   initCaseRouting();    // F7 and F15.3
   wireAssumptions();
   wireCaseActions();
+  wireCaseHold();
   wireTour();
   initCanvas();
   initPalette();
@@ -29328,25 +29526,34 @@ function renderRedaction(prepared) {
   const facts = el('div', 'facts');
   const withheld = (r.nodes_withheld || 0) + (r.edges_withheld || 0)
     + (r.evidence_withheld || 0);
-  facts.appendChild(fact('entities withheld', r.nodes_withheld || 0,
-    r.nodes_withheld ? 'warn' : ''));
-  facts.appendChild(fact('relationships withheld', r.edges_withheld || 0,
-    r.edges_withheld ? 'warn' : ''));
-  /* The case's disclosure setting decides the figure: under PRESENCE the
-     document says some exhibits are above the ceiling and not how many. */
-  facts.appendChild(fact('exhibits withheld',
-    r.evidence_some_withheld ? 'some' : (r.evidence_withheld || 0),
-    r.evidence_withheld || r.evidence_some_withheld ? 'warn' : ''));
-  /* Only when there is some: the matrix's scores leave these out (C2). */
-  if (r.hypothesis_evidence_withheld) {
-    facts.appendChild(fact('hypothesis evidence withheld',
-      r.hypothesis_evidence_withheld, 'warn'));
+  /* The case's disclosure setting decides all three figures (decision 179,
+     and 2026-10-08 for the entities and relationships): the number under
+     COUNT, whether there are some under PRESENCE, and under NONE nothing,
+     because a "0" there would say what the case chose not to. An older
+     server sent no setting and always counted. */
+  const mode = r.disclosure || 'COUNT';
+  if (mode !== 'NONE') {
+    for (const [label, count, some] of [
+      ['entities withheld', r.nodes_withheld, r.nodes_some_withheld],
+      ['relationships withheld', r.edges_withheld, r.edges_some_withheld],
+      ['exhibits withheld', r.evidence_withheld, r.evidence_some_withheld],
+    ]) {
+      facts.appendChild(fact(label,
+        mode === 'COUNT' ? (count || 0) : (some ? 'some' : 'none'),
+        count || some ? 'warn' : ''));
+    }
   }
-  card.appendChild(facts);
+  /* Only when there is some: the matrix's scores leave these out (C2). */
+  if (r.hypothesis_evidence_withheld || r.hypothesis_evidence_some_withheld) {
+    facts.appendChild(fact('hypothesis evidence withheld',
+      r.hypothesis_evidence_withheld || 'some', 'warn'));
+  }
+  if (facts.childNodes.length) card.appendChild(facts);
 
-  const anything = withheld || r.evidence_some_withheld || r.header_withheld
+  const anything = withheld || r.evidence_some_withheld
+    || r.nodes_some_withheld || r.edges_some_withheld || r.header_withheld
     || r.assumptions_withheld || r.hypotheses_withheld
-    || r.hypothesis_evidence_withheld;
+    || r.hypothesis_evidence_withheld || r.hypothesis_evidence_some_withheld;
   /* The statement is the document's own Markdown sentence, which bolds
      "Every figure below is computed over the redacted graph" with `**`.
      Printed through textContent, the card showed the asterisks the moment
@@ -33026,7 +33233,7 @@ async function showAdmin() {
   show($('btn-cases'), true);
   /* No case is open, so none of the case chrome applies. */
   for (const id of ['hdr-tlp', 'hdr-asof', 'btn-case-edit', 'btn-case-share',
-                    'btn-case-status']) {
+                    'btn-case-status', 'btn-case-hold', 'hdr-hold']) {
     show($(id), false);
   }
   $('hdr-case').textContent = adminViewName();

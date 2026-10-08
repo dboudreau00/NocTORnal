@@ -269,7 +269,10 @@ def test_an_above_ceiling_stance_neither_labels_nor_scores(conn):
     scored = {h["id"]: h for h in green.hypotheses["hypotheses"]}
     assert scored[str(h1)]["inconsistency"] == 0.0, (
         "a RED stance moved a score printed in a GREEN document")
-    assert green.redaction.hypothesis_evidence_withheld == 1
+    # Under the default setting (PRESENCE) the document says that some of the
+    # matrix's evidence was left out and not how much (2026-10-08).
+    assert green.redaction.hypothesis_evidence_some_withheld is True
+    assert green.redaction.hypothesis_evidence_withheld == 0
     assert "hypothesis matrix" in green.redaction.statement()
     assert SECRET_LABEL not in render_markdown(green)
 
@@ -308,7 +311,7 @@ def test_a_tie_to_an_above_ceiling_end_is_left_out(conn):
 
     green = _build(conn, case_id, owner, "GREEN")
     assert green.hypotheses["evidence"] == []
-    assert green.redaction.hypothesis_evidence_withheld == 1
+    assert green.redaction.hypothesis_evidence_some_withheld is True
     red = _build(conn, case_id, owner, "RED")
     assert len(red.hypotheses["evidence"]) == 1
 
@@ -325,7 +328,7 @@ def test_a_compartmented_stance_follows_the_read_in(conn):
 
     outside = _build(conn, case_id, owner, "RED")
     assert outside.hypotheses["evidence"] == []
-    assert outside.redaction.hypothesis_evidence_withheld == 1
+    assert outside.redaction.hypothesis_evidence_some_withheld is True
     inside = _build(conn, case_id, owner, "RED", frozenset({"OP-RHY"}))
     assert [e["label"] for e in inside.hypotheses["evidence"]] == [
         "compartmented_actor"]

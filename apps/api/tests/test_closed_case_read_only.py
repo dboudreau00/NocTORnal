@@ -380,7 +380,9 @@ def test_the_case_record_says_read_only():
             id="c", code="OP-X", title="t", status=status, classification="AMBER",
             owner_user_id="u", legal_basis="b", retention_until="2028-01-01",
             review_due="2027-01-01", created_at="2026-01-01T00:00:00Z",
-            closed_at=None, summary=None, authority_ref=None)
+            closed_at=None, summary=None, authority_ref=None,
+            # The record carries the case's hold since 2026-10-08.
+            legal_hold=False)
         assert _out(row).read_only is (status in CONTENT_READ_ONLY_STATES)
 
 

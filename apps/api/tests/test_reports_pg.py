@@ -482,8 +482,14 @@ def test_the_hidden_exhibit_figure_follows_the_cases_disclosure_setting(
     assert body["evidence_withheld"] == count
     assert body["evidence_some_withheld"] is some
     assert ("2 exhibits" in statement) is (mode == "COUNT")
-    assert ("some exhibits" in statement) is (mode == "PRESENCE")
+    # Case-folded since 2026-10-08: under PRESENCE the statement now opens
+    # its sentence with the kinds there are some of ("Some exhibits are
+    # above that level").
+    assert ("some exhibits" in statement.lower()) is (mode == "PRESENCE")
     assert report.redaction.anything_withheld is (mode != "NONE")
+    # And under NONE it never claims that nothing was withheld, whatever it
+    # holds above the ceiling (the case says nothing either way).
+    assert ("nothing has been withheld" in statement) is False
 
 
 # --- the hypotheses section --------------------------------------------
