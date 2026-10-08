@@ -973,7 +973,7 @@ class ScreeningService:
                                 coalesce(c.classification, s.classification)),
                        s.compartments || coalesce(c.compartments, '{{}}'),
                        c.code, s.state::text, s.preserved_key IS NOT NULL,
-                       octet_length(s.data_key_ciphertext) > 0,
+                       NOT s.data_key_destroyed,
                        s.screening_bytes_absent_at, s.preserved_at,
                        u.display_name, s.submitted_at, a.display_name,
                        EXISTS (SELECT 1 FROM lab.screening_review v2

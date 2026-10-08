@@ -23,11 +23,13 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
 from noctornal_api import egress_ledger
+from noctornal_api.db import SystemPurpose
 from noctornal_api.egress_admin import EgressAdminError, EgressAdminService
 from noctornal_api.http.deps import (
     CurrentUser,
     get_conn,
     require_global,
+    system_conn,
     user_ceiling,
 )
 from noctornal_api.http.errors import Problem, safe_detail
@@ -39,6 +41,11 @@ router = APIRouter(prefix="/admin/egress", tags=["admin"])
 MANAGE = "egress.manage"
 READ = "egress.log.read"
 _WRITE = [Depends(rate_limit("admin.egress"))]
+#: Every write lands on a system connection (0179, Beta 1.1): the egress
+#: tables are read-only to the request role, so a statement injected into
+#: a request cannot add a route or widen a profile without this gate, its
+#: step-up and the service's audit row.
+_CONFIG = system_conn(SystemPurpose.CONFIGURATION)
 
 
 class PolicyBody(BaseModel):
@@ -143,9 +150,10 @@ def overview(
 @router.post("/profiles", response_model=dict, status_code=201, dependencies=_WRITE)
 def create_profile(body: CreateProfileBody,
                    user: CurrentUser = Depends(require_global(MANAGE)),
-                   conn: psycopg.Connection = Depends(get_conn)) -> dict:
+                   conn: psycopg.Connection = Depends(get_conn),
+                   sconn: psycopg.Connection = Depends(_CONFIG)) -> dict:
     try:
-        return _svc(conn).create_profile(
+        return _svc(sconn).create_profile(
             actor_id=user.user_id, name=body.name, kind=body.kind, region=body.region,
             ceiling=body.ceiling, policy=body.policy.model_dump(exclude_none=True))
     except EgressAdminError as exc:
@@ -155,10 +163,11 @@ def create_profile(body: CreateProfileBody,
 @router.patch("/profiles/{profile_id}/policy", response_model=dict, dependencies=_WRITE)
 def set_policy(profile_id: UUID, body: PolicyBody,
                user: CurrentUser = Depends(require_global(MANAGE)),
-               conn: psycopg.Connection = Depends(get_conn)) -> dict:
+               conn: psycopg.Connection = Depends(get_conn),
+               sconn: psycopg.Connection = Depends(_CONFIG)) -> dict:
     clearance, _held = _clearance(conn, user)
     try:
-        return _svc(conn).set_policy(actor_id=user.user_id, profile_id=profile_id,
+        return _svc(sconn).set_policy(actor_id=user.user_id, profile_id=profile_id,
                                      clearance=clearance,
                                      policy=body.model_dump(exclude_none=True))
     except EgressAdminError as exc:
@@ -168,7 +177,8 @@ def set_policy(profile_id: UUID, body: PolicyBody,
 @router.put("/profiles/{profile_id}/exit", response_model=dict, dependencies=_WRITE)
 def seal_exit(profile_id: UUID, body: ExitBody,
               user: CurrentUser = Depends(require_global(MANAGE)),
-              conn: psycopg.Connection = Depends(get_conn)) -> dict:
+              conn: psycopg.Connection = Depends(get_conn),
+              sconn: psycopg.Connection = Depends(_CONFIG)) -> dict:
     """Seal an exit for the egress proxy. The answer carries the key id and
     whether the profile now reaches further, never any part of the exit."""
     endpoint = None
@@ -177,7 +187,7 @@ def seal_exit(profile_id: UUID, body: ExitBody,
             raise Problem(409, "Conflict", "Give the exit's host and port.")
         endpoint = ExitEndpoint(body.host, body.port, body.username, body.password)
     try:
-        return _svc(conn).seal_exit(actor_id=user.user_id, profile_id=profile_id,
+        return _svc(sconn).seal_exit(actor_id=user.user_id, profile_id=profile_id,
                                     exit_kind=body.exit_kind, endpoint=endpoint,
                                     cleartext_ack=body.cleartext_ack)
     except EgressAdminError as exc:
@@ -188,18 +198,20 @@ def seal_exit(profile_id: UUID, body: ExitBody,
              dependencies=_WRITE)
 def passive_default(profile_id: UUID,
                     user: CurrentUser = Depends(require_global(MANAGE)),
-                    conn: psycopg.Connection = Depends(get_conn)) -> dict:
+                    conn: psycopg.Connection = Depends(get_conn),
+                    sconn: psycopg.Connection = Depends(_CONFIG)) -> dict:
     try:
-        return _svc(conn).set_passive_default(actor_id=user.user_id, profile_id=profile_id)
+        return _svc(sconn).set_passive_default(actor_id=user.user_id, profile_id=profile_id)
     except EgressAdminError as exc:
         raise _refuse(exc) from exc
 
 
 @router.post("/profiles/{profile_id}/activate", response_model=dict, dependencies=_WRITE)
 def activate(profile_id: UUID, user: CurrentUser = Depends(require_global(MANAGE)),
-             conn: psycopg.Connection = Depends(get_conn)) -> dict:
+             conn: psycopg.Connection = Depends(get_conn),
+             sconn: psycopg.Connection = Depends(_CONFIG)) -> dict:
     try:
-        return _svc(conn).set_active(actor_id=user.user_id, profile_id=profile_id,
+        return _svc(sconn).set_active(actor_id=user.user_id, profile_id=profile_id,
                                      active=True)
     except EgressAdminError as exc:
         raise _refuse(exc) from exc
@@ -207,9 +219,10 @@ def activate(profile_id: UUID, user: CurrentUser = Depends(require_global(MANAGE
 
 @router.post("/profiles/{profile_id}/deactivate", response_model=dict, dependencies=_WRITE)
 def deactivate(profile_id: UUID, user: CurrentUser = Depends(require_global(MANAGE)),
-               conn: psycopg.Connection = Depends(get_conn)) -> dict:
+               conn: psycopg.Connection = Depends(get_conn),
+               sconn: psycopg.Connection = Depends(_CONFIG)) -> dict:
     try:
-        return _svc(conn).set_active(actor_id=user.user_id, profile_id=profile_id,
+        return _svc(sconn).set_active(actor_id=user.user_id, profile_id=profile_id,
                                      active=False)
     except EgressAdminError as exc:
         raise _refuse(exc) from exc
@@ -218,9 +231,10 @@ def deactivate(profile_id: UUID, user: CurrentUser = Depends(require_global(MANA
 @router.post("/profiles/{profile_id}/retire", response_model=dict, dependencies=_WRITE)
 def retire(profile_id: UUID, body: ReasonBody,
            user: CurrentUser = Depends(require_global(MANAGE)),
-           conn: psycopg.Connection = Depends(get_conn)) -> dict:
+           conn: psycopg.Connection = Depends(get_conn),
+           sconn: psycopg.Connection = Depends(_CONFIG)) -> dict:
     try:
-        return _svc(conn).retire(actor_id=user.user_id, profile_id=profile_id,
+        return _svc(sconn).retire(actor_id=user.user_id, profile_id=profile_id,
                                  reason=body.reason)
     except EgressAdminError as exc:
         raise _refuse(exc) from exc
@@ -229,9 +243,10 @@ def retire(profile_id: UUID, body: ReasonBody,
 @router.post("/routes", response_model=dict, status_code=201, dependencies=_WRITE)
 def create_route(body: CreateRouteBody,
                  user: CurrentUser = Depends(require_global(MANAGE)),
-                 conn: psycopg.Connection = Depends(get_conn)) -> dict:
+                 conn: psycopg.Connection = Depends(get_conn),
+                 sconn: psycopg.Connection = Depends(_CONFIG)) -> dict:
     try:
-        return _svc(conn).create_route(actor_id=user.user_id, name=body.name,
+        return _svc(sconn).create_route(actor_id=user.user_id, name=body.name,
                                        description=body.description,
                                        limits=body.limits.model_dump(exclude_none=True))
     except EgressAdminError as exc:
@@ -241,9 +256,10 @@ def create_route(body: CreateRouteBody,
 @router.patch("/routes/{route_id}", response_model=dict, dependencies=_WRITE)
 def update_route(route_id: UUID, body: UpdateRouteBody,
                  user: CurrentUser = Depends(require_global(MANAGE)),
-                 conn: psycopg.Connection = Depends(get_conn)) -> dict:
+                 conn: psycopg.Connection = Depends(get_conn),
+                 sconn: psycopg.Connection = Depends(_CONFIG)) -> dict:
     try:
-        return _svc(conn).update_route(actor_id=user.user_id, route_id=route_id,
+        return _svc(sconn).update_route(actor_id=user.user_id, route_id=route_id,
                                        description=body.description,
                                        limits=body.limits.model_dump(exclude_none=True),
                                        is_active=body.is_active)
@@ -254,9 +270,10 @@ def update_route(route_id: UUID, body: UpdateRouteBody,
 @router.post("/routes/{route_id}/retire", response_model=dict, dependencies=_WRITE)
 def retire_route(route_id: UUID, body: ReasonBody,
                  user: CurrentUser = Depends(require_global(MANAGE)),
-                 conn: psycopg.Connection = Depends(get_conn)) -> dict:
+                 conn: psycopg.Connection = Depends(get_conn),
+                 sconn: psycopg.Connection = Depends(_CONFIG)) -> dict:
     try:
-        return _svc(conn).retire_route(actor_id=user.user_id, route_id=route_id,
+        return _svc(sconn).retire_route(actor_id=user.user_id, route_id=route_id,
                                        reason=body.reason)
     except EgressAdminError as exc:
         raise _refuse(exc) from exc
@@ -266,9 +283,10 @@ def retire_route(route_id: UUID, body: ReasonBody,
              dependencies=_WRITE)
 def add_destination(route_id: UUID, body: DestinationBody,
                     user: CurrentUser = Depends(require_global(MANAGE)),
-                    conn: psycopg.Connection = Depends(get_conn)) -> dict:
+                    conn: psycopg.Connection = Depends(get_conn),
+                    sconn: psycopg.Connection = Depends(_CONFIG)) -> dict:
     try:
-        return _svc(conn).add_destination(actor_id=user.user_id, route_id=route_id,
+        return _svc(sconn).add_destination(actor_id=user.user_id, route_id=route_id,
                                           entry=body.entry, note=body.note)
     except EgressAdminError as exc:
         raise _refuse(exc) from exc
@@ -278,9 +296,10 @@ def add_destination(route_id: UUID, body: DestinationBody,
              response_model=dict, dependencies=_WRITE)
 def retire_destination(route_id: UUID, destination_id: UUID,
                        user: CurrentUser = Depends(require_global(MANAGE)),
-                       conn: psycopg.Connection = Depends(get_conn)) -> dict:
+                       conn: psycopg.Connection = Depends(get_conn),
+                       sconn: psycopg.Connection = Depends(_CONFIG)) -> dict:
     try:
-        return _svc(conn).retire_destination(actor_id=user.user_id, route_id=route_id,
+        return _svc(sconn).retire_destination(actor_id=user.user_id, route_id=route_id,
                                              destination_id=destination_id)
     except EgressAdminError as exc:
         raise _refuse(exc) from exc

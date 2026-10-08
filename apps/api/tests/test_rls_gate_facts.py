@@ -32,7 +32,9 @@ _FACT_READERS = {
     ("projections.py", "_disclosure_mode"): "iam.case_facts",
     ("http/routers/ach.py", "_withheld"): "iam.case_facts",
     ("evidence.py", "redeem_production_ticket"): "iam.element_facts",
-    ("evidence.py", "_production_refusal"): "iam.element_facts",
+    # Since 0180 (Beta 1.1) the refusal reads the ticket through its
+    # definer, which takes the exhibit's case from iam.element_facts.
+    ("evidence.py", "_production_refusal"): "lab.ticket_by_hash",
     ("http/routers/graph.py", "_element_labels"): "element_labels",
     ("http/routers/graph.py", "_gate_for_change"): "element_labels",
     ("http/routers/graph.py", "retract_assertion"): "element_labels",

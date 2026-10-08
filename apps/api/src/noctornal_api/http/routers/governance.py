@@ -337,7 +337,9 @@ def confirm_rule(
     by the same rule as `/due`: a deployment-wide total would be a volume
     report on cases they have no relationship to.
     """
-    svc = RetentionService(conn)
+    # The rule is written on the RETENTION connection (0179, Beta 1.1): the
+    # rules are read-only to the request role.
+    svc = RetentionService(sconn)
     before = svc.rules().get(category)
     try:
         rule = svc.confirm_rule(

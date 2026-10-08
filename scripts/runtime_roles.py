@@ -40,6 +40,11 @@ replays exactly the migrations' own SQL, so the two cannot disagree.
    blanket grant hands DELETE on the persona act queue back, and no role may
    have it (A collector process, 2026-10-02). And the revoke of the two ledger
    sequences from both roles (0169), which the same blanket grant hands back.
+   And, from Beta 1.1, the Lab custody ledger's sequence (0175), the session
+   and break-glass columns (0177), the case material's narrowed UPDATE and
+   DELETE (0178), the read-only configuration tables (0179), the sealed
+   columns outside the accounts table (0180) and a person's delivery
+   settings (0182).
 
 It never drops or alters any other role, and it touches only the database
 DATABASE_URL names.
@@ -151,6 +156,20 @@ def grant(conn) -> None:
     sequences = _migration_named("ledger_sequences_trigger_drawn")
     if _at_or_past(conn, sequences.revision):
         conn.execute(sequences.REVOKE_SQL)
+    # Beta 1.1 (2026-10-08): the Lab custody ledger's sequence, which the same
+    # blanket grant hands back; the session, break-glass and other sealed
+    # columns, which 0108's table SELECT hands back; and the case material's
+    # UPDATE and DELETE and the configuration tables' writes, which it hands
+    # back too. Each found by name.
+    for stem, attribute in (("sample_access_sequence_trigger_drawn", "REVOKE_SQL"),
+                            ("iam_session_break_glass_columns_sealed", "PRIVILEGES_SQL"),
+                            ("case_material_request_writes", "GRANTS_SQL"),
+                            ("configuration_read_only", "PRIVILEGES_SQL"),
+                            ("sealed_columns_outside_accounts", "PRIVILEGES_SQL"),
+                            ("notify_preference_read_only", "PRIVILEGES_SQL")):
+        later = _migration_named(stem)
+        if _at_or_past(conn, later.revision):
+            conn.execute(getattr(later, attribute))
 
 
 def ensure(conn) -> int:

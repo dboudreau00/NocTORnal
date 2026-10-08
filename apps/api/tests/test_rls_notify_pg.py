@@ -14,7 +14,8 @@ each system connection takes production's role:
   cannot read it back; a recipient who may not read it gets nothing;
 - the producers' one-open-notice guards still hold under row security,
   and answer only within the caller's reach;
-- a case owner's Jira veto holds for a caller who is not on the case;
+- a case owner's Jira veto holds whoever raises the notice, and a caller
+  who is not on the case raises none about it (0181);
 - the drain, the delivery ledger and its requeue, Jira's administration
   and a request's reach count see every recipient and case, while the
   case's own Integrations view and the inbox keep working as before.
@@ -94,12 +95,34 @@ def _ids(conn, sql: str, params=None) -> set:
     return {r[0] for r in conn.execute(sql, params).fetchall()}
 
 
+def _words(conn, kind: str, case_id) -> tuple[str, str]:
+    """The subject and summary a notice of `kind` is raised with. Since 0181
+    a request-role caller raises only the product's own words
+    (test_notify_templates_pg.py), so the two kinds raised here from a bound
+    request carry them; the others are raised by the owner or the system
+    role, which may say anything."""
+    code = None
+    if case_id is not None:
+        row = conn.execute("SELECT code FROM iam.case_facts(%s)", (case_id,)).fetchone()
+        code = (row[0] if row else None) or "?"
+    if kind == "APPROVAL_REQUESTED" and code:
+        return (f"{code}: a second signature is needed",
+                f"Someone on {code} is asking for a second signature on a node.merge "
+                f"operation. Sign in to review it.")
+    if kind == "EVIDENCE_INTEGRITY_ALARM" and code:
+        return (f"{code}: an exhibit failed its integrity check",
+                f"An exhibit on {code} no longer matches the hash recorded when it was "
+                f"acquired. Treat the case's evidence as suspect until this is explained.")
+    return "OP-RLSNOTE: something happened", "Something happened."
+
+
 def _notice(conn, recipient, *, case_id=None, kind="MERGE_PERFORMED",
             classification="AMBER", object_type=None, object_id=None, **kw):
     from noctornal_api.notifications import NotificationService
+    subject, summary = _words(conn, kind, case_id)
     return NotificationService(conn).enqueue(
         recipient_id=recipient, case_id=case_id, kind=kind,
-        subject="OP-RLSNOTE: something happened", summary="Something happened.",
+        subject=subject, summary=summary,
         body="b", classification=classification, object_type=object_type,
         object_id=object_id, **kw)
 
@@ -200,9 +223,11 @@ def test_nobody_else_reads_updates_deletes_or_inserts_a_notice(owner, world):
         assert svc.mark_read(theirs, world["boss"]) is False, "not even naming the recipient"
         assert app.execute("UPDATE notify.notification SET read_at = now() "
                            "WHERE id = %s", (theirs,)).rowcount == 0
-        # No DELETE policy: not even the recipient's own row goes.
-        assert app.execute("DELETE FROM notify.notification WHERE id = ANY(%s)",
-                           ([mine, theirs],)).rowcount == 0
+        # No DELETE privilege since 0178 (Beta 1.1), where there was no
+        # DELETE policy: not even the recipient's own row goes.
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            app.execute("DELETE FROM notify.notification WHERE id = ANY(%s)",
+                        ([mine, theirs],))
         # A guessed id is refused before its key is compared: no duplicate
         # key says the row exists.
         for recipient in (world["boss"], world["analyst"]):
@@ -250,12 +275,16 @@ def test_a_request_raises_a_notice_for_someone_else_and_cannot_read_it_back(owne
     app = _as(owner, world["analyst"])
     try:
         with app.transaction():
+            # A kind a request raises, in the product's words, as itself
+            # (0181).
             raised = _notice(app, world["boss"], case_id=world["case"],
-                             actor_id=world["analyst"])
+                             kind="APPROVAL_REQUESTED", actor_id=world["analyst"])
             cur = app.execute(
-                """SELECT * FROM notify.enqueue(%s::uuid, NULL, 'ESCALATION', 2::smallint,
-                       's', 's', 'b', 'GREEN'::core.tlp, '{}'::text[], NULL, NULL,
-                       NULL, NULL, '[]'::jsonb, NULL)""", (world["outsider"],))
+                """SELECT * FROM notify.enqueue(%s::uuid, NULL, 'APPROVAL_DECIDED', 2::smallint,
+                       'Your request was refused: Change a role definition',
+                       'Your deployment-wide request was refused.', 'b', 'GREEN'::core.tlp,
+                       '{}'::text[], NULL, NULL, %s::uuid, NULL, '[]'::jsonb, NULL)""",
+                (world["outsider"], world["analyst"]))
             assert [c.name for c in cur.description] == ["outcome", "raised_id",
                                                          "raised_at"]
             cur.fetchone()
@@ -285,7 +314,8 @@ def test_a_recipient_who_may_not_read_it_gets_no_row_whoever_asks(owner, world):
     app = _as(owner, world["analyst"])
     try:
         for recipient in (junior, gone, world["outsider"]):
-            raised = _notice(app, recipient, case_id=world["case"])
+            raised = _notice(app, recipient, case_id=world["case"],
+                             kind="APPROVAL_REQUESTED", actor_id=world["analyst"])
             assert (raised.outcome, raised.notification) == ("SUPPRESSED", None), recipient
     finally:
         app.close()
@@ -329,18 +359,25 @@ def test_an_open_notice_is_answered_only_within_the_callers_reach(owner, world):
     try:
         on_case = _notice(inside, world["boss"], case_id=world["case"],
                           kind="EVIDENCE_INTEGRITY_ALARM", object_type="evidence",
-                          object_id=amber, open_notice=guard)
+                          object_id=amber, open_notice=guard,
+                          actor_id=world["analyst"])
         assert on_case.outcome == "COALESCED"
-        # The outsider asks about the same exhibit with a notice to
-        # themselves: the boss's alarm is not theirs to know of.
-        off_case = _notice(outside, world["outsider"], classification="GREEN",
-                           kind="EVIDENCE_INTEGRITY_ALARM", object_type="evidence",
-                           object_id=amber, open_notice=guard)
-        assert off_case.outcome == "WRITTEN"
+        # The outsider asks about the same exhibit: the boss's alarm is not
+        # theirs to know of. Since 0181 they cannot raise an alarm about a
+        # case they are not on at all, and the refusal is the same whether
+        # an open alarm exists or not.
+        for obj in (amber, uuid4()):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege,
+                               match="case it may act on"):
+                with outside.transaction():
+                    _notice(outside, world["boss"], case_id=world["case"],
+                            kind="EVIDENCE_INTEGRITY_ALARM", object_type="evidence",
+                            object_id=obj, open_notice=guard,
+                            actor_id=world["outsider"])
         # The RED alarm is above the analyst, on their own case.
         above = _notice(inside, world["boss"], case_id=world["case"],
                         kind="EVIDENCE_INTEGRITY_ALARM", object_type="evidence",
-                        object_id=red, open_notice=guard)
+                        object_id=red, open_notice=guard, actor_id=world["analyst"])
         assert above.outcome == "WRITTEN"
     finally:
         inside.close()
@@ -356,7 +393,9 @@ def test_an_open_notice_is_answered_only_within_the_callers_reach(owner, world):
 
 def test_one_suspension_notice_per_persona_whoever_hits_the_refusal(owner, world):
     """persona_suspended asks the guard once, with the first manager's
-    notice, and fans out unguarded after it."""
+    notice, and fans out unguarded after it. A refusal is hit by a persona
+    act or a poll, which run as the system role (in the collector, and since
+    0179 inline too); no request raises the notice (0181)."""
     from noctornal_api import notify_events
 
     managers = [make_user(owner, PREFIX, clearance="AMBER",
@@ -366,10 +405,16 @@ def test_one_suspension_notice_per_persona_whoever_hits_the_refusal(owner, world
         "VALUES ('XENFORO', %s) RETURNING id", (f"{PREFIX}{uuid4().hex[:6]}",)).fetchone()[0]
     app = _as(owner, world["outsider"])
     try:
-        first = notify_events.persona_suspended(app, persona_id=persona, reason="locked")
-        again = notify_events.persona_suspended(app, persona_id=persona, reason="locked")
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            notify_events.persona_suspended(app, persona_id=persona, reason="locked")
     finally:
         app.close()
+    worker = _worker()
+    try:
+        first = notify_events.persona_suspended(worker, persona_id=persona, reason="locked")
+        again = notify_events.persona_suspended(worker, persona_id=persona, reason="locked")
+    finally:
+        worker.close()
     told = _ids(owner, "SELECT recipient_id FROM notify.notification WHERE object_id = %s",
                 (persona,))
     assert set(managers) <= told and first >= 2 and again == 0
@@ -383,6 +428,10 @@ def test_one_suspension_notice_per_persona_whoever_hits_the_refusal(owner, world
 
 
 def test_a_case_kept_out_of_jira_stays_out_for_a_caller_off_the_case(owner, world):
+    """The veto is applied by the definer, whoever raises the notice. Until
+    0181 the caller here was off the case and could not read the veto row;
+    a caller off the case now raises no notice about it at all, so the veto
+    is shown holding for a caller on it, and the caller off it refused."""
     from noctornal_api.notifications import NotificationService
 
     _destination(owner, world["admin"])
@@ -390,14 +439,23 @@ def test_a_case_kept_out_of_jira_stays_out_for_a_caller_off_the_case(owner, worl
     owner.execute("INSERT INTO notify.case_route_block (case_id, channel, reason, "
                   "blocked_by) VALUES (%s, 'JIRA', 'a sensitive source', %s)",
                   (world["case"], world["boss"]))
-    app = _as(owner, world["outsider"])
+    assign(owner, world["other"], world["analyst"])
+    outsider = _as(owner, world["outsider"])
     try:
-        assert s.count(app, "SELECT count(*) FROM notify.case_route_block "
-                            "WHERE case_id = %s", (world["case"],)) == 0
+        assert s.count(outsider, "SELECT count(*) FROM notify.case_route_block "
+                                 "WHERE case_id = %s", (world["case"],)) == 0
+        with pytest.raises(psycopg.errors.InsufficientPrivilege, match="case it may act on"):
+            _notice(outsider, world["boss"], case_id=world["case"],
+                    kind="APPROVAL_REQUESTED", actor_id=world["outsider"])
+    finally:
+        outsider.close()
+    app = _as(owner, world["analyst"])
+    try:
         kept = _notice(app, world["boss"], case_id=world["case"],
-                       kind="APPROVAL_REQUESTED").notification
+                       kind="APPROVAL_REQUESTED", actor_id=world["analyst"]).notification
         open_case = _notice(app, world["boss"], case_id=world["other"],
-                            kind="APPROVAL_REQUESTED").notification
+                            kind="APPROVAL_REQUESTED",
+                            actor_id=world["analyst"]).notification
     finally:
         app.close()
     rows = {r[0]: r[1:] for r in owner.execute(

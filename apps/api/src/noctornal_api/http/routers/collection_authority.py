@@ -32,7 +32,7 @@ from noctornal_api.collection_authority import (
 from noctornal_api.http.deps import CurrentUser, get_conn, require_global, user_ceiling
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
-from noctornal_api.http.routers.collection import L3_NOTICE, get_adapters
+from noctornal_api.http.routers.collection import _CONFIG, L3_NOTICE, get_adapters
 
 router = APIRouter(prefix="/collection/authorities", tags=["collection"])
 
@@ -40,6 +40,9 @@ AUTHORITY_NOTICE = AUTHORITY_NOTICE_LEAD + L3_NOTICE
 
 RECORD = "collection.authority.record"
 CONFIRM = "collection.authority.confirm"
+# Every write lands on a system connection (`_CONFIG`, 0179, Beta 1.1):
+# authorities are read-only to the request role, so a statement injected
+# into a request cannot record, confirm or stop one past these gates.
 
 
 def _service(conn: psycopg.Connection, adapters: dict) -> CollectionAuthorityService:
@@ -88,13 +91,14 @@ def record(
     body: AuthorityBody,
     user: CurrentUser = Depends(require_global(RECORD)),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
     adapters: dict = Depends(get_adapters),
 ) -> dict:
     """Record an authority as the first person. Nothing is read under it
     until a security officer confirms it and each source under it."""
     _utc_only(body.valid_from, body.valid_until)
     clearance, held = user_ceiling(conn, user.user_id)
-    view = _answer(lambda: _service(conn, adapters).record(
+    view = _answer(lambda: _service(sconn, adapters).record(
         persona_id=body.persona_id, scope=body.scope,
         classification=body.classification, authority_ref=body.authority_ref,
         issued_by=body.issued_by, jurisdiction=body.jurisdiction,
@@ -117,11 +121,12 @@ def add_targets(
     authority_id: UUID, body: TargetsBody,
     user: CurrentUser = Depends(require_global(RECORD)),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
     adapters: dict = Depends(get_adapters),
 ) -> dict:
     """More sources under an authority, each waiting for a second person."""
     clearance, held = user_ceiling(conn, user.user_id)
-    view = _answer(lambda: _service(conn, adapters).add_targets(
+    view = _answer(lambda: _service(sconn, adapters).add_targets(
         authority_id, source_ids=body.source_ids, added_by=user.user_id,
         clearance=clearance.name, compartments=held))
     return {"authority": view, "notice": AUTHORITY_NOTICE}
@@ -168,12 +173,13 @@ def confirm(
     authority_id: UUID, body: ConfirmBody,
     user: CurrentUser = Depends(require_global(CONFIRM)),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
     adapters: dict = Depends(get_adapters),
 ) -> dict:
     """Confirm an authority and the sources listed, as the second person:
     409 for the person who recorded it or added a source."""
     clearance, held = user_ceiling(conn, user.user_id)
-    view = _answer(lambda: _service(conn, adapters).confirm(
+    view = _answer(lambda: _service(sconn, adapters).confirm(
         authority_id, confirmed_by=user.user_id, note=body.note,
         target_ids=body.target_ids, clearance=clearance.name,
         compartments=held))
@@ -185,9 +191,10 @@ class StopBody(BaseModel):
 
 
 def _stop(authority_id: UUID, body: StopBody, user: CurrentUser,
-          conn: psycopg.Connection, adapters: dict, by_role: str) -> dict:
+          conn: psycopg.Connection, adapters: dict, by_role: str,
+          sconn: psycopg.Connection) -> dict:
     clearance, held = user_ceiling(conn, user.user_id)
-    view = _answer(lambda: _service(conn, adapters).revoke(
+    view = _answer(lambda: _service(sconn, adapters).revoke(
         authority_id, revoked_by=user.user_id, reason=body.reason,
         by_role=by_role, clearance=clearance.name, compartments=held))
     return {"authority": view, "notice": AUTHORITY_NOTICE}
@@ -199,10 +206,11 @@ def revoke(
     authority_id: UUID, body: StopBody,
     user: CurrentUser = Depends(require_global(RECORD)),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
     adapters: dict = Depends(get_adapters),
 ) -> dict:
     """The recording side stops an authority."""
-    return _stop(authority_id, body, user, conn, adapters, "record")
+    return _stop(authority_id, body, user, conn, adapters, "record", sconn)
 
 
 @router.post("/{authority_id}/refuse", response_model=dict,
@@ -211,16 +219,18 @@ def refuse(
     authority_id: UUID, body: StopBody,
     user: CurrentUser = Depends(require_global(CONFIRM)),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
     adapters: dict = Depends(get_adapters),
 ) -> dict:
     """The confirming side refuses or stops an authority."""
-    return _stop(authority_id, body, user, conn, adapters, "confirm")
+    return _stop(authority_id, body, user, conn, adapters, "confirm", sconn)
 
 
 def _stop_target(target_id: UUID, body: StopBody, user: CurrentUser,
-                 conn: psycopg.Connection, adapters: dict, by_role: str) -> dict:
+                 conn: psycopg.Connection, adapters: dict, by_role: str,
+                 sconn: psycopg.Connection) -> dict:
     clearance, held = user_ceiling(conn, user.user_id)
-    view = _answer(lambda: _service(conn, adapters).revoke_target(
+    view = _answer(lambda: _service(sconn, adapters).revoke_target(
         target_id, revoked_by=user.user_id, reason=body.reason,
         by_role=by_role, clearance=clearance.name, compartments=held))
     return {"authority": view, "notice": AUTHORITY_NOTICE}
@@ -232,10 +242,11 @@ def revoke_target(
     target_id: UUID, body: StopBody,
     user: CurrentUser = Depends(require_global(RECORD)),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
     adapters: dict = Depends(get_adapters),
 ) -> dict:
     """The recording side takes one source out from under an authority."""
-    return _stop_target(target_id, body, user, conn, adapters, "record")
+    return _stop_target(target_id, body, user, conn, adapters, "record", sconn)
 
 
 @router.post("/targets/{target_id}/refuse", response_model=dict,
@@ -244,7 +255,8 @@ def refuse_target(
     target_id: UUID, body: StopBody,
     user: CurrentUser = Depends(require_global(CONFIRM)),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
     adapters: dict = Depends(get_adapters),
 ) -> dict:
     """The confirming side refuses one source under an authority."""
-    return _stop_target(target_id, body, user, conn, adapters, "confirm")
+    return _stop_target(target_id, body, user, conn, adapters, "confirm", sconn)

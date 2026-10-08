@@ -78,8 +78,21 @@ def test_it_owns_nothing_and_is_a_member_of_nothing_that_does(conn):
 def test_privilege_for_privilege_it_is_the_request_role_plus_the_iam_plane(conn):
     lockdown = _migration("0109")
     narrowed = _migration("0155")
-    sealed = _migration("0143").RUNTIME_COLUMN_SELECTS
-    vocabulary = _migration("0172").RUNTIME_READ_ONLY_TABLES
+    # 0143, and 0177 (rls-6, Beta 1.1): the sessions' and the break-glass
+    # grants' sealed columns; 0180 (Beta 1.1), the others outside the
+    # accounts table.
+    sealed = {**_migration("0143").RUNTIME_COLUMN_SELECTS,
+              **_migration("0177").RUNTIME_COLUMN_SELECTS,
+              **_migration("0180").RUNTIME_COLUMN_SELECTS}
+    vocabulary = (_migration("0172").RUNTIME_READ_ONLY_TABLES
+                  + _migration("0179").RUNTIME_READ_ONLY_TABLES
+                  + _migration("0182").RUNTIME_READ_ONLY_TABLES)
+    # 0178 (Beta 1.1): the request role writes only what a request writes on
+    # exhibits and cases, and deletes no case material it never deletes; the
+    # system role keeps both, for the purge, a hold and the sweeps.
+    case_material = _migration("0178")
+    keeps_update = {t.replace('"', "") for t in case_material.SYSTEM_KEEPS_UPDATE}
+    keeps_delete = {t.replace('"', "") for t in case_material.NO_LONGER_DELETED}
     tables = [r[0] for r in conn.execute(
         """SELECT n.nspname || '.' || quote_ident(c.relname)
              FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -89,7 +102,9 @@ def test_privilege_for_privilege_it_is_the_request_role_plus_the_iam_plane(conn)
     differ = {}
     for table in tables:
         # 0172 (2026-10-07) closed the reference vocabulary to the request
-        # role only; the system role keeps what it held.
+        # role only, and 0179 and 0182 (Beta 1.1) the deployment
+        # configuration and a person's delivery settings; the system role
+        # keeps what it held.
         read_only = (table.split(".", 1)[0] in lockdown.RUNTIME_READ_ONLY_SCHEMAS
                      or table in lockdown.RUNTIME_READ_ONLY_TABLES
                      or table in vocabulary)
@@ -107,9 +122,13 @@ def test_privilege_for_privilege_it_is_the_request_role_plus_the_iam_plane(conn)
                 # scoring and the re-wrap write columns no request does.
                 continue
             if priv == "SELECT" and table in sealed:
-                # 0143 (rls-6, 2026-10-03): the request role reads the sealed
-                # credential columns of this table by column, the system role
+                # 0143 (rls-6, 2026-10-03): the request role reads this
+                # table by column, never its sealed ones; the system role
                 # keeps the table.
+                continue
+            bare = table.replace('"', "")
+            if (priv == "UPDATE" and bare in keeps_update) or (
+                    priv == "DELETE" and bare in keeps_delete):
                 continue
             if worker != app:
                 differ[(table, priv)] = {"worker": worker, "app": app}

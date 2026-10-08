@@ -401,7 +401,7 @@ class BreakGlassService:
         """The grant that would apply right now, if any: the highest live
         level first, as `PgAccessResolver.resolve()` reads them."""
         row = self._c.execute(
-            f"""SELECT {_COLUMNS} FROM iam.break_glass
+            f"""SELECT {_READ_COLUMNS} FROM iam.break_glass
                  WHERE user_id = %s AND revoked_at IS NULL
                    AND expires_at > now()
                    AND (case_id IS NULL OR case_id = %s)
@@ -422,7 +422,7 @@ class BreakGlassService:
         access gate would use wherever it applies.
         """
         rows = self._c.execute(
-            f"""SELECT {_COLUMNS} FROM iam.break_glass
+            f"""SELECT {_READ_COLUMNS} FROM iam.break_glass
                  WHERE user_id = %s AND revoked_at IS NULL
                    AND expires_at > now()
                  ORDER BY granted_classification DESC NULLS LAST,
@@ -478,7 +478,7 @@ class BreakGlassService:
         forever and does not age out: ageing out is how a review
         requirement becomes a formality."""
         rows = self._c.execute(
-            f"""SELECT {_COLUMNS} FROM iam.break_glass
+            f"""SELECT {_READ_COLUMNS} FROM iam.break_glass
                  WHERE reviewed_at IS NULL
                  ORDER BY started_at DESC LIMIT %s""", (limit,)).fetchall()
         return [_record(r) for r in rows]
@@ -568,6 +568,12 @@ _COLUMNS = ("id, user_id, case_id, justification, started_at, expires_at, "
             "granted_classification, granted_permissions, used_at, "
             "action_count, revoked_at, reviewed_by, reviewed_at, "
             "review_outcome")
+#: The same list for the reads a request makes (the holder's own grants, the
+#: officer's queue): the request role cannot read `justification` (rls-6,
+#: 0177), and the definer answers it to the grant's holder and to
+#: `break_glass.review` alone. The system paths keep `_COLUMNS`.
+_READ_COLUMNS = _COLUMNS.replace("justification",
+                                 "iam.break_glass_justification(id)", 1)
 
 
 def _record(r) -> Grant:

@@ -55,6 +55,7 @@ from noctornal_api.http.deps import (
     refuse_if_case_read_only,
     require_global,
     require_step_up,
+    system_conn,
     user_ceiling,
 )
 from noctornal_api.http.errors import Problem, safe_detail
@@ -422,12 +423,18 @@ class IssueKeyBody(BaseModel):
     ttl_days: int = Field(default=90, ge=1, le=365)
 
 
+#: A key is issued and revoked on a system connection (0179, Beta 1.1): the
+#: keys are read-only to the request role, so a statement injected into a
+#: request cannot mint or revive one past this gate and its step-up.
+_KEYS_CONN = system_conn(SystemPurpose.CONFIGURATION)
+
+
 @router.post("/keys", response_model=dict, status_code=201,
              dependencies=[Depends(rate_limit("evidence.export"))])
 def issue_key(
     body: IssueKeyBody,
     user: CurrentUser = Depends(require_global("ingest.manage")),
-    conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_KEYS_CONN),
 ) -> dict:
     """Issue a key. **The secret is returned exactly once, here.**
 
@@ -436,7 +443,7 @@ def issue_key(
     with no expiry as one nobody will ever notice is still live.
     """
     try:
-        issued = IngestService(conn).issue_key(
+        issued = IngestService(sconn).issue_key(
             name=body.name, owner_user_id=user.user_id,
             declared_category=body.declared_category,
             environment=body.environment, source_id=body.source_id,
@@ -465,13 +472,13 @@ class RevokeKeyBody(BaseModel):
 def revoke_key(
     key_row_id: UUID, body: RevokeKeyBody,
     user: CurrentUser = Depends(require_global("ingest.manage")),
-    conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_KEYS_CONN),
 ) -> dict:
     """Revoke a key. Step-up gated through `ingest.manage`, audited with
     the reason, and 404 for a key that is unknown or already revoked (it
     answered "revoked": true for both until 2026-09-23)."""
     try:
-        IngestService(conn).revoke_key(
+        IngestService(sconn).revoke_key(
             key_row_id, actor_id=user.user_id, reason=body.reason)
     except IngestError as exc:
         if "no such live key" in str(exc):

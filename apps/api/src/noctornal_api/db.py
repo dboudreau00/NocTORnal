@@ -193,6 +193,14 @@ class SystemPurpose(StrEnum):
     # The embedding pass, and an index's registration, activation, recheck
     # and retirement, which queue and sweep every item (S1, 2026-09-25).
     EMBEDDINGS = "embeddings"
+    # Deployment configuration the request role may only read (0179, Beta
+    # 1.1): the administration of egress profiles, routes and destinations,
+    # collection sources, personas and authorities, lookup providers and
+    # ingest keys, after the route's own gate, step-up and audit.
+    CONFIGURATION = "configuration"
+    # A person's own delivery settings, which the request role may only read
+    # (0182, Beta 1.1): written for the caller the route authenticated.
+    NOTIFY_PREFERENCE = "notify_preference"
     SCRIPT = "script"                    # seeders, bootstrap, maintenance
 
 

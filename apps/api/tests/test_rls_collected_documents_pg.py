@@ -381,8 +381,11 @@ def test_the_readiness_register_counts_what_its_reader_cannot_see(owner):
 
 def test_a_source_reclassification_requeues_every_document_of_it(owner):
     """`collect.source_vectors_follow` is SECURITY DEFINER (0118): run as
-    the writer it requeued only the documents the writer could see."""
+    the writer it requeued only the documents the writer could see. Since
+    0179 (Beta 1.1) the request role writes no source at all, so the writer
+    is the system role, and the requeue still reaches every document."""
     import embedding_pg as H
+    from noctornal_api.db import connect
     from noctornal_api.embeddings import EmbeddingService
 
     analyst = s.user(owner, "AMBER", prefix=PREFIX)
@@ -397,10 +400,18 @@ def test_a_source_reclassification_requeues_every_document_of_it(owner):
         _, raw = s.session(owner, analyst)
         app = s.app_conn(raw)
         try:
-            app.execute("UPDATE collect.source SET classification = 'GREEN' "
-                        "WHERE id = %s", (src,))
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                app.execute("UPDATE collect.source SET classification = 'GREEN' "
+                            "WHERE id = %s", (src,))
         finally:
             app.close()
+        worker = connect()
+        try:
+            worker.execute(f"SET ROLE {s.WORKER_ROLE}")
+            worker.execute("UPDATE collect.source SET classification = 'GREEN' "
+                           "WHERE id = %s", (src,))
+        finally:
+            worker.close()
         assert s.count(owner, "SELECT count(*) FROM core.embedding_pending "
                               "WHERE kind = 'document' AND item_id = %s", (red,)) == 1
     finally:
