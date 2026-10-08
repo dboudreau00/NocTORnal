@@ -573,9 +573,10 @@ def test_a_refused_reveal_is_audited(conn, svc, reader):
     with pytest.raises(AuthorisationRequired):
         reader.reveal_credential(cred, actor_id=owner, case_id=case_id,
                                  reason="x")
+    # A refusal is stored as one (docs/17, "refusals are recorded as SUCCESS").
     assert conn.execute(
-        "SELECT count(*) FROM audit.event WHERE case_id = %s "
-        "AND action = 'PII_REVEAL_REFUSED'", (case_id,)).fetchone()[0] == 1
+        "SELECT outcome FROM audit.event WHERE case_id = %s "
+        "AND action = 'PII_REVEAL_REFUSED'", (case_id,)).fetchall() == [("DENIED",)]
 
 
 def test_a_reveal_under_an_authorisation_works_and_is_counted(conn, svc, reader):
@@ -676,6 +677,9 @@ def test_correlation_still_needs_an_authorisation(conn, svc, reader):
     with pytest.raises(AuthorisationRequired):
         reader.search_by_fingerprint("anything", actor_id=owner,
                                      case_id=case_id)
+    assert conn.execute(
+        "SELECT outcome FROM audit.event WHERE case_id = %s "
+        "AND action = 'PII_SEARCH_REFUSED'", (case_id,)).fetchall() == [("DENIED",)]
 
 
 def test_a_credential_whose_value_was_never_kept_says_so(conn, svc, reader):

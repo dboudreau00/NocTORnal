@@ -305,12 +305,21 @@ def audit_auth_event(conn, action: str, actor_id, case_id, detail: dict,
 
     `ip_hash` names the source (http_ui-004, 2026-10-03): a refused
     session presentation without one could not be attributed.
+
+    Every row this writes is a REFUSAL (AUTHZ_DENIED, AUTH_SESSION_REJECTED,
+    RLS_BINDING_FAILED, SESSION_BINDING_REFUSED, CASE_SHARE_REFUSED), and it
+    is stored with outcome DENIED, as the sign-in, rate-limit and
+    row-security refusals always were. It was stored with the column's
+    default, SUCCESS, so a reader that filtered the log on outcome found
+    every other refusal and missed these (docs/17, "refusals are recorded as
+    SUCCESS", 2026-10-08). Rows written before then keep SUCCESS: the log is
+    append-only (invariant 6), so find those by `action`.
     """
     conn.execute(
         """INSERT INTO audit.event
                (actor_id, actor_kind, action, object_type, object_id, case_id,
-                detail, ip_hash)
-           VALUES (%s, %s, %s, 'auth', NULL, %s, %s, %s)""",
+                outcome, detail, ip_hash)
+           VALUES (%s, %s, %s, 'auth', NULL, %s, 'DENIED', %s, %s)""",
         (actor_id, "USER" if actor_id else "SYSTEM", action, case_id, Json(detail),
          ip_hash),
     )

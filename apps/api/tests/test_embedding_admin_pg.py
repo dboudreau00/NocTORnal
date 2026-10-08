@@ -97,9 +97,59 @@ def test_an_administrator_who_reads_no_documents_sees_no_figure(conn, world):
         assert key not in text
     space = world["svc"].active("WORDING")
     gaps = cl.get(f"/api/v1/admin/embeddings/gaps?space_id={space.id}", headers=auth)
-    assert gaps.status_code == 403 and gaps.json()["detail"] == body["coverage_note"]
+    # The gate's own sentence: the second verb is a dependency, not a check in
+    # the handler (docs/17, "a second permission check in a handler").
+    assert gaps.status_code == 403
+    assert gaps.json()["detail"] == "missing global permission collection.read"
     access = cl.get("/api/v1/admin/access", headers=auth).json()
     assert access["embedding_manage"] is True
+
+
+def _denials(conn, uid, permission):
+    """The AUTHZ_DENIED rows this account has for one permission, oldest first:
+    (outcome, scope) of each."""
+    return conn.execute(
+        """SELECT outcome, detail->>'scope' FROM audit.event
+            WHERE action = 'AUTHZ_DENIED' AND actor_id = %s
+              AND detail->>'permission' = %s ORDER BY seq""",
+        (uid, permission)).fetchall()
+
+
+def test_the_gaps_refusal_is_the_gates_and_leaves_its_authz_denied_row(conn, world):
+    """The administrator who reads no documents is refused the gaps list by
+    the gate, which records it. The check used to sit in the handler and wrote
+    no row, so an officer reading the log never saw the attempt."""
+    cl, auth = world["client"], H.auth(conn, world["admin"])
+    space = world["svc"].active("WORDING")
+    url = f"/api/v1/admin/embeddings/gaps?space_id={space.id}"
+    assert _denials(conn, world["admin"], "collection.read") == []
+
+    r = cl.get(url, headers=auth)
+    assert r.status_code == 403
+    assert r.headers["content-type"].startswith("application/problem+json")
+    assert _denials(conn, world["admin"], "collection.read") == [("DENIED", "global")]
+    # The first gate still decides first: no embedding.manage, and no second
+    # row naming collection.read for the same attempt.
+    outsider = world["analyst"]
+    r = cl.get(url, headers=H.auth(conn, outsider))
+    assert r.status_code == 403 and "embedding.manage" in r.json()["detail"]
+    assert _denials(conn, outsider, "embedding.manage") == [("DENIED", "global")]
+    assert _denials(conn, outsider, "collection.read") == []
+    # And the account that reads documents is let through, with no new row.
+    ok = cl.get(url, headers=H.auth(conn, world["reader_admin"]))
+    assert ok.status_code == 200, ok.text
+    assert _denials(conn, world["reader_admin"], "collection.read") == []
+
+
+def test_a_stale_sign_in_is_refused_before_the_second_verb_is_asked(conn, world):
+    """embedding.manage is a step-up verb and is asked first, so a stale
+    sign-in is told to re-authenticate, never that it lacks collection.read."""
+    cl = world["client"]
+    space = world["svc"].active("WORDING")
+    stale = H.auth(conn, world["admin"], fresh=False)
+    r = cl.get(f"/api/v1/admin/embeddings/gaps?space_id={space.id}", headers=stale)
+    assert r.status_code == 403 and "re-authentication" in r.json()["detail"]
+    assert _denials(conn, world["admin"], "collection.read") == []
 
 
 def test_figures_and_gaps_follow_the_callers_own_labels(conn, world):

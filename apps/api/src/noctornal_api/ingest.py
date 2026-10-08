@@ -1473,7 +1473,7 @@ class IngestService:
         if authorisation is None:
             self._audit(case_id, actor_id, "PII_REVEAL_REFUSED",
                         {"credential_id": str(credential_id),
-                         "reason": "no live authorisation"})
+                         "reason": "no live authorisation"}, outcome="DENIED")
             raise AuthorisationRequired(
                 "revealing a victim credential needs a live, logged "
                 "authorisation for this case. Without one the platform is a "
@@ -1516,7 +1516,7 @@ class IngestService:
             self._audit(case_id, actor_id, "PII_REVEAL_REFUSED",
                         {"credential_id": str(credential_id),
                          "reason": "the authorisation lapsed before the reveal "
-                                   "was counted"})
+                                   "was counted"}, outcome="DENIED")
             raise AuthorisationRequired(
                 "the authorisation for this case lapsed or was revoked before "
                 "the reveal was counted. Nothing was revealed.") from None
@@ -1536,7 +1536,7 @@ class IngestService:
         clearance, compartments = self._ceiling("search_by_fingerprint")
         if self._live_authorisation(actor_id, case_id) is None:
             self._audit(case_id, actor_id, "PII_SEARCH_REFUSED",
-                        {"reason": "no live authorisation"})
+                        {"reason": "no live authorisation"}, outcome="DENIED")
             raise AuthorisationRequired(
                 "correlating a credential across the corpus needs a live, "
                 "logged authorisation for this case")
@@ -2052,17 +2052,23 @@ class IngestService:
                     object_id=record_id)
 
     def _audit(self, case_id: UUID | None, actor_id: UUID, action: str,
-               detail: dict, *, object_id: UUID | None = None) -> None:
+               detail: dict, *, object_id: UUID | None = None,
+               outcome: str = "SUCCESS") -> None:
         """`object_id` names the record or dead letter an event is about.
         Every event here used to carry NULL, which was harmless while the
         events were only read by a person; the queue's verbs (2026-09-23)
-        read their own history back by it, through the object_id index."""
+        read their own history back by it, through the object_id index.
+
+        `outcome` is DENIED for a refusal (the PII reveal and search
+        refusals), as every other refusal in the log is stored, so a reader
+        that filters on it finds them (docs/17, "refusals are recorded as
+        SUCCESS", 2026-10-08)."""
         self._c.execute(
             """INSERT INTO audit.event
                    (actor_id, actor_kind, action, object_type, object_id,
-                    case_id, detail)
-               VALUES (%s, 'USER', %s, 'ingest', %s, %s, %s)""",
-            (actor_id, action, object_id, case_id, Json(detail)))
+                    case_id, outcome, detail)
+               VALUES (%s, 'USER', %s, 'ingest', %s, %s, %s, %s)""",
+            (actor_id, action, object_id, case_id, outcome, Json(detail)))
 
 
 # ---------------------------------------------------------------------------

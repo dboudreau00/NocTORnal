@@ -14,6 +14,7 @@ trigger validates at that commit.
 """
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass, replace
 from datetime import datetime
 from uuid import UUID
@@ -94,6 +95,46 @@ def _refuse_credential_attrs(attrs: dict | None) -> None:
                 f"graph does not record. Enter it without them.")
 
 
+#: Invariant 2 in words, for the refusal of a real name on a persona.
+REAL_NAME_REFUSAL = (
+    "a persona is a handle and not a person, so it does not carry a real "
+    "name. Record the person as an assessed person and tie the persona to "
+    "them with an attributed-to tie, which carries the confidence and can "
+    "be reversed.")
+
+
+def _is_real_name_key(key: object) -> bool:
+    """`real_name` however it is spelled: case, separators and width do not
+    make a different attribute (`Real Name`, `real-name`, `realName`)."""
+    if not isinstance(key, str):
+        return False
+    folded = unicodedata.normalize("NFKC", key).casefold()
+    return "".join(ch for ch in folded if ch.isalnum()) == "realname"
+
+
+def _refuse_real_name(node_type: str, attrs: dict | None) -> None:
+    """Refuse a `real_name` among an IDENTITY's attributes, at any depth.
+
+    Invariant 2 (CONVENTIONS, docs/01): a handle is not a person, and
+    "never add a real_name to IDENTITY". The schema cannot say so, because
+    `core.node.attrs` is free-form jsonb, and this is the one writer, so the
+    graph service said nothing until 2026-10-08 (docs/17, "`real_name` on an
+    identity"). A PERSON may carry one; an IDENTITY is tied to a PERSON by
+    `ATTRIBUTED_TO`. Walks the attributes without recursion, so a deeply
+    nested object cannot exhaust the stack. The message names no value."""
+    if node_type != "IDENTITY" or not attrs:
+        return
+    pending: list[object] = [attrs]
+    while pending:
+        found = pending.pop()
+        if isinstance(found, dict):
+            if any(_is_real_name_key(key) for key in found):
+                raise GraphWriteError(REAL_NAME_REFUSAL)
+            pending.extend(found.values())
+        elif isinstance(found, (list, tuple)):
+            pending.extend(found)
+
+
 #: ICD-203 analytic confidence, mirroring the `core.analytic_confidence`
 #: enum (0002). Checked in Python before the UPDATE only so the caller gets
 #: a readable error instead of a psycopg InvalidTextRepresentation; the DB
@@ -112,12 +153,41 @@ REVIEW_STATES = ("ACCEPTED", "DISPUTED", "PROPOSED")
 #: The refusal of a retirement over material above the caller, kept in one
 #: place since 2026-10-03 because a second guard (a live merge into the
 #: entity whose merged side the caller cannot see) must answer in exactly
-#: these words, so the two cannot be told apart.
+#: these words, so the two cannot be told apart. This is the sentence under
+#: PRESENCE and COUNT; `hidden_ties_refusal` chooses between it and the one
+#: below.
 HIDDEN_TIES_REFUSAL = (
     "this entity carries ties that are above your clearance or "
     "outside your compartments. Retiring it would remove them "
     "too, so the whole operation is refused rather than done "
     "half-way. Someone cleared for those ties has to do it.")
+
+#: The same refusal under a case whose `withheld_disclosure` is NONE (0030).
+#: That case has chosen not to say that anything is withheld, so the sentence
+#: names no tie, no clearance, no compartment and no reason: it reads as any
+#: refusal of an act that was not done, and nothing is retired (owner
+#: decision, 2026-10-08). Modelled on a refused case-hold lift under NONE
+#: (`RetentionService._lift_refusal`).
+HIDDEN_TIES_REFUSAL_NONE = (
+    "this entity was not retired and nothing was changed. If it should be "
+    "retired, ask the case's lead investigator.")
+
+
+def hidden_ties_refusal(conn: psycopg.Connection, case_id: UUID) -> str:
+    """What a retirement refused over material the caller cannot see says,
+    by the case's `withheld_disclosure` (migration 0030): today's sentence
+    under PRESENCE and COUNT, `HIDDEN_TIES_REFUSAL_NONE` under NONE.
+
+    The setting is read as a lock fact (`iam.case_facts`), which answers for
+    a case whose row the caller's own connection cannot read. A mode that
+    cannot be read is NONE: when it is unknown, say nothing. Both guards that
+    refuse in these words call this, so under every mode they stay one
+    answer."""
+    row = conn.execute("SELECT withheld_disclosure FROM iam.case_facts(%s)",
+                       (case_id,)).fetchone()
+    if row is not None and row[0] in ("PRESENCE", "COUNT"):
+        return HIDDEN_TIES_REFUSAL
+    return HIDDEN_TIES_REFUSAL_NONE
 
 #: The basis that marks a claim as a machine's. A tie founded on it is born
 #: PROPOSED; any other founding basis is a person's own assertion and is
@@ -259,6 +329,7 @@ class GraphWriteService:
         valid_to: datetime | None = None,
     ) -> UUID:
         _refuse_credential_attrs(attrs)
+        _refuse_real_name(node_type, attrs)
         try:
             with self._c.transaction():
                 node_id = self._c.execute(
@@ -422,7 +493,10 @@ class GraphWriteService:
         2026-10-03). A corrected label of an entity whose label IS its
         selector moves the selector index with it, refused with the
         ontology's reason when it is not a selector of that type
-        (graph-selector-index-drift, 2026-10-03).
+        (graph-selector-index-drift, 2026-10-03). Attributes that put a
+        `real_name` on a persona are refused, as at creation (invariant 2,
+        `_refuse_real_name`); a correction that leaves it out is how one
+        written before then is taken off.
         """
         if label is None and attrs is None and valid_to is KEEP:
             raise GraphWriteError(
@@ -449,6 +523,8 @@ class GraphWriteService:
                         f"node {node_id} not found in this case, or already "
                         f"deleted")
                 old_label, old_attrs, valid_from, old_valid_to, node_type = old
+                # The entity's type is known only from the row just locked.
+                _refuse_real_name(node_type, attrs)
                 if (isinstance(valid_to, datetime) and valid_from is not None
                         and valid_to < valid_from):
                     raise GraphWriteError("valid_to is before valid_from")
@@ -757,23 +833,22 @@ class GraphWriteService:
         NOT REPORTING THE COUNT would close the oracle and leave the
         unauthorised write, which is the more serious half.
 
-        So the operation is refused. The refusal does disclose one bit —
-        that a tie above the caller's clearance exists — and that is
-        deliberate: an analyst whose retirement silently failed to remove
-        half a node's ties reads structure off a picture they believe is
-        complete, which is what the console's withheld-material notice
-        exists to prevent (docs/14 U2).
+        So the operation is refused. Under PRESENCE and COUNT the refusal
+        does disclose one bit, that a tie above the caller's clearance
+        exists, and that is deliberate: an analyst whose retirement silently
+        failed to remove half a node's ties reads structure off a picture
+        they believe is complete, which is what the console's
+        withheld-material notice exists to prevent (docs/14 U2).
 
-        It is NOT the same disclosure as that notice, and this docstring
-        used to say it was. The notice follows the case's
-        `withheld_disclosure` (migration 0030): nothing under NONE, whether
-        under PRESENCE, how many under COUNT, because the count is itself a
-        weak signal. This refusal does not read the setting, so under NONE
-        it still tells the caller that a tie they cannot see touches this
-        entity (verification round three, A8, 2026-10-07; recorded in
-        docs/17). Honouring NONE would mean retiring over a tie the caller
-        cannot see, or refusing in words no different from any other
-        refusal, and neither has been decided.
+        It follows the case's `withheld_disclosure` (migration 0030) as that
+        notice does: nothing under NONE, whether under PRESENCE, how many
+        under COUNT. Under NONE the operation is still refused, and nothing
+        is retired over a tie the caller cannot see, but the sentence is
+        `HIDDEN_TIES_REFUSAL_NONE`, which names no tie, no clearance and no
+        compartment (owner decision, 2026-10-08; the refusal said so under
+        every mode until then, verification round three, A8, 2026-10-07).
+        That a retirement was refused at all differs from one that was not,
+        which no wording can hide.
         """
         # Counted on a system connection with the caller's ceiling (S1,
         # 2026-09-25). The ties it looks for are exactly the ones row-level
@@ -803,7 +878,7 @@ class GraphWriteService:
                  list(compartments), clearance, list(compartments)),
             ).fetchone()[0]
         if blocked:
-            raise GraphWriteError(HIDDEN_TIES_REFUSAL)
+            raise GraphWriteError(hidden_ties_refusal(self._c, case_id))
 
     def soft_delete_edge(
         self,

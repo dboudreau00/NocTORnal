@@ -47,6 +47,7 @@ from noctornal_api.cases import (
     CONTENT_READ_ONLY_STATES,
     CaseError,
     CaseService,
+    RoleHeldOnAnotherCase,
     allowed_transitions,
 )
 from noctornal_api.db import SystemPurpose, system_connection
@@ -547,6 +548,10 @@ def assign_case_user(case_id: UUID, body: AssignUserBody,
     compartments is a reachable state that every listing then quietly
     filters away. The grant would appear to succeed and confer nothing.
 
+    One thing it checks in the service rather than here: a liaison holds
+    one case at a time (`SINGLE_CASE_ROLES`, enforced in `_grant`, so every
+    writer of an assignment meets it).
+
     Four things it does not check, which are checked here:
 
     - **the role exists and confers something.** `_grant` inserts straight
@@ -682,6 +687,19 @@ def assign_case_user(case_id: UUID, body: AssignUserBody,
                 case_id, target, body.role_key,
                 granted_by=user.user_id, expires_at=body.expires_at,
             )
+    except RoleHeldOnAnotherCase as exc:
+        if body.email is None:
+            raise
+        _audit_share_refused(conn, user, case_id, body.email,
+                             "role_held_on_another_case")
+        # Said without the reason, as the labels refusal below is: by a
+        # guessable address it would tell any `case.grant` holder whether a
+        # colleague or partner is a live liaison on some other case.
+        raise Problem(
+            400, "Invalid request",
+            "that colleague cannot be given this role on this case. An "
+            "administrator can check their account.",
+        ) from exc
     except CaseError as exc:
         if body.email is None:
             raise
