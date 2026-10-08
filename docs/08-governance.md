@@ -52,10 +52,13 @@ past its review date rather than letting it roll on silently.
 - Purge does not run itself: nothing in the compose stack schedules it,
   because a purge that runs on a timer nobody watches is how data disappears
   on a Sunday. `RetentionService.due()` reports what has expired and a
-  person acts, a case at a time from the console or, for collected documents,
-  with `scripts/retention_sweep.py`. A purge of exhibits whose retention has
-  not expired (out of schedule) needs a second person (`evidence.purge`,
-  docs/05)
+  person acts, a case at a time from the console or, for collected
+  documents, dead letters and the ingest records attached to no case, with
+  `scripts/retention_sweep.py`: a dry run unless `--apply` is given, which
+  needs the same declared authority and named account as before, and which
+  nothing schedules. A record attached to a case stays that case's, with its
+  clock and its hold. A purge of exhibits whose retention has not expired
+  (out of schedule) needs a second person (`evidence.purge`, docs/05)
 - Purge writes a tombstone to the audit log: what was destroyed, under what
   authority, by whom. The record of destruction survives the data. The
   console's Destroyed list shows each batch's count, actor, rule and
@@ -73,18 +76,30 @@ past its review date rather than letting it roll on silently.
 - A real purge from the console takes two deliberate steps: a dry run of
   the same case under the same written authority, then a confirmation
   that repeats the dry run's counts and asks for the case code to be
-  typed. The dry run is the default every time the pane opens.
-- A hold on an exhibit or on a whole case is placed and lifted through the
-  API, not the console (the console has a hold control for collected
-  documents only): `POST /api/v1/retention/legal-hold` with `evidence_id`,
-  `on` and `reason`, and `POST /api/v1/retention/cases/{id}/legal-hold` with
-  `on` and `reason`. Both need `retention.manage` with a fresh second
-  factor and a written reason of at least five characters whichever way
-  the hold goes, and both are audited.
+  typed. The dry run is the default every time the pane opens. A real run
+  answers over what the caller may see, as the dry run does: its counts, its
+  warnings and its tombstone ids leave out an exhibit above the caller's
+  clearance, and the tombstone itself, the record of destruction, totals
+  everything that was destroyed. A lift, a dry run and a real purge each
+  have a limit of their own, so none of them waits on another, and a request
+  refused for a stale sign-in spends none
+- A hold on an exhibit or on a whole case is placed and lifted from the
+  console (the exhibit's card has a Place a legal hold or Lift the legal
+  hold button for a reader who may, and the case header has a Hold button
+  that opens a dialog) or through the API: `POST /api/v1/retention/legal-hold`
+  with `evidence_id`, `on` and `reason`, and
+  `POST /api/v1/retention/cases/{id}/legal-hold` with `on` and `reason`. Both
+  need `retention.manage` with a fresh second factor and a written reason of
+  at least five characters whichever way the hold goes, and both are
+  audited, the row naming the exhibit (object type `evidence`) or the case.
   Lifting is one person and is refused below the material: a case-level
   lift needs the lifter cleared for everything the case holds. A purge that
   is running when a case hold arrives finishes the exhibit it is destroying
-  and keeps every one after it
+  and keeps every one after it, and the hold's answer says what the purge
+  destroyed while the hold waited (`destroyed_while_waiting` and a `notice`),
+  counting only what the holder may see. The console offers each control
+  only to a reader whose register or case record says `may_hold`, and shows
+  the LEGAL HOLD chip to every reader of a held exhibit or case
 - Documents supporting an accepted assertion are pinned past source
   retention, otherwise you delete the evidence and leave the conclusion,
   which is the worst possible outcome
@@ -218,7 +233,18 @@ answers:
 **Disclosure pack.** The report builder (`reports.py`) is the part that is
 built: a report built at a target TLP, with a redaction statement, an evidence
 register of every exhibit's SHA-256 and BLAKE3 and the custody chain's head
-hash, the assumptions still standing and the hypotheses. The full pack is
+hash, the assumptions still standing and the hypotheses. The statement says
+of material above the ceiling only what the case's `withheld_disclosure`
+setting allows, for the entities, the relationships, the exhibits and the
+hypothesis matrix's evidence alike: under `NONE` it says neither that
+anything was withheld nor that nothing was, under `PRESENCE` that there is
+some, and under `COUNT` how much. A release is judged at the egress gate
+against the lower of the ceiling the caller typed and the one the deployment
+configured for the destination (`NOCTORNAL_SMTP_CEILING`,
+`NOCTORNAL_WEBHOOK_CEILING`, or for Jira the destination's own ceiling under
+`NOCTORNAL_JIRA_CEILING`), which is the ceiling the delivery drain applies;
+the audit row and the answer name the ceiling used, and a configured value
+that cannot be read refuses the release. The full pack is
 not built: given a case and a date range, a package containing every
 assertion with its provenance chain, the access log, and a list of retracted
 material with reasons, with redaction applied by rule and a redaction log.

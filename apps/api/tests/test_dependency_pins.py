@@ -328,7 +328,9 @@ def test_the_constraints_file_reaches_the_image():
 # Mailpit
 # ---------------------------------------------------------------------------
 
-_MAILPIT = re.compile(r"axllent/mailpit:(\S+)")
+#: The tag, up to the `@sha256:` digest the development file pins it with
+#: (2026-10-08) and CI does not.
+_MAILPIT = re.compile(r"axllent/mailpit:([^\s@]+)")
 
 
 def test_mailpit_is_a_release_tag_and_the_same_one_everywhere():
@@ -680,3 +682,22 @@ def test_the_extras_absent_leg_has_no_optional_extra():
     for module in ("telethon", "yara_x"):
         assert importlib.util.find_spec(module) is None, module
     assert _installed("noctornal-api")
+
+
+def test_every_workflow_action_is_pinned_to_a_commit():
+    """A tag on someone else's action moves under every build that names it; a
+    commit does not. Each `uses:` names a full 40-character commit, with the tag
+    it was taken from kept as a comment (2026-10-08)."""
+    import re
+    from pathlib import Path
+
+    workflows = Path(__file__).resolve().parents[3] / ".github" / "workflows"
+    seen = 0
+    for path in sorted(workflows.glob("*.yml")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            m = re.match(r"\s*-?\s*uses:\s*(\S+)", line)
+            if not m or m.group(1).startswith("./"):
+                continue
+            seen += 1
+            assert re.fullmatch(r"[\w.-]+/[\w.-]+(/[\w./-]+)?@[0-9a-f]{40}", m.group(1)), (path.name, line.strip())
+    assert seen, "no workflow step names an action"

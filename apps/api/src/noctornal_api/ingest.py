@@ -165,6 +165,35 @@ def hash_secret(secret: str) -> bytes:
     return hmac.new(_pepper(), secret.encode("utf-8"), hashlib.sha256).digest()
 
 
+def _admitted(allowlist: list[str], peer_ip: str | None) -> bool:
+    """Whether a key's address allowlist admits `peer_ip`."""
+    # CR6 (2026-07-26). This used to read `if allowlist and peer_ip:`,
+    # which SKIPS the check whenever the peer address is unknown —
+    # exactly the case a fail-closed control exists for. uvicorn behind
+    # a unix-socket reverse proxy leaves `request.client` as None, so a
+    # key restricted to a partner's CIDR was accepted from anywhere.
+    #
+    # The router carried a second guard for this, and it was dead code:
+    # the dict `authenticate` returns omitted `ip_allowlist` entirely, so
+    # `key.get("ip_allowlist")` was always None and could never fire.
+    # A defence written twice and connected zero times.
+    #
+    # Invariant 11 bounds the damage — an ingest key is write-only, so
+    # a leaked one buys junk in quarantine and never the case file —
+    # but a restriction the operator configured must actually restrict.
+    if not allowlist:
+        return True
+    if not peer_ip:
+        return False
+    import ipaddress
+    try:
+        address = ipaddress.ip_address(peer_ip)
+    except ValueError:
+        return False
+    return any(address in ipaddress.ip_network(cidr, strict=False)
+               for cidr in allowlist)
+
+
 #: Bumped whenever the token stream changes. Fingerprints from different
 #: versions are not comparable, and comparing them silently is how a
 #: dedup pass starts marking unrelated records as duplicates of each
@@ -717,16 +746,21 @@ class IngestService:
                      peer_ip: str | None = None) -> dict | None:
         """Resolve a presented key. Returns None for anything unusable.
 
-        Constant-time compare after an indexed lookup on the public half:
-        that is the shape docs/12 asks for, and it is why the key is split
-        rather than hashed whole.
+        An indexed lookup on the public half, then the secret: that is the
+        shape docs/12 asks for, and it is why the key is split rather than
+        hashed whole. The stored HMAC is not the request role's to read
+        (0180), so `ingest.api_key_used` (0179) compares it, as the definer,
+        and stamps the key's use when it matches. It is asked on every
+        presentation of a known key, with no HMAC when another refusal
+        applies, so a refused key costs what a live one does and only a
+        usable key's use is stamped.
         """
         match = KEY_PATTERN.fullmatch((token or "").strip())
         if match is None:
             return None
         environment, key_id, secret_half = match.groups()
         row = self._c.execute(
-            """SELECT id, secret_hmac, environment, scopes, source_id,
+            """SELECT id, environment, scopes, source_id,
                       declared_category, default_reliability,
                       classification_ceiling, forced_compartment, ip_allowlist,
                       expires_at, revoked_at, max_records_per_hour,
@@ -735,50 +769,25 @@ class IngestService:
             (key_id,)).fetchone()
         if row is None:
             return None
-        if not hmac.compare_digest(bytes(row[1]), hash_secret(secret_half)):
+        allowlist = [str(a) for a in (row[8] or [])]
+        usable = (row[1] == environment and row[10] is None
+                  and row[9] > datetime.now(timezone.utc)
+                  and _admitted(allowlist, peer_ip))
+        digest = hash_secret(secret_half)
+        matched = self._c.execute(
+            "SELECT ingest.api_key_used(%s, %s)",
+            (row[0], digest if usable else None)).fetchone()[0]
+        if not (usable and matched):
             return None
-        if row[2] != environment or row[11] is not None:
-            return None
-        if row[10] <= datetime.now(timezone.utc):
-            return None
-        # CR6 (2026-07-26). This used to read `if allowlist and peer_ip:`,
-        # which SKIPS the check whenever the peer address is unknown —
-        # exactly the case a fail-closed control exists for. uvicorn behind
-        # a unix-socket reverse proxy leaves `request.client` as None, so a
-        # key restricted to a partner's CIDR was accepted from anywhere.
-        #
-        # The router carried a second guard for this, and it was dead code:
-        # the dict returned below omitted `ip_allowlist` entirely, so
-        # `key.get("ip_allowlist")` was always None and could never fire.
-        # A defence written twice and connected zero times.
-        #
-        # Invariant 11 bounds the damage — an ingest key is write-only, so
-        # a leaked one buys junk in quarantine and never the case file —
-        # but a restriction the operator configured must actually restrict.
-        allowlist = [str(a) for a in (row[9] or [])]
-        if allowlist:
-            if not peer_ip:
-                return None
-            import ipaddress
-            try:
-                address = ipaddress.ip_address(peer_ip)
-            except ValueError:
-                return None
-            if not any(address in ipaddress.ip_network(cidr, strict=False)
-                       for cidr in allowlist):
-                return None
-        self._c.execute(
-            "UPDATE ingest.api_key SET last_used_at = now() WHERE id = %s",
-            (row[0],))
         return {
-            "id": row[0], "scopes": list(row[3] or []), "source_id": row[4],
-            "declared_category": row[5], "default_reliability": row[6],
-            "classification_ceiling": row[7], "forced_compartment": row[8],
+            "id": row[0], "scopes": list(row[2] or []), "source_id": row[3],
+            "declared_category": row[4], "default_reliability": row[5],
+            "classification_ceiling": row[6], "forced_compartment": row[7],
             # CR6: present so the router's second guard is reachable. It
             # was absent, which made that guard permanently None-valued.
             "ip_allowlist": allowlist or None,
-            "max_records_per_hour": row[12],
-            "max_bytes_per_request": row[13],
+            "max_records_per_hour": row[11],
+            "max_bytes_per_request": row[12],
         }
 
     def revoke_key(self, key_row_id: UUID, *, actor_id: UUID,
@@ -1473,7 +1482,7 @@ class IngestService:
         if authorisation is None:
             self._audit(case_id, actor_id, "PII_REVEAL_REFUSED",
                         {"credential_id": str(credential_id),
-                         "reason": "no live authorisation"})
+                         "reason": "no live authorisation"}, outcome="DENIED")
             raise AuthorisationRequired(
                 "revealing a victim credential needs a live, logged "
                 "authorisation for this case. Without one the platform is a "
@@ -1516,7 +1525,7 @@ class IngestService:
             self._audit(case_id, actor_id, "PII_REVEAL_REFUSED",
                         {"credential_id": str(credential_id),
                          "reason": "the authorisation lapsed before the reveal "
-                                   "was counted"})
+                                   "was counted"}, outcome="DENIED")
             raise AuthorisationRequired(
                 "the authorisation for this case lapsed or was revoked before "
                 "the reveal was counted. Nothing was revealed.") from None
@@ -1536,7 +1545,7 @@ class IngestService:
         clearance, compartments = self._ceiling("search_by_fingerprint")
         if self._live_authorisation(actor_id, case_id) is None:
             self._audit(case_id, actor_id, "PII_SEARCH_REFUSED",
-                        {"reason": "no live authorisation"})
+                        {"reason": "no live authorisation"}, outcome="DENIED")
             raise AuthorisationRequired(
                 "correlating a credential across the corpus needs a live, "
                 "logged authorisation for this case")
@@ -1813,7 +1822,7 @@ class IngestService:
             except Exception:  # noqa: BLE001 - see the docstring
                 import logging
 
-                logging.getLogger(__name__).warning(
+                logging.getLogger("noctornal.ingest").warning(
                     "could not raise FEED_SELECTOR_HIT for case %s", case_id,
                     exc_info=True)
 
@@ -2052,17 +2061,23 @@ class IngestService:
                     object_id=record_id)
 
     def _audit(self, case_id: UUID | None, actor_id: UUID, action: str,
-               detail: dict, *, object_id: UUID | None = None) -> None:
+               detail: dict, *, object_id: UUID | None = None,
+               outcome: str = "SUCCESS") -> None:
         """`object_id` names the record or dead letter an event is about.
         Every event here used to carry NULL, which was harmless while the
         events were only read by a person; the queue's verbs (2026-09-23)
-        read their own history back by it, through the object_id index."""
+        read their own history back by it, through the object_id index.
+
+        `outcome` is DENIED for a refusal (the PII reveal and search
+        refusals), as every other refusal in the log is stored, so a reader
+        that filters on it finds them (docs/17, "refusals are recorded as
+        SUCCESS", 2026-10-08)."""
         self._c.execute(
             """INSERT INTO audit.event
                    (actor_id, actor_kind, action, object_type, object_id,
-                    case_id, detail)
-               VALUES (%s, 'USER', %s, 'ingest', %s, %s, %s)""",
-            (actor_id, action, object_id, case_id, Json(detail)))
+                    case_id, outcome, detail)
+               VALUES (%s, 'USER', %s, 'ingest', %s, %s, %s, %s)""",
+            (actor_id, action, object_id, case_id, outcome, Json(detail)))
 
 
 # ---------------------------------------------------------------------------

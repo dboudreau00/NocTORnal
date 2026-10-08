@@ -114,9 +114,13 @@ HELD = `(SELECT iam.rls_compartments())`:
 - CUSTOM_AUDIT (the audit log, 0168): a SELECT policy, `case_id = ANY
   (CASES)`, or a case-less row the reader wrote, or `audit.read` held
   globally, or a case-less `ingest` row under a global `ingest.manage`;
-  and an INSERT policy `WITH CHECK (true)`: every writer appends, whatever
-  case the row names, because the log is append-only and a writer that may
-  read none of it still has to write to it. What a request may NAME is not
+  and an INSERT policy that admits every append, whatever case the row
+  names, because the log is append-only and a writer that may read none of
+  it still has to write to it, a refusal above all. The one exception is a
+  row a reader takes as state (0176, the migration's `STATE_BEARING`: a
+  triage verdict, an ACH line, a tie review, an account event, a screening
+  pass): the request role appends one only naming a case it may read, or
+  as a case-less `ingest` row under a global `ingest.manage`. What a request may NAME is not
   the policy's to say: 0150's BEFORE INSERT trigger `audit_attribution` pins
   it (an actor must be the user the connection is bound to, or the holder
   of a ticket it spent; a claim from a connection bound to nobody is kept
@@ -303,6 +307,12 @@ _EGRESS = ("the collection plane the egress proxy reads as noctornal_egress, whi
            "configuration and ceilings, no case content")
 _VOCAB = "reference vocabulary: no case, no label, the same for every reader"
 _CONFIG = "deployment configuration with no case and no label"
+#: 0179 (Beta 1.1): the administration routes write these on a system
+#: connection (SystemPurpose.CONFIGURATION and its neighbours) after their
+#: own gate, step-up and audit.
+_READ_ONLY = "; read-only to the request role, written by its routes as the system role (0179)"
+#: 0180 (Beta 1.1): sealed columns the request role is not granted at all.
+_SEALED = "; its sealed columns are not granted to the request role (0180)"
 
 EXEMPT: dict[str, str] = {
     # By named column since 0143 (rls-6, 2026-10-03): the password hash, the
@@ -313,12 +323,16 @@ EXEMPT: dict[str, str] = {
     "iam.session": _IAM + "; the request role keeps UPDATE of three columns on "
                           "its OWN bound session only, the idle window moving "
                           "forward and a revocation, never step-up "
-                          "(0109, 0112, 0144)",
+                          "(0109, 0112, 0144), and reads no token hash, "
+                          "binding, address or client: the validation asks "
+                          "iam.session_by_token (0177)",
     "iam.webauthn_credential": _IAM,
     "iam.user_role": _IAM,
     "iam.case_assignment": _IAM,
     "iam.break_glass": _IAM + "; uses are counted through "
-                              "iam.rls_record_break_glass_use",
+                              "iam.rls_record_break_glass_use, and the "
+                              "request role reads a justification only "
+                              "through iam.break_glass_justification (0177)",
     "iam.role": _IAM,
     "iam.permission": _IAM,
     "iam.role_permission": _IAM,
@@ -330,40 +344,46 @@ EXEMPT: dict[str, str] = {
                                              "must stay readable (F9)",
     "lab.download_ticket": ("a credential read before any user is bound (the sample "
                             "origin spends it unbound); read-only to the request "
-                            "role but for spending, which 0112 confines"),
+                            "role, which spends a ticket and reads a refused one "
+                            "only through lab.spend_sample_ticket, "
+                            "lab.spend_production_ticket and lab.ticket_by_hash, "
+                            "and reads no ticket's hash (0180)"),
     "core.edge_type": _VOCAB,
     "core.node_type": _VOCAB,
     "core.selector_type": _VOCAB,
     "comms.platform": _VOCAB,
-    "core.retention_rule": _CONFIG,
-    "core.embedding_space": _CONFIG,
+    "core.retention_rule": _CONFIG + _READ_ONLY,
+    "core.embedding_space": _CONFIG + _READ_ONLY,
     "core.embedding_pending": _CONFIG + " (a queue of item ids for the embedding "
                                        "pass, which runs as the system role)",
     "ingest.api_key": _CONFIG + " (partner keys, read by the unauthenticated "
-                                "ingest route before any user exists)",
+                                "ingest route before any user exists)" + _READ_ONLY
+                      + "; a key's use is stamped by ingest.api_key_used" + _SEALED,
     "ingest.category_rule": _CONFIG,
     "ingest.batch": _CONFIG + " (a raw upload's envelope, written by the "
                               "unauthenticated ingest route)",
-    "ingest.provider": _CONFIG,
-    "ingest.provider_exposure_change": _CONFIG,
-    "notify.preference": _CONFIG + " (per person, no case)",
-    "notify.jira_destination": _CONFIG,
-    "lab.screening_list": _CONFIG + " (the officer's label-free view, F13)",
-    "lab.screening_hash": _CONFIG + " (read only by the screening worker)",
+    "ingest.provider": _CONFIG + _READ_ONLY + _SEALED,
+    "ingest.provider_exposure_change": _CONFIG + _READ_ONLY,
+    "notify.preference": _CONFIG + " (per person, no case); read-only to the request "
+                                   "role, written by its settings route as the system "
+                                   "role for the caller alone (0182)",
+    "notify.jira_destination": _CONFIG + _READ_ONLY,
+    "lab.screening_list": _CONFIG + " (the officer's label-free view, F13)" + _READ_ONLY,
+    "lab.screening_hash": _CONFIG + " (read only by the screening worker)" + _READ_ONLY,
     "lab.yara_compile_job": _CONFIG + " (a queue the triage worker drains)",
     # 0157 (2026-10-03): when each collector was last seen and
     # whether its persona key ring opened what it sampled; key ids and
     # counts, never key material, a person or a source.
     "collect.collector_heartbeat": _CONFIG + " (the collector's heartbeat, "
                                              "read by the readiness register)",
-    "collect.source": _EGRESS,
-    "collect.collection_account": _EGRESS,
-    "collect.collection_authority": _EGRESS,
-    "collect.collection_authority_target": _EGRESS,
+    "collect.source": _EGRESS + _READ_ONLY,
+    "collect.collection_account": _EGRESS + _READ_ONLY + _SEALED,
+    "collect.collection_authority": _EGRESS + _READ_ONLY,
+    "collect.collection_authority_target": _EGRESS + _READ_ONLY,
     "collect.collection_run": _EGRESS,
-    "collect.egress_profile": _EGRESS,
-    "collect.egress_integration_route": _EGRESS,
-    "collect.egress_destination": _EGRESS,
+    "collect.egress_profile": _EGRESS + _READ_ONLY,
+    "collect.egress_integration_route": _EGRESS + _READ_ONLY,
+    "collect.egress_destination": _EGRESS + _READ_ONLY,
     "collect.egress_binding": _EGRESS,
     "collect.egress_connection": _EGRESS,
 }

@@ -110,6 +110,21 @@ def _purged(conn, doc):
                         "WHERE id = %s", (doc,)).fetchone()[0]
 
 
+def _tombstone(conn, owner):
+    """(storage_outcome, object_count) of the one document tombstone the
+    purge run by `owner` wrote. Tombstones are append-only, so every earlier
+    purge in the database has left its own, and "the newest of them all" is
+    whichever was stamped last, which need not be this one: on a host whose
+    clock steps, a purge run in the seconds BEFORE this one can be stamped
+    after it (db_clock.py). A purge names the account that ran it, and each
+    test has an account of its own."""
+    rows = conn.execute(
+        """SELECT storage_outcome, object_count FROM core.purge_tombstone
+            WHERE object_type = 'document' AND purged_by = %s""", (owner,)).fetchall()
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
 def _node_and_assertion(conn, case, owner, doc, *, retracted=False):
     node = uuid4()
     with conn.transaction():
@@ -316,6 +331,22 @@ def _in_thread(fn):
     return thread, box
 
 
+def _blocked_on_a_lock(watcher, other, timeout: float = 20.0) -> bool:
+    """Whether `other`'s backend is waiting on a lock, asked of
+    `pg_stat_activity` until it is or `timeout` passes. These tests used to
+    sleep a second and assume the wait had begun, which is a guess on a
+    loaded host and a second wasted on every other."""
+    pid = other.info.backend_pid
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        row = watcher.execute("SELECT wait_event_type FROM pg_stat_activity "
+                              "WHERE pid = %s", (pid,)).fetchone()
+        if row is not None and row[0] == "Lock":
+            return True
+        time.sleep(0.02)
+    return False
+
+
 def test_a_hold_placed_while_the_purge_runs_wins(conn, owner):
     from noctornal_api.db import connect
 
@@ -330,8 +361,8 @@ def test_a_hold_placed_while_the_purge_runs_wins(conn, owner):
         other.execute('UPDATE core."case" SET legal_hold = true, '
                       "legal_hold_reason = 'court order' WHERE id = %s", (case,))
         thread, box = _in_thread(lambda: _purge(purger, owner))
-        time.sleep(1.0)
-        assert thread.is_alive(), "the purge waits on the citing case's lock"
+        assert _blocked_on_a_lock(conn, purger), "the purge waits on the citing case's lock"
+        assert thread.is_alive()
         other.commit()
         thread.join(timeout=30)
         assert "error" not in box, box.get("error")
@@ -363,8 +394,9 @@ def test_a_citation_of_another_version_made_during_the_purge_waits_and_wins(conn
                          VALUES (%s, %s, 'DIRECT_OBSERVATION', %s, %s)""",
                       (case, node, owner, v2))
         thread, box = _in_thread(lambda: _purge(purger, owner))
-        time.sleep(1.0)
-        assert thread.is_alive(), "the purge waits for the citation's key-share lock"
+        assert _blocked_on_a_lock(conn, purger), (
+            "the purge waits for the citation's key-share lock")
+        assert thread.is_alive()
         other.commit()
         thread.join(timeout=30)
         assert "error" not in box, box.get("error")
@@ -445,9 +477,7 @@ def test_raw_markup_goes_with_its_document_and_a_shared_object_stays(conn, owner
     assert _purged(conn, alone) and _purged(conn, shared)
     assert not store.exists("collect/aa/one") and store.exists("collect/bb/shared")
     assert any("still used by other documents" in w for w in result.warnings)
-    outcome = conn.execute(
-        """SELECT storage_outcome, object_count FROM core.purge_tombstone
-            WHERE object_type = 'document' ORDER BY purged_at DESC LIMIT 1""").fetchone()
+    outcome = _tombstone(conn, owner)
     assert outcome[0] == "DELETED"
 
 
@@ -519,14 +549,15 @@ def test_a_hold_that_waited_on_the_purge_does_not_report_a_destroyed_document(co
         other.autocommit = False
         other.execute('UPDATE core."case" SET title = title WHERE id = %s', (case,))
         purging, purged_box = _in_thread(lambda: _purge(purger, owner))
-        time.sleep(1.0)
-        assert purging.is_alive(), "the purge waits on the citing case"
+        assert _blocked_on_a_lock(conn, purger), "the purge waits on the citing case"
+        assert purging.is_alive()
         holding, held_box = _in_thread(
             lambda: RetentionService(holder).set_document_legal_hold(
                 doc, actor_id=owner, on=True, reason="preservation order 9",
                 clearance="RED"))
-        time.sleep(1.0)
-        assert holding.is_alive(), "the hold waits on the purge's version locks"
+        assert _blocked_on_a_lock(conn, holder), (
+            "the hold waits on the purge's version locks")
+        assert holding.is_alive()
         other.commit()
         purging.join(timeout=30)
         holding.join(timeout=30)
@@ -552,9 +583,7 @@ def test_the_tombstone_names_only_the_purged_ids_and_what_happened_to_markup(con
     conn.execute("""UPDATE collect.document SET legal_hold = true,
                            legal_hold_reason = 'hold' WHERE id = %s""", (held,))
     _purge(conn, owner)
-    count, outcome = conn.execute(
-        """SELECT object_count, storage_outcome FROM core.purge_tombstone
-            WHERE object_type = 'document' ORDER BY purged_at DESC LIMIT 1""").fetchone()
+    outcome, count = _tombstone(conn, owner)
     assert _purged(conn, purged) and not _purged(conn, held)
     assert outcome == "NOT_APPLICABLE" and count >= 1
 

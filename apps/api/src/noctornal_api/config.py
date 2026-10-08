@@ -87,6 +87,21 @@ DEV_CREDENTIAL = "dev_only_change_me"
 ENV_VAR = "NOCTORNAL_ENV"
 PRODUCTION = "production"
 
+
+def is_production(env: Mapping[str, str] | None = None) -> bool:
+    """Whether `env` (the process environment by default) is a production
+    deployment: `NOCTORNAL_ENV` is `production`, case and surrounding space
+    aside, and nothing else is (a misspelt value is development, in every
+    caller alike).
+
+    The one reader of the mode. Every module that asks, the boot refusals in
+    this file among them, calls this instead of spelling the comparison, so
+    two readings of one variable cannot come to disagree
+    (apps/api/tests/test_duplicated_rules.py holds the tree to it)."""
+    source = os.environ if env is None else env
+    return source.get(ENV_VAR, "").strip().lower() == PRODUCTION
+
+
 #: A variable is treated as carrying a credential when its NAME says so.
 #:
 #: The scan below walks the value of EVERY variable rather than a fixed
@@ -525,7 +540,7 @@ def verify_environment(env: Mapping[str, str] | None = None, *,
     """
     if env is None:
         env = os.environ
-    if env.get(ENV_VAR, "").strip().lower() != PRODUCTION:
+    if not is_production(env):
         return []
 
     problems: list[str] = []
@@ -1064,7 +1079,7 @@ def refuse_unsafe_job_environment(job: str, env: Mapping[str, str] | None = None
     other job is, and the collector never receives the owner's credential."""
     if env is None:
         env = os.environ
-    if env.get(ENV_VAR, "").strip().lower() != PRODUCTION:
+    if not is_production(env):
         return []
     if whole_environment:
         return [f"{job}: refusing to run: {problem}"
@@ -1094,7 +1109,7 @@ def migration_job_problems(env: Mapping[str, str] | None = None) -> list[str]:
     what only this job needs, a DSN to connect with that names a role."""
     if env is None:
         env = os.environ
-    if env.get(ENV_VAR, "").strip().lower() != PRODUCTION:
+    if not is_production(env):
         return []
     dsn = env.get(MIGRATION_DSN_ENV, "").strip()
     if not dsn:
@@ -1129,7 +1144,7 @@ def persona_key_problems(env: Mapping[str, str] | None = None, *,
 
     if env is None:
         env = os.environ
-    if env.get(ENV_VAR, "").strip().lower() != PRODUCTION:
+    if not is_production(env):
         return []
     problems: list[str] = []
     if inline_requested(env):
@@ -1158,7 +1173,7 @@ def persona_key_problems(env: Mapping[str, str] | None = None, *,
             f"refuse to open any persona credential; the compose file sets it on "
             f"the collector service.")
         return problems
-    with _borrowing(env, "NOCTORNAL_ENV", pe.COLLECTOR_ENV, pe.KEK_ENV,
+    with _borrowing(env, ENV_VAR, pe.COLLECTOR_ENV, pe.KEK_ENV,
                     pe.KEK_ID_ENV, pe.RETIRED_ENV):
         try:
             pe.ring()

@@ -425,6 +425,11 @@
          2026-09-22). It was on the case list and nowhere else, so a
          CLOSED case looked exactly like an ACTIVE one once opened. -->
     <span id="hdr-state" class="chip case-state" hidden></span>
+    <!-- A case under a legal hold says so on every screen, to everyone who
+         can open it (docs/17 "no console control for a hold", 2026-10-08).
+         The reason it was placed for is for those who place and lift holds,
+         and is in the Hold… dialog. -->
+    <span id="hdr-hold" class="chip flag" role="status" hidden>LEGAL HOLD</span>
 
     <span class="spacer"></span>
     <span id="hdr-asof" class="hdr-asof mono" hidden>as-of: now</span>
@@ -463,6 +468,12 @@
             hidden title="Who is on this case, and adding a colleague">Share…</button>
     <button id="btn-case-status" type="button" class="btn ghost small"
             hidden title="Move this case through its lifecycle">Status…</button>
+    <!-- Hold… places or lifts a legal hold on the whole case. Shown only to
+         a reader who may (the case record's `may_hold`); governance, so it
+         stays on a closed case. -->
+    <button id="btn-case-hold" type="button" class="btn ghost small"
+            hidden aria-haspopup="dialog"
+            title="Place a legal hold on this whole case">Hold…</button>
     <button id="btn-cases" type="button" class="btn ghost" hidden>All cases</button>
     <!-- Administration is deployment-wide, so it is reachable from the case
          list rather than only from a rail tab inside a case: an account
@@ -2116,6 +2127,111 @@
             <div id="col-hits-list"></div>
             <p id="col-hits-empty" class="empty">
               Not loaded for this case yet.</p>
+
+            <!-- F53 (2026-10-08): the watches themselves. Only a script wrote
+                 one until now, so this tab listed what watches had matched
+                 and no way to make one. -->
+            <h3 class="h3">Watches: what this case's polls look for</h3>
+            <p class="help">
+              A watch is a standing tasking against one source. Its keywords,
+              selectors and patterns are tried on every item the collector
+              reads from that source, and each match is a hit above. A watch
+              applies from the next poll of its source, to what that poll
+              reads: documents already collected are not matched again. A
+              selector also counts toward the score of a partner feed record
+              in the Ingest queue, once that record is scored again.
+            </p>
+            <div class="pane-head">
+              <button id="col-watch-refresh" type="button" class="btn">
+                Load</button>
+              <span id="col-watch-counts" class="muted small"></span>
+            </div>
+            <div id="col-watch-list"></div>
+            <p id="col-watch-empty" class="empty">
+              Not loaded for this case yet.</p>
+            <details id="col-watch-box" class="card" hidden>
+              <summary>Add a watch</summary>
+              <form id="col-watch-form" class="row-form" novalidate>
+                <label class="field grow">
+                  <span class="label">Source</span>
+                  <select id="col-watch-source" class="select"></select>
+                </label>
+                <label class="field grow">
+                  <span class="label">Name</span>
+                  <input id="col-watch-name" type="text" minlength="3"
+                         maxlength="200" required autocomplete="off">
+                </label>
+                <label class="field">
+                  <span class="label">Looks at</span>
+                  <select id="col-watch-kind" class="select"></select>
+                </label>
+                <label class="field grow">
+                  <span id="col-watch-ref-label" class="label">Address or id</span>
+                  <input id="col-watch-ref" type="text" maxlength="2048" required
+                         autocomplete="off" spellcheck="false"
+                         placeholder="https://board.example.test/forums/7/"
+                         data-hint-chat="c:1234567890">
+                </label>
+                <label class="field grow">
+                  <span class="label">Keywords, one per line</span>
+                  <textarea id="col-watch-keywords" rows="3"
+                            spellcheck="false"></textarea>
+                </label>
+                <label class="field grow">
+                  <span class="label">Selectors, one per line</span>
+                  <textarea id="col-watch-selectors" rows="3"
+                            spellcheck="false"></textarea>
+                </label>
+                <label class="field grow">
+                  <span class="label">Patterns, one per line</span>
+                  <textarea id="col-watch-regexes" rows="3"
+                            spellcheck="false"></textarea>
+                </label>
+                <label class="field">
+                  <span class="label">Priority</span>
+                  <select id="col-watch-priority" class="select">
+                    <option value="1">1 (most urgent)</option>
+                    <option value="2">2</option>
+                    <option value="3" selected>3</option>
+                    <option value="4">4</option>
+                    <option value="5">5 (least urgent)</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="label">Thin repeats on a thread (minutes)</span>
+                  <input id="col-watch-window" type="number" min="0" max="10080"
+                         value="60" required>
+                </label>
+                <button id="col-watch-btn" type="submit" class="btn primary">
+                  Add watch</button>
+              </form>
+              <p class="help">
+                Keywords and selectors match anywhere in an item's title or
+                text, whatever the case; a selector that equals an id the item
+                carries, such as its author, matches too. A pattern is a Python
+                regular expression, matched without regard to case in a
+                separate process that is stopped if it runs long. A watch needs
+                at least one of the three. Within the thinning time, further
+                matches on the same thread add no hit; 0 gives a hit for every
+                match.
+              </p>
+              <p class="help">
+                What a watch looks at is a note for the people reading the
+                list: the collector reads the source's own address and does not
+                visit this one. The exception is a Telegram chat, which is
+                named by its typed id, c:1234567890 for a channel or a
+                supergroup and g:1234567890 for a basic group, never by an
+                @name, because a name can be given to someone else.
+              </p>
+              <p id="col-watch-chat-help" class="help" hidden>
+                A chat watch goes on the Telegram source that reads that chat,
+                and choosing the source fills in the id. It fires only on a
+                message collected from that chat. With no keyword, selector or
+                pattern it fires on every message there.
+              </p>
+              <p id="col-watch-error" class="form-error" role="alert" hidden></p>
+              <p id="col-watch-ok" class="form-ok" role="status" hidden></p>
+            </details>
 
             <h3 class="h3">Collected documents</h3>
             <p class="help">
@@ -5736,6 +5852,29 @@
       <button id="status-cancel" type="button" class="btn">Cancel</button>
       <button id="status-save" type="submit" class="btn primary" disabled>
         Change status</button>
+    </div>
+  </form>
+</div>
+
+<!-- Legal hold on the case (2026-10-08). One reason, a sign-in from the last
+     15 minutes, and the server's answer said as it is: a lift below the
+     material is refused, and a purge that was running when a hold arrived
+     says what it had already destroyed. -->
+<div id="hold-scrim" class="palette-scrim" hidden>
+  <form id="hold-form" class="palette stance-sheet" role="dialog"
+        aria-modal="true" aria-labelledby="hold-title"
+        aria-describedby="hold-now" novalidate>
+    <h2 id="hold-title" class="h-sm">Legal hold on the case</h2>
+    <p id="hold-now"></p>
+    <p id="hold-help" class="help"></p>
+    <label class="field">
+      <span class="label">Why</span>
+      <input id="hold-why" type="text" autocomplete="off" maxlength="1000">
+    </label>
+    <p id="hold-msg" class="msg" role="status" hidden></p>
+    <div class="stance-actions">
+      <button id="hold-cancel" type="button" class="btn">Cancel</button>
+      <button id="hold-save" type="submit" class="btn primary">Place the hold</button>
     </div>
   </form>
 </div>

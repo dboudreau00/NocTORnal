@@ -181,16 +181,37 @@ class Redaction:
     #: COUNT (2026-10-07: the figure used to be stated
     #: whatever the setting).
     evidence_some_withheld: bool = False
+    #: The same for the entities, the relationships and the hypothesis
+    #: matrix's evidence (2026-10-08): the three figures that were still
+    #: stated exactly under PRESENCE. Each of the three counts above is 0
+    #: unless the setting is COUNT, and each flag is True only under
+    #: PRESENCE and only when there is something above the ceiling.
+    nodes_some_withheld: bool = False
+    edges_some_withheld: bool = False
+    hypothesis_evidence_some_withheld: bool = False
+    #: The case's withheld-disclosure setting the document was built under,
+    #: and so what its statement may say of material above the ceiling. NONE
+    #: unless the builder says otherwise: a statement built by hand says no
+    #: more than a case that discloses nothing would.
+    disclosure: str = DISCLOSURE_NONE
 
     @property
     def anything_withheld(self) -> bool:
+        """Whether this statement may say that something was withheld: a
+        figure, a flag, or the case's own header and the notes written about
+        it. Under NONE it is False for the elements however much was
+        withheld, because the setting leaves the question unanswered."""
         return bool(self.nodes_withheld or self.edges_withheld
                     or self.evidence_withheld or self.evidence_some_withheld
+                    or self.nodes_some_withheld or self.edges_some_withheld
                     or self.header_withheld
                     or self.assumptions_withheld or self.hypotheses_withheld
-                    or self.hypothesis_evidence_withheld)
+                    or self.hypothesis_evidence_withheld
+                    or self.hypothesis_evidence_some_withheld)
 
     def statement(self) -> str:
+        if self.disclosure == DISCLOSURE_NONE:
+            return self._statement_saying_nothing()
         if not self.anything_withheld:
             return (f"This document is marked TLP:{self.built_at_tlp} and was "
                     f"prepared to include material up to TLP:{self.ceiling_tlp}. "
@@ -200,30 +221,7 @@ class Redaction:
         # a sentence of its own rather than a " -- " clause: the statement
         # is the first thing a disclosure says (README screenshot review,
         # 2026-09-23).
-        header = ""
-        if self.header_withheld:
-            header = (
-                " **The case's own identifying detail is above that ceiling "
-                "and has been withheld**, so this document does not name the "
-                "operation, its subject or the authority it was collected "
-                "under. It is therefore not a disclosure document as it "
-                "stands.")
-            n = self.assumptions_withheld
-            if n:
-                header += (
-                    f" The {_count(n, 'recorded assumption', 'recorded assumptions')} "
-                    f"the case rests on {'is' if n == 1 else 'are'} withheld "
-                    f"with it, because {'it is' if n == 1 else 'they are'} "
-                    f"written about the case at the case's own level; the "
-                    f"findings below therefore rest on "
-                    f"{'a premise' if n == 1 else 'premises'} this document "
-                    f"cannot state.")
-            n = self.hypotheses_withheld
-            if n:
-                header += (
-                    f" The {_count(n, 'competing hypothesis', 'competing hypotheses')} "
-                    f"recorded against the case {'is' if n == 1 else 'are'} "
-                    f"withheld for the same reason.")
+        header = self._header_sentences()
         matrix = ""
         n = self.hypothesis_evidence_withheld
         if n:
@@ -232,18 +230,79 @@ class Redaction:
                 f"matrix {'rests' if n == 1 else 'rest'} on that material, so "
                 f"the hypothesis scores below leave "
                 f"{'it' if n == 1 else 'them'} out.")
-        exhibits = ("some exhibits" if self.evidence_some_withheld
-                    else _count(self.evidence_withheld, 'exhibit', 'exhibits'))
-        withheld = (f"{_count(self.nodes_withheld, 'entity', 'entities')}, "
-                    f"{_count(self.edges_withheld, 'relationship', 'relationships')} "
-                    f"and {exhibits}")
+        elif self.hypothesis_evidence_some_withheld:
+            matrix = (" Some items of evidence in the hypothesis matrix rest "
+                      "on that material, so the hypothesis scores below leave "
+                      "them out.")
+        if self.disclosure == DISCLOSURE_COUNT:
+            exhibits = _count(self.evidence_withheld, 'exhibit', 'exhibits')
+            withheld = (f"{_count(self.nodes_withheld, 'entity', 'entities')}, "
+                        f"{_count(self.edges_withheld, 'relationship', 'relationships')} "
+                        f"and {exhibits}")
+        else:
+            # PRESENCE: the kinds there are some of, and nothing of the rest.
+            kinds = [words for words, there in (
+                ("some entities", self.nodes_some_withheld),
+                ("some relationships", self.edges_some_withheld),
+                ("some exhibits", self.evidence_some_withheld)) if there]
+            withheld = (", ".join(kinds[:-1]) + " and " + kinds[-1]
+                        if len(kinds) > 1 else kinds[0] if kinds else "")
+        elements = (f" {withheld[0].upper()}{withheld[1:]} are above that "
+                    f"level and have been withheld." if withheld else "")
         return (
             f"This document is marked TLP:{self.built_at_tlp} and was prepared "
             f"to include material up to TLP:{self.ceiling_tlp}, from a case "
-            f"classified TLP:{self.case_tlp}.{header} "
-            f"{withheld} are above that level and have been withheld.{matrix} "
+            f"classified TLP:{self.case_tlp}.{header}{elements}{matrix} "
             f"**Every figure below is computed over the redacted graph** and "
             f"is therefore a lower bound, not a measurement of the case.")
+
+    def _header_sentences(self) -> str:
+        """What is said when the case's own header is above the ceiling, and
+        of the notes written about it that went with it. The requester chose
+        the ceiling and knows the case's own level, so none of it says
+        anything about material they may not see."""
+        if not self.header_withheld:
+            return ""
+        header = (
+            " **The case's own identifying detail is above that ceiling "
+            "and has been withheld**, so this document does not name the "
+            "operation, its subject or the authority it was collected "
+            "under. It is therefore not a disclosure document as it "
+            "stands.")
+        n = self.assumptions_withheld
+        if n:
+            header += (
+                f" The {_count(n, 'recorded assumption', 'recorded assumptions')} "
+                f"the case rests on {'is' if n == 1 else 'are'} withheld "
+                f"with it, because {'it is' if n == 1 else 'they are'} "
+                f"written about the case at the case's own level; the "
+                f"findings below therefore rest on "
+                f"{'a premise' if n == 1 else 'premises'} this document "
+                f"cannot state.")
+        n = self.hypotheses_withheld
+        if n:
+            header += (
+                f" The {_count(n, 'competing hypothesis', 'competing hypotheses')} "
+                f"recorded against the case {'is' if n == 1 else 'are'} "
+                f"withheld for the same reason.")
+        return header
+
+    def _statement_saying_nothing(self) -> str:
+        """The statement of a case that discloses nothing about material
+        above the ceiling (0030, NONE). It used to read "nothing has been
+        withheld" whenever its counts were zero, and under NONE they are zero
+        whatever was withheld, so it said so of a document that had left
+        entities or exhibits out (2026-10-08). It says neither that anything
+        was withheld nor that nothing was: the same sentence, whether or not
+        the case holds anything above the ceiling."""
+        return (
+            f"This document is marked TLP:{self.built_at_tlp} and was prepared "
+            f"to include material up to TLP:{self.ceiling_tlp}, from a case "
+            f"classified TLP:{self.case_tlp}.{self._header_sentences()} It "
+            f"contains nothing above that ceiling, and this case does not say "
+            f"whether any material above it exists. **Every figure below is "
+            f"computed over the redacted graph** and is therefore a lower "
+            f"bound, not a measurement of the case.")
 
 
 @dataclass
@@ -281,12 +340,17 @@ class Report:
                 "edges_withheld": self.redaction.edges_withheld,
                 "evidence_withheld": self.redaction.evidence_withheld,
                 "evidence_some_withheld": self.redaction.evidence_some_withheld,
+                "nodes_some_withheld": self.redaction.nodes_some_withheld,
+                "edges_some_withheld": self.redaction.edges_some_withheld,
+                "disclosure": self.redaction.disclosure,
                 "statement": self.redaction.statement(),
                 "header_withheld": self.redaction.header_withheld,
                 "assumptions_withheld": self.redaction.assumptions_withheld,
                 "hypotheses_withheld": self.redaction.hypotheses_withheld,
                 "hypothesis_evidence_withheld":
                     self.redaction.hypothesis_evidence_withheld,
+                "hypothesis_evidence_some_withheld":
+                    self.redaction.hypothesis_evidence_some_withheld,
             },
             "summary": self.summary,
             "assumptions": self.assumptions,
@@ -480,19 +544,29 @@ class ReportBuilder:
         # all three (2026-10-07), so a case set to NONE
         # had a register showing 0 beside a document saying "2 exhibits".
         hidden_exhibits = evidence_total - len(evidence_rows)
+        # All three figures, and the matrix's, by the one rule (decision 179,
+        # and 2026-10-08 for the three that were still exact under
+        # PRESENCE): the number only under COUNT, that there are some under
+        # PRESENCE, and under NONE neither.
+        counted = withheld.mode == DISCLOSURE_COUNT
+        some = withheld.mode == DISCLOSURE_PRESENCE
+        hidden_nodes = withheld.nodes or 0
+        hidden_edges = withheld.edges or 0
         redaction = Redaction(
             built_at_tlp=marking.name, ceiling_tlp=target.name,
             case_tlp=case_tlp,
-            nodes_withheld=withheld.nodes or 0,
-            edges_withheld=withheld.edges or 0,
-            evidence_withheld=(hidden_exhibits
-                               if withheld.mode == DISCLOSURE_COUNT else 0),
-            evidence_some_withheld=(withheld.mode == DISCLOSURE_PRESENCE
-                                    and hidden_exhibits > 0),
+            nodes_withheld=hidden_nodes if counted else 0,
+            edges_withheld=hidden_edges if counted else 0,
+            evidence_withheld=hidden_exhibits if counted else 0,
+            evidence_some_withheld=some and hidden_exhibits > 0,
+            nodes_some_withheld=some and hidden_nodes > 0,
+            edges_some_withheld=some and hidden_edges > 0,
             header_withheld=not header_ok,
             assumptions_withheld=assumptions_withheld,
             hypotheses_withheld=hypotheses_withheld,
-            hypothesis_evidence_withheld=matrix.withheld,
+            hypothesis_evidence_withheld=matrix.withheld if counted else 0,
+            hypothesis_evidence_some_withheld=some and matrix.withheld > 0,
+            disclosure=withheld.mode,
         )
 
         metrics = redacted.metrics(projection) if (

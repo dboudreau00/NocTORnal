@@ -1,13 +1,18 @@
-"""Sweep the collected documents that are past their retention clock, once
-(F30, 2026-10-02). An operator runs this; nothing schedules it for you.
+"""Sweep what no case governs and is past its retention clock, once (F30,
+2026-10-02; F55, 2026-10-08). An operator runs this; nothing schedules it for
+you.
 
 A Telegram group's messages and a forum's posts are collected documents
 with a retention clock, and no case-scoped route can reach them, so until
-this script nothing destroyed them when the clock ran out. It calls the same
+this script nothing destroyed them when the clock ran out. Dead letters (the
+fragments the ingest could not parse) and the ingest records attached to no
+case are in the same position, and are swept with them. It calls the same
 purge every other family uses (`RetentionService.purge_due`, with its legal
 hold checks on the document and on every case that cites it, its locks, its
-markup deletion and its tombstone), for collected documents only. Exhibits,
-ingest records and the rest keep their own routes.
+markup deletion and its tombstone), for those three families only. Exhibits,
+lookups and the rest, and every ingest record attached to a case, keep their
+own routes: a record attached to a case is that case's, with its clock and its
+hold.
 
     python scripts/retention_sweep.py                      # a dry run, the default
     python scripts/retention_sweep.py --apply --actor you@example.org
@@ -34,9 +39,9 @@ tombstones as it always does. A backlog bigger than one pass is cleared in
 the same run, up to --max-passes.
 
 Exit codes: 0 when the run did what it was asked (a dry run always, a real run
-that left nothing it could destroy); 1 when a real run left documents it could
-have destroyed (a store refused their markup, or the pass limit was reached),
-so run it again after reading the warnings; 2 when it refused to run: a missing
+that left nothing it could destroy); 1 when a real run left something it could
+have destroyed (a store refused a document's markup, or the pass limit was
+reached), so run it again after reading the warnings; 2 when it refused to run: a missing
 or placeholder authority, no named account, no store for collected markup, or,
 under NOCTORNAL_ENV=production and for a dry run as well, an environment every
 job refuses (`config.refuse_unsafe_job_environment`: a credential that carries a
@@ -89,8 +94,9 @@ def _refuse(message: str) -> int:
 def main(argv: list[str] | None = None, *, conn=None,
          document_raw=_FROM_ENVIRONMENT) -> int:
     parser = argparse.ArgumentParser(
-        description="Sweep collected documents past their retention clock. "
-                    "A dry run unless --apply is given.")
+        description="Sweep collected documents, dead letters and ingest "
+                    "records attached to no case that are past their "
+                    "retention clock. A dry run unless --apply is given.")
     parser.add_argument("--apply", action="store_true",
                         help="destroy what is past its clock and not held; "
                              "needs a declared authority and a named account")
@@ -98,7 +104,7 @@ def main(argv: list[str] | None = None, *, conn=None,
                         help="email of the active account that holds "
                              "retention.purge and answers for this run")
     parser.add_argument("--max-passes", type=int, default=None,
-                        help="the most passes of 500 documents one run makes")
+                        help="the most passes of 500 of each kind one run makes")
     args = parser.parse_args(argv)
 
     from noctornal_api import retention_sweep as rs
@@ -159,7 +165,7 @@ def main(argv: list[str] | None = None, *, conn=None,
     if report.stopped:
         print(f"stopped: {report.stopped}")
     if not args.apply:
-        if report.sweepable:
+        if report.sweepable_total:
             print("dry run: nothing was changed. Run with --apply under a "
                   "declared authority to destroy what is past its clock.")
         return 0

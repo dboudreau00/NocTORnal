@@ -439,7 +439,11 @@ select.select:disabled { color: var(--text-tertiary); cursor: default; }
 .session-warn[hidden] { display: none; }
 .session-warn-text { flex: 1 1 260px; }
 .session-warn-actions { display: flex; gap: var(--s-2); }
-.reauth-scrim { z-index: 86; }
+/* Two classes, so it beats `.palette-scrim`'s 80, which comes later in this
+   file. With one the sign-in question stood UNDER any dialog that was open
+   when it was asked (the case Hold dialog, 2026-10-08), where it could be
+   seen and not clicked. */
+.palette-scrim.reauth-scrim { z-index: 86; }
 /* Two classes, so the width beats `.palette`'s, which comes later. */
 .palette.reauth-sheet, .palette.account-sheet {
   width: min(460px, 100%); max-height: 88vh; overflow: auto; gap: var(--s-3);
@@ -1429,8 +1433,17 @@ button.hdr-user.codes-low::before { background: var(--alert); }
 #pane-analytics .card p:last-child { margin-bottom: 0; }
 
 /* A wide metric table must scroll inside its own box rather than push the
-   whole pane sideways. */
-.scroll-x { overflow-x: auto; max-width: 100%; }
+   whole pane sideways. `position: relative` is what makes the box clip
+   everything inside it: an absolutely positioned descendant is clipped only
+   by an overflow box that is (or sits inside) its containing block, and
+   `.sr-only` is `position: absolute`. The case list's visually hidden "Open"
+   heading sits at the table's 740th pixel, with no positioned ancestor to
+   hold it, so it was drawn against the page, which grew to 741px and
+   scrolled sideways by 280 to 390px on a phone (docs/17 "the case list at
+   375 px", 2026-10-08). Measured in a browser at 320 to 768px: the page was
+   741px wide on the list and is the window's width now, and the seventeen
+   panes of an open case did not scroll the page before and do not after. */
+.scroll-x { position: relative; overflow-x: auto; max-width: 100%; }
 
 /* Caveats. docs/03: flag approximation explicitly, and never present a
    number as more certain than it is. A warning changes what the number is
@@ -1957,6 +1970,14 @@ th[aria-sort="descending"] .th-sort::after { content: " \2193"; }
 #src-auth-form > .field { flex: 1 1 10em; }
 #src-add-form > .field.grow, #src-persona-form > .field.grow { flex: 1 1 16em; }
 #src-auth-form > .field.grow { flex: 1 1 100%; }
+/* The Collected tab's Add a watch form (F53, 2026-10-08), laid out as the
+   Sources forms are: a field keeps a readable width and wraps before it
+   squeezes; the name and the target take room, and each of the three term
+   lists is as wide as a source's name. */
+#col-watch-box > summary { cursor: pointer; }
+#col-watch-form { margin: 8px 0; }
+#col-watch-form > .field { flex: 0 1 12em; }
+#col-watch-form > .field.grow { flex: 1 1 16em; }
 .row-head {
   display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
 }

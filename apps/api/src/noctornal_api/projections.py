@@ -20,6 +20,7 @@ the analytics worker with igraph.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID
@@ -225,6 +226,28 @@ class ProjectionTooLarge(ProjectionError):
     every other ProjectionError gets."""
 
 
+class PathSearchLimit(ProjectionError):
+    """A path search gathered `NEIGHBOURHOOD_MAX_NODES` entities without
+    joining its two ends and without running out of entities to look at, so
+    it cannot say whether they are connected. Never `connected: false`: the
+    route answers 422 (Beta 1.1)."""
+
+
+#: The most entities an ego network or a path search gathers (docs/03: the
+#: live views are built for about 5,000 entities). Until Beta 1.1 both
+#: searched the FIRST 5,000 entities of the case by creation time and
+#: answered "not in this projection" for an entity outside them: 88 of 100
+#: ego requests on a case of 101,000 entities. They are built outward from the
+#: entity asked about now, nearer entities before farther ones, and stop here
+#: saying so.
+NEIGHBOURHOOD_MAX_NODES = 5000
+
+#: How many ties one step of a search reads, as a multiple of the bound above.
+#: A hub of tens of thousands of ties does not hold a request: the step is cut
+#: and the answer says the search was.
+_STEP_ROWS_PER_NODE = 20
+
+
 # L3 (2026-09-24): which ties a projection computes over by review state.
 # "all" is today's behaviour; "accepted" keeps only the ties a reviewer has
 # accepted and counts every tie it left out, by state.
@@ -317,6 +340,44 @@ def _review_split(rows: list[dict]) -> tuple[list[dict], dict]:
         key = str(state).lower() if state is not None else "other"
         left[key if key in left else "other"] += 1
     return kept, left
+
+
+def _visible_node_sql(alias: str) -> str:
+    """The projection's node predicate for the row aliased `alias`, with
+    named binds: `project()`'s WHERE, said once more for the searches that
+    start from one entity (apps/api/tests/test_ego_path_from_the_centre_pg.py
+    holds the two to the same answer)."""
+    return f"""{alias}.case_id = %(case)s AND {alias}.deleted_at IS NULL
+               AND {alias}.merged_into_id IS NULL
+               AND {alias}.classification <= %(clr)s::core.tlp
+               AND {alias}.compartments <@ %(comp)s
+               AND EXISTS (SELECT 1 FROM core.assertion la
+                            WHERE la.node_id = {alias}.id AND la.retracted_at IS NULL
+                              AND la.superseded_at IS NULL)
+               AND (%(as_of)s::timestamptz IS NULL
+                    OR ({alias}.valid_from IS NULL OR {alias}.valid_from <= %(as_of)s)
+                    AND ({alias}.valid_to IS NULL OR {alias}.valid_to >= %(as_of)s))"""
+
+
+def _visible_tie_sql(alias: str, type_alias: str) -> str:
+    """The projection's tie predicate for the row aliased `alias` (its type
+    row `type_alias`), with named binds, apart from where its ends are: the
+    preset or types, the inferred flag, the confidence floor, the review
+    scope, the window, its own labels and its live claim."""
+    return f"""{alias}.case_id = %(case)s AND {alias}.deleted_at IS NULL
+               AND {alias}.classification <= %(clr)s::core.tlp
+               AND {alias}.compartments <@ %(comp)s
+               AND (%(inferred)s OR NOT {alias}.is_inferred)
+               AND EXISTS (SELECT 1 FROM core.assertion ea
+                            WHERE ea.edge_id = {alias}.id AND ea.retracted_at IS NULL
+                              AND ea.superseded_at IS NULL)
+               AND ((%(types)s::text[] IS NULL AND {type_alias}.is_social_tie)
+                    OR {alias}.edge_type = ANY(%(types)s))
+               AND {alias}.confidence::text = ANY(%(keep)s)
+               AND (%(all_reviews)s OR {alias}.review = 'ACCEPTED'::core.review_state)
+               AND (%(as_of)s::timestamptz IS NULL
+                    OR ({alias}.valid_from IS NULL OR {alias}.valid_from <= %(as_of)s)
+                    AND ({alias}.valid_to IS NULL OR {alias}.valid_to >= %(as_of)s))"""
 
 
 def _edge_row(r) -> dict:
@@ -445,7 +506,8 @@ class GraphService:
         self._comp = list(compartments)
 
     # -- projection --------------------------------------------------------
-    def project(self, p: Projection, *, limit: int = 2000) -> Subgraph:
+    def project(self, p: Projection, *, limit: int = 2000,
+                within: Sequence[UUID] | None = None) -> Subgraph:
         """The projected subgraph: visible nodes, and edges whose endpoints
         are BOTH visible and which pass the projection's filters.
 
@@ -453,7 +515,11 @@ class GraphService:
         other one is counted by state; with venue families listed (F2) the
         venues are replaced by derived ties between entities. Neither ever
         filters a node, and neither adds a key to a stored edge's row, so
-        `/graph`, which serialises the rows as they are, is untouched."""
+        `/graph`, which serialises the rows as they are, is untouched.
+
+        `within` limits the entities to those ids (an ego network's, a
+        path's): the filters are the same, so it is the projection cut to
+        them and no other answer."""
         validate_projection(p)
 
         nodes = self._c.execute(
@@ -497,11 +563,13 @@ class GraphService:
                   AND (%s::timestamptz IS NULL
                        OR (valid_from IS NULL OR valid_from <= %s)
                        AND (valid_to IS NULL OR valid_to >= %s))
+                  """ + ("AND n.id = ANY(%s)" if within is not None else "") + """
                 ORDER BY created_at LIMIT %s""",
             (*seen_params(self._clearance, self._comp),
              self._clearance, self._comp,
              p.case_id, self._clearance, self._comp,
-             p.as_of, p.as_of, p.as_of, limit + 1),
+             p.as_of, p.as_of, p.as_of,
+             *([list(within)] if within is not None else []), limit + 1),
         ).fetchall()
         truncated = len(nodes) > limit
         nodes = nodes[:limit]
@@ -689,11 +757,149 @@ class GraphService:
         return row[0] if row else DISCLOSURE_NONE
 
     # -- neighbourhood -----------------------------------------------------
+    def _scope(self, p: Projection) -> dict:
+        """The binds `_visible_node_sql` and `_visible_tie_sql` take, for the
+        projection `p`: what `project()` binds, by name."""
+        floor = _CONFIDENCE_ORDER[p.min_confidence]
+        return {
+            "case": p.case_id, "clr": self._clearance, "comp": self._comp,
+            "as_of": p.as_of, "inferred": p.include_inferred,
+            "types": p.resolved_edge_types(),
+            "keep": [c for c in ("LOW", "MODERATE", "HIGH") if _CONFIDENCE_ORDER[c] >= floor],
+            "all_reviews": p.review_scope == REVIEW_SCOPE_ALL,
+        }
+
+    def _visible(self, p: Projection, ids: Sequence[UUID]) -> set[UUID]:
+        """Which of `ids` the projection draws: the same entities
+        `project()` would fetch, asked of a few ids."""
+        rows = self._c.execute(
+            f"SELECT n.id FROM core.node n WHERE n.id = ANY(%(ids)s) AND "
+            f"{_visible_node_sql('n')}", {**self._scope(p), "ids": list(ids)}).fetchall()
+        return {r[0] for r in rows}
+
+    def _reach(self, p: Projection, frontier: Sequence[UUID],
+               rows_max: int) -> tuple[list[tuple[UUID, UUID, datetime]], bool]:
+        """One step outward: every tie the projection draws from an entity in
+        `frontier` to an entity it draws, as `(near, far, far's creation
+        time)`, either way round (a path is undirected). At most `rows_max`
+        rows, and whether more were left."""
+        rows = self._c.execute(
+            f"""SELECT t.near, t.far, o.created_at
+                  FROM (SELECT e.src_node_id AS near, e.dst_node_id AS far
+                          FROM core.edge e JOIN core.edge_type et ON et.key = e.edge_type
+                         WHERE e.src_node_id = ANY(%(frontier)s)
+                           AND {_visible_tie_sql('e', 'et')}
+                        UNION ALL
+                        SELECT e.dst_node_id, e.src_node_id
+                          FROM core.edge e JOIN core.edge_type et ON et.key = e.edge_type
+                         WHERE e.dst_node_id = ANY(%(frontier)s)
+                           AND {_visible_tie_sql('e', 'et')}) t
+                  JOIN core.node o ON o.id = t.far AND {_visible_node_sql('o')}
+                 LIMIT %(rows)s""",
+            {**self._scope(p), "frontier": list(frontier), "rows": rows_max + 1}).fetchall()
+        return rows[:rows_max], len(rows) > rows_max
+
     def ego(self, p: Projection, centre: UUID, depth: int = 1) -> Subgraph:
-        """The ego network around one node to `depth` hops — what a
-        double-click gives you (docs/06). Computed from the projection so it
-        honours the same filters."""
-        full = self.project(p, limit=5000)
+        """The ego network around one node to `depth` hops, what a
+        double-click gives you (docs/06), under the projection's filters.
+
+        Built OUTWARD from the centre, a step at a time, so an entity
+        anywhere in the case has one; it used to be cut from the first 5,000
+        entities of the case, and answered "not in this projection" for the
+        rest. It holds at most `NEIGHBOURHOOD_MAX_NODES` entities, the nearer
+        before the farther (the older before the newer among the same
+        distance), and `truncated` says when it was cut."""
+        validate_projection(p)
+        if p.one_mode.enabled():
+            return self._ego_of_whole(p, centre, depth)
+        if centre not in self._visible(p, [centre]):
+            raise ProjectionError("centre node is not in this projection")
+        bound = NEIGHBOURHOOD_MAX_NODES
+        seen = {centre}
+        frontier = [centre]
+        truncated = False
+        for _ in range(max(0, depth)):
+            rows, more = self._reach(p, frontier, _STEP_ROWS_PER_NODE * bound)
+            found: dict[UUID, datetime] = {}
+            for _near, far, created in rows:
+                if far not in seen:
+                    found.setdefault(far, created)
+            truncated = truncated or more
+            if not found:
+                break
+            room = bound - len(seen)
+            if len(found) > room:
+                truncated = True
+                keep = sorted(found, key=lambda n: (found[n], n))[:max(0, room)]
+                found = {n: found[n] for n in keep}
+            seen |= found.keys()
+            frontier = list(found)
+            if not frontier:
+                break
+        whole = self.project(p, limit=bound, within=list(seen))
+        return Subgraph(
+            whole.nodes, whole.edges,
+            {**whole.projection, "ego": str(centre), "depth": depth},
+            truncated,
+            compartments=whole.compartments,
+        )
+
+    def shortest_path(self, p: Projection, src: UUID, dst: UUID) -> list[UUID]:
+        """Unweighted shortest path (BFS), the shift-click interaction. The
+        path is treated as undirected: an analyst asking "how are these two
+        connected" does not care about edge direction.
+
+        Grown from BOTH ends a step at a time, the smaller side first, until
+        they meet, so two entities anywhere in the case are asked about; it
+        used to search the first 5,000 entities of the case. `[]` means the
+        two are not connected under the projection, and is said only when a
+        side ran out of entities to look at. A search that reached
+        `NEIGHBOURHOOD_MAX_NODES` entities first raises `PathSearchLimit`:
+        it cannot say."""
+        validate_projection(p)
+        if p.one_mode.enabled():
+            return self._path_of_whole(p, src, dst)
+        ends = self._visible(p, [src, dst])
+        if src not in ends or dst not in ends:
+            raise ProjectionError("both endpoints must be in this projection")
+        if src == dst:
+            return [src]
+        bound = NEIGHBOURHOOD_MAX_NODES
+        forward: dict[UUID, UUID | None] = {src: None}
+        backward: dict[UUID, UUID | None] = {dst: None}
+        f_front, b_front = [src], [dst]
+        while f_front and b_front:
+            grow_forward = len(f_front) <= len(b_front)
+            parents, other = (forward, backward) if grow_forward else (backward, forward)
+            rows, more = self._reach(p, f_front if grow_forward else b_front,
+                                     _STEP_ROWS_PER_NODE * bound)
+            fresh: dict[UUID, UUID] = {}
+            for near, far, _created in rows:
+                if far not in parents and far not in fresh:
+                    fresh[far] = near
+            parents.update(fresh)
+            # Nothing met before this step (or it would have been returned), so
+            # any entity both sides now hold gives a shortest path.
+            meeting = next((n for n in fresh if n in other), None)
+            if meeting is not None:
+                return _chain(forward, meeting)[::-1] + _chain(backward, meeting)[1:]
+            if more or len(forward) + len(backward) > bound:
+                raise PathSearchLimit(
+                    f"The search covered {len(forward) + len(backward):,} entities "
+                    f"without joining these two, and stopped there, so it cannot "
+                    f"say they are not connected. Narrow the projection (a preset, "
+                    f"a higher minimum confidence) and ask again.")
+            if grow_forward:
+                f_front = list(fresh)
+            else:
+                b_front = list(fresh)
+        return []
+
+    def _ego_of_whole(self, p: Projection, centre: UUID, depth: int) -> Subgraph:
+        """`ego` over a projection with venue families (F2), whose derived
+        ties exist only after `project()` has made them: searched in the
+        first `NEIGHBOURHOOD_MAX_NODES` entities, as every ego network was."""
+        full = self.project(p, limit=NEIGHBOURHOOD_MAX_NODES)
         if centre not in full.node_ids():
             raise ProjectionError("centre node is not in this projection")
         adjacency: dict[UUID, set[UUID]] = defaultdict(set)
@@ -719,11 +925,9 @@ class GraphService:
             compartments=full.compartments,
         )
 
-    def shortest_path(self, p: Projection, src: UUID, dst: UUID) -> list[UUID]:
-        """Unweighted shortest path (BFS) — the shift-click interaction. The
-        path is treated as undirected: an analyst asking "how are these two
-        connected" does not care about edge direction."""
-        full = self.project(p, limit=5000)
+    def _path_of_whole(self, p: Projection, src: UUID, dst: UUID) -> list[UUID]:
+        """`shortest_path` over a projection with venue families, as `ego`'s."""
+        full = self.project(p, limit=NEIGHBOURHOOD_MAX_NODES)
         present = full.node_ids()
         if src not in present or dst not in present:
             raise ProjectionError("both endpoints must be in this projection")
@@ -743,11 +947,7 @@ class GraphService:
                     queue.append(nb)
         if dst not in prev:
             return []
-        path, cur = [], dst
-        while cur is not None:
-            path.append(cur)
-            cur = prev[cur]
-        return list(reversed(path))
+        return _chain(prev, dst)[::-1]
 
     # -- local metrics -----------------------------------------------------
     def metrics(self, p: Projection) -> dict:
@@ -845,6 +1045,16 @@ class GraphService:
                 for i in sorted(ids, key=lambda x: -len(neighbours[x]))
             ],
         }
+
+
+def _chain(parents: dict[UUID, UUID | None], node: UUID) -> list[UUID]:
+    """`node`, its parent, its parent's parent, up to the root of a search."""
+    out: list[UUID] = []
+    cur: UUID | None = node
+    while cur is not None:
+        out.append(cur)
+        cur = parents[cur]
+    return out
 
 
 def _k_core(neighbours: dict[UUID, set[UUID]]) -> dict[UUID, int]:

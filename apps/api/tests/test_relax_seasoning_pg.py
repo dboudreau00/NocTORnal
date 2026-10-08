@@ -31,6 +31,7 @@ from uuid import uuid4
 
 import pytest
 
+from db_clock import wait_until_after
 from test_case_merge_relax_pg import _on, _put, _raise_relax, _switch, season
 from test_case_merge_relax_pg import session as _session
 from test_dual_control_policy_pg import teardown
@@ -413,6 +414,11 @@ def _approved_over_http(conn, client, *, deputy_aged: bool):
     rid = raised.json()["id"]
     if deputy_aged:
         season(conn, case_id, deputy_id)
+    # The decision must be stamped after the deputy's grant, or the rule reads
+    # the grant as one given again after the approval (db_clock).
+    wait_until_after(conn, conn.execute(
+        "SELECT max(granted_at) FROM iam.case_assignment "
+        "WHERE case_id = %s AND user_id = %s", (case_id, deputy_id)).fetchone()[0])
     decided = client.post(f"{API}/cases/{case_id}/approvals/{rid}/decide",
                           headers=deputy, json={"approve": True})
     return lead_id, deputy_id, case_id, lead, rid, decided

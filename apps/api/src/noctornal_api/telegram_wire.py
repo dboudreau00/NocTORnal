@@ -80,7 +80,7 @@ from noctornal_api.telegram import (
     in_dc_networks,
 )
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("noctornal.telegram_wire")
 
 # ---------------------------------------------------------------------------
 # The library and the route
@@ -238,7 +238,7 @@ class _ScrubbingHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            logging.getLogger("noctornal_api.telegram_wire").log(
+            logging.getLogger("noctornal.telegram_wire").log(
                 max(record.levelno, logging.WARNING),
                 "telethon %s in %s", record.levelname, record.name)
         except Exception:  # noqa: BLE001 - a log line never fails a session

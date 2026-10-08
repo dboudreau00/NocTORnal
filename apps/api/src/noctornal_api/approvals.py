@@ -93,7 +93,7 @@ from psycopg.types.json import Json
 from noctornal_api import notify_events
 from noctornal_api.wording import count_of
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("noctornal.approvals")
 
 PENDING = "PENDING"
 APPROVED = "APPROVED"

@@ -407,6 +407,28 @@ holders who may be below those sources' labels. Both are counts or one bit,
 never a name, the same presence disclosure the collection foundation's
 rows make (docs/16 D2).
 
+### Watches (F53)
+
+| Route | Needs | Step-up | Meter |
+|---|---|---|---|
+| `GET /cases/{case_id}/collection/watches` | `collection.read` on the case | no | none |
+| `POST /cases/{case_id}/collection/watches` | the global `watch.manage` and `collection.read` on the case; refused on a closed case | no | `collection.config` |
+
+A watch is a standing tasking, and its terms are the case's content, so the
+list is read as the hits it produces are. Making one takes two things: the
+verb, which only the collection manager's role holds, and the case, where the
+five-part gate runs as it does for any content write. The verb alone would let
+a collection manager task a case they are not on, and the case alone would let
+any analyst point the collector at a source. The global check runs first, so a
+caller without it learns nothing of the case, and a caller who is not on the
+case meets the case gate's 404. The source must be one the caller can see by
+its label and its compartments, and a source above them answers the 404 an
+unknown id does; a watch on a source above the reader is left out of the
+reader's list, as that source is from every other list. Each creation is
+audited as `WATCH_CREATED`, naming the case, with the counts of the terms and
+never the terms: the audit trail is read by people with no access to the
+case's content. There is no route that edits or stops a watch.
+
 ## Authentication
 
 **MFA is mandatory.** Not optional, not admin-only.

@@ -57,7 +57,11 @@ from noctornal_api.egress import NEVER_EGRESS
 # The Lab's ticket, reused for an exhibit (0068): its lifetime, and its
 # sampled counter for strings that match no ticket. Private to samples.py
 # and imported rather than copied, so the two tickets cannot drift apart.
-from noctornal_api.samples import DOWNLOAD_TICKET_TTL_SECONDS, _SampledWarning
+from noctornal_api.samples import (
+    DOWNLOAD_TICKET_TTL_SECONDS,
+    _bounded_http,
+    _SampledWarning,
+)
 
 #: How long the storage layer's COMPLIANCE lock holds an exhibit, counted
 #: from the moment the server LODGES the bytes (the put in `ingest`), not
@@ -179,6 +183,47 @@ class EvidenceError(Exception):
     pass
 
 
+class StoreUnavailable(EvidenceError):
+    """The object store did not answer a put, so the exhibit was not lodged
+    and the caller may try again. The HTTP layer answers it with a 503
+    (2026-10-08): a store that was down answered a raw 500 after about 18
+    seconds."""
+
+
+def store_did_not_answer(exc: BaseException) -> bool:
+    """Whether a put failed because the store did not answer (a refused or
+    timed-out connection, a reset, a name that did not resolve) and not
+    because it answered with a refusal. The store's own refusals are
+    `S3Error`s and keep their codes."""
+    import urllib3
+
+    return (not isinstance(exc, S3Error)
+            and isinstance(exc, (urllib3.exceptions.HTTPError, OSError)))
+
+
+def store_never_reached(exc: BaseException) -> bool:
+    """Whether a failed put never reached the store at all: a connection that
+    was refused, that timed out opening, or to a name that did not resolve.
+    Nothing was sent, so nothing was stored, and no object is waiting under a
+    lock for a row to name it. A read that timed out, or a connection that
+    was reset, is not this: the bytes may have landed."""
+    import socket
+
+    import urllib3
+
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if isinstance(cur, (urllib3.exceptions.NewConnectionError,
+                            urllib3.exceptions.ConnectTimeoutError,
+                            ConnectionRefusedError, socket.gaierror)):
+            return True
+        # MaxRetryError keeps what it gave up on in `reason`.
+        cur = getattr(cur, "reason", None) or cur.__cause__ or cur.__context__
+    return False
+
+
 @dataclass(frozen=True)
 class VersionedDeleteResult:
     """What a versioned delete actually did, per key.
@@ -298,7 +343,16 @@ class EvidenceStorage:
             )
         secure = os.environ.get("MINIO_SECURE", "false").lower() == "true"
         self._bucket = os.environ.get("EVIDENCE_BUCKET", "noctornal-evidence")
-        self._client = Minio(endpoint, access_key=access, secret_key=secret, secure=secure)
+        # A pool that gives up in seconds (2026-10-08). minio-py's own waits
+        # five minutes on a connect and retries five times, so a store that
+        # was down held an upload for about 18 seconds and a store that
+        # swallowed packets for far longer. Writes are never resent after a
+        # server answer or a read timeout: an exhibit's object is locked and
+        # versioned, and a resent put whose answer was lost writes a second
+        # version nothing can delete (`samples._bounded_http`).
+        self._client = Minio(endpoint, access_key=access, secret_key=secret,
+                             secure=secure,
+                             http_client=_bounded_http(resend_writes=False))
 
     @property
     def bucket(self) -> str:
@@ -868,8 +922,25 @@ class EvidenceService:
                          is_hostile_markup),
                     )
                     put_sent = True
-                    version = self._s.put(storage_key, data, media_type=media_type,
-                                          retain_until=retain)
+                    try:
+                        version = self._s.put(storage_key, data,
+                                              media_type=media_type,
+                                              retain_until=retain)
+                    except Exception as exc:
+                        if store_never_reached(exc):
+                            # Nothing was sent, so nothing is stored under a
+                            # lock for a row to name: no orphan is recorded
+                            # (it was, with the object marked "may be stored
+                            # with no row naming it", for a store that was
+                            # down; 2026-10-08).
+                            put_sent = False
+                        if store_did_not_answer(exc):
+                            raise StoreUnavailable(
+                                "the evidence object store did not answer, so "
+                                "this exhibit was not lodged. Try again in a "
+                                "moment; if it keeps failing, tell an "
+                                "administrator.") from exc
+                        raise
                     # Read-back verify, of the version just written: confirm the
                     # object landed byte-exact before committing a row that says
                     # it did (catches a store-side short-write).
@@ -1162,7 +1233,7 @@ class EvidenceService:
                     self._c, case_id=case_id, evidence_id=evidence_id,
                     actor_id=actor_id, on_read=False)
             except Exception:  # noqa: BLE001 - audited already; the alarm is logged
-                logging.getLogger(__name__).exception(
+                logging.getLogger("noctornal.evidence").exception(
                     "integrity alarm for exhibit %s was audited but its "
                     "notification failed", evidence_id)
         return ok
@@ -1285,7 +1356,7 @@ class EvidenceService:
                     self._c, case_id=case_id, evidence_id=evidence_id,
                     actor_id=actor_id, on_read=True)
             except Exception:  # noqa: BLE001 - audited already; the alarm is logged
-                logging.getLogger(__name__).exception(
+                logging.getLogger("noctornal.evidence").exception(
                     "integrity alarm for exhibit %s was audited but its "
                     "notification failed", evidence_id)
             raise IntegrityError(
@@ -1494,19 +1565,12 @@ class EvidenceService:
         # 2026-09-25). The sample origin spends the ticket BEFORE anybody is
         # bound, and an unbound connection sees no exhibit under row-level
         # security, so an EXISTS on core.evidence here refused every valid
-        # ticket.
+        # ticket. As the definer since 0180: the request role reads no
+        # ticket's hash and writes no ticket.
         row = self._c.execute(
-            """UPDATE lab.download_ticket
-                  SET redeemed_at = now()
-                WHERE token_hash = %s
-                  AND evidence_id = %s
-                  AND purpose = %s
-                  AND redeemed_at IS NULL
-                  AND expires_at > now()
-                  AND (SELECT f.case_id FROM iam.element_facts('evidence', %s) f)
-                      = %s
-            RETURNING id, user_id, session_id, token_hash, issued_at""",
-            (digest, evidence_id, TICKET_PRODUCTION, evidence_id, case_id),
+            """SELECT id, user_id, session_id, token_hash, issued_at
+                 FROM lab.spend_production_ticket(%s, %s, %s, %s)""",
+            (digest, evidence_id, TICKET_PRODUCTION, case_id),
         ).fetchone()
         if row is None:
             reason, holder, named = self._production_refusal(
@@ -1581,13 +1645,11 @@ class EvidenceService:
         """Why a presentation matched nothing, for the audit row only: the
         reason, the holder, and the (exhibit, case) the row is filed under,
         which is the ticket's own exhibit when it names one."""
-        # The exhibit's case as a fact (S1): unbound here, see above.
+        # The exhibit's case as a fact (S1): unbound here, see above. The
+        # ticket through its definer (0180), keyed on the presented hash.
         row = self._c.execute(
-            """SELECT t.user_id, t.evidence_id, t.redeemed_at,
-                      t.expires_at <= now(),
-                      (SELECT f.case_id FROM iam.element_facts('evidence', t.evidence_id) f)
-                 FROM lab.download_ticket t
-                WHERE t.token_hash = %s""",
+            """SELECT user_id, evidence_id, redeemed_at, expired, evidence_case
+                 FROM lab.ticket_by_hash(%s)""",
             (digest,)).fetchone()
         if row is None:
             return "unknown_ticket", None, (evidence_id, None)

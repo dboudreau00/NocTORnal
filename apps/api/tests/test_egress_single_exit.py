@@ -9,6 +9,12 @@ primitive, allowed only in a named module with the reason it is allowed. A
 text grep missed an aliased import; a suite-wide socket guard in conftest
 was rejected because it would sit under every database and MinIO test.
 A planted module proves the scan catches what it must.
+
+`scripts/` is scanned by the same rules (docs/17, "yara_db.py is outside the
+single client"), with one more primitive: a program started to reach the
+network on its own account, which the scan reads as a subprocess whose
+command is `git`. The one script that does is an operator's tool and has an
+allowance that says why.
 """
 from __future__ import annotations
 
@@ -20,6 +26,7 @@ import pytest
 from noctornal_api import egress, egress_routes
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "noctornal_api"
+SCRIPTS = Path(__file__).resolve().parents[3] / "scripts"
 
 #: Dotted names whose call, construction or subclassing opens a connection.
 PRIMITIVES = {
@@ -61,6 +68,20 @@ ALLOWED = {
                           "the worker has no network at all",
 }
 
+#: Script -> why it may start a program that opens connections of its own. The
+#: scripts run beside the application, not in it, and most start no such
+#: program. Every entry must still have a finding.
+SCRIPT_ALLOWED = {
+    "yara_db.py": "the operator's rule-corpus tool: `git clone` and `git fetch` of "
+                  "the public rule repositories named in yara/sources.json, run by "
+                  "a person from a shell on a workstation and never by the API, the "
+                  "collector or the cron loop, holding no case material and no "
+                  "credential, at the commit sources.json pins unless the person "
+                  "asks for `--update`. The rules it pulls reach the deployment "
+                  "only through `import`, which a lab member must adopt and a "
+                  "Security Officer activate",
+}
+
 #: Modules part way through their conversion onto the one client, with the
 #: primitives each still names. Empty since transports.py moved onto
 #: pinned_http (F7); the test below fails while an entry has nothing left to
@@ -76,9 +97,29 @@ MESSAGE = ("Every outbound connection goes through egress.route_for (docs/00 dec
            "the host.")
 
 
+#: Calls that start a program. A command that starts `git` with a verb that
+#: talks to a remote (or with arguments the scan cannot read, a starred list)
+#: opens connections of its own, around the one client. A local verb
+#: (`check-ignore`, `rev-parse`) does not.
+SUBPROCESS_CALLS = {"subprocess.run", "subprocess.Popen", "subprocess.call",
+                    "subprocess.check_call", "subprocess.check_output"}
+GIT_REMOTE_VERBS = {"clone", "fetch", "pull", "push", "ls-remote", "remote",
+                    "submodule", "archive", "fetch-pack", "send-pack"}
+
+
+def _starts_with_git(command: ast.AST) -> bool:
+    if not (isinstance(command, (ast.List, ast.Tuple)) and command.elts
+            and isinstance(command.elts[0], ast.Constant)
+            and command.elts[0].value == "git"):
+        return False
+    return any(isinstance(e, ast.Starred)
+               or (isinstance(e, ast.Constant) and e.value in GIT_REMOTE_VERBS)
+               for e in command.elts[1:])
+
+
 def scan(tree: ast.AST) -> set[str]:
     """The primitives a module uses, as dotted names (and 'import:<pkg>',
-    'method:<name>' and 'route:EgressRoute')."""
+    'method:<name>', 'subprocess:git' and 'route:EgressRoute')."""
     names: dict[str, str] = {}
     found: set[str] = set()
     for node in ast.walk(tree):
@@ -109,6 +150,8 @@ def scan(tree: ast.AST) -> set[str]:
             name = dotted(node.func)
             if name in PRIMITIVES:
                 found.add(name)
+            if name in SUBPROCESS_CALLS and node.args and _starts_with_git(node.args[0]):
+                found.add("subprocess:git")
             if isinstance(node.func, ast.Attribute) and node.func.attr in METHODS:
                 found.add(f"method:{node.func.attr}")
             if name and (name.endswith("EgressRoute") or name.endswith("EgressRoute.direct")):
@@ -151,6 +194,28 @@ def test_every_allowed_and_pending_entry_still_has_something_to_excuse():
             f"{name} was converted: delete its PENDING entry")
 
 
+def _scripts():
+    for path in sorted(SCRIPTS.glob("*.py")):
+        yield path, scan(ast.parse(path.read_text(encoding="utf-8")))
+
+
+def test_no_script_outside_the_list_opens_an_outbound_connection():
+    offenders = [f"scripts/{path.name}: {sorted(found)}" for path, found in _scripts()
+                 if found - {"route:EgressRoute"} and path.name not in SCRIPT_ALLOWED]
+    assert not offenders, MESSAGE + "\n" + "\n".join(offenders)
+
+
+def test_every_allowed_script_still_has_something_to_excuse():
+    by_name = {path.name: found for path, found in _scripts()}
+    for name in SCRIPT_ALLOWED:
+        assert by_name.get(name, set()) - {"route:EgressRoute"}, (
+            f"scripts/{name} no longer needs its place")
+
+
+def test_the_scripts_build_no_route():
+    assert not [path.name for path, found in _scripts() if "route:EgressRoute" in found]
+
+
 def test_routes_are_built_only_by_the_route_layer():
     builders = {path.name for path, found in _modules() if "route:EgressRoute" in found}
     assert builders <= ROUTE_BUILDERS, builders - ROUTE_BUILDERS
@@ -169,6 +234,13 @@ def test_routes_are_built_only_by_the_route_layer():
      "socket.create_connection"),
     ("import requests\n", "import:requests"),
     ("def f(ctx, s):\n    return ctx.wrap_socket(s)\n", "method:wrap_socket"),
+    ("import subprocess\nsubprocess.run(['git', 'clone', 'https://x.example/r.git'])\n",
+     "subprocess:git"),
+    ("import subprocess as sp\nsp.Popen(['git', *[]])\n", "subprocess:git"),
+    ("from subprocess import check_output\ncheck_output(('git', 'fetch'))\n",
+     "subprocess:git"),
+    ("import subprocess\nsubprocess.run(['git', '-C', 'd', 'ls-remote', 'u'])\n",
+     "subprocess:git"),
     ("from noctornal_api.egress_policy import EgressRoute\nEgressRoute.direct(1, 2, 3)\n",
      "route:EgressRoute"),
 ])
@@ -176,6 +248,16 @@ def test_a_planted_module_is_caught(tmp_path, source, expected):
     planted = tmp_path / "planted.py"
     planted.write_text(source, encoding="utf-8")
     assert expected in scan(ast.parse(planted.read_text(encoding="utf-8")))
+
+
+@pytest.mark.parametrize("source", [
+    "import subprocess\nsubprocess.run(['git', 'check-ignore', '-q', 'p'])\n",
+    "import subprocess\nsubprocess.run([sys.executable, 'x.py'])\n",
+    "import subprocess\nsubprocess.run(['git'])\n",
+    "def run(*a):\n    pass\nrun(['git', 'clone', 'u'])\n",
+])
+def test_a_local_git_verb_and_other_programs_are_not_an_outbound_connection(source):
+    assert "subprocess:git" not in scan(ast.parse(source))
 
 
 def test_every_crossing_destination_says_how_it_leaves():

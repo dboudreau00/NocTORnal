@@ -45,11 +45,27 @@ workstation's antivirus quarantined mid-clone:
 ## Use
 
 ```bash
-python scripts/yara_db.py fetch      # clone/update every source in sources.json
+python scripts/yara_db.py fetch      # pull every source at the commit pinned in sources.json
 python scripts/yara_db.py build      # validate + index into yara/dist/
 python scripts/yara_db.py stats      # provenance + counts
 python scripts/yara_db.py fetch --only signature-base bartblaze-yara
+python scripts/yara_db.py fetch --update   # follow each default branch, then print the commits to pin
 ```
+
+**Pinned.** A source whose entry in `sources.json` carries
+`"commit": "<full commit id>"` is pulled at exactly that commit and `fetch`
+goes no further, so the rules an operator reviewed are the rules that are
+imported, whatever the upstream has pushed since. A source with no pin is
+refused by `fetch`, with the sentence saying so. `fetch --update` is the one
+explicit way to take the tip of somebody else's repository: it follows each
+default branch past any pin and prints the commit it reached, for the
+operator to read the rules and then put on the source's entry. The manifest
+ships with no pin on any source, so a first `fetch --update` is what produces
+the commits to pin. `stats` marks
+a source `[UNPINNED]` or `[NOT AT ITS PIN]`, and `import` records on the rule
+set's source whether the commit it pulled is the pinned one
+(`source_pinned`). A pin is a full commit id: a branch or a tag moves, and
+`sources.json` with either is refused.
 
 `build` compiles with the product's own engine and two-pass compile when
 yara-x is installed (`noctornal-api[yara]`), so a file that fails there is a

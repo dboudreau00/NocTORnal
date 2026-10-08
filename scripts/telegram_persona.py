@@ -73,15 +73,16 @@ class Refused(Exception):
 
 
 def _audit(conn, actor_id, action: str, object_type: str, object_id,
-           detail: dict) -> None:
+           detail: dict, *, outcome: str = "SUCCESS") -> None:
     from psycopg.types.json import Json
 
     conn.execute(
         """INSERT INTO audit.event
-               (actor_id, actor_kind, action, object_type, object_id, detail)
-           VALUES (%s, %s, %s, %s, %s, %s)""",
+               (actor_id, actor_kind, action, object_type, object_id, outcome,
+                detail)
+           VALUES (%s, %s, %s, %s, %s, %s, %s)""",
         (actor_id, "USER" if actor_id else "SYSTEM", action, object_type,
-         object_id, Json(detail)))
+         object_id, outcome, Json(detail)))
 
 
 def _where() -> dict:
@@ -109,22 +110,26 @@ def sign_in(conn):
     code = getpass.getpass("Authenticator code: ").strip()
     result = AuthService(PgUserStore(conn)).authenticate(
         email, password, code, spend_recovery=False)
+    # Every refusal below is stored as one (outcome DENIED), as the console's
+    # sign-in stores its own (docs/17, "refusals are recorded as SUCCESS").
     if result.outcome is AuthOutcome.SECOND_FACTOR_UNAVAILABLE or not result.ok:
         _audit(conn, result.user_id if result.outcome is
                AuthOutcome.SECOND_FACTOR_UNAVAILABLE else None, "AUTH_FAILED",
                "auth", None, {"reason": result.audit_reason, "email": email,
-                              "via": VIA})
+                              "via": VIA}, outcome="DENIED")
         raise Refused(NOT_VERIFIED)
     if result.audit_reason == "ok_recovery_code":
         _audit(conn, None, "AUTH_FAILED", "auth", None,
-               {"reason": "recovery_code_refused", "email": email, "via": VIA})
+               {"reason": "recovery_code_refused", "email": email, "via": VIA},
+               outcome="DENIED")
         raise Refused(RECOVERY_REFUSED)
     must_change = conn.execute(
         "SELECT must_change_password FROM iam.app_user WHERE id = %s",
         (result.user_id,)).fetchone()
     if must_change is not None and must_change[0]:
         _audit(conn, None, "AUTH_FAILED", "auth", None,
-               {"reason": "password_change_required", "email": email, "via": VIA})
+               {"reason": "password_change_required", "email": email, "via": VIA},
+               outcome="DENIED")
         raise Refused(CHANGE_FIRST)
     holds = conn.execute(
         """SELECT EXISTS (
@@ -136,7 +141,8 @@ def sign_in(conn):
         (result.user_id,)).fetchone()[0]
     if not holds:
         _audit(conn, result.user_id, "AUTHZ_DENIED", "auth", None,
-               {"permission": "collection_account.manage", "via": VIA})
+               {"permission": "collection_account.manage", "via": VIA},
+               outcome="DENIED")
         raise Refused(NOT_MANAGER)
     _audit(conn, result.user_id, "AUTH_SUCCEEDED", "auth", None, {"via": VIA})
     return result.user_id

@@ -1,12 +1,12 @@
 # What is left
 
-**State (2026-10-07):** branch `main`, Alembic head `0173`,
-7967 tests counted as `def test_` functions across the two pytest roots,
-version 0.9.0 single-sourced from `pyproject.toml`. Those four counters are
+**State (2026-10-08):** branch `main`, Alembic head `0182`,
+8365 tests counted as `def test_` functions across the two pytest roots,
+version 0.9.1 single-sourced from `pyproject.toml`. Those four counters are
 generated: `scripts/refresh_counters.py` writes them and `test_doc_invariants`
 holds them to the tree with no tolerance. Per-release totals of COLLECTED
 items, which parametrisation makes larger, are in `release/CHANGELOG.md`.
-Beta 1 (2026-10-07) is released. **Every roadmap item is built.** The
+Beta 1.1 (2026-10-08) is released. **Every roadmap item is built.** The
 end-to-end check of the Telegram adapter is `scripts/telegram_live_check.py`,
 which an operator runs with the deployment's own Telegram account (docs/17
 F31). What stands between the product and a deployment is not software: it is
@@ -51,7 +51,7 @@ left" beside a figure below 100.
 | 6, Tradecraft | **96%** | ◐ | ✅ | ✅ | ✅ | Nothing named. WebAuthn is a deliberate absence, stated in four documents; SECURITY.md says reporting it is not a finding. |
 | 7, Comms | **95%** | ✅ | ✅ | ✅ | ✅ | Nothing named. |
 | 8, Samples | **80%** | ✅ | ✅ | ✅ | ✅ | Nothing named. **The one phase where 100% would still mean "do not switch on": see L1.** |
-| 9, Ingest | **90%** | ✅ | ✅ | ✅ | ✅ | A sweep for dead letters and ingest records attached to no case (docs/17 F55). A vendor answer a lookup adapter cannot read is kept as UNREADABLE (docs/17 F27). |
+| 9, Ingest | **90%** | ✅ | ✅ | ✅ | ✅ | Nothing named. A vendor answer a lookup adapter cannot read is kept as UNREADABLE (docs/17 F27). |
 
 ### Overall: **92.8%**
 
@@ -114,7 +114,34 @@ section, and there was no Alpha 8 release.
 - **The 2026-10-03 review** kept 82 findings (16 high, 25 medium, 41 low, none
   critical), all fixed or stated: 77 fixed, one fixed for credentials and
   stated for the rest, and four stated and not fixed. docs/17, "The
-  2026-10-03 review at Beta 1", lists each by area with its status.
+  2026-10-03 review at Beta 1.1", lists each by area with its status.
+
+**Beta 1.1 (2026-10-08).**
+
+- **The request role narrowed** (Alembic 0174 to 0182; decisions 208 to 215): no
+  session token or binding, no break-glass justification and no sealed column
+  outside the accounts table is readable; no configuration table or delivery
+  setting is writable; an exhibit and a case are updated only in the columns
+  their routes write; a state-bearing audit row names a case; a request raises
+  only the product's own notices.
+- **Holds in the console** (decision 217): an exhibit's card and the case header
+  place and lift a legal hold, and the hold's answer says what a purge destroyed
+  while it waited.
+- **Watches from the console and the API** (F53, decision 228): a collection
+  manager assigned to a case adds a watch.
+- **The sweep widened** (F55, decision 204): dead letters and ingest records
+  attached to no case join the operator-run sweep.
+- **A statement timeout on request connections; ego and path built from the
+  centre** (decisions 221 and 222).
+- **A real purge, a report and a report's release** follow the case's disclosure
+  setting and the destination's configured ceiling (decisions 218 and 219).
+- **Upload bounds, console compression, the hop-count readiness row and the
+  pins** (decisions 223 to 225).
+- **The owner's four answers** (decisions 202 to 205), recorded in docs/17,
+  Decisions the owner took.
+- **The 2026-10-03 review's residuals**: of its 82 findings, 78 are fixed, one is
+  fixed apart from case membership and three are stated and not fixed. docs/17
+  has each, and its Closed index has what Beta 1.1 closed.
 
 ---
 
@@ -153,7 +180,7 @@ server may receive case text (D12).
 | WebAuthn | A deliberate absence: password and TOTP today. SECURITY.md says reporting it is not a finding. |
 
 What the request role can still reach, and the other gaps the fixes and the
-release reviews found and left, are in docs/17, "Known residuals at Beta 1".
+release reviews found and left, are in docs/17, "Known residuals at Beta 1.1".
 
 ---
 
@@ -170,14 +197,15 @@ deployment's own Telegram account.
 **Named and not built.** None of these is a roadmap feature: each waits on a
 decision, or is hardening that needs a migration.
 
-- A sweep for dead letters and ingest records attached to no case, which
-  nothing destroys when their clock runs out (docs/17 F55).
-- A route or console form that creates a watch (docs/17 F53).
-- A console control to place or lift a legal hold on an exhibit or a case.
-  Both are done through the API today (docs/17, Known residuals at Beta 1).
-- Narrowing the request role further: the unpolicied configuration tables,
-  the hold and purge columns and the sealed columns outside the accounts
-  table each need a migration (docs/17).
+- Filtering `iam.case_assignment` for the request role. 31 code paths read
+  the table, some on connections bound to nobody, so each needs a definer
+  function before a row policy can stand on it (docs/17, Known residuals at
+  Beta 1.1).
+- The request role's last writes: the collector's heartbeat, the queues
+  `core.embedding_pending`, `lab.yara_compile_job` and `ingest.batch`, and a
+  case's retention date and governance text. Each needs a migration (docs/17).
+- A way to stop or edit a watch. A watch is made from the console and the API
+  and has no verb after that (docs/17, Known residuals at Beta 1.1).
 
 **Records written under older rules** are listed and never filled or moved
 (decision 80). Claims accepted from Triage with no observation date are dated
@@ -194,11 +222,15 @@ are listed too, and are retracted by an analyst.
 
 None of the numbered questions is open (docs/00 questions 11 and 12, settled
 by decisions 170 and 169). Judgements in docs/17 wait on the owner: who runs
-the document sweep, and under which authority (F30, with counsel); whether
-dead letters and caseless ingest records join it (F55); whether a
-compartmented source should be polled at all, because collection's TLP checks
-pass no compartments while F43 polls compartmented sources on purpose;
-and whether a sample download is an egress.
+the sweep of documents, dead letters and caseless ingest records, and under
+which authority (F30, with counsel); how a co-participation weight divides;
+whether a case's closure should look for a conversation nobody on the team
+can minimise; whether a missing id should cost the same as a hidden one;
+whether the lab keeps a copy of a sample per label set (lab-6); and whether
+lifting a hold takes two people. The owner answered four others on 2026-10-08
+(decisions 202 to 205): compartmented sources keep being polled, a sample
+download is not an egress, dead letters join the sweep, and a retirement over
+a hidden tie reads like any other refusal under NONE.
 
 ## Open questions for the operator
 

@@ -582,16 +582,36 @@ LIMITS: dict[str, Limit] = {
     ),
     # Destruction. The tightest quota here, and deliberately so.
     #
-    # A purge is irreversible and a legal hold is what stands between an
-    # exhibit and one, so both meter together: the attack is not volume,
-    # it is a script looping over cases. Ten an hour is more than any real
-    # retention run needs and far fewer than a loop wants. Fails CLOSED --
-    # if the meter is unavailable, not destroying things is the safe
-    # direction.
+    # A purge is irreversible, so a real run meters tightly: the attack is
+    # not volume, it is a script looping over cases. Ten an hour is more than
+    # any real retention run needs and far fewer than a loop wants. Fails
+    # CLOSED -- if the meter is unavailable, not destroying things is the
+    # safe direction.
+    #
+    # One meter per act (2026-10-08). A lift, a dry run and a real purge
+    # shared this one, so a lead who previewed a case twice and lifted a hold
+    # waited about six minutes before the purge they came to run, and a
+    # request refused for a stale sign-in spent from it too. Each act has its
+    # own, and the routes spend only after the gate has let the request in.
     "retention.destroy": Limit(
         "retention.destroy", quota=10, per_seconds=3600, scope=Scope.USER,
         burst=3, on_backend_failure=OnBackendFailure.DENY,
         audit_every_seconds=60,
+    ),
+    # Releasing a hold is what makes a later destruction lawful, so it keeps
+    # the tight meter and fails closed. Placing one is never metered here:
+    # preservation is the act that must not be slowed (decision 192).
+    "retention.lift": Limit(
+        "retention.lift", quota=10, per_seconds=3600, scope=Scope.USER,
+        burst=3, on_backend_failure=OnBackendFailure.DENY,
+        audit_every_seconds=60,
+    ),
+    # A dry run destroys nothing and is the first step of every real run, and
+    # the Records pane opens on one, so it is metered as a read that scans a
+    # case's clocks (the analytics suite's shape) and not as a destruction.
+    "retention.dry_run": Limit(
+        "retention.dry_run", quota=30, per_seconds=300, scope=Scope.USER,
+        burst=10, on_backend_failure=OnBackendFailure.DENY,
     ),
     # The ingest 202 endpoint, and the ONE limit in this catalogue that
     # cannot be USER-scoped.

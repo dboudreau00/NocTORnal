@@ -81,7 +81,7 @@ from noctornal_api.security.access import (
     tlp_from_name,
 )
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("noctornal.notifications")
 
 IN_APP = "IN_APP"
 SMTP = "SMTP"
@@ -151,6 +151,76 @@ def readable_predicate(alias: str = "n") -> str:
                    AND rca.user_id = {alias}.recipient_id
                    AND (rca.expires_at IS NULL OR rca.expires_at > now())))
     """
+
+
+def element_rows_sql(alias: str = "n") -> str:
+    """SQL for the labels, as they stand NOW, of what `alias`'s notification
+    is about: one `(classification, compartments)` row for each element the
+    notification names through `object_type` and `object_id`, and none when
+    it names no element that carries labels of its own or the element is
+    gone.
+
+    A notification is labelled, when it is raised, with its case's labels
+    composed with those of the element it is about (`enqueue`,
+    `element_classification`): the exhibit of an integrity alarm, the two
+    entities of a merge, the sample of a withdrawal. The case's labels are read
+    again at the drain (`transports.CASE_LABELS_SQL`), and these are the
+    element's, so an exhibit, entity, sample or feed record raised after the
+    notice was queued is judged at its label and not the one it had
+    (docs/17, "a notice raised after it was queued").
+
+    Read through `iam.element_facts` where it answers (a definer function: it
+    reads the element whoever asks) and from the tables where it does not.
+    The drain reads as a system role. The centre reads the notice's own
+    labels and its case's, as before; this is the egress side's check."""
+    return f"""
+        SELECT f.classification, f.compartments
+          FROM iam.element_facts('evidence', {alias}.object_id) f
+         WHERE {alias}.object_type = 'evidence'
+        UNION ALL
+        SELECT f.classification, f.compartments
+          FROM core.node_merge m
+         CROSS JOIN LATERAL (VALUES (m.source_node_id), (m.target_node_id)) AS ends(id)
+         CROSS JOIN LATERAL iam.element_facts('node', ends.id) f
+         WHERE {alias}.object_type = 'node_merge' AND m.id = {alias}.object_id
+        UNION ALL
+        SELECT f.classification, f.compartments
+          FROM core.approval_request a
+         CROSS JOIN LATERAL (VALUES (a.payload ->> 'source_node_id'),
+                                    (a.payload ->> 'target_node_id')) AS ends(id)
+         CROSS JOIN LATERAL iam.element_facts('node', CASE
+                WHEN ends.id ~ '^[0-9a-fA-F]{{8}}-[0-9a-fA-F]{{4}}-[0-9a-fA-F]{{4}}-[0-9a-fA-F]{{4}}-[0-9a-fA-F]{{12}}$'
+                THEN ends.id::uuid END) f
+         WHERE {alias}.object_type = 'approval_request' AND a.id = {alias}.object_id
+           AND a.operation = 'node.merge'
+        UNION ALL
+        SELECT f.classification, f.compartments
+          FROM lab.detonation d
+         CROSS JOIN LATERAL iam.element_facts('sample', d.sample_id) f
+         WHERE {alias}.object_type = 'detonation' AND d.id = {alias}.object_id
+        UNION ALL
+        SELECT f.classification, f.compartments
+          FROM lab.screening_result r
+         CROSS JOIN LATERAL iam.element_facts('sample', r.sample_id) f
+         WHERE {alias}.object_type = 'sample_screening' AND r.id = {alias}.object_id
+        UNION ALL
+        SELECT r.classification, r.compartments
+          FROM ingest.record r
+         WHERE {alias}.object_type = 'ingest.record' AND r.id = {alias}.object_id
+    """
+
+
+def deliverable_predicate(alias: str = "n") -> str:
+    """`readable_predicate`, and the recipient's clearance and compartments
+    dominate the labels the notification's element carries now
+    (`element_rows_sql`). The outbox drain's rule for sending, withdrawing and
+    counting a delivery; the centre keeps `readable_predicate`."""
+    return f"""({readable_predicate(alias)}
+        AND NOT EXISTS (
+            SELECT 1 FROM ({element_rows_sql(alias)}) el
+              JOIN iam.app_user eu ON eu.id = {alias}.recipient_id
+             WHERE NOT (el.classification <= eu.tlp_clearance
+                        AND el.compartments <@ eu.compartments)))"""
 
 
 @dataclass(frozen=True)
@@ -1217,6 +1287,7 @@ __all__ = [
     "IN_APP", "SMTP", "WEBHOOK", "JIRA", "URGENT", "NORMAL", "LOW",
     "ESCALATE_AFTER", "KINDS", "Kind", "Notification", "NotificationError",
     "NotificationService", "Preference", "Tlp", "deliver_after",
-    "effective_labels_for_notification", "escalate_unacknowledged",
-    "escalates_at", "readable_predicate",
+    "deliverable_predicate", "effective_labels_for_notification",
+    "element_rows_sql", "escalate_unacknowledged", "escalates_at",
+    "readable_predicate",
 ]

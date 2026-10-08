@@ -62,8 +62,38 @@ def key():
     _forget(name)
 
 
+#: The production script's one clock read, which a test replaces with an
+#: argument.
+_CLOCK_READ = ("local now = redis.call('TIME')\n"
+               "local now_us = tonumber(now[1]) * 1000000 + tonumber(now[2])\n")
+
+
+def _on_a_clock(backend, now_us):
+    """`backend`, its script's one clock read replaced by `now_us()`
+    (microseconds) passed as an argument. Every other line is what production
+    runs, called through `RedisBackend`'s own parsing. What a test asserts
+    then does not depend on how long a Redis round trip took, nor on Redis's
+    clock holding still between two of them, which a host that steps its
+    clock does not promise: the development machine's moves it by five
+    seconds and back a tenth of a second later, every five seconds
+    (db_clock.py)."""
+    from noctornal_api.ratelimit_redis import _GCRA_LUA
+
+    assert _GCRA_LUA.count(_CLOCK_READ) == 1
+    timed = backend._redis.register_script(
+        _GCRA_LUA.replace(_CLOCK_READ, "local now_us = tonumber(ARGV[4])\n"))
+    backend._script = lambda keys, args: timed(keys=keys, args=[*args, now_us()])
+    return backend
+
+
 def test_the_script_allows_the_burst_then_refuses(backend, key):
-    emission, tolerance = 100_000, 300_000  # 0.1s each, burst 3
+    emission, tolerance = 60_000_000, 180_000_000  # a minute each, burst 3
+    # The three requests and the refusal land in one instant, held still. On
+    # Redis's own clock, 0.1 s between two of them (a slow round trip, or a step
+    # of the host's clock) gave the meter an emission back and the count read
+    # one higher than the burst had left. A minute each keeps the meter's real
+    # expiry, which is Redis's clock too, far longer than the test.
+    _on_a_clock(backend, lambda: 1_790_000_000 * 1_000_000)
     for expected in (2, 1, 0):
         decision = backend.measure(key, emission, tolerance)
         assert decision.allowed
@@ -97,12 +127,6 @@ def test_the_meter_expires_on_its_own(backend, key):
     assert backend.measure(key, emission, tolerance).allowed
 
 
-#: The production script's one clock read, which the agreement test below
-#: replaces with an argument.
-_CLOCK_READ = ("local now = redis.call('TIME')\n"
-               "local now_us = tonumber(now[1]) * 1000000 + tonumber(now[2])\n")
-
-
 def test_redis_and_python_agree_request_for_request(key):
     """The test that matters. One algorithm, two implementations, one
     decision sequence, asserted at the boundaries.
@@ -128,15 +152,10 @@ def test_redis_and_python_agree_request_for_request(key):
     import random
 
     from noctornal_api.ratelimit import InProcessBackend
-    from noctornal_api.ratelimit_redis import _GCRA_LUA, RedisBackend
+    from noctornal_api.ratelimit_redis import RedisBackend
 
-    assert _GCRA_LUA.count(_CLOCK_READ) == 1
     clock_s = [1_790_000_000]
-    backend = RedisBackend(REDIS_URL)
-    timed = backend._redis.register_script(
-        _GCRA_LUA.replace(_CLOCK_READ, "local now_us = tonumber(ARGV[4])\n"))
-    backend._script = lambda keys, args: timed(
-        keys=keys, args=[*args, clock_s[0] * 1_000_000])
+    backend = _on_a_clock(RedisBackend(REDIS_URL), lambda: clock_s[0] * 1_000_000)
     local = InProcessBackend(now=lambda: float(clock_s[0]))
 
     emission, tolerance = 60_000_000, 300_000_000  # a minute each, burst 5

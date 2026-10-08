@@ -44,6 +44,7 @@ import hmac
 import html
 import http.client
 import ipaddress
+import json
 import re
 import secrets as _secrets
 import socket
@@ -393,16 +394,28 @@ def redact(text: str | None, *, secrets: tuple[str, ...] = ()) -> str:
     return out
 
 
-def scrub_live_secrets(text: str | None, *, markup: bool = False) -> str:
+def _json_spellings(form: str):
+    """How a JSON writer spells `form` inside a string: with and without
+    ASCII escapes, and with the solidus escaped, as PHP writes it."""
+    for ascii_only in (True, False):
+        spelled = json.dumps(form, ensure_ascii=ascii_only)[1:-1]
+        yield spelled
+        yield spelled.replace("/", "\\/")
+
+
+def scrub_live_secrets(text: str | None, *, markup: bool = False,
+                       json_escaped: bool = False) -> str:
     """`text` with every live secret removed, EXACTLY and nothing else.
 
     `redact` is for an error message: it also masks anything shaped like a
     credential, which would change an investigator's words. This is for
-    material that is stored as evidence (a collected post, its markup): only
-    a secret this process holds is removed, in each form `redact` knows and,
-    with `markup`, the HTML-escaped forms a page spells it in. A board that
-    reflects the persona's password or session cookie back into a page
-    otherwise gets it stored (2026-10-07)."""
+    material that is stored as evidence (a collected post, its markup, a
+    vendor's answer): only a secret this process holds is removed, in each
+    form `redact` knows, with `markup` the HTML-escaped forms a page spells
+    it in, and with `json_escaped` the forms a JSON string spells it in. A
+    board that reflects the persona's password or session cookie back into
+    a page otherwise gets it stored (2026-10-07), and so does an answer
+    that echoes the API key it was asked under."""
     if not text:
         return text or ""
     out = text
@@ -412,6 +425,9 @@ def scrub_live_secrets(text: str | None, *, markup: bool = False) -> str:
         forms = set(_secret_forms(value))
         if markup:
             forms.update((html.escape(value, quote=True), html.escape(value, quote=False)))
+        if json_escaped:
+            for form in tuple(forms):
+                forms.update(_json_spellings(form))
         for form in sorted(forms, key=len, reverse=True):
             out = out.replace(form, "[REDACTED]")
     return out
@@ -1628,6 +1644,9 @@ def open_connection(route: EgressRoute, host: str, port: int, *, timeout: float,
         raise ValueError("open_connection takes an entered Deadline")
     if not isinstance(timeout, (int, float)) or timeout <= 0:
         raise ValueError("timeout is above 0")
+    if tls is not None:
+        # As fetch_response does, before anything is resolved or dialled.
+        _refuse_unverifying(tls)
     label = _route_label(route)
     try:
         name = egress_policy.normalise_host(host)

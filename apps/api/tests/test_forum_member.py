@@ -823,6 +823,65 @@ def test_a_run_that_stops_the_persona_seals_no_session_for_it(conn, stub):
         w["board"].close()
 
 
+def test_a_stop_that_lands_between_the_check_and_the_seal_leaves_no_session(
+        conn, stub, monkeypatch):
+    """docs/17, "a stopped persona resealed": settle looked whether the persona
+    was stopped and then sealed, two statements, and a stop (a person's burn
+    writes the status and then clears the sessions) landing between them left
+    a burnt persona holding a sealed forum session. The burn here lands after
+    settle has decided and before the seal runs."""
+    from noctornal_api import forum_session
+    from noctornal_api.collection import PersonaVault
+    from noctornal_api.db import connect
+
+    w = _world(conn, stub, "xenforo")
+    real = forum_session.seal_session
+
+    def burnt_first(c, persona_id, origin, jar):
+        other = connect()
+        try:
+            PersonaVault(other).set_status(persona_id, "BURNED", actor_id=w["recorder"],
+                                           reason="seen by an administrator")
+        finally:
+            other.close()
+        return real(c, persona_id, origin, jar)
+
+    monkeypatch.setattr(forum_session, "seal_session", burnt_first)
+    try:
+        assert _svc(conn).run_once(w["source"], actor_id=None).status == "OK"
+        assert conn.execute("SELECT status::text FROM collect.collection_account "
+                            "WHERE id = %s", (w["persona"],)).fetchone()[0] == "BURNED"
+        assert _session_row(conn, w["persona"]) == (False, None, None)
+    finally:
+        w["board"].close()
+
+
+def test_a_stopped_persona_is_sealed_nothing_and_loses_what_it_held(conn, stub):
+    """The check is the seal's own, under the row lock: a persona stopped by
+    any route holds no sealed session after a seal is attempted."""
+    from noctornal_api import forum_session
+
+    w = _world(conn, stub, "xenforo")
+    try:
+        assert _svc(conn).run_once(w["source"], actor_id=None).status == "OK"
+        assert _session_row(conn, w["persona"])[0] is True
+        origin = forum_session.origin_key(w["board"].base_url)
+        # Stopped behind the vault's back, so nothing cleared the session.
+        conn.execute("UPDATE collect.collection_account SET status = 'LOCKED', "
+                     "status_changed_at = now() WHERE id = %s", (w["persona"],))
+        assert _session_row(conn, w["persona"])[0] is True
+        forum_session.seal_session(conn, w["persona"], origin, {"xf_session": "late"})
+        assert _session_row(conn, w["persona"]) == (False, None, None)
+        # A persona that is not stopped is still sealed.
+        conn.execute("UPDATE collect.collection_account SET status = 'HEALTHY', "
+                     "status_changed_at = now() WHERE id = %s", (w["persona"],))
+        forum_session.seal_session(conn, w["persona"], origin, {"xf_session": "kept"})
+        assert forum_session.open_session(conn, w["persona"], origin) == {
+            "xf_session": "kept"}
+    finally:
+        w["board"].close()
+
+
 def test_the_stop_route_signs_a_forum_persona_out_of_its_board(conn, stub, monkeypatch):
     from noctornal_api.http.routers import collection as router
 

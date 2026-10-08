@@ -81,7 +81,7 @@ try:
     from noctornal_api.db import SystemPurpose, connect_system
     from noctornal_api.graph import AssertionInput, GraphWriteError, GraphWriteService
     from noctornal_api.security import totp
-    from noctornal_api.security.access import Tlp
+    from noctornal_api.security.access import TLP_NAMES, Tlp
     from noctornal_api.selectors import SelectorError, SelectorStore
     from noctornal_api.stores import PgUserStore
 except ImportError as exc:
@@ -746,7 +746,7 @@ _CREWS = {
 _BRIDGES = ["dvina", "kolar", "oriel"]
 
 #: The labels `--classification` accepts, lowest first (core.tlp).
-_TLP_NAMES = ("CLEAR", "GREEN", "AMBER", "AMBER_STRICT", "RED")
+_TLP_NAMES = TLP_NAMES
 
 
 def cmd_demo_network(args: argparse.Namespace) -> None:

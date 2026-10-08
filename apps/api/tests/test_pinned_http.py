@@ -414,6 +414,52 @@ def test_open_connection_takes_only_an_entered_deadline():
                                     deadline=pinned_http.Deadline(5))
 
 
+def test_open_connection_refuses_a_tls_context_that_does_not_verify(monkeypatch):
+    """docs/17, the pinned client's TLS check: `fetch_response` refuses a
+    context that skips the certificate or the name check, and
+    `open_connection` took any. Its one caller passes a verifying context;
+    the refusal is made before anything is resolved or dialled."""
+    import ssl
+
+    def dialled(*_a, **_k):
+        raise AssertionError("a refused context must not reach the network")
+
+    monkeypatch.setattr(pinned_http, "_dial", dialled)
+    monkeypatch.setattr(pinned_http, "_open_tunnel", dialled)
+    route = _dev_integration(Rule.for_host("localhost", {1025}), name="smtp")
+    no_name_check = ssl.create_default_context()
+    no_name_check.check_hostname = False
+    no_certificate_check = ssl.create_default_context()
+    no_certificate_check.check_hostname = False
+    no_certificate_check.verify_mode = ssl.CERT_NONE
+    for context in (no_name_check, no_certificate_check):
+        with pinned_http.Deadline(5) as deadline:
+            with pytest.raises(pinned_http.OutboundError) as caught:
+                pinned_http.open_connection(route, "localhost", 1025, timeout=5,
+                                            deadline=deadline, tls=context)
+        assert caught.value.code == "tls_context_refused"
+        assert caught.value.connected is False and caught.value.request_sent is False
+
+
+def test_open_connection_accepts_a_verifying_context(monkeypatch):
+    import ssl
+
+    listener = _banner_server("127.0.0.1")
+    port = listener.getsockname()[1]
+    try:
+        route = _dev_integration(Rule.for_host("127.0.0.1", {port}), name="smtp")
+        context = ssl.create_default_context()
+        with pinned_http.Deadline(5) as deadline:
+            # The handshake itself fails (the stub speaks no TLS): what is held
+            # is that the context was not turned away as unverifying.
+            with pytest.raises(pinned_http.OutboundError) as caught:
+                pinned_http.open_connection(route, "127.0.0.1", port, timeout=5,
+                                            deadline=deadline, tls=context)
+        assert caught.value.code != "tls_context_refused"
+    finally:
+        listener.close()
+
+
 def test_open_connection_refuses_what_the_route_does_not_name():
     route = _dev_integration(Rule.for_host("localhost", {1025}), name="smtp")
     with pinned_http.Deadline(5) as deadline:

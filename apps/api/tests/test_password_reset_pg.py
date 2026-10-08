@@ -358,9 +358,11 @@ def test_a_wrong_current_password_is_a_403_that_counts_toward_the_lockout(
         (uid,)).fetchone()
     assert passwords.verify_password(row[0], PASSWORD)
     assert row[1] == 1, "a wrong current password did not count"
+    # A refusal is stored as one (docs/17, "refusals are recorded as SUCCESS").
     assert conn.execute(
-        """SELECT 1 FROM audit.event WHERE actor_id = %s
-            AND action = 'PASSWORD_CHANGE_FAILED'""", (uid,)).fetchone()
+        """SELECT outcome FROM audit.event WHERE actor_id = %s
+            AND action = 'PASSWORD_CHANGE_FAILED'""", (uid,)).fetchall() == [
+        ("DENIED",)]
     assert _live_sessions(conn, uid) == 1, "a refused change signed them out"
 
 

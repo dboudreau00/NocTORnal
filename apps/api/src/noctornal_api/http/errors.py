@@ -108,6 +108,33 @@ def is_rls_refusal(exc: BaseException) -> bool:
     return any(f'table "{name}"' in text for name in names)
 
 
+#: What a request is told when one of its statements overran the limit a
+#: request connection is opened with (`db.request_statement_timeout`).
+#: 504 and not 503: the console waits out a 503 and asks again by itself
+#: (the metrics retry), and a statement that overran once will overrun again,
+#: so a 503 would have every open console re-running it. The reason is the
+#: sentence; the cause is logged against the reference.
+STATEMENT_TIMEOUT_DETAIL = (
+    "The database did not finish within the time this deployment allows one "
+    "statement, so the request was stopped. Ask for less at once (a smaller "
+    "page or a tighter filter) or try again when the system is quieter.")
+
+
+def is_statement_timeout(exc: BaseException) -> bool:
+    """True when the database cancelled a statement of this request, whether
+    `exc` is the cancellation or a service error that wraps it."""
+    return isinstance(_db_cause(exc), psycopg.errors.QueryCanceled)
+
+
+def statement_timeout_problem(exc: BaseException,
+                              request: Request | None = None) -> Problem:
+    """The 504 for `exc`, with a reference the log carries the cause under."""
+    cid = uuid.uuid4().hex[:12]
+    where = f" on {request.method} {request.url.path}" if request is not None else ""
+    log.warning("statement timeout %s%s: %s", cid, where, _db_cause(exc))
+    return Problem(504, "Gateway timeout", f"{STATEMENT_TIMEOUT_DETAIL} (ref {cid})")
+
+
 def _db_cause(exc: Exception, depth: int = 8) -> psycopg.Error | None:
     """The psycopg error underneath `exc`, however deeply it is wrapped.
 
@@ -169,6 +196,11 @@ def safe_detail(exc: Exception) -> str:
     if cause is None:
         # Raised by our own code with an authored message — safe to return.
         return str(exc)
+    if isinstance(cause, psycopg.errors.QueryCanceled):
+        # Not a 400 about the request: the database ran out of the time one
+        # statement is allowed. Raised, because every caller is on its way to
+        # a `Problem` and this is the one that is true.
+        raise statement_timeout_problem(exc) from exc
     cid = uuid.uuid4().hex[:12]
     log.warning("db error %s: %s", cid, cause, exc_info=cause)
     constraint = getattr(getattr(cause, "diag", None), "constraint_name", None)
@@ -191,7 +223,7 @@ def install_error_handlers(app) -> None:
     from noctornal_api.cases import CaseError
     from noctornal_api.curation import CurationError
     from noctornal_api.evidence import (
-        EvidenceError, ExhibitUnavailable, IntegrityError)
+        EvidenceError, ExhibitUnavailable, IntegrityError, StoreUnavailable)
     from noctornal_api.graph import GraphWriteError
     from noctornal_api.security.access import AccessResolutionError
     from noctornal_api.selectors import SelectorError, SelectorOwnerConflict
@@ -206,11 +238,21 @@ def install_error_handlers(app) -> None:
         # A strong selector already attributed elsewhere — a merge lead.
         return problem_response(409, "Conflict", str(exc))
 
+    @app.exception_handler(psycopg.errors.QueryCanceled)
+    async def _statement_timeout(request: Request, exc: Exception):
+        """A statement overran the limit a request connection is opened
+        with, or was cancelled by an operator: a clean 504 with a reference,
+        never the 500 and the logged traceback it was."""
+        problem = statement_timeout_problem(exc, request)
+        return problem_response(problem.status, problem.title, problem.detail)
+
     @app.exception_handler(CaseError)
     @app.exception_handler(CurationError)
     @app.exception_handler(SelectorError)
     @app.exception_handler(GraphWriteError)
-    async def _bad_request(_: Request, exc: Exception):
+    async def _bad_request(request: Request, exc: Exception):
+        if is_statement_timeout(exc):
+            return await _statement_timeout(request, exc)
         return problem_response(400, "Invalid request", safe_detail(exc))
 
     @app.exception_handler(IntegrityError)
@@ -225,8 +267,18 @@ def install_error_handlers(app) -> None:
         # 2026-10-03). The sentence is fixed text, not the exception's cause.
         return problem_response(409, "Exhibit unavailable", str(exc))
 
+    @app.exception_handler(StoreUnavailable)
+    async def _store_unavailable(_: Request, exc: Exception):
+        # The object store did not answer: the caller did nothing wrong and
+        # may try again, which a 400 would not tell them and a 500 would
+        # report as the server's own defect (2026-10-08).
+        return problem_response(503, "Service unavailable", str(exc),
+                                headers={"Retry-After": "5"})
+
     @app.exception_handler(EvidenceError)
-    async def _evidence(_: Request, exc: Exception):
+    async def _evidence(request: Request, exc: Exception):
+        if is_statement_timeout(exc):
+            return await _statement_timeout(request, exc)
         return problem_response(400, "Evidence error", safe_detail(exc))
 
     @app.exception_handler(AccessResolutionError)

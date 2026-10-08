@@ -379,7 +379,7 @@ _COMPOSED = """
 SELECT s.state::text, s.screening_outcome,
        greatest(s.classification, coalesce(c.classification, s.classification))::text,
        s.compartments || coalesce(c.compartments, '{}'),
-       c.status::text, octet_length(s.data_key_ciphertext) > 0, s.case_id
+       c.status::text, NOT s.data_key_destroyed, s.case_id
   FROM lab.sample s LEFT JOIN LATERAL iam.case_facts(s.case_id) c ON true
  WHERE s.id = %s"""
 

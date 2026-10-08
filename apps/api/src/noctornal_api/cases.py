@@ -74,6 +74,20 @@ class CaseError(Exception):
     pass
 
 
+#: Roles an account holds on ONE case at a time. docs/05: the external
+#: liaison reads a single case, time-boxed, and the role is the leak path
+#: that model exists to keep narrow. `_grant` refuses a second live
+#: assignment of a role in this set.
+SINGLE_CASE_ROLES = frozenset({"LIAISON"})
+
+
+class RoleHeldOnAnotherCase(CaseError):
+    """A grant of a single-case role to an account that already holds a live
+    assignment of it on another case. Its own class so the sharing route can
+    word the refusal without naming the fact when the colleague was named by
+    an address, which anyone with `case.grant` can guess."""
+
+
 @dataclass(frozen=True)
 class CaseRow:
     id: UUID
@@ -91,6 +105,11 @@ class CaseRow:
     review_due: date
     created_at: datetime
     closed_at: datetime | None
+    #: Whether the case is under a legal hold, and the reason it was placed
+    #: for. The reason is for those who hold `retention.manage` on the case,
+    #: and the route that draws the record decides who they are.
+    legal_hold: bool = False
+    legal_hold_reason: str | None = None
 
 
 class CaseService:
@@ -163,7 +182,8 @@ class CaseService:
         row = self._c.execute(
             """SELECT id, code, title, summary, status, classification, compartments,
                       owner_user_id, deputy_user_id, legal_basis, authority_ref,
-                      retention_until, review_due, created_at, closed_at
+                      retention_until, review_due, created_at, closed_at,
+                      legal_hold, legal_hold_reason
                  FROM core."case" WHERE id = %s""",
             (case_id,),
         ).fetchone()
@@ -266,7 +286,7 @@ class CaseService:
             """SELECT c.id, c.code, c.title, c.summary, c.status, c.classification,
                       c.compartments, c.owner_user_id, c.deputy_user_id, c.legal_basis,
                       c.authority_ref, c.retention_until, c.review_due, c.created_at,
-                      c.closed_at
+                      c.closed_at, c.legal_hold, c.legal_hold_reason
                  FROM core."case" c
                  JOIN iam.case_assignment a ON a.case_id = c.id
                  JOIN iam.app_user u ON u.id = a.user_id
@@ -313,20 +333,57 @@ class CaseService:
         the right trade for now — removing a time limit is a deliberate act
         and deserves its own verb rather than being the accidental effect of
         omitting a field.
+
+        **A role in `SINGLE_CASE_ROLES` is refused while the account holds a
+        live assignment of it on another case** (docs/17 "LIAISON is not
+        single-case", closed 2026-10-08). Re-granting on the same case is
+        not a second assignment and still works, so a liaison's end date can
+        be moved. "Live" is the gate's own test, no end or an end in the
+        future (`CHECK_ASSIGNMENT`). The check and the write are one
+        transaction under a lock per account and role: two leads granting
+        the same liaison at the same moment would otherwise each find
+        nothing held and each write.
         """
+        with self._c.transaction():
+            if role_key in SINGLE_CASE_ROLES:
+                self._refuse_second_live(case_id, user_id, role_key)
+            self._c.execute(
+                """INSERT INTO iam.case_assignment
+                       (case_id, user_id, role_key, granted_by, expires_at)
+                   VALUES (%s, %s, %s, %s, %s)
+                   ON CONFLICT (case_id, user_id)
+                       DO UPDATE SET role_key = EXCLUDED.role_key,
+                                     granted_by = EXCLUDED.granted_by,
+                                     expires_at = COALESCE(
+                                         EXCLUDED.expires_at,
+                                         iam.case_assignment.expires_at),
+                                     granted_at = now()""",
+                (case_id, user_id, role_key, granted_by, expires_at),
+            )
+
+    def _refuse_second_live(self, case_id: UUID, user_id: UUID,
+                            role_key: str) -> None:
+        """Raise `RoleHeldOnAnotherCase` if `user_id` holds a live `role_key`
+        assignment on a case other than `case_id`. Called inside `_grant`'s
+        transaction, which the advisory lock below lives and dies with."""
         self._c.execute(
-            """INSERT INTO iam.case_assignment
-                   (case_id, user_id, role_key, granted_by, expires_at)
-               VALUES (%s, %s, %s, %s, %s)
-               ON CONFLICT (case_id, user_id)
-                   DO UPDATE SET role_key = EXCLUDED.role_key,
-                                 granted_by = EXCLUDED.granted_by,
-                                 expires_at = COALESCE(
-                                     EXCLUDED.expires_at,
-                                     iam.case_assignment.expires_at),
-                                 granted_at = now()""",
-            (case_id, user_id, role_key, granted_by, expires_at),
-        )
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (f"iam.case_assignment.single_case:{role_key}:{user_id}",))
+        held = self._c.execute(
+            """SELECT 1 FROM iam.case_assignment
+                WHERE user_id = %s AND role_key = %s AND case_id <> %s
+                  AND (expires_at IS NULL OR expires_at > now())
+                LIMIT 1""",
+            (user_id, role_key, case_id)).fetchone()
+        if held is not None:
+            # The other case is not named: the person granting may not be
+            # on it, and which case it is is not theirs to learn here.
+            role = role_key.lower()
+            raise RoleHeldOnAnotherCase(
+                f"that account already holds a live {role} assignment on "
+                f"another case. A {role} holds one case at a time: the other "
+                f"assignment has to end, or be revoked, before this one can "
+                f"be made.")
 
     def _require_clearance(self, user_id: UUID, classification: str, who: str) -> None:
         row = self._c.execute(
@@ -431,5 +488,6 @@ def _row(r) -> CaseRow:
         id=r[0], code=r[1], title=r[2], summary=r[3], status=r[4], classification=r[5],
         compartments=list(r[6] or []), owner_user_id=r[7], deputy_user_id=r[8],
         legal_basis=r[9], authority_ref=r[10], retention_until=r[11], review_due=r[12],
-        created_at=r[13], closed_at=r[14],
+        created_at=r[13], closed_at=r[14], legal_hold=bool(r[15]),
+        legal_hold_reason=r[16],
     )

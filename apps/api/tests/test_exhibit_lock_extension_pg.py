@@ -44,6 +44,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from uuid import uuid4
 
 import pytest
+from db_clock import wait_until_after
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DATABASE_URL"), reason="needs a migrated database")
@@ -161,6 +162,12 @@ def _exhibit(conn, case_id, uid, *, lock_day=date(2027, 1, 10), purged=False,
     EvidenceService(conn, None)._custody(
         ev, "ACQUIRED", uid, hash_verified=True,
         detail={"sha256": "ab", "bytes": 10, "lock_ends_at": lodged.isoformat()})
+    # The register and the inspector read the NEWEST lock end of an exhibit by
+    # when each custody row was appended (`NEWEST_LOCK_SQL`), so a lengthening
+    # has to be appended later by the database's own clock than this lodging.
+    wait_until_after(conn, conn.execute(
+        "SELECT max(occurred_at) FROM core.evidence_custody WHERE evidence_id = %s",
+        (ev,)).fetchone()[0])
     return ev, key, lodged
 
 

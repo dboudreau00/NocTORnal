@@ -73,9 +73,9 @@ FORMAT = 2
 
 __all__ = [
     "FORMAT", "MAX_COOKIES", "MAX_COOKIE_NAME", "MAX_COOKIE_VALUE",
-    "MAX_ORIGINS", "clear_session", "cookie_header", "open_session",
-    "open_sessions", "origin_key", "seal_session", "session_sealed_at",
-    "take_cookies",
+    "MAX_ORIGINS", "STOPPED_SQL", "clear_session", "cookie_header",
+    "open_session", "open_sessions", "origin_key", "seal_session",
+    "session_sealed_at", "take_cookies",
 ]
 
 
@@ -229,20 +229,37 @@ def _store(conn: psycopg.Connection, persona_id: UUID,
             WHERE id = %s""", (ciphertext, key_id, persona_id))
 
 
+#: A persona a person locked or burnt, or its platform locked: it holds no
+#: sealed session (collect.collection_account columns).
+STOPPED_SQL = ("status::text IN ('LOCKED', 'BURNED') OR machine_lock_code IS NOT NULL")
+
+
 def seal_session(conn: psycopg.Connection, persona_id: UUID, origin: str,
                  jar: dict[str, str]) -> None:
     """Seal `jar` as the persona's session on `origin`, beside its
     credential and beside any other board's jar. An empty jar removes this
     origin's only. Read, change and write under one row lock, so two runs
-    of one persona cannot overwrite each other's board."""
+    of one persona cannot overwrite each other's board.
+
+    Whether the persona is stopped is read under that same lock, and a
+    stopped persona is sealed nothing and has what it held cleared. A stop
+    writes the persona's status and then clears its sessions, so a check
+    made before the lock could pass, the stop could land between the check
+    and this seal, and a burnt persona was left holding a sealed session
+    (docs/17, "a stopped persona resealed"). The stop's status write waits
+    for the row lock, and a stop that came first is seen here."""
     if not origin:
         return
     with conn.transaction():
         row = conn.execute(
-            """SELECT session_ciphertext, session_key_id
+            f"""SELECT session_ciphertext, session_key_id, ({STOPPED_SQL})
                  FROM collect.collection_account WHERE id = %s FOR UPDATE""",
             (persona_id,)).fetchone()
         if row is None:
+            return
+        if row[2]:
+            if row[0]:
+                _store(conn, persona_id, {})
             return
         jars = _decode(persona_id, row)
         clean = _clean_jar(jar)

@@ -47,6 +47,7 @@ from noctornal_api.cases import (
     CONTENT_READ_ONLY_STATES,
     CaseError,
     CaseService,
+    RoleHeldOnAnotherCase,
     allowed_transitions,
 )
 from noctornal_api.db import SystemPurpose, system_connection
@@ -57,6 +58,7 @@ from noctornal_api.http.deps import (
     check_writable_labels,
     current_user,
     get_conn,
+    holds_global,
     require,
     require_global,
 )
@@ -123,6 +125,15 @@ class CaseOut(BaseModel):
     my_role: str | None = None
     my_role_name: str | None = None
     my_permissions: list[str] = []
+    # Whether the case is under a legal hold, for the header's chip and its
+    # Hold control (2026-10-08). The reason it was placed for goes only to a
+    # caller who holds `retention.manage` on the case, as the due list's
+    # does, and `may_hold` says whether the Hold control is offered: the
+    # global role and the case's, asked as if the sign-in were fresh (the
+    # route asks for one). A hint for the console, never a gate.
+    legal_hold: bool = False
+    legal_hold_reason: str | None = None
+    may_hold: bool = False
 
 
 def _out(c) -> CaseOut:
@@ -135,10 +146,12 @@ def _out(c) -> CaseOut:
         authority_ref=c.authority_ref,
         allowed_transitions=allowed_transitions(c.status),
         read_only=c.status in CONTENT_READ_ONLY_STATES,
+        legal_hold=c.legal_hold,
     )
 
 
-def _with_caller(conn: psycopg.Connection, cases: list, user_id: UUID) -> list[CaseOut]:
+def _with_caller(conn: psycopg.Connection, cases: list, user_id: UUID, *,
+                 holds: bool = True) -> list[CaseOut]:
     """`_out` for each case, with the owner's name and the caller's live
     role on it, read in two queries whatever the number of cases.
 
@@ -163,12 +176,19 @@ def _with_caller(conn: psycopg.Connection, cases: list, user_id: UUID) -> list[C
             WHERE a.user_id = %s AND a.case_id = ANY(%s)
               AND (a.expires_at IS NULL OR a.expires_at > now())""",
         (user_id, ids)).fetchall()}
+    # The hold's controls and reason are drawn for one case and not for a
+    # list (`holds=False`): a listing is not where the text a court order
+    # rests on is handed to everyone who may open the page.
+    may_hold_globally = holds and holds_global(conn, user_id, "retention.manage")
     for row, case in zip(out, cases, strict=True):
         row.owner_name = names.get(case.owner_user_id)
         role = mine.get(case.id)
         if role:
             row.my_role, row.my_role_name, row.my_permissions = (
                 role[0], role[1] or role[0], role[2])
+            if holds and "retention.manage" in role[2]:
+                row.legal_hold_reason = case.legal_hold_reason
+                row.may_hold = may_hold_globally
     return out
 
 
@@ -205,7 +225,7 @@ def list_cases(user: CurrentUser = Depends(current_user),
     # With the caller's role on each, for the case list's "Your role"
     # column (ux02-cases:case-list-lacks-triage-fields, 2026-09-23).
     return _with_caller(conn, CaseService(conn).list_for_user(user.user_id),
-                        user.user_id)
+                        user.user_id, holds=False)
 
 
 @router.get("/cases/{case_id}", response_model=CaseOut,
@@ -547,6 +567,10 @@ def assign_case_user(case_id: UUID, body: AssignUserBody,
     compartments is a reachable state that every listing then quietly
     filters away. The grant would appear to succeed and confer nothing.
 
+    One thing it checks in the service rather than here: a liaison holds
+    one case at a time (`SINGLE_CASE_ROLES`, enforced in `_grant`, so every
+    writer of an assignment meets it).
+
     Four things it does not check, which are checked here:
 
     - **the role exists and confers something.** `_grant` inserts straight
@@ -682,6 +706,19 @@ def assign_case_user(case_id: UUID, body: AssignUserBody,
                 case_id, target, body.role_key,
                 granted_by=user.user_id, expires_at=body.expires_at,
             )
+    except RoleHeldOnAnotherCase as exc:
+        if body.email is None:
+            raise
+        _audit_share_refused(conn, user, case_id, body.email,
+                             "role_held_on_another_case")
+        # Said without the reason, as the labels refusal below is: by a
+        # guessable address it would tell any `case.grant` holder whether a
+        # colleague or partner is a live liaison on some other case.
+        raise Problem(
+            400, "Invalid request",
+            "that colleague cannot be given this role on this case. An "
+            "administrator can check their account.",
+        ) from exc
     except CaseError as exc:
         if body.email is None:
             raise

@@ -597,7 +597,7 @@ def _credentials_not_published(conn: psycopg.Connection) -> Check:
     off within a week. Values are never quoted, only variable names and
     which published value each one carries.
     """
-    from noctornal_api.config import ENV_VAR, PRODUCTION, published_credentials
+    from noctornal_api.config import ENV_VAR, PRODUCTION, is_production, published_credentials
 
     name = "credentials_not_published"
     found = published_credentials()
@@ -608,7 +608,7 @@ def _credentials_not_published(conn: psycopg.Connection) -> Check:
             "repository, its CI workflow, its test suites or MinIO publish; a "
             "store configured outside this environment is not visible from here")
     listed = "; ".join(f"{p.variable} ({p.label})" for p in found)
-    production = os.environ.get(ENV_VAR, "").strip().lower() == PRODUCTION
+    production = is_production()
     mode = ("this process runs as production, so it should not have started "
             "at all" if production else
             f"{ENV_VAR} is not {PRODUCTION}, so the boot check that refuses "
@@ -816,6 +816,67 @@ def _rate_limiting_enabled(conn: psycopg.Connection) -> Check:
         "rate_limiting_enabled", True,
         f"NOCTORNAL_RATELIMIT is {'unset' if not setting.strip() else repr(setting.strip())}; "
         f"the limiter is built at startup")
+
+
+def _proxy_hops_declared(conn: psycopg.Connection) -> Check:
+    """Does this process know how many proxies stand in front of it?
+    (docs/17 "a missing hop count", 2026-10-08)
+
+    `limits.client_ip` takes the client's address from the peer unless
+    `NOCTORNAL_TRUSTED_PROXY_HOPS` counts the proxies the operator runs, and
+    then from that far along `X-Forwarded-For`, counted from the right. The
+    peer is what uvicorn reports, and uvicorn reports the forwarded address
+    instead only when it is told to trust the proxy (`--forwarded-allow-ips`,
+    which `compose.yml` sets and a deployment of another shape may not). So an
+    unset count leaves the client's address to how the server was started:
+    where that is not right the peer is the proxy, every client is one subject
+    to the rate limiter, the sign-in audit names the proxy as the origin of
+    every login and every session is pinned to one address, and neither the
+    boot nor this register said so. The count is read by
+    `limits.trusted_proxy_hops`, the reader `client_ip` uses, so the row and
+    the code cannot differ.
+
+    Outside production the row passes and says what it read: a development
+    stack has no proxy, and the peer is the right address there. In production
+    a count below one fails it. NOT blocking: it affects who the limiter and
+    the audit think a client is, not material a poll collects; and it is
+    deliberately not a boot refusal either, because a count cannot be told
+    from a deployment that really has no proxy in front of it.
+    """
+    from noctornal_api.config import is_production
+    from noctornal_api.http.limits import HOPS_ENV, trusted_proxy_hops
+
+    name = "proxy_hops_declared"
+    raw = os.environ.get(HOPS_ENV, "").strip()
+    hops = trusted_proxy_hops()
+    shown = "unset" if not raw else repr(raw)
+    if hops >= 1:
+        return Check(
+            name, True,
+            f"{HOPS_ENV} is {hops}: {count_of(hops, 'proxy stands', 'proxies stand')} "
+            f"in front of this process, and the client's address is the entry "
+            f"{hops} from the right of X-Forwarded-For")
+    if not is_production():
+        return Check(
+            name, True,
+            f"{HOPS_ENV} is {shown}, so the peer's address is the client's. That is "
+            f"right with no proxy in front, as in development; in production the "
+            f"count is the number of proxies in front of the API")
+    return Check(
+        name, False,
+        f"{HOPS_ENV} is {shown}, which counts as 0: this process takes the address "
+        f"its server reports for the peer as the client's, and never reads "
+        f"X-Forwarded-For itself. Behind a proxy that is right only if the server "
+        f"was told to read the forwarded address (uvicorn's --forwarded-allow-ips, "
+        f"which this deployment's compose file sets); where it was not, the peer is "
+        f"the proxy, the rate limiter meters every client as one subject, the "
+        f"sign-in audit records the proxy as the origin of every login and session "
+        f"binding pins every session to one address",
+        f"set {HOPS_ENV} to the number of proxies in front of the API (1 behind the "
+        f"Caddy this deployment ships) in secrets.env and restart, so the "
+        f"application reads the client from X-Forwarded-For itself, counted from "
+        f"the right, whatever the server was started with; a count above the real "
+        f"one lets a client choose its own address")
 
 
 def _redis_limiter_store(conn: psycopg.Connection) -> Check:
@@ -1233,7 +1294,7 @@ def _redis_limiter_isolated(conn: psycopg.Connection) -> Check:
     `_acl_posture`), and under NOCTORNAL_ENV=production a limiter the ACL
     does not confine fails the row before the census runs.
     """
-    from noctornal_api.config import ENV_VAR, PRODUCTION
+    from noctornal_api.config import is_production
     from noctornal_api.http.limits import redacted_url
     from noctornal_api.ratelimit_redis import (
         CONNECT_TIMEOUT_S,
@@ -1272,7 +1333,7 @@ def _redis_limiter_isolated(conn: psycopg.Connection) -> Check:
         # holding the whole register.
         posture = _acl_posture(backend._redis)
         faults = _acl_faults(posture, shown)
-        if faults and os.environ.get(ENV_VAR, "").strip().lower() == PRODUCTION:
+        if faults and is_production():
             return Check(
                 name, False,
                 f"Redis at {where} answers PING, and its ACL does not confine "
@@ -4023,6 +4084,11 @@ _CHECKS: tuple[tuple[str, Callable[[psycopg.Connection], Check], str], ...] = (
      "generated for this deployment, and restart"),
     ("rate_limiting_enabled", _rate_limiting_enabled,
      "unset NOCTORNAL_RATELIMIT and restart the API"),
+    # docs/17 "a missing hop count" (2026-10-08). Not blocking, no console
+    # target: the count is settled in secrets.env.
+    ("proxy_hops_declared", _proxy_hops_declared,
+     "set NOCTORNAL_TRUSTED_PROXY_HOPS to the number of proxies in front of the "
+     "API and restart"),
     ("redis_limiter_store", _redis_limiter_store,
      "fix REDIS_URL or start the Redis it names; run it with "
      "maxmemory-policy=noeviction (docs/16 C8)"),

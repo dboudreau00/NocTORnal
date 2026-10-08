@@ -470,7 +470,7 @@ means break-glass refuses every request because nobody can review one.
 GET /api/v1/admin/readiness
 ```
 
-Forty-five checks, each with the evidence behind it and, when it fails, the
+Forty-six checks, each with the evidence behind it and, when it fails, the
 action that fixes it. It needs `user.manage`, which is a step-up
 permission, so re-enter your second factor first.
 
@@ -504,7 +504,7 @@ register is the one that answers for the deployment.
 
 ### What stays red, and what a red check refuses
 
-Four of the forty-five are **blocking** (`readiness.BLOCKING_CHECKS`):
+Four of the forty-six are **blocking** (`readiness.BLOCKING_CHECKS`):
 `prohibited_content_policy`, `sample_origin_configured`,
 `retention_rules_confirmed` and `security_officer_present`. "Blocking" is
 not a synonym for important, everything in the register is important. It
@@ -548,6 +548,17 @@ that instance's other databases, without reading a value. In production it
 fails when the ACL does not confine the limiter (see
 [The limiter's Redis](#the-limiters-redis)); it is green on this compose
 file's Redis, which nothing else uses.
+
+`proxy_hops_declared` reads `NOCTORNAL_TRUSTED_PROXY_HOPS`, the number of
+proxies in front of the API, which is what the rate limiter, the sign-in audit
+and session binding take the client's address from. It is green at 1, which is
+this compose file's one proxy and what `secrets.env.example` sets, and in
+production it is red when the count is unset or 0: the client's address is
+then whatever the server reports as the peer. This compose file starts uvicorn
+with `--forwarded-allow-ips` for Caddy, so there it is the client's own; a
+deployment started any other way would see the proxy for every client in all
+three. It is not blocking, and a count above the real one is not caught by any
+check, because it lets a client choose its own address.
 
 **1. `prohibited_content_policy`**, `docs/16` L1. Sample ingest is refused
 until `NOCTORNAL_PROHIBITED_CONTENT_POLICY` and
@@ -1403,10 +1414,12 @@ the older release. Nothing in the database changes in either direction.
 
 ## Retention sweep
 
-Collected documents (a Telegram group's messages, a forum's posts) carry a
-retention clock, and nothing in this stack destroys them when it runs out
-unless somebody runs the sweep. The console's purge is case-scoped and a
-collected document belongs to no case, so it never reaches them.
+Collected documents (a Telegram group's messages, a forum's posts), dead
+letters (the fragments the ingest could not parse) and the ingest records
+attached to no case carry a retention clock, and nothing in this stack
+destroys them when it runs out unless somebody runs the sweep. The console's
+purge is case-scoped and none of these belongs to a case, so it never reaches
+them.
 
 The sweep is `scripts/retention_sweep.py`, and it is **not in the cron loop**:
 no compose service, installer or launcher runs it. It destroys third-party
@@ -1414,19 +1427,23 @@ personal data, so who runs it, how often and under which authority is the
 owner's decision (`docs/16` L4), and a purge that runs itself on a timer
 nobody watches is how data disappears on a Sunday. What keeps the gap from
 going quiet is the readiness row `retention_sweep_current`: it turns red when
-a document no hold keeps has been past its clock for more than seven days, and
-it counts them without naming one.
+a document, a dead letter or an unattached ingest record that no hold keeps has
+been past its clock for more than seven days, and it counts them without naming
+one.
 
-It destroys collected documents past their clock that nothing holds, by the
-same purge the other families use. A hold on the document or on any version of
-it, a case under legal hold that cites any version, and an unretracted
-assertion that rests on it each keep a document, and a hold placed while a
-sweep runs wins. Exhibits, ingest records, lookups and dead letters are not
-touched: they keep the case-scoped route in the console.
+It destroys collected documents, dead letters and ingest records attached to no
+case that are past their clock and that nothing holds, by the same purge the
+other families use. A hold on the document or on any version of it, a case
+under legal hold that cites any version, and an unretracted assertion that
+rests on it each keep a document, and a hold placed while a sweep runs wins.
+Exhibits, lookups and every ingest record attached to a case are not touched:
+they keep the case-scoped route in the console, with the case's clock and its
+hold.
 
 **Look first.** A dry run is the default. It changes nothing, writes nothing
-and needs no declaration. The one line it prints counts what is past its
-clock, what a hold keeps and what a sweep would destroy:
+and needs no declaration. The one line it prints counts the documents past
+their clock, the ones a hold keeps and the ones a sweep would destroy, and the
+dead letters and unattached ingest records a sweep would destroy:
 
 ```sh
 docker compose -p noctornal-prod -f infra/production/compose.yml \
@@ -1434,7 +1451,7 @@ docker compose -p noctornal-prod -f infra/production/compose.yml \
     cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt
     export SSL_CERT_FILE=/tmp/ca-bundle.crt
     python scripts/retention_sweep.py'
-# mode=dry-run past_clock=140 sweepable=120 held=20
+# mode=dry-run past_clock=140 sweepable=120 held=20 dead_letters=3 unattached_records=17
 ```
 
 **Then destroy.** The same command with `--apply`, an authority and an account:
@@ -1446,7 +1463,7 @@ docker compose -p noctornal-prod -f infra/production/compose.yml \
     cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt
     export SSL_CERT_FILE=/tmp/ca-bundle.crt
     python scripts/retention_sweep.py --apply --actor you@example.org'
-# mode=apply passes=2 documents_purged=120 tombstones=1 held=20 remaining=0
+# mode=apply passes=2 documents_purged=120 dead_letters_purged=3 records_purged=17 tombstones=3 held=20 remaining=0
 ```
 
 A real run needs all three, and refuses with exit 2, destroying nothing,
@@ -1468,8 +1485,8 @@ without any of them:
   session and no step-up, so name your own account, never a colleague's.
 
 The exit code is the only channel a scheduler has back. `0`: the run did what
-it was asked (a dry run always). `1`: a real run left documents it could have
-destroyed, because the object store refused to delete their markup (the
+it was asked (a dry run always). `1`: a real run left something it could have
+destroyed, because the object store refused to delete a document's markup (the
 warnings say which key, never what it held) or the pass limit was reached; read
 the warnings and run it again. `2`: it refused to run, for a missing or
 placeholder authority, no named account, no store for collected markup (set
@@ -1477,15 +1494,16 @@ placeholder authority, no named account, no store for collected markup (set
 cannot delete the markup and will not record a destruction that did not happen)
 or a credential in the environment that carries a published value (the check every unattended job makes in production).
 
-What a real run writes: the purge's tombstone for each pass of up to 500
-documents (`core.purge_tombstone`, object type `document`, authority
-`retention sweep under <your reference>`), the purge's `PURGE_EXECUTED` audit
-rows, and one `RETENTION_SWEEP` audit event per run: counts, the reference and
-where it ran, never a document, an id or a key. It writes that event when
-nothing was due too, so the log shows that a sweep ran. `passes` counts the
-last pass, the one that finds nothing left to destroy. A backlog bigger than
-one pass is cleared in the one run, up to `--max-passes` (100 by default, so
-50,000 documents).
+What a real run writes: the purge's tombstone for each family in each pass of
+up to 500 items (`core.purge_tombstone`, object type `document`, `dead_letter`
+or `ingest_record`, authority `retention sweep under <your reference>`, no
+case), the purge's `PURGE_EXECUTED` audit rows, and one `RETENTION_SWEEP` audit
+event per run: counts (`documents_purged`, `dead_letters_purged`,
+`records_purged`), the reference and where it ran, never a document, an id or
+a key. It writes that event when nothing was due too, so the log shows that a
+sweep ran. `passes` counts the last pass, the one that finds nothing left to
+destroy. A backlog bigger than one pass is cleared in the one run, up to
+`--max-passes` (100 by default, so 50,000 of each family).
 
 Unlike the console's purge, the script does not ask for a preview digest of an
 earlier dry run: the dry run is for you, and the declared authority and the
@@ -1541,9 +1559,45 @@ it there. A client that cannot speak TLS 1.3 cannot reach the console. Under
 certificate" once at start: it tries to add its local CA to the container's
 own trust store, which is read-only and which nothing in the container uses.
 
-**Images are pinned by digest**, in `compose.yml` and in the Dockerfile's
-`FROM`, because a tag is whatever its registry says it is at pull time. To
-move one deliberately:
+Caddy compresses the console (`/ui`, 2.3 MiB of static text that goes out as
+about 0.7 MiB) and nothing else: an API answer is what the caller may read with
+what they sent in it, which is what a compression side channel needs. It takes
+the `Server` header off every answer on both hostnames, the application's
+`uvicorn` and its own `Caddy`.
+
+### Upload sizes
+
+The five routes that take a multipart file (an exhibit, a sample, an e-mail
+exhibit, a YARA rule set version and a hash list) are the ones a request with
+a junk credential could make the API write to disk: the body is read into a
+temporary file before the route looks at who sent it, and telling a live
+session from a junk one takes the database. Three settings bound that, and a
+deployment that changes one changes the others:
+
+| Setting | Where | Default | What it bounds |
+|---|---|---|---|
+| `NOCTORNAL_MAX_EVIDENCE_BYTES`, `NOCTORNAL_MAX_SAMPLE_BYTES` | `secrets.env` | 256 MiB each | the largest body the application accepts, and its refusal names the cap |
+| `request_body` `max_size` | `Caddyfile`, the `@uploads` block | `256MiB` | the largest body the proxy passes to those five routes, refused with a 413 that names this setting |
+| `tmpfs` for `/tmp` | `compose.yml`, services `api` and `sample-origin` | `1g` and `64m` | everything those bodies can occupy together, however many requests arrive |
+
+The API's 1 GiB is four workers each holding one upload at the default cap of
+256 MiB. The sample origin refuses every route but the two downloads before it
+reads a body, and those take 2 KiB, so its 64 MiB holds the CA bundle and
+nothing a request can grow. A full `/tmp` fails the upload that found it full
+and nobody else's; it is memory, and Docker frees it with the container.
+
+To accept larger bodies, raise all three before you restart: the caps in
+`secrets.env`, the Caddyfile limit to at least the larger of the two, and
+`/tmp` on the `api` service to one such body per worker. Write the Caddyfile
+limit in `MiB`: Caddy reads `256MB` as 256,000,000 bytes, which is under the
+application's 256 MiB, and a body between the two would be refused by the proxy
+while the application would take it. A body over the proxy's limit is answered
+with a `problem+json` 413 that names the Caddyfile setting, and one over the
+application's cap with the application's own.
+
+**Images are pinned by digest**, in `compose.yml`, in the development compose
+file (`infra/docker-compose.yml`) and in the Dockerfile's `FROM`, because a tag
+is whatever its registry says it is at pull time. To move one deliberately:
 
 ```sh
 docker buildx imagetools inspect caddy:2-alpine        # the digest line is the pin
@@ -1584,7 +1638,10 @@ both names resolve to the same digest, which is how that is checked.
   directory is open work.
 * **No read-only root filesystem, and no memory or process limits, on the
   application services** (the analysis worker has both). The CA bundle and the Lab's child processes write to
-  `/tmp`, and the limits need a sizing for your host.
+  `/tmp`, and the limits need a sizing for your host. `/tmp` itself is a
+  size-limited tmpfs on the API and the sample origin (Upload sizes, above), so
+  what an upload can write there is bounded, and nothing else on the root
+  filesystem is.
 * **Two MinIO service-account secrets are still arguments** of
   `mc admin user svcacct add`, once, the first time each account is created
   (the `SAMPLE_` and `PRESERVE_` keys; the root credential and the database role
@@ -1599,27 +1656,29 @@ both names resolve to the same digest, which is how that is checked.
   that class, and needs the compose file's `context` pointed at the export,
   which this file does not do.
 * **Images and tools that are not digest pinned.** The development stack
-  (`infra/docker-compose.yml`) and the CI workflow's service containers pull by
-  tag, on purpose: they track what a developer's machine and the suite use, and
-  a digest there would only go stale. What each tag resolved to on 2026-10-03,
-  for a reader who wants to compare or to pin one:
+  (`infra/docker-compose.yml`) pins all five of its images by digest, as
+  `compose.yml` does (2026-10-08), and so does the CI step that starts the ACL
+  Redis. The CI workflow's other containers still pull by tag
+  (`pgvector/pgvector:pg16` and `redis:7-alpine` as service containers, and
+  the MinIO, `mc` and Mailpit images in its `docker run` steps); its two
+  actions (`actions/checkout`, `actions/setup-python`) are pinned to commits,
+  and the workflow has no `permissions:` block. The installers
+  `pip install` an unpinned `pip`, and the Dockerfile installs whatever `gnupg`
+  Debian ships that day (`docs/17` F34 depends on its version). The digest each
+  tag resolves to in its registry, which the files named below pin and CI's
+  "Pinned images resolve" job asks the registry about on every push:
 
-  | Image (tag) | Pulled by | Digest on 2026-10-03 |
+  | Image (tag) | Pinned in | Digest |
   |---|---|---|
-  | `pgvector/pgvector:pg16` | development stack, CI | `sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b` |
-  | `redis:7-alpine` | development stack, CI | `sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499` |
-  | `ghcr.io/dboudreau00/minio:RELEASE.2025-04-22T22-12-26Z` | development stack | `sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e` |
-  | `ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z` | development stack | `sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727` |
+  | `pgvector/pgvector:pg16` | development stack, `compose.yml` | `sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b` |
+  | `redis:7-alpine` | development stack, `compose.yml` | `sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499` |
+  | `ghcr.io/dboudreau00/minio:RELEASE.2025-04-22T22-12-26Z` | development stack, `compose.yml` | `sha256:3f97c5651cb6662b880c787a232b6b34fec8d8922e08d6617b25d241a21164bb` |
+  | `ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z` | development stack, `compose.yml` | `sha256:eb4ea9884b77704230e2423e9004d2fa738dc272876b9cc41a297d29443b8780` |
   | `axllent/mailpit:v1.31.0` | development stack | `sha256:c96991d9bef73594c246d89ca81411d4e916f03e76a7d2d72fa2ab5dd3c9ce24` |
 
-  The first four are the digests `compose.yml` pins for production, and a test
-  holds this table to that file, so moving a production pin without updating
-  the table fails the suite. Mailpit is a development mail sink and is not in
-  the production stack. The CI workflow's two actions (`actions/checkout@v4`,
-  `actions/setup-python@v5`) are pinned by tag and the workflow has no
-  `permissions:` block, the installers `pip install` an unpinned `pip`, and the
-  Dockerfile installs whatever `gnupg` Debian ships that day (`docs/17` F34
-  depends on its version).
+  A test holds this table to both files, so moving a pin in the development
+  file or in `compose.yml` without the table fails the suite. Mailpit is a
+  development mail sink and is not in the production stack.
 
 ---
 

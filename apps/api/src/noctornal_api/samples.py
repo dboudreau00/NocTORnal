@@ -2372,9 +2372,10 @@ class SampleService:
         else:
             held_at = (f"the held copy at {found.bucket}/{found.key} (version "
                        f"{found.version_id})")
+            # Through its definer (0180): the request role reads no key.
             key_row = self._c.execute(
-                "SELECT data_key_ciphertext, data_key_id FROM lab.sample "
-                "WHERE id = %s", (current.id,)).fetchone()
+                "SELECT data_key_ciphertext, data_key_id "
+                "FROM lab.sample_data_key(%s)", (current.id,)).fetchone()
             # Both refused as a SampleError naming what was found, so a key
             # ring or a store that fails here answers the router's 409 and
             # not a bare 500 (2026-09-23: a
@@ -3201,11 +3202,17 @@ class SampleService:
                                "call this outside a transaction")
         if store not in self._INTEGRITY_REFUSAL:
             raise ValueError(f"unknown store {store!r}")
+        # The key through its definer (0180), which answers it to the system
+        # role, to the sample origin on the sample its spent ticket names and
+        # to a holder of sample.download or sample.analyse within reach; to
+        # anyone else it is no key, and the read is refused below.
         row = self._c.execute(
-            """SELECT storage_key, data_key_ciphertext, data_key_id, sha256,
-                      byte_size, preserved_bucket, preserved_key,
-                      preserved_version_id
-                 FROM lab.sample WHERE id = %s""", (sample_id,)).fetchone()
+            """SELECT s.storage_key, k.data_key_ciphertext, k.data_key_id,
+                      s.sha256, s.byte_size, s.preserved_bucket,
+                      s.preserved_key, s.preserved_version_id
+                 FROM lab.sample s
+                 LEFT JOIN LATERAL lab.sample_data_key(s.id) k ON true
+                WHERE s.id = %s""", (sample_id,)).fetchone()
         if row is None:
             raise SampleError("no such sample")
         (storage_key, key_blob, key_id, recorded, size, bucket, held_key,
@@ -3340,8 +3347,8 @@ class SampleService:
         """The decision that stands between a caller and a live binary, in
         ONE place because two endpoints now make it.
 
-        Returns `(storage_key, data_key_ciphertext, data_key_id, sha256,
-        state)` for a sample this caller may take a copy of, and raises
+        Returns `(storage_key, whether a data key is held, data_key_id,
+        sha256, state)` for a sample this caller may take a copy of, and raises
         otherwise. `issue_download_ticket` calls it and throws the row
         away: what it needs is the refusal, so that a ticket can never be
         minted for a sample its holder could not have downloaded directly.
@@ -3365,7 +3372,7 @@ class SampleService:
         """
         _require_clearance(clearance)
         row = self._c.execute(
-            f"""SELECT s.storage_key, s.data_key_ciphertext, s.data_key_id,
+            f"""SELECT s.storage_key, NOT s.data_key_destroyed, s.data_key_id,
                        s.sha256, s.state, s.preserved_key, c.status::text
                   FROM lab.sample s
                   LEFT JOIN LATERAL iam.case_facts(s.case_id) c ON true
@@ -3557,14 +3564,11 @@ class SampleService:
         presented.
         """
         digest = hash_token(presented or "")
+        # That statement, as the definer (0180): the request role reads no
+        # ticket's hash and writes no ticket.
         row = self._c.execute(
-            """UPDATE lab.download_ticket
-                  SET redeemed_at = now()
-                WHERE token_hash = %s
-                  AND sample_id = %s
-                  AND redeemed_at IS NULL
-                  AND expires_at > now()
-            RETURNING id, user_id, session_id, token_hash, purpose""",
+            """SELECT id, user_id, session_id, token_hash, purpose
+                 FROM lab.spend_sample_ticket(%s, %s)""",
             (digest, sample_id)).fetchone()
         if row is None:
             # WHY it failed goes in the audit and never in the answer. The
@@ -3719,8 +3723,8 @@ class SampleService:
         one to name.
         """
         row = self._c.execute(
-            """SELECT user_id, sample_id, redeemed_at, expires_at <= now()
-                 FROM lab.download_ticket WHERE token_hash = %s""",
+            """SELECT user_id, sample_id, redeemed_at, expired
+                 FROM lab.ticket_by_hash(%s)""",
             (digest,)).fetchone()
         if row is None:
             # The one reason with no user behind it, and the one the
@@ -3987,11 +3991,11 @@ class SampleService:
                      ip_hash: bytes | None = None) -> tuple:
         """The label and state half of a retrieval: the same composition
         `_downloadable` makes, then "is it preserved". Returns
-        `(sha256, data_key_ciphertext, data_key_id, preserved_bucket,
+        `(sha256, whether a data key is held, data_key_id, preserved_bucket,
         preserved_key, preserved_version_id)`."""
         _require_clearance(clearance)
         row = self._c.execute(
-            f"""SELECT s.sha256, s.data_key_ciphertext, s.data_key_id,
+            f"""SELECT s.sha256, NOT s.data_key_destroyed, s.data_key_id,
                        s.preserved_bucket, s.preserved_key,
                        s.preserved_version_id
                   FROM lab.sample s
@@ -4105,7 +4109,7 @@ class SampleService:
         if not row[1]:
             raise SampleError("this sample has no data key; it cannot be read")
 
-        _sha256, _key_blob, _key_id, bucket, key, version = row
+        _sha256, _key_held, _key_id, bucket, key, version = row
         # The download's tamper discipline, through the one path that
         # decrypts, verifies and records the alarm on its own (F11-core D).
         data = self._verified_plaintext(sample_id, actor_id=actor_id,
@@ -5020,9 +5024,10 @@ _SAMPLE_COLUMNS = ", ".join("s." + c for c, _f in SAMPLE_FIELDS)
 #: Whether the data key has been destroyed, read as a BOOLEAN (0063). The
 #: console needs to say "destroyed" or "kept" for a rejected sample, and
 #: selecting the sealed key itself to decide that would carry key material
-#: through every queue read for the sake of one word.
-_RETURNING = _COLUMNS + ", octet_length(data_key_ciphertext) = 0"
-_SELECT = _SAMPLE_COLUMNS + ", octet_length(s.data_key_ciphertext) = 0"
+#: through every queue read for the sake of one word. A generated column
+#: since 0180, which the request role may read and the key it may not.
+_RETURNING = _COLUMNS + ", data_key_destroyed"
+_SELECT = _SAMPLE_COLUMNS + ", s.data_key_destroyed"
 
 
 def _hex(value) -> str | None:

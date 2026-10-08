@@ -44,10 +44,11 @@ def client():
     from dataclasses import replace
     app = create_app()
     limits = dict(LIMITS)
-    # The destroy limit is a burst of three per account, and these tests
-    # place and lift holds more often than that.
-    limits["retention.destroy"] = replace(limits["retention.destroy"],
-                                          quota=1000, burst=1000)
+    # The lift limit is a burst of three per account, and these tests
+    # place and lift holds more often than that (a lift has a meter of its
+    # own since 2026-10-08; it shared `retention.destroy` before).
+    limits["retention.lift"] = replace(limits["retention.lift"],
+                                       quota=1000, burst=1000)
     app.state.limiter = RateLimiter(InProcessBackend(), limits=limits)
     return TestClient(app, raise_server_exceptions=False)
 
@@ -100,7 +101,8 @@ def test_placing_holds_does_not_spend_the_destruction_meter(conn):
     """2026-10-07: every hold route spent `retention.destroy` (a burst
     of three, ten an hour), so the fourth hold an officer placed inside a few
     minutes was refused. With the REAL limits: five placements in a row
-    succeed, and lifting still meets the tight meter."""
+    succeed, and lifting still meets the tight meter (its own, `retention.lift`,
+    since 2026-10-08)."""
     from fastapi.testclient import TestClient
 
     from noctornal_api.http.app import create_app

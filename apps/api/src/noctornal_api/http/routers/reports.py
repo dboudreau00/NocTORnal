@@ -59,6 +59,7 @@ from fastapi import APIRouter, Depends, Path, Query
 from psycopg.types.json import Json
 from pydantic import BaseModel
 
+from noctornal_api import jira, transports
 from noctornal_api.egress import Destination
 from noctornal_api.http.deps import (
     CurrentUser,
@@ -76,6 +77,7 @@ from noctornal_api.http.limits import rate_limit
 from noctornal_api.projections import PRESETS
 from noctornal_api.security.access import (
     CHECK_STEP_UP,
+    TLP_NAMES,
     AccessResolutionError,
     evaluate,
     tlp_from_name,
@@ -91,7 +93,7 @@ from noctornal_api.stores import PgAccessResolver
 
 router = APIRouter(prefix="/cases/{case_id}/report", tags=["reports"])
 
-_TLP = frozenset({"CLEAR", "GREEN", "AMBER", "AMBER_STRICT", "RED"})
+_TLP = frozenset(TLP_NAMES)
 
 
 def _target_within_ceiling(conn: psycopg.Connection, user: CurrentUser,
@@ -188,6 +190,11 @@ def build(
         # in an audit log and one field cannot say it.
         "target_tlp": effective_tlp,
         "target_tlp_requested": target_tlp,
+        # The three figures are what the document says, so they follow the
+        # case's withheld-disclosure setting (0030): a 0 under NONE or
+        # PRESENCE is "not stated", and the setting is recorded beside them
+        # so the row cannot be read as "nothing was withheld".
+        "disclosure": report.redaction.disclosure,
         "nodes_withheld": report.redaction.nodes_withheld,
         "edges_withheld": report.redaction.edges_withheld,
         "evidence_withheld": report.redaction.evidence_withheld,
@@ -199,6 +206,45 @@ def build(
     out["preset"] = preset
     out["include_hypotheses"] = include_hypotheses
     return out
+
+
+def _stricter(typed: str | None, configured: str | None) -> str | None:
+    """The lower of two ceilings, either of which may be absent. One that
+    cannot be read is passed on as it is, so the gate refuses it as unknown
+    and does not take it for the other (fail closed)."""
+    if configured is None:
+        return typed
+    if typed is None:
+        return configured
+    try:
+        a, b = tlp_from_name(typed), tlp_from_name(configured)
+    except AccessResolutionError:
+        try:
+            tlp_from_name(typed)
+        except AccessResolutionError:
+            return typed
+        return configured
+    return (a if a <= b else b).name
+
+
+def _release_ceiling(conn: psycopg.Connection, destination: Destination,
+                     typed: str | None) -> str | None:
+    """The ceiling a release is judged against: the one the caller typed and
+    the one the deployment configured for that destination, whichever is
+    lower (2026-10-08). The drain judges every delivery against the
+    configured one (`transports.configured_ceiling`, and for Jira
+    `jira.configured_ceiling`: the destination's own ceiling under the host
+    cap), and a release judged on the typed one alone allowed a document the
+    drain then refused. Export has no destination to configure."""
+    if destination is Destination.SMTP:
+        configured = transports.configured_ceiling(transports.SMTP)
+    elif destination is Destination.WEBHOOK:
+        configured = transports.configured_ceiling(transports.WEBHOOK)
+    elif destination is Destination.JIRA:
+        configured = jira.configured_ceiling(conn)
+    else:
+        configured = None
+    return _stricter(typed, configured)
 
 
 def _known_preset(preset: str) -> None:
@@ -348,8 +394,8 @@ def release(
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
 
     digest = content_digest(report)
-    decision = check_egress(report, destination,
-                            destination_ceiling=body.destination_ceiling)
+    ceiling = _release_ceiling(conn, destination, body.destination_ceiling)
+    decision = check_egress(report, destination, destination_ceiling=ceiling)
     _audit(conn, case_id, user.user_id,
            "REPORT_RELEASED" if decision.allowed else "REPORT_RELEASE_REFUSED",
            {# CR1 follow-up: the EFFECTIVE value, plus what was asked for.
@@ -360,6 +406,9 @@ def release(
         # one was missed.
         "target_tlp": effective_tlp,
         "target_tlp_requested": body.target_tlp, "destination": destination.value,
+            # The ceiling the document was judged against, which is the lower
+            # of the one typed and the one configured for the destination.
+            "destination_ceiling": ceiling,
             "reason": decision.reason, "note": body.recipient_note,
             # WHICH document was judged, so the record can be matched to
             # the file that left (ux15-report, 2026-09-22).
@@ -373,6 +422,7 @@ def release(
         "allowed": True,
         "classification": report.redaction.built_at_tlp,
         "destination": destination.value,
+        "destination_ceiling": ceiling,
         "redaction": report.redaction.statement(),
         "document": render_markdown(report),
         "content_digest": digest,

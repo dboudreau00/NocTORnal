@@ -49,6 +49,7 @@ from psycopg.types.json import Json
 
 from noctornal_api.cases import CONTENT_READ_ONLY_STATES
 from noctornal_api.graph import AssertionInput, GraphWriteError, GraphWriteService
+from noctornal_api.security.access import TLP_NAMES
 from noctornal_api.selectors import (
     SelectorError,
     SelectorStore,
@@ -85,7 +86,7 @@ DEFAULT_CLASSIFICATION = "AMBER"
 
 #: The TLP levels in order, lowest first: `core.tlp`'s enum order, which
 #: is what `<=` and GREATEST compare by in SQL.
-TLP_ORDER = ("CLEAR", "GREEN", "AMBER", "AMBER_STRICT", "RED")
+TLP_ORDER = TLP_NAMES
 
 
 def _rank(level: str | None) -> int:
@@ -303,8 +304,9 @@ _SOURCE_FROM = """
     LEFT JOIN LATERAL iam.element_facts('proposal_block', p.id) b ON true
     LEFT JOIN LATERAL iam.lookup_result_facts(p.lookup_result_id) lr ON true"""
 
-_PAYLOAD_CLS = """CASE WHEN p.payload->>'classification' IN
-        ('CLEAR', 'GREEN', 'AMBER', 'AMBER_STRICT', 'RED')
+_TLP_SQL_LIST = ", ".join(f"'{name}'" for name in TLP_NAMES)
+_PAYLOAD_CLS = f"""CASE WHEN p.payload->>'classification' IN
+        ({_TLP_SQL_LIST})
         THEN (p.payload->>'classification')::core.tlp END"""
 
 #: The label a READER must dominate: everything the proposal's text could

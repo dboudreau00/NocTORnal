@@ -159,6 +159,41 @@ def scrub(c, prefix: str) -> None:
     teardown(c, prefix)
 
 
+#: Further than any list's `seq` will ever be, so a sample marked screened
+#: against it is never "behind" the newest list.
+_BEYOND_EVERY_LIST = 2 ** 62
+
+
+def stand_alone(c) -> None:
+    """For a test that runs in a rolled-back transaction (`rolled_back`):
+    hide whatever the database already holds that the screening and sandbox
+    readiness rows count, so the test sees only its own world and the
+    transaction's end gives everything back.
+
+    Those rows are counts over the whole database: lists that are active,
+    samples that no pass has reached, matches nobody has reviewed,
+    detonations waiting to be sent. Another suite (or a real estate) leaves
+    any of them, and a test that needs "no list is loaded" or "every sample
+    is screened" then skipped, which CI's no-skip gate turns into a failure.
+    So: every list, entry, result and review is removed, every sample is
+    marked screened against a list from the future (so a pass of the test's
+    own list does not reach for bytes that are not in its store), and every
+    detonation is removed. The guards that keep these tables append-only are
+    off for the statements and on again, inside the transaction."""
+    tables = ("screening_review", "screening_result", "screening_hash",
+              "screening_list", "sample", "detonation")
+    for table in tables:
+        c.execute(f"ALTER TABLE lab.{table} DISABLE TRIGGER USER")
+    for table in ("screening_review", "screening_result", "screening_hash",
+                  "screening_list", "detonation"):
+        c.execute(f"DELETE FROM lab.{table}")
+    c.execute("""UPDATE lab.sample SET screening_outcome = 'NO_MATCH',
+                        screened_at = now(), screening_list_seq = %s,
+                        screening_bytes_absent_at = NULL""", (_BEYOND_EVERY_LIST,))
+    for table in tables:
+        c.execute(f"ALTER TABLE lab.{table} ENABLE TRIGGER USER")
+
+
 def assert_scrubbed(c, prefix: str) -> None:
     """Nothing the suite made is left, and nothing a downgrade of 0102 or
     0103 refuses on (a MATCH result, a SUBMIT detonation) survives it."""
@@ -176,4 +211,5 @@ def assert_scrubbed(c, prefix: str) -> None:
 
 
 __all__ = ["AUTHORITY", "MemoryPreservation", "assert_scrubbed", "declare",
-           "import_list", "listed", "notices", "payload", "scrub", "service"]
+           "import_list", "listed", "notices", "payload", "scrub", "service",
+           "stand_alone"]

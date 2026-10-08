@@ -13,6 +13,7 @@ import pytest
 import collection_helpers as h
 import telegram_fake as tf
 import telegram_pg as tp
+from rolled_back import rolled_back
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 pytestmark = pytest.mark.skipif(
@@ -24,20 +25,15 @@ P = "test-tgrdy-"
 
 @pytest.fixture
 def conn(monkeypatch):
-    from noctornal_api.db import connect
-
     tf.guard_sockets(monkeypatch)
-    c = connect()
-    # Other suites' Telegram sources are deactivated by their teardowns; the
-    # row counts active ones only, so a leftover would be a flaky count.
-    active = c.execute("SELECT count(*) FROM collect.source WHERE is_active "
-                       "AND kind = 'TELEGRAM' AND parser_key = 'telegram'").fetchone()[0]
-    if active:
-        pytest.skip("this database has active Telegram sources of its own")
-    yield c
-    tp.teardown(c, P)
-    h.retire_users(c, P)
-    c.close()
+    with rolled_back() as c:
+        # The row counts ACTIVE Telegram sources, and Telegram rows are never
+        # deleted, so whatever another suite left active is switched off for
+        # the length of this transaction, which is rolled back (it used to
+        # skip the whole file when any was).
+        c.execute("UPDATE collect.source SET is_active = false WHERE is_active "
+                  "AND kind = 'TELEGRAM' AND parser_key = 'telegram'")
+        yield c
 
 
 def _row(conn):

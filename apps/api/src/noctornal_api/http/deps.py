@@ -64,7 +64,7 @@ from noctornal_api.security.sessions import (
 from noctornal_api.stores import PgAccessResolver, PgSessionStore
 from noctornal_api.wording import agree
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("noctornal.api")
 
 _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 SESSION_COOKIE = "__Host-session"
@@ -305,12 +305,21 @@ def audit_auth_event(conn, action: str, actor_id, case_id, detail: dict,
 
     `ip_hash` names the source (http_ui-004, 2026-10-03): a refused
     session presentation without one could not be attributed.
+
+    Every row this writes is a REFUSAL (AUTHZ_DENIED, AUTH_SESSION_REJECTED,
+    RLS_BINDING_FAILED, SESSION_BINDING_REFUSED, CASE_SHARE_REFUSED), and it
+    is stored with outcome DENIED, as the sign-in, rate-limit and
+    row-security refusals always were. It was stored with the column's
+    default, SUCCESS, so a reader that filtered the log on outcome found
+    every other refusal and missed these (docs/17, "refusals are recorded as
+    SUCCESS", 2026-10-08). Rows written before then keep SUCCESS: the log is
+    append-only (invariant 6), so find those by `action`.
     """
     conn.execute(
         """INSERT INTO audit.event
                (actor_id, actor_kind, action, object_type, object_id, case_id,
-                detail, ip_hash)
-           VALUES (%s, %s, %s, 'auth', NULL, %s, %s, %s)""",
+                outcome, detail, ip_hash)
+           VALUES (%s, %s, %s, 'auth', NULL, %s, 'DENIED', %s, %s)""",
         (actor_id, "USER" if actor_id else "SYSTEM", action, case_id, Json(detail),
          ip_hash),
     )
@@ -405,9 +414,11 @@ def effective_labels(
 #: content write under this guard or named there as governance, and no
 #: read route gates on a verb in this set.
 #:
-#: `ingest.manage` and `ingest.replay` reach `authorize_object` only when
-#: they parse or replay records INTO a case; `sample.submit` only when a
-#: sample is attached to one. `comms.minimise` is absent on purpose:
+#: `ingest.replay` reaches `authorize_object` only when it replays or
+#: attaches records INTO a case; `sample.submit` only when a sample is
+#: attached to one. `ingest.manage` reaches it nowhere now: parse no longer
+#: takes a case (2026-10-08), and no case role carries the verb. It stays
+#: here for a role that ever does. `comms.minimise` is absent on purpose:
 #: minimisation is performed at closure (docs/16 L4).
 CONTENT_WRITE_PERMISSIONS: frozenset[str] = frozenset({
     "graph.node.create", "graph.node.update", "graph.node.delete",
@@ -814,6 +825,24 @@ def _fresh(user: CurrentUser) -> bool:
     return (user.session_mfa_at is not None
             and (datetime.now(user.session_mfa_at.tzinfo)
                  - user.session_mfa_at) < STEP_UP_FRESHNESS)
+
+
+def holds_global(conn: psycopg.Connection, user_id: UUID,
+                 permission_key: str) -> bool:
+    """Whether a global role of an active account carries `permission_key`,
+    asked as a question: no AUTHZ_DENIED row (a listing that draws a control
+    or leaves it out has not been denied anything), and no step-up, which the
+    act itself asks for. `require_global`'s own check without its refusals,
+    for the routes that tell the console whether to offer a verb (2026-10-08;
+    the collection router's `_holds` is the same query)."""
+    return conn.execute(
+        """SELECT EXISTS (
+               SELECT 1 FROM iam.user_role ur
+                 JOIN iam.role_permission rp ON rp.role_key = ur.role_key
+                 JOIN iam.app_user u ON u.id = ur.user_id
+                WHERE ur.user_id = %s AND u.is_active
+                  AND rp.permission_key = %s)""",
+        (user_id, permission_key)).fetchone()[0]
 
 
 def authorize_global(conn: psycopg.Connection, user: CurrentUser,

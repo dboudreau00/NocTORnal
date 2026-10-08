@@ -250,7 +250,9 @@ def _channels(conn) -> dict:
 def set_preference(
     channel: str, body: PreferenceIn,
     user: CurrentUser = Depends(current_user),
-    conn: psycopg.Connection = Depends(get_conn),
+    # Written on a system connection, for this caller alone: the settings
+    # are read-only to the request role (0182, Beta 1.1).
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.NOTIFY_PREFERENCE)),
 ) -> PreferenceOut:
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
     # An explicit null on either half of the quiet window means "clear it",
@@ -263,7 +265,7 @@ def set_preference(
         fields["address"] = body.address
     try:
         return PreferenceOut(**vars(
-            NotificationService(conn).set_preference(user.user_id, channel, **fields)))
+            NotificationService(sconn).set_preference(user.user_id, channel, **fields)))
     except NotificationError as exc:
         raise Problem(400, "Invalid request", safe_detail(exc)) from exc
 

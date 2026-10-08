@@ -1868,6 +1868,7 @@ const CASE_CONTENT_CONTROLS = [
   'comms-pgpkey-form', 'comms-pgpkey-wkd-form',   // comms F10b, F10c
   'dcp-cap-new', 'dcp-eml-new', 'dcp-call-new',               // deception
   'ach-score-card', 'ach-add-card', 'asm-create',             // analysis
+  'col-watch-box',                                            // feeds: a watch
 ];
 
 /** The content controls a pane builds at render time, by the class its
@@ -2293,6 +2294,12 @@ async function openCase(caseId) {
   state.triageId = null;
   stopWorkerLayout();
   applyMetrics(null);
+  /* Every pane chosen from here on is the analyst's, not this open's: the
+     workspace is on screen well before the case has loaded (on a large case
+     that is seconds), its rail is live, and the Graph this open ends on is a
+     default for an open nobody touched. The choices are counted by
+     `selectTab`, and nothing this function awaits calls it. */
+  const choicesAtOpen = _tabChoices;
   try {
     const [rec, ontology] = await Promise.all([
       api('/cases/' + caseId),
@@ -2355,10 +2362,15 @@ async function openCase(caseId) {
     /* After the first full load, so an event arriving mid-boot cannot
        race the initial fetch and redraw a half-built workspace. */
     connectLive();
-    selectTab('graph');
+    /* The default pane, unless the analyst has already picked one while the
+       case was loading: a click on Evidence at the third second used to be
+       undone by the Graph this ended on. Their pick also outranks a deep
+       link's, which was written before they clicked. */
+    const picked = _tabChoices !== choicesAtOpen;
+    if (!picked) selectTab('graph');
     // After the graph, so a deep-linked pane lands on a workspace that is
     // already populated rather than one still fetching.
-    applyDeepLinkTab();
+    applyDeepLinkTab(picked);
   } catch (err) {
     if (caseChanged(token)) return;
     /* The record itself could not be read: say so in the bar rather than
@@ -2374,7 +2386,13 @@ async function openCase(caseId) {
   }
 }
 
+/** How many times a pane has been chosen, by anyone: a click, a key, a
+ *  palette jump, a link inside the console. `openCase` reads it before and
+ *  after it loads to tell whether the analyst chose a pane meanwhile. */
+let _tabChoices = 0;
+
 function selectTab(name) {
+  _tabChoices += 1;
   state.tab = name;
   /* The pane goes into the address as well, in place: a reload lands on
      it, and a pane change is not a Back step (ux02-cases, 2026-09-23). */
@@ -3276,6 +3294,15 @@ async function enterEgo(nodeId, depth) {
     state.needFit = true;
     setRendered(sub.nodes || [], sub.edges || []);
     renderProjectionBar();
+    if (sub.truncated) {
+      /* Built outward from the entity and stopped at what one view draws,
+         the nearer entities kept: said, because a partial neighbourhood
+         read as the whole one misleads. */
+      banner('Neighbourhood cut',
+        'This entity has more neighbours within ' + (depth || 1) + ' hops than one ' +
+        'view draws, so the nearest are shown. A smaller depth shows all of them.',
+        'warn');
+    }
   } catch (err) {
     if (seq !== state.graphSeq) return;
     fail(err);
@@ -7253,6 +7280,11 @@ function exhibitCard(ev, page) {
     dcpRuns(desc, ev.description_segments);
     item.appendChild(desc);
   }
+  /* Why it is held, for the people who place and lift holds: the server
+     sends the text to nobody else (2026-10-08). */
+  if (ev.legal_hold && ev.legal_hold_reason) {
+    item.appendChild(el('p', 'help', 'Held: ' + visibleText(ev.legal_hold_reason)));
+  }
   item.appendChild(exhibitIdLine('SHA-256', ev.sha256, 'the SHA-256 digest'));
   item.appendChild(exhibitIdLine('Exhibit id', ev.id, 'the exhibit id'));
   item.appendChild(backsLine(ev));
@@ -7358,10 +7390,55 @@ function exhibitCard(ev, page) {
     });
     actions.appendChild(bChain);
   }
+  /* A hold on this exhibit, for a reader who may place and lift one. A
+     destroyed exhibit has nothing left to hold. */
+  if (page.may_hold && !ev.purged_at) {
+    actions.appendChild(exhibitHoldButton(ev, item));
+  }
   actions.appendChild(verdict);
   item.appendChild(actions);
   item.appendChild(custodyBox);
   return item;
+}
+
+/** Place or lift a legal hold on an exhibit, with a reason either way,
+ *  behind the step-up gate: the exhibit card's half of the console's hold
+ *  controls (docs/17, "no console control for a hold", 2026-10-08), built as
+ *  the collected document's is (`documentHoldActions`). The route is
+ *  `POST /retention/legal-hold`, which decides for itself: this only offers
+ *  the control to a reader whose register said `may_hold`. A lift needs the
+ *  lifter cleared for the exhibit, which a reader of the register is. Holds
+ *  are governance, so the control stays on a CLOSED case. */
+function exhibitHoldButton(ev, card) {
+  const verb = ev.legal_hold ? 'Lift the legal hold' : 'Place a legal hold';
+  const btn = el('button', 'btn small ghost', verb);
+  btn.type = 'button';
+  btn.setAttribute('aria-label', verb + ' on ' + visibleText(ev.title));
+  btn.addEventListener('click', () => rowForm(card, {
+    kind: 'hold', submit: verb,
+    help: ev.legal_hold
+      ? 'Once lifted, this exhibit follows the case\'s retention date again, '
+        + 'unless the case itself is held. A written reason and a sign-in '
+        + 'from the last 15 minutes are needed either way, and the reason '
+        + 'is kept in the audit log.'
+      : 'A hold stops every deletion of this exhibit, whatever the case\'s '
+        + 'retention date says, until somebody lifts it. It needs a written '
+        + 'reason and a sign-in from the last 15 minutes, and the reason is '
+        + 'kept in the audit log.',
+    fields: [{ label: 'Why', grow: true }],
+    check: ([why]) => (why.trim().length < 5
+      ? 'Say why, in at least 5 characters.' : null),
+    submitFn: async ([why]) => {
+      const token = caseToken();
+      const out = await withStepUp('A legal hold needs a recent sign-in.',
+        () => api('/retention/legal-hold', { method: 'POST', json: {
+          evidence_id: ev.id, on: !ev.legal_hold, reason: why.trim() } }));
+      if (!out) throw Object.assign(new Error('cancelled'), { handled: true });
+      if (caseChanged(token)) return;
+      loadEvidence({ pageOnly: true, focus: ev.id });
+    },
+  }));
+  return btn;
 }
 
 /** An exhibit's card with its Similar control (F6.4, 2026-09-24):
@@ -9688,11 +9765,12 @@ function caseRoleWords(rec) {
  *  ux02-cases:case-actions-linger-on-case-list, 2026-09-23). */
 function hideCaseChrome() {
   for (const id of ['btn-case-edit', 'btn-case-share', 'btn-case-status',
-                    'live-dot']) {
+                    'btn-case-hold', 'hdr-hold', 'live-dot']) {
     show($(id), false);
   }
   closeCaseRecord();
   closeStatus();
+  closeCaseHold();
 }
 
 /** And shown for an open case, each saying what the caller's role there
@@ -9717,6 +9795,10 @@ function showCaseChrome(rec) {
     ? 'Move this case through its lifecycle'
     : 'Where this case can go next. Changing its status needs case.close, '
       + 'which ' + caseRoleWords(rec) + ' on this case does not include.';
+  /* The LEGAL HOLD chip and the Hold… button, here with the rest of the
+     case chrome because opening a case draws it through this function and
+     not through `applyCaseRecord` (2026-10-08). */
+  renderCaseHold(rec);
 }
 
 /** Who the signed-in person is here: their role on the open case, and
@@ -10262,7 +10344,149 @@ async function statusAfterSignIn(rec, to) {
 onCaseSwitch(() => {
   closeCaseRecord();
   closeStatus();
+  closeCaseHold();
 });
+
+/* --- Hold…: a legal hold on the whole case ------------------------------
+ *
+ * docs/17, "no console control for a hold" (2026-10-08). A case-level hold
+ * freezes everything the case governs against every deletion path: its
+ * exhibits, those lodged later too, its ingest records, lookups and
+ * samples, and the collected documents it cites. Placing one is open to
+ * whoever holds retention.manage on the case, lifting one to somebody
+ * cleared for everything the case holds, and both take a written reason and
+ * a sign-in from the last 15 minutes. `POST /retention/cases/{id}/legal-hold`
+ * decides all of it; the case record's `may_hold` only says whether to
+ * offer the control. It is governance, so it works on a CLOSED case too.
+ */
+
+/** The header's LEGAL HOLD chip, for every reader of a held case, and the
+ *  Hold… button, for one who may place and lift it. */
+function renderCaseHold(rec) {
+  const chip = $('hdr-hold');
+  const btn = $('btn-case-hold');
+  const held = !!(rec && rec.legal_hold);
+  show(chip, held);
+  if (held) {
+    chip.title = 'This case is under a legal hold. Nothing it governs may be '
+      + 'destroyed while the hold stands, whatever its retention date says.';
+  }
+  show(btn, !!(rec && rec.may_hold));
+  if (rec && rec.may_hold) {
+    btn.title = held ? 'Lift the legal hold on this case'
+      : 'Place a legal hold on this whole case';
+  }
+}
+
+let holdReturn = null;
+
+function openCaseHold() {
+  const rec = state.caseRec;
+  if (!rec || !state.caseId || !rec.may_hold) return;
+  holdReturn = document.activeElement;
+  const held = !!rec.legal_hold;
+  $('hold-title').textContent = (held ? 'Lift the legal hold on '
+    : 'Place a legal hold on ') + rec.code;
+  $('hold-now').textContent = held
+    ? rec.code + ' is under a legal hold'
+      + (rec.legal_hold_reason
+        ? ', placed for: ' + visibleText(rec.legal_hold_reason) : '') + '.'
+    : rec.code + ' is not under a legal hold.';
+  $('hold-help').textContent = held
+    ? 'Lifting the hold lets the case\'s retention dates and rules govern '
+      + 'again, so a purge can destroy what is past its date. Only somebody '
+      + 'cleared for everything the case holds can lift it. A written '
+      + 'reason and a sign-in from the last 15 minutes are needed either way.'
+    : 'A hold stops every deletion of what the case governs: its exhibits, '
+      + 'including any lodged later, its ingest records, lookups and samples, '
+      + 'and the collected documents it cites. A purge already running '
+      + 'finishes the exhibit it is destroying and keeps everything after '
+      + 'it. A written reason and a sign-in from the last 15 minutes are '
+      + 'needed either way.';
+  $('hold-why').value = '';
+  setMsg($('hold-msg'), '');
+  $('hold-save').textContent = held ? 'Lift the hold' : 'Place the hold';
+  show($('hold-scrim'), true);
+  $('hold-why').focus();
+}
+
+function closeCaseHold() {
+  const scrim = $('hold-scrim');
+  if (!scrim || scrim.hidden) return;
+  show(scrim, false);
+  const back = holdReturn;
+  holdReturn = null;
+  if (back && typeof back.focus === 'function' && document.contains(back)
+      && !back.closest('[hidden]')) {
+    back.focus();
+  }
+}
+
+async function submitCaseHold(e) {
+  e.preventDefault();
+  const rec = state.caseRec;
+  const msg = $('hold-msg');
+  setMsg(msg, '');
+  if (!rec || !state.caseId || !rec.may_hold) return;
+  const why = $('hold-why').value.trim();
+  if (why.length < 5) {
+    setMsg(msg, 'Say why, in at least 5 characters.');
+    return;
+  }
+  const btn = $('hold-save');
+  btn.disabled = true;
+  const token = caseToken();
+  const place = !rec.legal_hold;
+  let changed = false;
+  try {
+    const out = await withStepUp('A legal hold needs a recent sign-in.',
+      () => api('/retention/cases/' + rec.id + '/legal-hold',
+        { method: 'POST', json: { on: place, reason: why } }));
+    if (caseChanged(token)) return;
+    if (!out) {
+      setMsg(msg, 'Not changed: the sign-in was cancelled.');
+      return;
+    }
+    changed = true;
+    closeCaseHold();
+    /* Said first, with what a purge that was destroying material when the
+       hold arrived had destroyed (the hold response reports it): the hold
+       stands whatever the re-read below does. */
+    banner(place ? 'Legal hold placed' : 'Legal hold lifted',
+      place ? rec.code + ' is now under a legal hold.'
+        + (out.notice ? ' ' + out.notice : '')
+        : 'The legal hold on ' + rec.code + ' is lifted.',
+      out.notice ? 'warn' : 'info',
+      out.notice ? { sticky: true } : 8000);
+    /* The record again, so the chip and the control follow what the server
+       now holds; the register and the Records pane read the case's hold on
+       their next load. */
+    const fresh = await api('/cases/' + rec.id);
+    if (caseChanged(token)) return;
+    applyCaseRecord(fresh);
+    reloadRegisterIfShown();
+  } catch (err) {
+    if (caseChanged(token) || (err && err.handled)) return;
+    /* Only the re-read failed: the hold is in force, and the dialog's "Not
+       changed" would say the opposite. */
+    if (changed) { fail(err, 'The case record'); return; }
+    setMsg(msg, 'Not changed: ' + (err instanceof ApiError && err.status === 403
+      ? refusalText(err, 'Placing or lifting a hold needs retention.manage on '
+        + 'this case.')
+      : err instanceof ApiError ? (err.detail || err.title) : String(err)));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function wireCaseHold() {
+  const btn = $('btn-case-hold');
+  if (!btn) return;
+  btn.addEventListener('click', openCaseHold);
+  $('hold-form').addEventListener('submit', submitCaseHold);
+  $('hold-cancel').addEventListener('click', closeCaseHold);
+  holdDialogKeys('hold-scrim', closeCaseHold);
+}
 
 function wireCaseActions() {
   const edit = $('btn-case-edit');
@@ -15324,6 +15548,7 @@ function wire() {
   initCaseRouting();    // F7 and F15.3
   wireAssumptions();
   wireCaseActions();
+  wireCaseHold();
   wireTour();
   initCanvas();
   initPalette();
@@ -15620,11 +15845,14 @@ function signInLinkRefused(err) {
  *  case-scoped and selecting one before `state.caseId` exists produces a
  *  pane that renders its empty state and then never refreshes, which looks
  *  exactly like "there is no data".
+ *
+ *  `chosenMeanwhile` is true when the analyst picked a pane while the case was
+ *  loading: the link is spent either way, but it does not take the pane back.
  */
-function applyDeepLinkTab() {
+function applyDeepLinkTab(chosenMeanwhile) {
   const name = state.deepLinkTab;
   state.deepLinkTab = null;
-  if (!name) return;
+  if (!name || chosenMeanwhile) return;
   if (!document.querySelector('.rail-btn[data-tab="' + name + '"]')) return;
   selectTab(name);
 }
@@ -29328,25 +29556,34 @@ function renderRedaction(prepared) {
   const facts = el('div', 'facts');
   const withheld = (r.nodes_withheld || 0) + (r.edges_withheld || 0)
     + (r.evidence_withheld || 0);
-  facts.appendChild(fact('entities withheld', r.nodes_withheld || 0,
-    r.nodes_withheld ? 'warn' : ''));
-  facts.appendChild(fact('relationships withheld', r.edges_withheld || 0,
-    r.edges_withheld ? 'warn' : ''));
-  /* The case's disclosure setting decides the figure: under PRESENCE the
-     document says some exhibits are above the ceiling and not how many. */
-  facts.appendChild(fact('exhibits withheld',
-    r.evidence_some_withheld ? 'some' : (r.evidence_withheld || 0),
-    r.evidence_withheld || r.evidence_some_withheld ? 'warn' : ''));
-  /* Only when there is some: the matrix's scores leave these out (C2). */
-  if (r.hypothesis_evidence_withheld) {
-    facts.appendChild(fact('hypothesis evidence withheld',
-      r.hypothesis_evidence_withheld, 'warn'));
+  /* The case's disclosure setting decides all three figures (decision 179,
+     and 2026-10-08 for the entities and relationships): the number under
+     COUNT, whether there are some under PRESENCE, and under NONE nothing,
+     because a "0" there would say what the case chose not to. An older
+     server sent no setting and always counted. */
+  const mode = r.disclosure || 'COUNT';
+  if (mode !== 'NONE') {
+    for (const [label, count, some] of [
+      ['entities withheld', r.nodes_withheld, r.nodes_some_withheld],
+      ['relationships withheld', r.edges_withheld, r.edges_some_withheld],
+      ['exhibits withheld', r.evidence_withheld, r.evidence_some_withheld],
+    ]) {
+      facts.appendChild(fact(label,
+        mode === 'COUNT' ? (count || 0) : (some ? 'some' : 'none'),
+        count || some ? 'warn' : ''));
+    }
   }
-  card.appendChild(facts);
+  /* Only when there is some: the matrix's scores leave these out (C2). */
+  if (r.hypothesis_evidence_withheld || r.hypothesis_evidence_some_withheld) {
+    facts.appendChild(fact('hypothesis evidence withheld',
+      r.hypothesis_evidence_withheld || 'some', 'warn'));
+  }
+  if (facts.childNodes.length) card.appendChild(facts);
 
-  const anything = withheld || r.evidence_some_withheld || r.header_withheld
+  const anything = withheld || r.evidence_some_withheld
+    || r.nodes_some_withheld || r.edges_some_withheld || r.header_withheld
     || r.assumptions_withheld || r.hypotheses_withheld
-    || r.hypothesis_evidence_withheld;
+    || r.hypothesis_evidence_withheld || r.hypothesis_evidence_some_withheld;
   /* The statement is the document's own Markdown sentence, which bolds
      "Every figure below is computed over the redacted graph" with `**`.
      Printed through textContent, the card showed the asterisks the moment
@@ -31523,6 +31760,261 @@ function watchHitRow(h) {
   return card;
 }
 
+/* --- Watches (F53, 2026-10-08) -----------------------------------------
+ *
+ * Only a seeding script wrote a watch until now, so this tab listed what
+ * watches had matched and offered no way to make one, and a watch of kind
+ * TELEGRAM_CHAT could be written only by hand. The list is case-scoped
+ * behind `collection.read` on the case, like the hits; the form is drawn
+ * only for a caller who holds `watch.manage` (the listing says so), and
+ * the server refuses it for anyone else and on a read-only case. The
+ * Add a watch box is one of CASE_CONTENT_CONTROLS, so a closed case turns
+ * it off as it does every other write.
+ *
+ * What a watch looks at is a note for the people reading the list; the
+ * collector reads the SOURCE's address. A Telegram chat is the exception:
+ * it is named by its typed id, and choosing the Telegram source fills the
+ * id in from the listing, so it cannot be mistyped or aimed at a chat the
+ * source does not read.
+ */
+const WATCH_KIND_WORDS = {
+  BOARD: 'Board', THREAD: 'Thread', USER: 'User profile', CHANNEL: 'Channel',
+  FEED: 'Feed', SEARCH: 'Search', TELEGRAM_CHAT: 'Telegram chat',
+};
+const WATCH_CHAT_KIND = 'TELEGRAM_CHAT';
+const COL_WATCHES_NOT_LOADED = 'Not loaded for this case yet.';
+
+/* The last listing, for the form: the sources it may offer. Dropped with
+   the case, so one case's source list is never offered on the next. */
+const WATCH = { form: null };
+
+onCaseSwitch(() => {
+  clear($('col-watch-list'));
+  $('col-watch-counts').textContent = '';
+  $('col-watch-empty').textContent = COL_WATCHES_NOT_LOADED;
+  show($('col-watch-empty'), true);
+  clearLoadFailure('col-watch-empty');
+  /* The box and what was typed in it go with the case: a selector typed for
+     one case is not left in the form of the next. */
+  $('col-watch-form').reset();
+  $('col-watch-box').open = false;
+  show($('col-watch-box'), false);
+  setMsg($('col-watch-error'), '');
+  setMsg($('col-watch-ok'), '');
+  WATCH.form = null;
+});
+
+async function loadWatches() {
+  if (!state.caseId) return;
+  const token = caseToken();
+  try {
+    const body = await api(cpath('/collection/watches'));
+    if (caseChanged(token)) return;
+    const rows = body.watches || [];
+    WATCH.form = body;
+    renderList('col-watch-list', 'col-watch-empty', rows, watchRow);
+    $('col-watch-counts').textContent = rows.length
+      ? countOf(rows.length, 'watch', 'watches') : '';
+    if (!rows.length) {
+      $('col-watch-empty').textContent = body.can_create
+        ? 'No watch is set on this case yet. Add one below.'
+        : 'No watch is set on this case yet.';
+    }
+    paintWatchForm(body);
+  } catch (err) {
+    if (caseChanged(token)) return;
+    renderList('col-watch-list', 'col-watch-empty', [], watchRow);
+    $('col-watch-counts').textContent = '';
+    WATCH.form = null;
+    show($('col-watch-box'), false);
+    if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
+      listRefused('col-watch-empty', refusalText(
+        err, 'Watches need collection.read on this case.'));
+      return;
+    }
+    $('col-watch-empty').textContent = COL_WATCHES_NOT_LOADED;
+    showLoadFailure('col-watch-empty', "This case's watches", err,
+      loadWatches);
+  }
+}
+
+/** The thinning time in the unit it was given in. */
+function watchWindowText(seconds) {
+  const s = Number(seconds);
+  if (s === 0) return 'none: a hit for every match';
+  if (s % 60 === 0) {
+    return 'one hit per thread each ' + countOf(s / 60, 'minute', 'minutes');
+  }
+  return 'one hit per thread each ' + countOf(s, 'second', 'seconds');
+}
+
+function watchRow(w) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', visibleText(w.name)));
+  head.appendChild(el('span', 'chip small',
+    WATCH_KIND_WORDS[w.target_kind] || visibleText(w.target_kind)));
+  head.appendChild(el('span', 'chip small', 'priority ' + w.priority));
+  if (!w.is_active) head.appendChild(el('span', 'chip', 'stopped'));
+  if (!w.source_active) {
+    const chip = el('span', 'chip warn', 'source paused');
+    chip.title = 'Nothing is read from this watch’s source until it is '
+      + 'activated, so the watch cannot fire.';
+    head.appendChild(chip);
+  }
+  card.appendChild(head);
+
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('source', visibleText(w.source_name)));
+  facts.appendChild(fact(w.target_kind === WATCH_CHAT_KIND ? 'chat' : 'looks at',
+    visibleText(w.target_ref)));
+  facts.appendChild(fact('thinning', watchWindowText(w.suppress_window_s)));
+  facts.appendChild(fact('last hit', w.last_hit_at ? fmtTime(w.last_hit_at) : 'none yet'));
+  card.appendChild(facts);
+
+  const terms = el('div', 'facts');
+  let named = 0;
+  for (const [label, list] of [['keywords', w.keywords], ['selectors', w.selectors],
+    ['patterns', w.regexes]]) {
+    if (!list || !list.length) continue;
+    terms.appendChild(fact(label, list.map((t) => visibleText(t)).join(', ')));
+    named += 1;
+  }
+  if (named) {
+    card.appendChild(terms);
+  } else {
+    /* The documented difference (docs/04): a chat watch with no term is the
+       chat itself, and any other kind with none matches nothing. */
+    card.appendChild(el('p', 'help', w.target_kind === WATCH_CHAT_KIND
+      ? 'No term: this watch fires on every message of its chat.'
+      : 'No term: this watch matches nothing.'));
+  }
+  /* A poll's warning names a watch by its id. */
+  card.appendChild(el('p', 'muted small mono', 'Watch ' + w.id));
+  return card;
+}
+
+/** The add form, once a listing has said whether the caller may use it. */
+function paintWatchForm(body) {
+  const may = Boolean(body && body.can_create);
+  show($('col-watch-box'), may);
+  if (!may) return;
+  const kind = $('col-watch-kind');
+  if (!kind.children.length) {
+    for (const k of body.kinds || []) {
+      kind.appendChild(selectOption(k, WATCH_KIND_WORDS[k] || k));
+    }
+  }
+  paintWatchSources();
+}
+
+/** The sources the form offers: every source the caller may see, or for a
+ *  chat watch the Telegram sources that read a chat. */
+function paintWatchSources() {
+  const chat = $('col-watch-kind').value === WATCH_CHAT_KIND;
+  const select = $('col-watch-source');
+  const keep = select.value;
+  clear(select);
+  const sources = ((WATCH.form && WATCH.form.sources) || [])
+    .filter((s) => !chat || (s.kind === 'TELEGRAM' && s.chat));
+  for (const s of sources) {
+    select.appendChild(selectOption(s.id,
+      visibleText(s.name) + (s.is_active ? '' : ' (paused)')));
+  }
+  if (!sources.length) {
+    select.appendChild(selectOption('', chat ? 'No Telegram chat is added'
+      : 'No source is available'));
+  }
+  if (sources.some((s) => s.id === keep)) select.value = keep;
+  show($('col-watch-chat-help'), chat);
+  paintWatchRef();
+}
+
+/** The target field: a chat's id is the source's own and not typed; any
+ *  other kind's is the person's note. */
+function paintWatchRef() {
+  const ref = $('col-watch-ref');
+  const chat = $('col-watch-kind').value === WATCH_CHAT_KIND;
+  $('col-watch-ref-label').textContent = chat ? 'Chat' : 'Address or id';
+  ref.readOnly = chat;
+  /* The example addresses are the markup's (the script carries none). */
+  if (!ref.dataset.hintNote) ref.dataset.hintNote = ref.placeholder;
+  ref.placeholder = chat ? ref.dataset.hintChat : ref.dataset.hintNote;
+  if (chat) {
+    const source = (((WATCH.form && WATCH.form.sources) || [])
+      .find((s) => s.id === $('col-watch-source').value));
+    ref.value = (source && source.chat) || '';
+    ref.dataset.filled = 'yes';
+  } else if (ref.dataset.filled === 'yes') {
+    /* What the chat mode wrote is not kept as a note for another kind. */
+    ref.value = '';
+    delete ref.dataset.filled;
+  }
+}
+
+/** A textarea's lines as a list of terms: trimmed, none empty. */
+function watchLines(id) {
+  return $(id).value.split('\n').map((line) => line.trim()).filter(Boolean);
+}
+
+async function addWatch(e) {
+  e.preventDefault();
+  const err = $('col-watch-error');
+  setMsg(err, '');
+  setMsg($('col-watch-ok'), '');
+  const source = $('col-watch-source').value;
+  if (!source) { setMsg(err, 'Choose the source this watch reads.'); return; }
+  const name = $('col-watch-name').value.trim();
+  if (name.length < 3) { setMsg(err, 'Name the watch, in at least 3 characters.'); return; }
+  const kind = $('col-watch-kind').value;
+  const chat = kind === WATCH_CHAT_KIND;
+  const ref = $('col-watch-ref').value.trim();
+  if (!ref) {
+    setMsg(err, chat ? 'Choose a Telegram source that reads a chat.'
+      : 'Say what the watch looks at: an address or an id.');
+    return;
+  }
+  const keywords = watchLines('col-watch-keywords');
+  const selectors = watchLines('col-watch-selectors');
+  const regexes = watchLines('col-watch-regexes');
+  if (!chat && !(keywords.length || selectors.length || regexes.length)) {
+    setMsg(err, 'Give the watch a keyword, a selector or a pattern, or it '
+      + 'matches nothing.');
+    return;
+  }
+  const minutes = Number($('col-watch-window').value);
+  if (!(Number.isInteger(minutes) && minutes >= 0 && minutes <= 10080)) {
+    setMsg(err, 'Thin repeats for a whole number of minutes, from 0 to 10080.');
+    return;
+  }
+  const json = {
+    source_id: source, name, target_kind: kind, target_ref: ref,
+    keywords, selectors, regexes,
+    priority: Number($('col-watch-priority').value),
+    suppress_window_s: minutes * 60,
+  };
+  const token = caseToken();
+  $('col-watch-btn').disabled = true;
+  try {
+    const out = await api(cpath('/collection/watches'), { method: 'POST', json });
+    if (caseChanged(token)) return;
+    $('col-watch-name').value = '';
+    for (const id of ['col-watch-keywords', 'col-watch-selectors',
+      'col-watch-regexes']) $(id).value = '';
+    setMsg($('col-watch-ok'), 'Added. ' + (out.next || ''));
+    loadWatches();
+  } catch (ex) {
+    if (caseChanged(token)) return;
+    if (ex instanceof ApiError && ex.status >= 400 && ex.status < 500) {
+      setMsg(err, ex.detail || ex.title);
+    } else {
+      fail(ex);
+    }
+  } finally {
+    $('col-watch-btn').disabled = false;
+  }
+}
+
 async function loadCollectedDocuments() {
   const triage = $('col-doc-triage').value;
   // Whether a row can offer Similar (F6.3); read once, cached.
@@ -33026,7 +33518,7 @@ async function showAdmin() {
   show($('btn-cases'), true);
   /* No case is open, so none of the case chrome applies. */
   for (const id of ['hdr-tlp', 'hdr-asof', 'btn-case-edit', 'btn-case-share',
-                    'btn-case-status']) {
+                    'btn-case-status', 'btn-case-hold', 'hdr-hold']) {
     show($(id), false);
   }
   $('hdr-case').textContent = adminViewName();
@@ -35680,13 +36172,18 @@ function initOpsPanes() {
        entry: that list is global rather than case-scoped and can be long,
        so it sits behind its own Load, the way co-participation and the
        report do. */
-    if (name === 'collected') loadWatchHits();
+    if (name === 'collected') { loadWatchHits(); loadWatches(); }   // F53
     if (name === 'keys') loadKeys();
     /* The issued key's secret leaves with the Keys tab (r2 u25). */
     else clearKeySecret();
   });
   $('col-hits-refresh').addEventListener('click', loadWatchHits);
   $('col-hits-unack').addEventListener('change', loadWatchHits);
+  // F53 (2026-10-08). The watches, and the form that adds one.
+  $('col-watch-refresh').addEventListener('click', loadWatches);
+  $('col-watch-form').addEventListener('submit', addWatch);
+  $('col-watch-kind').addEventListener('change', paintWatchSources);
+  $('col-watch-source').addEventListener('change', paintWatchRef);
   $('col-doc-refresh').addEventListener('click', loadCollectedDocuments);
   $('col-doc-triage').addEventListener('change', loadCollectedDocuments);
   /* The delivery ledger moved to Administration, Integrations (F8,

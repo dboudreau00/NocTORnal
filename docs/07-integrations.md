@@ -71,7 +71,12 @@ revoked, withdrawn, case not routed, already on the issue and the rest),
 and what left: STUB, SUBJECT or SUMMARY. The gate judges a delivery at
 its notification's labels composed with its case's labels as they stand
 when it is sent, so a case raised or given a compartment while a delivery
-waits (a digest, quiet hours, a retry) is gated at its new labels.
+waits (a digest, quiet hours, a retry) is gated at its new labels. The labels
+of the element a notice is about are read again the same way (the exhibit of
+an integrity alarm, the entities of a merge or its approval, the sample of a
+detonation or a screening, a feed record), so an element raised after its
+notice was queued is gated at the label it has now, and a delivery whose
+recipient no longer dominates it is revoked, never sent.
 
 **Held against failed.** A delivery that cannot be attempted because
 something is not configured (no `SMTP_HOST`, no `smtp` or `webhook` route,

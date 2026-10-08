@@ -160,6 +160,23 @@ def test_scrubbing_removes_exactly_the_live_secrets_and_nothing_else():
         assert scrub_live_secrets(None) == "" and scrub_live_secrets("") == ""
 
 
+def test_scrubbing_knows_the_forms_a_json_string_spells_a_secret_in():
+    """A vendor's answer is JSON: a quote or a backslash is escaped, a
+    non-ASCII letter is \\uXXXX or raw, and PHP writes `/` as `\\/`."""
+    import json
+
+    from noctornal_api.pinned_http import scrub_live_secrets
+
+    secret = 'k/e"y\\ü-live-secret'
+    with secret_in_scope(secret):
+        for spelled in (json.dumps(secret), json.dumps(secret, ensure_ascii=False),
+                        json.dumps(secret, ensure_ascii=False).replace("/", "\\/")):
+            text = '{"echo": ' + spelled + ', "other": "kept"}'
+            assert scrub_live_secrets(text) == text, "plain mode leaves JSON spellings"
+            assert scrub_live_secrets(text, json_escaped=True) == \
+                '{"echo": "[REDACTED]", "other": "kept"}'
+
+
 def test_scrubbing_ignores_a_value_too_short_to_be_a_secret_and_a_block_that_ended():
     from noctornal_api.pinned_http import scrub_live_secrets
 

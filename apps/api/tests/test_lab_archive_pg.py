@@ -468,6 +468,87 @@ def test_a_tree_is_held_to_one_cap_not_one_per_archive(conn, store, monkeypatch)
                         ).digest(),)).fetchone()[0] == 0
 
 
+def _queued(conn, sample_id):
+    return conn.execute("SELECT id FROM lab.static_run WHERE sample_id = %s "
+                        "AND status = 'QUEUED'", (sample_id,)).fetchone()[0]
+
+
+def test_an_archive_tree_is_counted_and_stored_under_its_lock_and_a_second_archive_waits(
+        conn, store, monkeypatch):
+    """docs/17, "the archive tree count is not locked": two archives of one
+    tree expanded in the same moment by two processes each read the tree's
+    count before either stored a member, so each passed the cap. The count and
+    the members stored from it are now one step under a lock named by the
+    tree's root, and an archive that cannot get it in time stores nothing and
+    says why, to be run again."""
+    from noctornal_api import lab_archive, lab_triage
+    from noctornal_api.db import connect
+    monkeypatch.setenv("NOCTORNAL_ARCHIVE_MAX_MEMBERS", "6")
+    monkeypatch.setenv("NOCTORNAL_ARCHIVE_MAX_TREE_MEMBERS", "8")
+    owner = make_user(conn, PREFIX, roles=("CASE_OWNER",))
+    inner_a = zip_of([(f"a{i}.exe", member_bytes(f"a{i}")) for i in range(2)])
+    inner_b = zip_of([(f"b{i}.exe", member_bytes(f"b{i}")) for i in range(2)])
+    outer = _submit(conn, store, owner, zip_of([("inner_a.zip", inner_a),
+                                                ("inner_b.zip", inner_b)]))
+    _run_parent(conn, store, outer)
+    rows = {r[1]: r[0] for r in _members(conn, outer.id)}
+    key = f"noctornal.archive_tree:{outer.id}"
+
+    def free(probe_conn) -> bool:
+        got = probe_conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
+                                 (key,)).fetchone()[0]
+        if got:
+            probe_conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
+                               (key,))
+        return got
+
+    # While an archive of the tree is being expanded, no other connection
+    # can take the tree's lock; before and after, any can.
+    seen = []
+    real = lab_archive._expand
+
+    def probe(*args, **kw):
+        other = connect()
+        try:
+            seen.append(free(other))
+        finally:
+            other.close()
+        return real(*args, **kw)
+
+    monkeypatch.setattr(lab_archive, "_expand", probe)
+    assert drain(conn, store, run_id=_queued(conn, rows["inner_a.zip"])) == ["DONE"]
+    assert seen == [False], "the count and the storing run under the tree's lock"
+    monkeypatch.setattr(lab_archive, "_expand", real)
+    other = connect()
+    try:
+        assert free(other), "and it is let go when the expansion is over"
+    finally:
+        other.close()
+    assert len(_members(conn, rows["inner_a.zip"])) == 2
+
+    # Another process holds the tree: this archive waits its allowance, then
+    # stores nothing and says so, and a later run expands it.
+    holder = connect()
+    real_wall = lab_archive.wall_s
+    try:
+        assert holder.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
+                              (key,)).fetchone()[0]
+        monkeypatch.setattr(lab_archive, "wall_s", lambda *_a, **_k: 1.1)
+        assert drain(conn, store, run_id=_queued(conn, rows["inner_b.zip"])) == ["DONE"]
+    finally:
+        holder.close()
+        monkeypatch.setattr(lab_archive, "wall_s", real_wall)
+    assert _members(conn, rows["inner_b.zip"]) == []
+    gap = _gap(conn, rows["inner_b.zip"])
+    assert gap["status"] == "pending" and gap["reason"] == lab_archive.TREE_WAITS.format(s=1)
+    assert _finding(conn, rows["inner_b.zip"]) is None, "no finding is a fact about it"
+    lab_triage.enqueue(conn, rows["inner_b.zip"], trigger="ON_DEMAND", requested_by=owner)
+    assert drain(conn, store, run_id=_queued(conn, rows["inner_b.zip"])) == ["DONE"]
+    assert [r[1] for r in _members(conn, rows["inner_b.zip"])] == ["b0.exe", "b1.exe"]
+    assert _gap(conn, rows["inner_b.zip"]) is None
+    assert len(lab_archive.tree_ids(conn, outer.id)) == 1 + 2 + 4
+
+
 def test_a_resumed_expansion_counts_only_the_members_it_has_still_to_store(
         conn, store, monkeypatch):
     """An expansion an earlier run left half done (two of five members

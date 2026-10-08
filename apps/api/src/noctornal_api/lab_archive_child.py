@@ -312,16 +312,51 @@ def _end_record_at(data: bytes) -> int:
     return data.rfind(b"PK\x05\x06", max(0, len(data) - _EOCD_SEARCH))
 
 
+#: A central directory file header: its signature, its fixed length, and where
+#: its three variable lengths (name, extra field, comment) sit in it.
+_CD_SIGNATURE = b"PK\x01\x02"
+_CD_FIXED = 46
+
+
+def _count_directory(data: bytes, start: int, cd_size: int, max_members: int) -> int:
+    """How many entries the central directory really holds, counted by
+    walking its records from `start` and refusing at the first one past
+    `max_members`. The claimed count is not believed: zipfile reads records
+    until `cd_size` bytes are used and never looks at the count, so a
+    directory of millions of 46-byte records behind an end record that
+    claims one entry was parsed whole, up to the size of the archive, before
+    the count refusal (docs/17). The walk only counts: a record that is not
+    one ends it, and zipfile, which reads the same bytes from the same place,
+    refuses that as corrupt in its own words."""
+    if start < 0:
+        raise Refused("corrupt")
+    end = min(start + cd_size, len(data))
+    count = 0
+    at = start
+    while at + _CD_FIXED <= end and data[at:at + 4] == _CD_SIGNATURE:
+        count += 1
+        if count > max_members:
+            raise Refused("member_count", entries=count, cap=max_members)
+        name, extra, comment = struct.unpack("<HHH", data[at + 28:at + 34])
+        at += _CD_FIXED + name + extra + comment
+    return count
+
+
 def zip_preflight(data: bytes, max_members: int) -> int:
-    """The entry count the end record (or a zip64 record a locator points
-    at) claims, refused by count or by a multi-part layout BEFORE zipfile
-    builds one object per entry (the discipline `yara_rules` uses for a
-    rule bundle). Returns the larger claim."""
+    """The entry count of the archive, refused by count or by a multi-part
+    layout BEFORE zipfile builds one object per entry (the discipline
+    `yara_rules` uses for a rule bundle). The end record (or a zip64 record a
+    locator points at) is read for its claim, and the central directory is
+    then counted by walking it (`_count_directory`), at most `max_members`
+    records. Returns the larger of the claim and the count."""
     at = _end_record_at(data)
     if at < 0 or at + 22 > len(data):
         raise Refused("corrupt")
     (_sig, disk, cd_disk, _here, total, cd_size, cd_offset,
      _comment) = struct.unpack("<4sHHHHIIH", data[at:at + 22])
+    # Where zipfile reads the directory from: it ends where the end record
+    # begins, and a zip64 end record and its locator (76 bytes) come first.
+    cd_end = at
     loc = at - 20
     if loc >= 0 and data[loc:loc + 4] == b"PK\x06\x07":
         (_s, z_disk, z64_at, disks) = struct.unpack("<4sIQI", data[loc:loc + 20])
@@ -337,13 +372,14 @@ def zip_preflight(data: bytes, max_members: int) -> int:
         disk, cd_disk = disk or disk64, cd_disk or cd_disk64
         total = max(total, total64)
         cd_size = max(cd_size, cd_size64)
+        cd_end = at - 76
     if disk or cd_disk:
         raise Refused("multipart")
     if total > max_members:
         raise Refused("member_count", entries=total, cap=max_members)
     if cd_size > len(data):
         raise Refused("corrupt")
-    return total
+    return max(total, _count_directory(data, cd_end - cd_size, cd_size, max_members))
 
 
 #: The most a zip entry marked as a symbolic link may hold and still be one:

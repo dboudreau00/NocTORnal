@@ -63,6 +63,7 @@ import os
 from fastapi import Header, HTTPException, Request
 from starlette.responses import JSONResponse
 
+from noctornal_api.config import is_production
 from noctornal_api.http.errors import Problem
 from noctornal_api.http.limits import consume_on_failure
 
@@ -82,7 +83,7 @@ def configured_token() -> str | None:
 
 
 def _production() -> bool:
-    return os.environ.get("NOCTORNAL_ENV", "").strip().lower() == "production"
+    return is_production()
 
 
 def door_closed() -> bool:

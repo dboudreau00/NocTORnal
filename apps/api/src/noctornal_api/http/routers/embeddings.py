@@ -112,11 +112,22 @@ def admin_embedding_gaps(
     after_at: datetime | None = None,
     after_id: UUID | None = None,
     user: CurrentUser = Depends(require_global("embedding.manage")),
+    # The second verb is a gate of its own, after the first (a dependency
+    # runs in the order it is declared), so a caller who lacks it is refused
+    # with the gate's sentence and its AUTHZ_DENIED row. It was a
+    # `_holds_global` check in the body, which refused with no row at all
+    # (docs/17, "a second permission check in a handler", 2026-10-08).
+    _reads: CurrentUser = Depends(require_global("collection.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
     """The documents of one index that are not embedded, with each reason
     in words, at the caller's own labels; keyset paging on (embedded_at,
     document_id).
+
+    Needs `embedding.manage` and the global `collection.read`, both through
+    the gate: the figures follow the caller's own case-less labels, and
+    "what is indexed at every label" is a volume disclosure to an
+    administrator who reads no documents.
 
     `after_at` is parsed here as a time, so a malformed one is a 422 and
     never reaches the SQL cast, where it would be a 500 (2026-09-25). The
@@ -127,8 +138,6 @@ def admin_embedding_gaps(
     if after_at is not None and after_at.tzinfo is None:
         raise Problem(422, "Unprocessable", "after_at needs a time zone; every time "
                       "here is UTC.")
-    if not _holds_global(conn, user, "collection.read"):
-        raise Problem(403, "Forbidden", COVERAGE_NOTE)
     svc = EmbeddingService(conn)
     space = svc.space(space_id)
     if space is None:

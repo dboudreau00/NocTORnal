@@ -99,7 +99,11 @@ Nothing alerts on them; an `ingest.manage` holder looks.
   unvetted bytes); nothing is parsed in the request.
 - Parsing is a separate step: `POST /ingest/batches/{id}/parse`, by an
   `ingest.manage` holder, so a malformed 50MB dump is a background problem
-  rather than a request timeout.
+  rather than a request timeout. It parses into the unattached queue and
+  takes no case: a record goes into a case afterwards, with
+  `POST /ingest/records/{id}/attach`, on the word of somebody who works that
+  case (`ingest.replay` on it). A parse request that names a case is refused
+  with a 400 that says so.
 
 ---
 
@@ -306,7 +310,14 @@ What exists, and where:
   at send time and runs its housekeeping whatever the switch says.
 - **Adapters** for VirusTotal v3, Shodan host and MISP restSearch, report
   lookups only: no scan, submission or upload operation exists (docs/16
-  L5).
+  L5). The answer is stored with every key the request was sent under removed
+  from it, in each form it is spelt, so a vendor that echoes the key back
+  leaves no copy. A MISP answer's TLP floor is the highest marking on ANY
+  attribute or event it carries, however many came back (the summary lists the
+  first 50), and an answer whose shape the adapter does not read, such as a
+  tag with no readable name or a response that is not the object it expects,
+  is unreadable and so labelled RED, never answered as found or not found
+  with no floor.
 
 ## Schema
 

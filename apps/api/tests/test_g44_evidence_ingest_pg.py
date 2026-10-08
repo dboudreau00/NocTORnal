@@ -347,8 +347,13 @@ def test_a_failed_put_leaves_no_row(conn, store):
         raise ConnectionError("the object store went away")
 
     store.on_put = boom
-    with pytest.raises(ConnectionError):
+    # A store that did not answer is `StoreUnavailable` since 2026-10-08 (the
+    # HTTP layer's 503), with the store's own error kept as its cause; this
+    # test pinned the raw ConnectionError escaping.
+    from noctornal_api.evidence import StoreUnavailable
+    with pytest.raises(StoreUnavailable) as raised:
         g.lodge(conn, store, case_id, boss, data=data)
+    assert isinstance(raised.value.__cause__, ConnectionError)
     assert _rows_for(conn, case_id, data) == []
 
 
@@ -387,12 +392,25 @@ def test_no_role_rewrites_an_exhibits_anchors(conn, store, column, value):
     _, raw = s.session(conn, boss)
     a = s.app_conn(raw)
     try:
-        with pytest.raises(psycopg.errors.CheckViolation, match="fixed when it is lodged"):
+        # Since 0178 (Beta 1.1) the request role holds UPDATE of
+        # storage_version_id alone, so the privilege check refuses it before
+        # 0140's guard is reached; the guard still holds the system role.
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
             with a.transaction():
                 a.execute(f"UPDATE core.evidence SET {column} = %s WHERE id = %s",
                           (value, res.evidence_id))
     finally:
         a.close()
+    from noctornal_api.db import connect
+    w = connect()
+    try:
+        w.execute(f"SET ROLE {s.WORKER_ROLE}")
+        with pytest.raises(psycopg.errors.CheckViolation, match="fixed when it is lodged"):
+            with w.transaction():
+                w.execute(f"UPDATE core.evidence SET {column} = %s WHERE id = %s",
+                          (value, res.evidence_id))
+    finally:
+        w.close()
     # The schema owner is refused too: correcting a row means disabling the
     # guard by name, in a transaction that is itself on the record.
     with pytest.raises(psycopg.errors.CheckViolation):

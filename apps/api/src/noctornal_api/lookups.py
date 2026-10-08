@@ -37,6 +37,7 @@ reserve) / 100)), so interactive work always has room.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import hashlib
 import logging
 import math
@@ -62,6 +63,7 @@ from noctornal_api.egress import Destination, can_egress
 from noctornal_api.egress_policy import EgressRoute
 from noctornal_api.ingest import IngestError, hash_secret
 from noctornal_api.proposals import KIND_ATTRIBUTE, KIND_NODE, ProposalStore
+from noctornal_api.security.access import TLP_NAMES
 from noctornal_api.wording import count_of
 
 log = logging.getLogger("noctornal.lookups")
@@ -81,7 +83,7 @@ _SOCIAL_PROFILE_HOSTS = frozenset({
     "linkedin.com", "vk.com", "ok.ru", "threads.net", "youtube.com"})
 _HASH_TYPES = {"HASH_MD5": "md5", "HASH_SHA1": "sha1", "HASH_SHA256": "sha256"}
 _URL_SEPARATORS = re.compile(r"[/?#&=;,]+")
-_TLP = ("CLEAR", "GREEN", "AMBER", "AMBER_STRICT", "RED")
+_TLP = TLP_NAMES
 
 PII_REFUSAL = ("This value is personal data or looks like it. Sending personal data to a "
                "provider needs a transfer authority this deployment has not recorded, "
@@ -122,6 +124,20 @@ def _max(*labels) -> str:
 
 def _above(a: str, b: str) -> bool:
     return _TLP.index(a) > _TLP.index(b)
+
+
+def _without_live_secrets(fetched):
+    """The answer with every live secret removed from its body: the key the
+    request was sent under, in each form it takes on the wire and in a JSON
+    string. Bytes that are not UTF-8 survive unchanged (a lossless round trip
+    through surrogateescape), and an answer that carries no key is returned
+    as it came."""
+    body = bytes(fetched.body or b"")
+    text = body.decode("utf-8", "surrogateescape")
+    clean = pinned_http.scrub_live_secrets(text, json_escaped=True)
+    if clean == text:
+        return fetched
+    return dataclasses.replace(fetched, body=clean.encode("utf-8", "surrogateescape"))
 
 
 def query_fingerprint(selector_type: str, value: str) -> bytes:
@@ -1008,6 +1024,11 @@ class LookupService:
                  FROM ingest.lookup WHERE id = %s""", (lookup_id,)).fetchone()
         case_id, operation, stype, value, cls, node_id, fingerprint, kind, requester = lk
         fetched_at = datetime.now(timezone.utc)
+        # The answer is scrubbed of the key this lookup was sent under before
+        # anything reads it, so neither the stored body nor the summary and
+        # findings made from it can carry a key the vendor echoed. The hash
+        # is of what is stored.
+        fetched = _without_live_secrets(fetched)
         raw = bytes(fetched.body or b"")
         digest = hashlib.sha256(raw).digest()
         if 300 <= fetched.status < 400:

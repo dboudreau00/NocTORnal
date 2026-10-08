@@ -194,6 +194,78 @@ def test_an_unreadable_answer_is_kept_failed_and_never_cached(conn):
     assert len(w.fetcher.calls) == 2
 
 
+def _result_of(conn, lookup_id):
+    return conn.execute(
+        "SELECT r.outcome, r.classification, r.raw_body, r.raw_sha256, r.summary, "
+        "       r.interpret_error "
+        "  FROM ingest.lookup l JOIN ingest.lookup_result r ON r.id = l.result_id "
+        " WHERE l.id = %s", (lookup_id,)).fetchone()
+
+
+def test_an_answer_in_a_shape_nobody_reads_is_unreadable_and_labelled_red(conn):
+    """docs/17, the MISP floor: an answer in a shape the adapter does not read
+    became NOT_FOUND with no TLP floor, so a marking it carried never
+    labelled it. It is now UNREADABLE, which the service labels RED."""
+    w = _world(conn, b'{"response": {"Event": [{"Attribute": [{"Tag": '
+                     b'[{"name": "tlp:red"}]}]}]}}')
+    got = _ask(w, conn)
+    assert got["status"] == 502 and got["error_class"] == "unreadable"
+    outcome, label, _raw, _digest, summary, error = _result_of(conn, got["lookup_id"])
+    assert (outcome, label, summary) == ("UNREADABLE", "RED", {}) and error
+
+
+def test_a_marking_past_the_fiftieth_attribute_labels_the_answer(conn):
+    """The whole body is kept, so the floor reads the whole body."""
+    import json
+    attributes = [{"event_id": str(n), "category": "c", "type": "domain",
+                   "to_ids": False, "Event": {"info": "i", "date": "2026-09-01"},
+                   "Tag": [{"name": "tlp:green"}]} for n in range(60)]
+    attributes[57]["Tag"] = [{"name": "tlp:red"}]
+    w = _world(conn, json.dumps({"response": {"Attribute": attributes}}).encode())
+    got = _ask(w, conn)
+    outcome, label, raw, _digest, summary, _error = _result_of(conn, got["lookup_id"])
+    assert (outcome, label) == ("FOUND", "RED")
+    assert len(summary["events"]) == 50 and b"tlp:red" in bytes(raw)
+
+
+def test_an_answer_that_echoes_the_key_is_stored_without_it(conn):
+    """docs/17, the lookup's raw body: a vendor that echoed the API key it was
+    asked under had it stored in `raw_body`. The key is removed in each form
+    it takes, before anything reads the answer, and the hash is of what is
+    kept."""
+    import base64
+    import json
+    import urllib.parse
+    key = "sk_test_" + "k" * 40
+    echoes = {"plain": key, "url": urllib.parse.quote(key, safe=""),
+              "b64": base64.b64encode(key.encode()).decode(),
+              "json": json.dumps(key)[1:-1]}
+    body = json.loads(MISP_GREEN_BODY)
+    body["echo"] = echoes
+    body["response"]["Attribute"][0]["Event"]["info"] = f"seen with {key}"
+    w = _world(conn, json.dumps(body).encode())
+    got = _ask(w, conn)
+    outcome, _label, raw, digest, summary, _error = _result_of(conn, got["lookup_id"])
+    assert outcome == "FOUND"
+    stored = bytes(raw)
+    for form in echoes.values():
+        assert form.encode() not in stored
+    assert key not in json.dumps(summary) and b"[REDACTED]" in stored
+    assert b"tlp:green" in stored, "everything else is kept as the vendor sent it"
+    assert bytes(digest) == hashlib.sha256(stored).digest()
+
+
+def test_removing_the_key_leaves_the_other_bytes_of_an_answer_alone(conn):
+    """A body that is not UTF-8 is still kept as it came, key apart."""
+    key = b"sk_test_" + b"k" * 40
+    body = b'{"note": "\xff\xfe raw", "echo": "' + key + b'"}'
+    w = _world(conn, body)
+    got = _ask(w, conn)
+    _outcome, _label, raw, digest, _summary, _error = _result_of(conn, got["lookup_id"])
+    assert bytes(raw) == b'{"note": "\xff\xfe raw", "echo": "[REDACTED]"}'
+    assert bytes(digest) == hashlib.sha256(bytes(raw)).digest()
+
+
 def test_a_redirect_is_refused_as_a_changed_api(conn):
     w = _world(conn)
     w.fetcher.answers = [fetched(302, b"", location="https://elsewhere.example/")]

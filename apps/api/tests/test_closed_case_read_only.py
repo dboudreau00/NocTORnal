@@ -99,7 +99,10 @@ CONTENT = {
     ("POST", "/cases/{case_id}/curation/sets/{set_id}/members"),
     ("DELETE", "/cases/{case_id}/curation/sets/{set_id}/members/{node_id}"),
     ("POST", "/samples"),
-    ("POST", "/ingest/batches/{batch_id}/parse"),
+    # `POST /ingest/batches/{batch_id}/parse` is no longer here: it takes no
+    # case (2026-10-08, docs/17 "`parse` with a case id") and parses into the
+    # unattached queue. A record reaches a case by `POST /ingest/records/
+    # {record_id}/attach`, which gates on `ingest.replay`, a content verb.
     ("POST", "/ingest/dead-letters/{dead_letter_id}/replay"),
     # Lab work on a sample already attached to a case: its case is in no
     # path and the verbs are global, so each calls the gate by hand (c7/c21,
@@ -119,6 +122,9 @@ CONTENT = {
     ("POST", "/cases/{case_id}/lookups/results/{result_id}/file"),
     ("POST", "/cases/{case_id}/lookups/batches"),
     # Keeping a case out of Jira is governance, below.
+    # F53 (2026-10-08): a new standing tasking on the case. Unlike the hits it
+    # raises, which are housekeeping, a closed case takes no new watch.
+    ("POST", "/cases/{case_id}/collection/watches"),
 }
 
 #: Why a similarity route is a read (F6.3, F6.4, 2026-09-24).
@@ -380,7 +386,9 @@ def test_the_case_record_says_read_only():
             id="c", code="OP-X", title="t", status=status, classification="AMBER",
             owner_user_id="u", legal_basis="b", retention_until="2028-01-01",
             review_due="2027-01-01", created_at="2026-01-01T00:00:00Z",
-            closed_at=None, summary=None, authority_ref=None)
+            closed_at=None, summary=None, authority_ref=None,
+            # The record carries the case's hold since 2026-10-08.
+            legal_hold=False)
         assert _out(row).read_only is (status in CONTENT_READ_ONLY_STATES)
 
 
@@ -694,6 +702,9 @@ CONSOLE_CONTENT = {
         ("drawn", ".case-write", "ingestRow", "verb('Correct category…', "),
         ("drawn", ".case-write", "ingestRow", "const cases = attachTargets();"),
     ],
+    # F53 (2026-10-08): the Collected tab's Add a watch box, the whole box
+    # (the summary included), as Add a hypothesis is.
+    "addWatch": [("id", "col-watch-box", "col-watch-btn")],
 }
 
 #: Console writes on one case that stay live, and why (NOT_CONTENT above

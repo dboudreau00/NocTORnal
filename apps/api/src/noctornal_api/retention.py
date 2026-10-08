@@ -139,6 +139,10 @@ class _StorageOutcome:
     locked: int = 0
     failed: int = 0
     warnings: tuple[str, ...] = ()
+    #: The exhibit each warning above is about, in the same order, so a
+    #: warning can be left out of an answer to a caller who may not know of
+    #: that exhibit (2026-10-08).
+    warning_about: tuple = ()
     #: Exhibits that came under a legal hold, their own or their case's,
     #: between the sweep and the purge's row locks, and were not touched
     #: (evidence-purge-hold-race, 2026-10-03). Not in the three counts.
@@ -150,6 +154,36 @@ class _StorageOutcome:
     deleted_ids: tuple = ()
     locked_ids: tuple = ()
     failed_ids: tuple = ()
+
+
+#: The kinds of object a case hold can find destroyed behind it, in the order
+#: `RetentionService._destroyed_so_far` counts them, and how each is said.
+WAITED_KINDS = ("evidence", "ingest_record", "lookup", "lookup_result",
+                "lookup_batch", "sample")
+_WAITED_NOUNS = {
+    "evidence": ("exhibit", "exhibits"),
+    "ingest_record": ("ingest record", "ingest records"),
+    "lookup": ("lookup", "lookups"),
+    "lookup_result": ("lookup answer", "lookup answers"),
+    "lookup_batch": ("lookup batch", "lookup batches"),
+    "sample": ("sample", "samples"),
+}
+
+
+def _waited_sentence(waited: dict[str, int]) -> str:
+    """What a case hold says when a purge destroyed something while the hold
+    waited for it (2026-10-08). The hold stands from here on and cannot bring
+    back what had gone, and a purge reads the hold again for everything it
+    has not reached."""
+    parts = [count_of(waited[kind], *_WAITED_NOUNS[kind])
+             for kind in WAITED_KINDS if waited.get(kind)]
+    said = (", ".join(parts[:-1]) + " and " + parts[-1]) if len(parts) > 1 \
+        else parts[0]
+    total = sum(waited.values())
+    return (f"A purge or a sample rejection in this case was running when the "
+            f"hold arrived and had already destroyed {said}. The hold cannot bring "
+            f"{agree(total, 'it', 'them')} back. It stands from now on, and "
+            f"everything not yet reached is kept.")
 
 
 #: The most exhibits one out-of-schedule purge may name. Its rows and their
@@ -260,6 +294,30 @@ class PurgeResult:
     #: the deployment disposes of a rejected sample (lab-4, 2026-10-03).
     samples_purged: int = 0
     warnings: list[str] = field(default_factory=list)
+    #: The objects each count above stands for, by the count's name, so an
+    #: answer to a caller who may know of only some of them is drawn from
+    #: these and not from the totals (`governance._answer_over`,
+    #: 2026-10-08). Counted with `count`; never serialised.
+    members: dict[str, list[UUID]] = field(default_factory=dict)
+    #: The warnings that are about particular objects, by their index in
+    #: `warnings`: how to say it for n of them (and n of the batch it counts
+    #: them among), and which. A warning in none of these is about the run.
+    scoped: dict[int, tuple] = field(default_factory=dict)
+    #: Each tombstone written, with the objects it records.
+    stones: dict[UUID, frozenset] = field(default_factory=dict)
+
+    def count(self, name: str, ids) -> None:
+        """Say which objects the count `name` stands for: their ids, and for
+        `held_back`, which counts objects of every kind, (kind, id) pairs."""
+        self.members.setdefault(name, []).extend(ids)
+
+    def warn_about(self, say, members, universe=()) -> None:
+        """A warning about `members`, among `universe` (the batch it counts
+        them within, where it does). `say` is the sentence, or a function of
+        (how many members, how many in the universe) that makes it."""
+        text = say if callable(say) else (lambda _n, _u, _t=say: _t)
+        self.scoped[len(self.warnings)] = (text, tuple(members), tuple(universe))
+        self.warnings.append(text(len(members), len(universe)))
 
 
 # ---------------------------------------------------------------------------
@@ -543,18 +601,28 @@ class RetentionService:
     # -- what is expired ---------------------------------------------------
 
     def due(self, *, case_id: UUID | None = None,
-            as_of: datetime | None = None, limit: int = 500) -> list[DueItem]:
+            as_of: datetime | None = None, limit: int = 500,
+            unattached_only: bool = False) -> list[DueItem]:
         """Everything past its retention, INCLUDING what is held.
 
         Held items are returned flagged rather than filtered out, because
         "nothing is due" and "eleven things are due and all of them are
         frozen by a court order" are different answers and an operator
         needs the second one.
+
+        `unattached_only` (F55, 2026-10-08) leaves out everything that
+        belongs to a case: the exhibits, lookups, answers, batches and
+        samples, which all have one, and the ingest records attached to one.
+        What is left is what no case's clock or hold governs: collected
+        documents, dead letters and the records attached to no case, which
+        is the deployment-wide sweep's. The filter is in the query and not
+        applied after it, so a backlog of case records cannot fill the limit
+        and starve the records that have none.
         """
         now = as_of or datetime.now(timezone.utc)
         items: list[DueItem] = []
 
-        evidence = self._c.execute(
+        evidence = [] if unattached_only else self._c.execute(
             """SELECT e.id, e.case_id, c.retention_until, e.legal_hold,
                       e.legal_hold_reason, c.legal_hold
                  FROM core.evidence e
@@ -640,8 +708,9 @@ class RetentionService:
                 WHERE r.purged_at IS NULL AND r.retain_until IS NOT NULL
                   AND d.deadline <= %s
                   AND (%s::uuid IS NULL OR r.case_id = %s)
+                  AND (NOT %s OR r.case_id IS NULL)
                 ORDER BY d.deadline LIMIT %s""",
-            (now, case_id, case_id, limit)).fetchall()
+            (now, case_id, case_id, unattached_only, limit)).fetchall()
         for row in records:
             items.append(DueItem(
                 object_type="ingest_record", object_id=row[0], case_id=row[1],
@@ -673,9 +742,10 @@ class RetentionService:
         # F15.3 and F15.4 (2026-09-24): lookups, answers and batches
         # follow the CASE clock and the case's legal hold, as exhibits do.
         # A provider test (no case) is never selected.
-        for object_type, table in (("lookup", "ingest.lookup"),
-                                   ("lookup_result", "ingest.lookup_result"),
-                                   ("lookup_batch", "ingest.lookup_batch")):
+        for object_type, table in (() if unattached_only else (
+                ("lookup", "ingest.lookup"),
+                ("lookup_result", "ingest.lookup_result"),
+                ("lookup_batch", "ingest.lookup_batch"))):
             rows = self._c.execute(
                 f"""SELECT x.id, x.case_id, c.retention_until, c.legal_hold
                       FROM {table} x JOIN core."case" c ON c.id = x.case_id
@@ -690,7 +760,8 @@ class RetentionService:
                                               tzinfo=timezone.utc),
                     rule="case.retention_until", held=bool(row[3]),
                     hold_reason="case-level legal hold" if row[3] else None))
-        items.extend(self._due_samples(case_id, now, limit))
+        if not unattached_only:
+            items.extend(self._due_samples(case_id, now, limit))
         return items
 
     def _due_samples(self, case_id: UUID | None, now: datetime,
@@ -723,7 +794,8 @@ class RetentionService:
                   case_id: UUID | None = None,
                   as_of: datetime | None = None,
                   dry_run: bool = False,
-                  kinds: frozenset[str] | None = None) -> PurgeResult:
+                  kinds: frozenset[str] | None = None,
+                  unattached_only: bool = False) -> PurgeResult:
         """Destroy what is expired and not held, and write the tombstone.
 
         `authority` is mandatory and free text: the schedule, the policy
@@ -737,6 +809,13 @@ class RetentionService:
         `retention_sweep.py`, which must reach collected documents (the one
         family no case-scoped route can) without also destroying every
         case's exhibits under a tombstone that names no case.
+
+        `unattached_only` (F55, 2026-10-08) is the same sweep's other half:
+        a record attached to a case is that case's, with its clock and its
+        hold, and a deployment-wide run must not reach it, so only what no
+        case governs is considered (`due`). Dead letters and the records
+        attached to no case are in that set; both carry a clock and neither
+        can be held.
 
         The exhibits go first, each in a transaction of its own that marks
         it destroyed as soon as the store has deleted it, and the tombstone
@@ -790,12 +869,15 @@ class RetentionService:
                 f"`documents_purged` counts only documents that have a "
                 f"clock.")
 
-        items = self.due(case_id=case_id, as_of=as_of)
+        items = self.due(case_id=case_id, as_of=as_of,
+                         unattached_only=unattached_only)
         if kinds is not None:
             items = [i for i in items if i.object_type in kinds]
         actionable = [i for i in items if not i.held]
         result.held_back = sum(1 for i in items
                                if i.held and i.object_type != "document")
+        result.count("held_back", [(i.object_type, i.object_id) for i in items
+                                   if i.held and i.object_type != "document"])
         if case_id is None:
             # From its own count, not from the LIMITed list.
             result.held_back += self._held_document_count(
@@ -895,15 +977,20 @@ class RetentionService:
                             or by_case.get(i) in held_cases}
                 if kept_ids:
                     result.held_back += len(kept_ids)
-                    result.warnings.append(
-                        f"the case came under a legal hold between the sweep "
-                        f"and the purge, so nothing it holds was destroyed "
-                        f"({count_of(len(kept_ids), 'item', 'items')} kept)."
-                        if case_id is not None else
-                        f"{count_of(len(kept_ids), 'item', 'items')} came "
-                        f"under a case's legal hold between the sweep and "
-                        f"the purge and {agree(len(kept_ids), 'was', 'were')} "
-                        f"kept.")
+                    kind_of = {i.object_id: i.object_type for i in actionable}
+                    result.count("held_back",
+                                 [(kind_of[i], i) for i in kept_ids])
+                    result.warn_about(
+                        lambda n, _u: (
+                            f"the case came under a legal hold between the "
+                            f"sweep and the purge, so nothing it holds was "
+                            f"destroyed ({count_of(n, 'item', 'items')} kept)."
+                            if case_id is not None else
+                            f"{count_of(n, 'item', 'items')} came "
+                            f"under a case's legal hold between the sweep and "
+                            f"the purge and {agree(n, 'was', 'were')} "
+                            f"kept."),
+                        kept_ids)
                 record_ids = [i for i in record_ids if i not in kept_ids]
                 sample_ids = [i for i in sample_ids if i not in kept_ids]
                 lookup_ids = [i for i in lookup_ids if i not in kept_ids]
@@ -943,10 +1030,11 @@ class RetentionService:
                               priority_detail = '{}'::jsonb
                         WHERE id = ANY(%s)""", (record_ids,))
                 result.records_purged = len(record_ids)
-                result.tombstones.append(self._tombstone(
-                    case_id=case_id, object_type="ingest_record",
+                result.count("records_purged", record_ids)
+                self._stone(
+                    result, case_id=case_id, object_type="ingest_record",
                     ids=record_ids, authority=authority, actor_id=actor_id,
-                    rule="retention_rule", storage_outcome=STORAGE_NA))
+                    rule="retention_rule", storage_outcome=STORAGE_NA)
 
             if dead_ids:
                 # `raw_fragment` is NOT NULL (0033), so it is replaced
@@ -962,11 +1050,12 @@ class RetentionService:
                               redacted = true
                         WHERE id = ANY(%s)""", (dead_ids,))
                 result.dead_letters_purged = len(dead_ids)
-                result.tombstones.append(self._tombstone(
-                    case_id=None, object_type="dead_letter",
+                result.count("dead_letters_purged", dead_ids)
+                self._stone(
+                    result, case_id=None, object_type="dead_letter",
                     ids=dead_ids, authority=authority, actor_id=actor_id,
                     rule="dead_letter[90d default]",
-                    storage_outcome=STORAGE_NA))
+                    storage_outcome=STORAGE_NA)
             # Lookups, answers and batches are emptied, never deleted.
             self._purge_lookups(result, lookup_ids, result_ids, batch_ids,
                                 case_id=case_id, authority=authority,
@@ -1008,20 +1097,26 @@ class RetentionService:
             # exhibit, and is never acknowledged on one destroyed.
             kept = len(storage.held)
             result.held_back += kept
-            result.warnings.append(
-                f"{count_of(kept, 'exhibit', 'exhibits')} came under a "
-                f"legal hold between the sweep and the purge and "
-                f"{agree(kept, 'was', 'were')} kept.")
+            result.count("held_back", [("evidence", i) for i in storage.held])
+            result.warn_about(
+                lambda n, _u: (
+                    f"{count_of(n, 'exhibit', 'exhibits')} came under a "
+                    f"legal hold between the sweep and the purge and "
+                    f"{agree(n, 'was', 'were')} kept."),
+                storage.held)
             held_ids = set(storage.held)
             evidence_ids = [i for i in evidence_ids if i not in held_ids]
         if storage.gone:
             gone = set(storage.gone)
-            result.warnings.append(
-                f"{count_of(len(gone), 'exhibit was', 'exhibits were')} "
-                f"already destroyed by another purge and "
-                f"{agree(len(gone), 'was', 'were')} skipped.")
+            result.warn_about(
+                lambda n, _u: (
+                    f"{count_of(n, 'exhibit was', 'exhibits were')} "
+                    f"already destroyed by another purge and "
+                    f"{agree(n, 'was', 'were')} skipped."),
+                storage.gone)
             evidence_ids = [i for i in evidence_ids if i not in gone]
         result.evidence_purged = len(evidence_ids)
+        result.count("evidence_purged", evidence_ids)
         # All three counts, always. Until 2026-09-02 `storage_failed`
         # was only copied when the batch verdict was FAILED, so a
         # batch with one lock and one transport failure reported the
@@ -1030,32 +1125,44 @@ class RetentionService:
         result.storage_deleted = storage.deleted
         result.storage_locked = storage.locked
         result.storage_failed = storage.failed
-        result.warnings.extend(storage.warnings)
+        result.count("storage_deleted", storage.deleted_ids)
+        result.count("storage_locked", storage.locked_ids)
+        result.count("storage_failed", storage.failed_ids)
+        if len(storage.warning_about) == len(storage.warnings):
+            for text, about in zip(storage.warnings, storage.warning_about,
+                                    strict=True):
+                result.warn_about(text, (about,))
+        else:
+            result.warnings.extend(storage.warnings)
         if storage.locked:
             # The REFUSAL count in EXHIBIT ROWS, not the batch size
             # and not the number of object versions -- see
             # `_StorageOutcome`. The per-key version detail is in
             # the warnings copied above.
-            result.warnings.append(
-                f"{storage.locked} of {len(evidence_ids)} evidence "
-                f"rows are under a retention lock and could not be "
-                f"deleted. The retention schedule says destroy; the "
-                f"object store disagrees. Those rows are NOT marked "
-                f"purged and stay due, so the sweep after the lock "
-                f"expires finishes the job. Check the lock's expiry "
-                f"on the object store before telling anybody the "
-                f"bytes are gone.")
+            result.warn_about(
+                lambda n, total: (
+                    f"{n} of {total} evidence "
+                    f"rows are under a retention lock and could not be "
+                    f"deleted. The retention schedule says destroy; the "
+                    f"object store disagrees. Those rows are NOT marked "
+                    f"purged and stay due, so the sweep after the lock "
+                    f"expires finishes the job. Check the lock's expiry "
+                    f"on the object store before telling anybody the "
+                    f"bytes are gone."),
+                storage.locked_ids, evidence_ids)
         if storage.failed:
             # Distinct from LOCKED on purpose: a lock is a lawful
             # refusal that will expire, a failure is a store that
             # did not answer -- or had nothing under the key -- and
             # somebody has to look before the next sweep retries it.
-            result.warnings.append(
-                f"{storage.failed} of {len(evidence_ids)} evidence "
-                f"objects could not be deleted, and NOT because of a "
-                f"retention lock. Those rows are NOT marked purged. "
-                f"The bytes may still be there; do not report this "
-                f"as a completed destruction.")
+            result.warn_about(
+                lambda n, total: (
+                    f"{n} of {total} evidence "
+                    f"objects could not be deleted, and NOT because of a "
+                    f"retention lock. Those rows are NOT marked purged. "
+                    f"The bytes may still be there; do not report this "
+                    f"as a completed destruction."),
+                storage.failed_ids, evidence_ids)
         if outcome == STORAGE_NA:
             # NO OBJECT STORE WAS CONTACTED AT ALL, and the caller
             # has to be told. `RetentionService(conn)` takes
@@ -1086,9 +1193,9 @@ class RetentionService:
             # second purge will not record them.
             try:
                 with self._c.transaction():
-                    result.tombstones.extend(self._evidence_tombstones(
-                        storage, case_id=case_id, authority=authority,
-                        actor_id=actor_id, rule="case.retention_until"))
+                    self._evidence_tombstones(
+                        result, storage, case_id=case_id, authority=authority,
+                        actor_id=actor_id, rule="case.retention_until")
             except Exception as exc:
                 # `from None`: a router replaces the message of an error
                 # chained to a database error (`safe_detail`), and this one
@@ -1125,17 +1232,28 @@ class RetentionService:
                      STORAGE_FAILED if failed else STORAGE_DELETED),
             deleted=sum(p.deleted for p in parts), locked=locked, failed=failed,
             warnings=tuple(w for p in parts for w in p.warnings),
+            warning_about=tuple(a for p in parts for a in p.warning_about),
             held=tuple(h for p in parts for h in p.held),
             gone=tuple(g for p in parts for g in p.gone),
             deleted_ids=tuple(i for p in parts for i in p.deleted_ids),
             locked_ids=tuple(i for p in parts for i in p.locked_ids),
             failed_ids=tuple(i for p in parts for i in p.failed_ids))
 
-    def _evidence_tombstones(self, storage: "_StorageOutcome", *,
+    def _stone(self, result: PurgeResult, **fields) -> None:
+        """Write a tombstone and say, on the result, which objects it
+        records (`PurgeResult.stones`): an answer to a caller who may know
+        of only some of them leaves out a tombstone that records none of
+        theirs."""
+        stone = self._tombstone(**fields)
+        result.tombstones.append(stone)
+        result.stones[stone] = frozenset(fields["ids"])
+
+    def _evidence_tombstones(self, result: PurgeResult,
+                             storage: "_StorageOutcome", *,
                              case_id: UUID | None, authority: str,
                              actor_id: UUID, rule: str,
                              approval_request_id: UUID | None = None,
-                             ) -> list[UUID]:
+                             ) -> None:
         """One evidence tombstone per storage outcome, each counting the
         exhibits that had it: DELETED, then LOCKED_UNTIL_RETENTION, then
         FAILED, and none for an outcome no exhibit had.
@@ -1149,17 +1267,15 @@ class RetentionService:
         exhibit, the destroyed ones included, and the refused ones were
         counted again by the sweep that later destroyed them. The record of
         destruction said nothing was destroyed."""
-        made = []
         for outcome, ids in ((STORAGE_DELETED, storage.deleted_ids),
                              (STORAGE_LOCKED, storage.locked_ids),
                              (STORAGE_FAILED, storage.failed_ids)):
             if ids:
-                made.append(self._tombstone(
-                    case_id=case_id, object_type="evidence", ids=list(ids),
-                    authority=authority, actor_id=actor_id, rule=rule,
-                    approval_request_id=approval_request_id,
-                    storage_outcome=outcome))
-        return made
+                self._stone(
+                    result, case_id=case_id, object_type="evidence",
+                    ids=list(ids), authority=authority, actor_id=actor_id,
+                    rule=rule, approval_request_id=approval_request_id,
+                    storage_outcome=outcome)
 
     def purge_out_of_schedule(self, *, actor_id: UUID, authority: str,
                               approval_request_id: UUID,
@@ -1282,10 +1398,10 @@ class RetentionService:
                         f"written. Do not report this as a completed "
                         f"destruction.")
                 if evidence_ids:
-                    result.tombstones.extend(self._evidence_tombstones(
-                        storage, case_id=case_id, authority=authority,
+                    self._evidence_tombstones(
+                        result, storage, case_id=case_id, authority=authority,
                         actor_id=actor_id, rule="out-of-schedule",
-                        approval_request_id=approval_request_id))
+                        approval_request_id=approval_request_id)
         except ApprovalError as exc:
             raise RetentionError(str(exc)) from exc
         # F7: the early destruction most likely
@@ -1371,12 +1487,16 @@ class RetentionService:
                 raise SampleError("no sample store is configured for this purge")
             storage, preservation = self._sample_stores()
         except Exception as exc:  # noqa: BLE001 - reported, and the samples stay due
-            result.warnings.append(
-                f"{count_of(len(sample_ids), 'sample', 'samples')} of this "
-                f"case {agree(len(sample_ids), 'is', 'are')} due and "
-                f"{agree(len(sample_ids), 'was', 'were')} not disposed of: "
-                f"{exc} {agree(len(sample_ids), 'It stays', 'They stay')} in "
-                f"the Lab and due, so the next purge tries again.")
+            result.warn_about(
+                # `exc` is unbound once this block ends, and the sentence is
+                # said again later for a caller who may know of fewer.
+                lambda n, _u, _why=str(exc): (
+                    f"{count_of(n, 'sample', 'samples')} of this "
+                    f"case {agree(n, 'is', 'are')} due and "
+                    f"{agree(n, 'was', 'were')} not disposed of: "
+                    f"{_why} {agree(n, 'It stays', 'They stay')} in "
+                    f"the Lab and due, so the next purge tries again."),
+                sample_ids)
             return
         service = _ForRetention(self._c, storage, preservation)
         reason = f"Retention purge under: {authority.strip()}"
@@ -1386,26 +1506,29 @@ class RetentionService:
                 service.reject(sample_id, actor_id=actor_id, reason=reason,
                                purge_bytes=True)
             except SampleError as exc:
-                result.warnings.append(
+                result.warn_about(
                     f"sample {sample_id} was not disposed of and stays due: "
-                    f"{exc}")
+                    f"{exc}", (sample_id,))
                 continue
             done.append(sample_id)
         result.samples_purged = len(done)
+        result.count("samples_purged", done)
         if not done:
             return
         destroyed = disposition == DESTROY
         if not destroyed:
-            result.warnings.append(
-                f"{count_of(len(done), 'sample was', 'samples were')} moved "
-                f"into the preservation store under a legal hold, as this "
-                f"deployment disposes of rejected samples: out of the Lab "
-                f"and no longer downloadable, but not destroyed.")
-        result.tombstones.append(self._tombstone(
-            case_id=case_id, object_type="sample", ids=done,
+            result.warn_about(
+                lambda n, _u: (
+                    f"{count_of(n, 'sample was', 'samples were')} moved "
+                    f"into the preservation store under a legal hold, as this "
+                    f"deployment disposes of rejected samples: out of the Lab "
+                    f"and no longer downloadable, but not destroyed."),
+                done)
+        self._stone(
+            result, case_id=case_id, object_type="sample", ids=done,
             authority=authority, actor_id=actor_id,
             rule="case.retention_until",
-            storage_outcome=STORAGE_DELETED if destroyed else STORAGE_NA))
+            storage_outcome=STORAGE_DELETED if destroyed else STORAGE_NA)
 
     def _purge_lookups(self, result: PurgeResult, lookup_ids, result_ids, batch_ids,
                        *, case_id, authority: str, actor_id: UUID) -> None:
@@ -1433,11 +1556,12 @@ class RetentionService:
                 (lookup_ids,)).fetchall()
             ids = [r[0] for r in done]
             result.lookups_purged = len(ids)
+            result.count("lookups_purged", ids)
             if ids:
-                result.tombstones.append(self._tombstone(
-                    case_id=case_id, object_type="lookup", ids=ids,
+                self._stone(
+                    result, case_id=case_id, object_type="lookup", ids=ids,
                     authority=authority, actor_id=actor_id,
-                    rule="case.retention_until", storage_outcome=STORAGE_NA))
+                    rule="case.retention_until", storage_outcome=STORAGE_NA)
         if result_ids:
             self._c.execute(
                 """UPDATE ingest.lookup_result
@@ -1445,10 +1569,11 @@ class RetentionService:
                           interpret_error = NULL, purged_at = now()
                     WHERE id = ANY(%s)""", (result_ids,))
             result.lookup_results_purged = len(result_ids)
-            result.tombstones.append(self._tombstone(
-                case_id=case_id, object_type="lookup_result", ids=result_ids,
-                authority=authority, actor_id=actor_id,
-                rule="case.retention_until", storage_outcome=STORAGE_NA))
+            result.count("lookup_results_purged", result_ids)
+            self._stone(
+                result, case_id=case_id, object_type="lookup_result",
+                ids=result_ids, authority=authority, actor_id=actor_id,
+                rule="case.retention_until", storage_outcome=STORAGE_NA)
         if batch_ids:
             self._c.execute(
                 """UPDATE ingest.lookup_batch
@@ -1457,10 +1582,11 @@ class RetentionService:
                           purged_at = now()
                     WHERE id = ANY(%s)""", (batch_ids,))
             result.lookup_batches_purged = len(batch_ids)
-            result.tombstones.append(self._tombstone(
-                case_id=case_id, object_type="lookup_batch", ids=batch_ids,
-                authority=authority, actor_id=actor_id,
-                rule="case.retention_until", storage_outcome=STORAGE_NA))
+            result.count("lookup_batches_purged", batch_ids)
+            self._stone(
+                result, case_id=case_id, object_type="lookup_batch",
+                ids=batch_ids, authority=authority, actor_id=actor_id,
+                rule="case.retention_until", storage_outcome=STORAGE_NA)
 
     def _purge_evidence(self, ids: list[UUID], *,
                         refuse_held: bool = False, actor_id: UUID | None = None,
@@ -1598,6 +1724,8 @@ class RetentionService:
         locked_ids: list[UUID] = []
         failed_ids: list[UUID] = []
         warnings: list[str] = []
+        # The exhibit each warning is about, in step with `warnings`.
+        warned: list[UUID] = []
         for evidence_id, key in rows:
             if hasattr(self._storage, "delete_all_versions"):
                 try:
@@ -1612,6 +1740,7 @@ class RetentionService:
                     # caller adds a warning of its own.
                     failed += 1
                     failed_ids.append(evidence_id)
+                    warned.append(evidence_id)
                     warnings.append(
                         f"object store refused storage_key {key!r} for a "
                         f"reason that is not a retention lock "
@@ -1635,6 +1764,7 @@ class RetentionService:
                     # count.
                     locked += 1
                     locked_ids.append(evidence_id)
+                    warned.append(evidence_id)
                     warnings.append(
                         f"{r.versions_locked} of "
                         f"{count_of(r.versions_seen, 'version', 'versions')} "
@@ -1648,6 +1778,7 @@ class RetentionService:
                 if r.versions_removed == 0:
                     failed += 1
                     failed_ids.append(evidence_id)
+                    warned.append(evidence_id)
                     warnings.append(
                         f"no object found for storage_key {key!r}: the store "
                         f"holds no bytes under it "
@@ -1710,7 +1841,9 @@ class RetentionService:
             outcome = STORAGE_DELETED
         return _StorageOutcome(outcome=outcome, deleted=deleted,
                                locked=locked, failed=failed,
-                               warnings=tuple(warnings), held=tuple(held_ids),
+                               warnings=tuple(warnings),
+                               warning_about=tuple(warned),
+                               held=tuple(held_ids),
                                gone=tuple(gone_ids),
                                deleted_ids=tuple(destroyed_ids),
                                locked_ids=tuple(locked_ids),
@@ -1806,6 +1939,39 @@ class RetentionService:
                   CROSS JOIN LATERAL (SELECT {_DOCUMENT_HELD_SQL} AS reason) held
                  WHERE d.purged_at IS NULL AND d.retain_until IS NOT NULL
                    AND d.retain_until <= %s""", (now,)).fetchone()
+        return int(row[0]), int(row[1]), row[2]
+
+    def unattached_backlog(self, as_of: datetime | None = None
+                           ) -> tuple[int, int, datetime | None]:
+        """(dead letters past their clock, ingest records attached to no
+        case past theirs, the oldest deadline of the two), counts and a date
+        only (F55, 2026-10-08).
+
+        The other half of what the deployment-wide sweep reaches. Neither
+        can be held (a case hold reaches a record only through its case, and
+        a dead letter has none), so every one counted here is one a sweep
+        would destroy. Counted by the predicates `due` selects them with, on
+        the connection this service runs on, uncapped for the reason
+        `document_backlog` gives."""
+        now = as_of or datetime.now(timezone.utc)
+        row = self._c.execute(
+            """SELECT (SELECT count(*) FROM ingest.dead_letter dl
+                        WHERE dl.purged_at IS NULL
+                          AND dl.retain_until IS NOT NULL
+                          AND dl.retain_until <= %(now)s),
+                      (SELECT count(*) FROM ingest.record r
+                        WHERE r.purged_at IS NULL AND r.case_id IS NULL
+                          AND r.retain_until IS NOT NULL
+                          AND r.retain_until <= %(now)s),
+                      least((SELECT min(dl.retain_until) FROM ingest.dead_letter dl
+                              WHERE dl.purged_at IS NULL
+                                AND dl.retain_until IS NOT NULL
+                                AND dl.retain_until <= %(now)s),
+                            (SELECT min(r.retain_until) FROM ingest.record r
+                              WHERE r.purged_at IS NULL AND r.case_id IS NULL
+                                AND r.retain_until IS NOT NULL
+                                AND r.retain_until <= %(now)s))""",
+            {"now": now}).fetchone()
         return int(row[0]), int(row[1]), row[2]
 
     def _purge_documents(self, ids: list[UUID], *, authority: str,
@@ -1920,10 +2086,10 @@ class RetentionService:
         result.documents_purged += len(purged)
         outcome = (STORAGE_FAILED if failed else STORAGE_DELETED if deleted
                    else STORAGE_NA)
-        result.tombstones.append(self._tombstone(
-            case_id=None, object_type="document", ids=purged,
+        self._stone(
+            result, case_id=None, object_type="document", ids=purged,
             authority=authority, actor_id=actor_id, rule="retention_rule",
-            storage_outcome=outcome))
+            storage_outcome=outcome)
 
     def set_document_legal_hold(self, document_id: UUID, *, actor_id: UUID,
                                 on: bool, reason: str | None, clearance: str,
@@ -2119,11 +2285,15 @@ class RetentionService:
                 raise RetentionError(
                     "no such exhibit, or it has been destroyed, so no legal "
                     "hold was placed or lifted")
+            # `object_id` names the exhibit (2026-10-08): the row carried
+            # none, and `/audit/events` does not return `detail`, so an
+            # officer reading the log could not tell which exhibit was held.
             self._audit(prior[0], actor_id,
                         "LEGAL_HOLD_APPLIED" if on else "LEGAL_HOLD_LIFTED",
                         {"evidence_id": str(evidence_id), "reason": reason,
                          "prior_on": bool(prior[1]),
-                         "prior_reason": prior[2]})
+                         "prior_reason": prior[2]},
+                        object_type="evidence", object_id=evidence_id)
 
     def set_case_legal_hold(self, case_id: UUID, *, actor_id: UUID,
                             on: bool, reason: str | None,
@@ -2170,12 +2340,22 @@ class RetentionService:
                 "a legal hold has to say what it rests on, placed or lifted: "
                 "a hold nobody can attribute is a hold nobody can lift")
         refused = False
+        waited: dict[str, int] = {}
         with self._c.transaction():
+            # What the case has had destroyed, counted before the wait and
+            # again once the lock is ours: the difference is what a purge
+            # destroyed while this hold stood behind it (2026-10-08).
+            before = (self._destroyed_so_far(case_id, lifter_ceiling)
+                      if on else {})
             prior = self._c.execute(
                 """SELECT legal_hold, legal_hold_reason FROM core."case"
                     WHERE id = %s FOR UPDATE""", (case_id,)).fetchone()
             if prior is None:
                 raise RetentionNotFound("no such case")
+            if on:
+                after = self._destroyed_so_far(case_id, lifter_ceiling)
+                waited = {kind: after[kind] - before[kind] for kind in after
+                          if after[kind] > before[kind]}
             if not on and not self._ceiling_covers_case(
                     case_id, lifter_ceiling, document_ceiling):
                 refused = True
@@ -2183,11 +2363,14 @@ class RetentionService:
                 self._c.execute(
                     """UPDATE core."case" SET legal_hold = %s, legal_hold_reason = %s
                         WHERE id = %s""", (on, reason if on else None, case_id))
+                detail = {"case_id": str(case_id), "scope": "case",
+                          "reason": reason, "prior_on": bool(prior[0]),
+                          "prior_reason": prior[1]}
+                if waited:
+                    detail["destroyed_while_waiting"] = waited
                 self._audit(case_id, actor_id,
                             "LEGAL_HOLD_APPLIED" if on else "LEGAL_HOLD_LIFTED",
-                            {"case_id": str(case_id), "scope": "case",
-                             "reason": reason, "prior_on": bool(prior[0]),
-                             "prior_reason": prior[1]})
+                            detail, object_type="case", object_id=case_id)
         if refused:
             # Recorded, as an exhibit's lift below its label is (the gate's
             # AUTHZ_DENIED row): an attempt to release a hold over material
@@ -2195,10 +2378,57 @@ class RetentionService:
             # row at all (2026-10-07). Names nothing above the lifter.
             self._audit(case_id, actor_id, "LEGAL_HOLD_LIFT_REFUSED",
                         {"case_id": str(case_id), "scope": "case",
-                         "reason": reason}, outcome="DENIED")
+                         "reason": reason}, outcome="DENIED",
+                        object_type="case", object_id=case_id)
             raise RetentionError(self._lift_refusal(case_id))
-        return {"case_id": str(case_id), "legal_hold": bool(on),
-                "legal_hold_reason": reason if on else None}
+        out = {"case_id": str(case_id), "legal_hold": bool(on),
+               "legal_hold_reason": reason if on else None}
+        if waited:
+            out["destroyed_while_waiting"] = {**waited,
+                                              "total": sum(waited.values())}
+            out["notice"] = _waited_sentence(waited)
+        return out
+
+    def _destroyed_so_far(self, case_id: UUID, ceiling: tuple | None
+                          ) -> dict[str, int]:
+        """How many objects of each kind a case governs have been destroyed
+        so far, over the ones within `ceiling` (the caller's own labels; all
+        of them when none is given): an answer to a caller is made of what
+        that caller may know of, and says nothing of the rest. A sample counts
+        once it has left the working store (REJECTED), which is where a
+        purge takes it. Batches carry no labels."""
+        if ceiling is None:
+            clearance, held, every = "RED", [], True
+        else:
+            (clearance, held), every = _ceiling_parts(ceiling), False
+
+        def labelled(alias: str, *, compartments: bool = True) -> str:
+            within = f"{alias}.classification <= %(l)s::core.tlp"
+            if compartments:
+                within += f" AND {alias}.compartments <@ %(h)s::text[]"
+            return f"(%(all)s OR ({within}))"
+
+        row = self._c.execute(
+            f"""SELECT
+                  (SELECT count(*) FROM core.evidence e
+                    WHERE e.case_id = %(c)s AND e.purged_at IS NOT NULL
+                      AND {labelled('e')}),
+                  (SELECT count(*) FROM ingest.record r
+                    WHERE r.case_id = %(c)s AND r.purged_at IS NOT NULL
+                      AND {labelled('r')}),
+                  (SELECT count(*) FROM ingest.lookup k
+                    WHERE k.case_id = %(c)s AND k.purged_at IS NOT NULL
+                      AND {labelled('k', compartments=False)}),
+                  (SELECT count(*) FROM ingest.lookup_result k
+                    WHERE k.case_id = %(c)s AND k.purged_at IS NOT NULL
+                      AND {labelled('k', compartments=False)}),
+                  (SELECT count(*) FROM ingest.lookup_batch b
+                    WHERE b.case_id = %(c)s AND b.purged_at IS NOT NULL),
+                  (SELECT count(*) FROM lab.sample s
+                    WHERE s.case_id = %(c)s AND s.state = 'REJECTED'
+                      AND {labelled('s')})""",
+            {"c": case_id, "l": clearance, "h": held, "all": every}).fetchone()
+        return dict(zip(WAITED_KINDS, row, strict=True))
 
     def _lift_refusal(self, case_id: UUID) -> str:
         """What a refused lift says. Under NONE (0030) it says nothing about
@@ -2283,10 +2513,13 @@ class RetentionService:
         return above == 0
 
     def _audit(self, case_id: UUID | None, actor_id: UUID, action: str,
-               detail: dict, *, outcome: str = "SUCCESS") -> None:
+               detail: dict, *, outcome: str = "SUCCESS",
+               object_type: str = "retention",
+               object_id: UUID | None = None) -> None:
         self._c.execute(
             """INSERT INTO audit.event
                    (actor_id, actor_kind, action, object_type, object_id,
                     case_id, outcome, detail)
-               VALUES (%s, 'USER', %s, 'retention', NULL, %s, %s, %s)""",
-            (actor_id, action, case_id, outcome, Json(detail)))
+               VALUES (%s, 'USER', %s, %s, %s, %s, %s, %s)""",
+            (actor_id, action, object_type, object_id, case_id, outcome,
+             Json(detail)))

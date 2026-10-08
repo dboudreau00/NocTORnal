@@ -38,6 +38,7 @@ from noctornal_api.http.deps import (
     effective_labels,
     element_labels,
     get_conn,
+    holds_global,
     require,
     user_ceiling,
 )
@@ -57,7 +58,9 @@ from noctornal_api.samples import SampleError, origin_split
 from noctornal_api.security.access import (
     CHECK_STEP_UP,
     AccessResolutionError,
+    Tlp,
     evaluate,
+    tlp_from_name,
 )
 from noctornal_api.stores import PgAccessResolver
 from noctornal_api.wording import count_of
@@ -227,6 +230,19 @@ _AUTHORITY_MAX = 200
 _CLOCK_SKEW = timedelta(minutes=5)
 
 
+def _known_classification(classification: str) -> None:
+    """An unknown classification is the caller's mistake, said as one before
+    anything else is read (2026-10-08). It reached `check_writable_labels`,
+    whose refusal to resolve a label is a 403, so a typo read as a missing
+    permission."""
+    try:
+        tlp_from_name(classification)
+    except AccessResolutionError:
+        raise Problem(400, "Invalid request",
+                      f"unknown classification {classification!r}: it must "
+                      f"be one of {', '.join(Tlp.__members__)}") from None
+
+
 def _provenance(method: str, description: str | None, source_url: str | None,
                 acquired_at: str | None, authority_ref: str | None,
                 *, now: datetime | None = None) -> dict:
@@ -321,6 +337,7 @@ async def upload(
     seizure recorded without the instrument it rests on is the gap a
     custody challenge lands in. Both are checked before a byte is stored.
     """
+    _known_classification(classification)
     provenance = _provenance(acquisition_method, description, source_url,
                              acquired_at, authority_ref)
     data = await file.read()
@@ -472,6 +489,31 @@ def _backs_counts(ev: str) -> str:
                    AND {_live_edge('bg')}) AS backs_edges"""
 
 
+def _backs_nothing(alias: str) -> str:
+    """A boolean: the exhibit aliased `alias` backs nothing the reader would
+    see drawn. `_backs_counts`' rule, asked as an existence test: a purged
+    exhibit backs nothing, and an exhibit backs an element a live claim or a
+    link attaches it to while the element is drawn.
+
+    This is what the case-wide "backs nothing" figure and filter ask of every
+    exhibit, so it stops at the first live attachment instead of counting
+    them all (docs/17, the register grows with the case: counting for every
+    exhibit took 1.4 s warm and 5.7 s cold at 15,300 exhibits, this 0.12 s
+    and 0.42 s). What each exhibit backs, as numbers, is counted for the
+    page's own rows only."""
+    return f"""({alias}.purged_at IS NOT NULL OR NOT (
+          EXISTS (SELECT 1 FROM core.assertion ba JOIN core.node bn ON bn.id = ba.node_id
+                   WHERE ba.evidence_id = {alias}.id AND ba.retracted_at IS NULL
+                     AND {_live_node('bn')})
+          OR EXISTS (SELECT 1 FROM core.evidence_link bl JOIN core.node bn ON bn.id = bl.node_id
+                      WHERE bl.evidence_id = {alias}.id AND {_live_node('bn')})
+          OR EXISTS (SELECT 1 FROM core.assertion ba JOIN core.edge bg ON bg.id = ba.edge_id
+                      WHERE ba.evidence_id = {alias}.id AND ba.retracted_at IS NULL
+                        AND {_live_edge('bg')})
+          OR EXISTS (SELECT 1 FROM core.evidence_link bl JOIN core.edge bg ON bg.id = bl.edge_id
+                      WHERE bl.evidence_id = {alias}.id AND {_live_edge('bg')})))"""
+
+
 def _visible_exhibit(alias: str) -> str:
     return f"""{alias}.case_id = %(case)s
                AND {alias}.classification <= %(clr)s::core.tlp
@@ -534,6 +576,10 @@ class ExhibitOut(BaseModel):
     #: verifier, 2026-09-24).
     lock_short_of_case: bool = False
     legal_hold: bool = False
+    #: Why the hold was placed, for a reader who holds `retention.manage`
+    #: here and no other (`RegisterOut.may_hold`): a hold's text is for the
+    #: people who place and lift it, as the due list's is (2026-10-08).
+    legal_hold_reason: str | None = None
     is_hostile_markup: bool = False
     purged_at: datetime | None = None
     backs_nodes: int = 0
@@ -557,6 +603,11 @@ class RegisterOut(BaseModel):
     #: controls only; every route decides for itself.
     may_export: bool = False
     may_audit: bool = False
+    #: Whether the reader may place and lift a legal hold on an exhibit here:
+    #: `retention.manage` through a global role and on the case, asked as if
+    #: the sign-in were fresh. For showing the card's Hold control only; the
+    #: route decides (2026-10-08).
+    may_hold: bool = False
     #: Of the exhibits this reader may see, how many hold a lock SHORT of
     #: the case (`ExhibitOut.lock_short_of_case`), across every page; the
     #: instant `POST .../locks` would lengthen them to; and whether the
@@ -730,34 +781,47 @@ def exhibit_register(conn: psycopg.Connection, *, case_id: UUID, clearance: str,
                      compartments: list[str], offset: int = 0, limit: int = 50,
                      q: str | None = None, backs_nothing: bool = False,
                      evidence_id: UUID | None = None,
-                     now: datetime | None = None) -> dict:
+                     now: datetime | None = None,
+                     reveal_hold_reason: bool = False) -> dict:
     """One page of the register, with the totals the pane states. Public
-    so a test can call it without a request."""
+    so a test can call it without a request. `reveal_hold_reason` puts a
+    held exhibit's reason on its row, for a reader who may place and lift
+    holds and no other."""
     binds = {"case": case_id, "clr": clearance, "comp": list(compartments),
              "q": _like(q) if q else None, "id": evidence_id,
-             "nothing": backs_nothing, "off": offset, "lim": limit}
-    reg = f"""SELECT e.*, {_backs_counts('e.id')}
-                FROM core.evidence e WHERE {_visible_exhibit('e')}"""
+             "off": offset, "lim": limit}
+    visible = _visible_exhibit("e")
+    # The case-wide figure is an existence test per exhibit; what each
+    # exhibit backs, as numbers, is counted below for the page's rows only.
     totals = conn.execute(
-        f"""SELECT count(*),
-                   count(*) FILTER (WHERE r.backs_nodes + r.backs_edges = 0)
-              FROM ({reg}) r""", binds).fetchone()
-    where = """(%(q)s::text IS NULL OR r.title ILIKE %(q)s
-                 OR coalesce(r.description, '') ILIKE %(q)s)
-               AND (%(id)s::uuid IS NULL OR r.id = %(id)s)
-               AND (NOT %(nothing)s OR r.backs_nodes + r.backs_edges = 0)"""
-    matching = conn.execute(
-        f"SELECT count(*) FROM ({reg}) r WHERE {where}", binds).fetchone()[0]
+        f"""SELECT count(*), count(*) FILTER (WHERE {_backs_nothing('e')})
+              FROM core.evidence e WHERE {visible}""", binds).fetchone()
+    where = """(%(q)s::text IS NULL OR e.title ILIKE %(q)s
+                 OR coalesce(e.description, '') ILIKE %(q)s)
+               AND (%(id)s::uuid IS NULL OR e.id = %(id)s)"""
+    if backs_nothing:
+        where += f" AND {_backs_nothing('e')}"
+    if q or evidence_id is not None:
+        matching = conn.execute(
+            f"SELECT count(*) FROM core.evidence e WHERE {visible} AND {where}",
+            binds).fetchone()[0]
+    else:
+        # No text and no id: every exhibit matches, or every unbacked one,
+        # which the totals have just counted.
+        matching = totals[1] if backs_nothing else totals[0]
     rows = conn.execute(
         f"""SELECT r.id, r.title, r.media_type, r.byte_size, r.sha256,
                    r.classification, r.acquisition_method, r.acquired_at,
                    r.acquired_by, au.display_name, r.created_at,
                    r.description, r.source_url, r.is_worm_locked,
                    r.retention_until, r.legal_hold, r.is_hostile_markup,
-                   r.purged_at, r.backs_nodes, r.backs_edges,
+                   r.purged_at, bk.backs_nodes, bk.backs_edges,
                    acq.detail, chk.occurred_at, chk.hash_verified,
-                   cu.display_name, lk.lock_ends_at
-              FROM ({reg}) r
+                   cu.display_name, lk.lock_ends_at, r.legal_hold_reason
+              FROM (SELECT e.* FROM core.evidence e WHERE {visible} AND {where}
+                     ORDER BY e.acquired_at DESC, e.id
+                    OFFSET %(off)s LIMIT %(lim)s) r
+              CROSS JOIN LATERAL (SELECT {_backs_counts('r.id')}) bk
               LEFT JOIN iam.app_user au ON au.id = r.acquired_by
               LEFT JOIN LATERAL (
                    SELECT c.detail FROM core.evidence_custody c
@@ -770,9 +834,7 @@ def exhibit_register(conn: psycopg.Connection, *, case_id: UUID, clearance: str,
                     WHERE c.evidence_id = r.id AND c.action = 'HASH_VERIFIED'
                     ORDER BY c.occurred_at DESC, c.id DESC LIMIT 1) chk ON true
               LEFT JOIN iam.app_user cu ON cu.id = chk.actor_id
-             WHERE {where}
-             ORDER BY r.acquired_at DESC, r.id
-             OFFSET %(off)s LIMIT %(lim)s""", binds).fetchall()
+             ORDER BY r.acquired_at DESC, r.id""", binds).fetchall()
     at = now or datetime.now(timezone.utc)
     short_before, target = case_lock_bounds(conn, case_id, at)
     items = []
@@ -794,7 +856,9 @@ def exhibit_register(conn: psycopg.Connection, *, case_id: UUID, clearance: str,
             lock_ends_at=ends_at, lock_lapsed=lapsed,
             lock_short_of_case=bool(live_lock) and lock_is_short(
                 lock_until, ends_at, short_before),
-            legal_hold=r[15], is_hostile_markup=r[16], purged_at=r[17],
+            legal_hold=r[15],
+            legal_hold_reason=r[25] if reveal_hold_reason and r[15] else None,
+            is_hostile_markup=r[16], purged_at=r[17],
             backs_nodes=r[18], backs_edges=r[19],
             last_check=(LastCheck(at=r[21], ok=r[22], by_name=r[23])
                         if r[21] is not None else None),
@@ -825,14 +889,20 @@ def register(
     card). Filtered by the reader's own clearance and compartments, as the
     list it replaces was."""
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
+    # Whether this reader places and lifts holds here: the global role the
+    # route demands and the case's, as `routers/governance.legal_hold` asks
+    # for both. Only they are told why an exhibit is held.
+    may_hold = (holds_global(conn, user.user_id, "retention.manage")
+                and _asks(conn, user, case_id, "retention.manage", fresh=True))
     page = exhibit_register(
         conn, case_id=case_id, clearance=clearance.name,
         compartments=list(compartments), offset=offset, limit=limit,
         q=(q or "").strip() or None, backs_nothing=backs_nothing,
-        evidence_id=evidence_id)
+        evidence_id=evidence_id, reveal_hold_reason=may_hold)
     return RegisterOut(**page,
                        may_export=_asks(conn, user, case_id, "evidence.export",
                                         fresh=True),
+                       may_hold=may_hold,
                        may_audit=_holds_audit_read(conn, user),
                        may_lock=(bool(page["locks_short"])
                                  and _asks(conn, user, case_id, "case.update")))

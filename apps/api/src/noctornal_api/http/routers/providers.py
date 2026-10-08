@@ -15,12 +15,18 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
 from noctornal_api import lookups, providers
-from noctornal_api.http.deps import CurrentUser, get_conn, require_global
+from noctornal_api.db import SystemPurpose
+from noctornal_api.http.deps import CurrentUser, get_conn, require_global, system_conn
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 
 router = APIRouter(prefix="/providers", tags=["providers"])
 _MANAGE = require_global("integration.manage")
+#: Every write lands on a system connection (0179, Beta 1.1): the provider
+#: registry is read-only to the request role, so a statement injected into
+#: a request cannot add a provider, lower its exposure or replace its key
+#: past this gate, its step-up and the registry's audit rows.
+_CONFIG = system_conn(SystemPurpose.CONFIGURATION)
 
 
 def _problem(exc: Exception) -> Problem:
@@ -107,10 +113,11 @@ def catalogue(_: CurrentUser = Depends(_MANAGE)) -> dict:
 def list_providers(
     include_retired: bool = Query(False),
     user: CurrentUser = Depends(_MANAGE),
-    conn: psycopg.Connection = Depends(get_conn),
+    # The listing lapses expired exposure changes as it reads, a write.
+    sconn: psycopg.Connection = Depends(_CONFIG),
 ) -> dict:
     switch, _raw = providers.outbound_switch()
-    return {"providers": providers.ProviderRegistry(conn).list(
+    return {"providers": providers.ProviderRegistry(sconn).list(
                 include_retired=include_retired, actor_id=user.user_id),
             "switch": switch}
 
@@ -126,9 +133,10 @@ def create_provider(
     body: ProviderCreate,
     user: CurrentUser = Depends(_MANAGE),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
 ) -> dict:
     try:
-        p = providers.ProviderRegistry(conn).create(body.model_dump(), actor_id=user.user_id)
+        p = providers.ProviderRegistry(sconn).create(body.model_dump(), actor_id=user.user_id)
     except providers.ProviderError as exc:
         raise _problem(exc) from exc
     return _one(conn, p.id, user.user_id)
@@ -140,9 +148,10 @@ def update_provider(
     provider_id: UUID, body: ProviderUpdate,
     user: CurrentUser = Depends(_MANAGE),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
 ) -> dict:
     try:
-        providers.ProviderRegistry(conn).update(
+        providers.ProviderRegistry(sconn).update(
             provider_id, body.model_dump(exclude_unset=True), actor_id=user.user_id)
     except providers.ProviderError as exc:
         raise _problem(exc) from exc
@@ -155,13 +164,14 @@ def put_secret(
     provider_id: UUID, body: SecretIn,
     user: CurrentUser = Depends(_MANAGE),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
 ) -> dict:
     today = datetime.now(timezone.utc).date()
     rotate_by = body.rotate_by or today + timedelta(days=365)
     if not today < rotate_by <= today + timedelta(days=730):
         raise Problem(400, "Invalid request", "Rotate the key within two years.")
     try:
-        p = providers.ProviderVault(conn).store(provider_id, body.fields,
+        p = providers.ProviderVault(sconn).store(provider_id, body.fields,
                                                 actor_id=user.user_id, rotate_by=rotate_by)
     except providers.ProviderError as exc:
         raise _problem(exc) from exc
@@ -176,13 +186,14 @@ def clear_secret(
     provider_id: UUID, body: ReasonIn,
     user: CurrentUser = Depends(_MANAGE),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
 ) -> dict:
     registry = providers.ProviderRegistry(conn)
     try:
         registry.require(provider_id)
     except providers.ProviderError as exc:
         raise _problem(exc) from exc
-    providers.ProviderVault(conn).clear(provider_id, actor_id=user.user_id,
+    providers.ProviderVault(sconn).clear(provider_id, actor_id=user.user_id,
                                         reason=body.reason.strip())
     return _one(conn, provider_id, user.user_id)
 
@@ -193,9 +204,10 @@ def enable(
     provider_id: UUID, body: EnableIn,
     user: CurrentUser = Depends(_MANAGE),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
 ) -> dict:
     try:
-        return providers.ProviderRegistry(conn).enable(
+        return providers.ProviderRegistry(sconn).enable(
             provider_id, confirm_exposure=body.confirm_exposure, actor_id=user.user_id)
     except providers.ProviderError as exc:
         raise _problem(exc) from exc
@@ -207,9 +219,10 @@ def disable(
     provider_id: UUID, body: ReasonIn,
     user: CurrentUser = Depends(_MANAGE),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
 ) -> dict:
     try:
-        providers.ProviderRegistry(conn).disable(provider_id, reason=body.reason,
+        providers.ProviderRegistry(sconn).disable(provider_id, reason=body.reason,
                                                  actor_id=user.user_id)
     except providers.ProviderError as exc:
         raise _problem(exc) from exc
@@ -222,9 +235,10 @@ def unlock(
     provider_id: UUID, body: ReasonIn,
     user: CurrentUser = Depends(_MANAGE),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
 ) -> dict:
     try:
-        providers.ProviderRegistry(conn).unlock(provider_id, reason=body.reason,
+        providers.ProviderRegistry(sconn).unlock(provider_id, reason=body.reason,
                                                 actor_id=user.user_id)
     except providers.ProviderError as exc:
         raise _problem(exc) from exc
@@ -237,9 +251,10 @@ def retire(
     provider_id: UUID, body: ReasonIn,
     user: CurrentUser = Depends(_MANAGE),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
 ) -> dict:
     try:
-        providers.ProviderRegistry(conn).retire(provider_id, reason=body.reason,
+        providers.ProviderRegistry(sconn).retire(provider_id, reason=body.reason,
                                                 actor_id=user.user_id)
     except providers.ProviderError as exc:
         raise _problem(exc) from exc
@@ -252,9 +267,10 @@ def request_change(
     provider_id: UUID, body: ChangeIn,
     user: CurrentUser = Depends(_MANAGE),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
 ) -> dict:
     try:
-        change_id = providers.ProviderRegistry(conn).request_exposure_change(
+        change_id = providers.ProviderRegistry(sconn).request_exposure_change(
             provider_id, to_level=body.to_level, basis=body.basis, actor_id=user.user_id,
             private_cidr=body.private_cidr)
     except providers.ProviderError as exc:
@@ -268,9 +284,10 @@ def decide_change(
     provider_id: UUID, change_id: UUID, body: DecideIn,
     user: CurrentUser = Depends(_MANAGE),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
 ) -> dict:
     try:
-        providers.ProviderRegistry(conn).decide_exposure_change(
+        providers.ProviderRegistry(sconn).decide_exposure_change(
             provider_id, change_id, approve=body.approve, note=body.note,
             actor_id=user.user_id)
     except providers.ProviderError as exc:
@@ -284,9 +301,10 @@ def withdraw_change(
     provider_id: UUID, change_id: UUID,
     user: CurrentUser = Depends(_MANAGE),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
 ) -> dict:
     try:
-        providers.ProviderRegistry(conn).withdraw_exposure_change(
+        providers.ProviderRegistry(sconn).withdraw_exposure_change(
             provider_id, change_id, actor_id=user.user_id)
     except providers.ProviderError as exc:
         raise _problem(exc) from exc

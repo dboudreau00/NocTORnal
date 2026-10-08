@@ -454,7 +454,8 @@ def test_a_request_cannot_read_or_draw_the_ledger_sequences(owner):
 
 def test_the_attribution_pin_holds_with_the_insert_policy_in_place(owner):
     """The log is under row-level security and its INSERT policy admits every
-    append. What a request may name is the pin's (0150), and it fires first:
+    append but a state-bearing row naming a case its writer may not act on
+    (0176). What a request may name is the pin's (0150), and it fires first:
     another user is refused, a claim from a connection bound to nobody lands
     without an actor and keeps the claim, and the row chains to the true tail
     whoever it is written by, a row its writer may not read included."""
@@ -466,7 +467,7 @@ def test_the_attribution_pin_holds_with_the_insert_policy_in_place(owner):
     (check,) = owner.execute(
         "SELECT with_check FROM pg_policies WHERE schemaname = 'audit' "
         "AND tablename = 'event' AND cmd = 'INSERT'").fetchone()
-    assert check.strip().lower() == "true", check
+    assert "<> ALL" in check and "iam.rls_cases()" in check, check
 
     analyst, other, victim = _user(owner), _user(owner), _user(owner)
     marker = uuid4()

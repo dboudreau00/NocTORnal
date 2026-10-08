@@ -136,10 +136,9 @@ class RunnerChoice:
 
 
 def _production(env: Mapping[str, str]) -> bool:
-    # The mode's one spelling is config's (ENV_VAR, PRODUCTION); read the
-    # same way egress._production reads it.
-    from noctornal_api.config import ENV_VAR, PRODUCTION
-    return env.get(ENV_VAR, "").strip().lower() == PRODUCTION
+    # The mode has one reader, config's.
+    from noctornal_api.config import is_production
+    return is_production(env)
 
 
 def setting_problem(env: Mapping[str, str] | None = None) -> str | None:
@@ -619,6 +618,26 @@ def send_all(sock, data, deadline: float) -> None:
             raise WireError("closed") from None
 
 
+def _no_constant(name: str):
+    raise ValueError(f"{name} is not JSON")
+
+
+def loads_child_json(raw):
+    """JSON a child (or the worker) sent, read the way every parent check of
+    an answer needs it read: a ValueError for anything that is not an answer
+    this process can store. That is a text that is not UTF-8, one nested so
+    deep that the interpreter's decoder gives out (a RecursionError, which is
+    no ValueError and went past the `except ValueError` of three callers),
+    and the constants NaN, Infinity and -Infinity, which Python's decoder
+    accepts and PostgreSQL's jsonb refuses, so one in a stored finding
+    failed its write."""
+    try:
+        return json.loads(str(raw, "utf-8") if not isinstance(raw, str) else raw,
+                          parse_constant=_no_constant)
+    except RecursionError:
+        raise ValueError("nested too deeply") from None
+
+
 def read_frame(sock, deadline: float, *, wait: bool = False) -> dict:
     """One frame. With `wait`, its first bytes may take until the deadline
     (a caller waiting while the worker's child runs); the rest of it, and
@@ -631,8 +650,8 @@ def read_frame(sock, deadline: float, *, wait: bool = False) -> dict:
         raise WireError("oversize")
     raw = recv_exact(sock, n, deadline)
     try:
-        value = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError, RecursionError):
+        value = loads_child_json(raw)
+    except ValueError:
         raise WireError("malformed") from None
     if not isinstance(value, dict):
         raise WireError("malformed")
@@ -768,6 +787,26 @@ def hello(path: str, *, connect=None, timeout_s: float = CONNECT_TIMEOUT_S) -> d
             or reply.get("ok") is not True or not isinstance(status, dict)):
         raise WorkerUnavailable("bad_answer")
     return status
+
+
+def worker_request_cap(env: Mapping[str, str] | None = None, *,
+                       connect=None) -> int | None:
+    """The most payload bytes the isolated worker takes in one request, as
+    it reports them (`Worker.status`, `max_request_bytes`), or None: no
+    worker is in use (the local runner has no such limit), or it did not
+    answer, or it did not say. A fresh question each time; the caller asks
+    only after the worker has refused a request."""
+    choice = runner_choice(env)
+    if choice.mode != "isolated":
+        return None
+    try:
+        status = hello(choice.socket_path, connect=connect, timeout_s=HELLO_TIMEOUT_S)
+    except WorkerUnavailable:
+        return None
+    cap = status.get("max_request_bytes")
+    if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
+        return None
+    return cap
 
 
 def run(kind: str, header: dict, payloads: tuple = (), *, wall_s: float,

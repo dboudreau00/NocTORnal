@@ -91,7 +91,7 @@ from uuid import UUID
 import psycopg
 
 from noctornal_api import pinned_http
-from noctornal_api.config import ENV_VAR, PRODUCTION
+from noctornal_api.config import is_production
 from noctornal_api.egress import Destination, can_egress
 from noctornal_api.egress_policy import Refusal, Rule, split_url
 from noctornal_api.notifications import (
@@ -100,8 +100,9 @@ from noctornal_api.notifications import (
     SENT,
     SMTP,
     WEBHOOK,
+    deliverable_predicate,
+    element_rows_sql,
     escalate_unacknowledged,
-    readable_predicate,
     single_address_domain,
 )
 from noctornal_api.notify_events import case_reviews_due
@@ -285,7 +286,7 @@ def base_url() -> str:
 
 def production() -> bool:
     """config's reading of NOCTORNAL_ENV: the one reader of the mode."""
-    return os.environ.get(ENV_VAR, "").strip().lower() == PRODUCTION
+    return is_production()
 
 
 # ---------------------------------------------------------------------------
@@ -770,8 +771,9 @@ def send_webhook(url: str, payload: dict, secret: str | None, *, route,
 #: Due, AND still deliverable to this recipient, on a channel that is not
 #: held.
 #:
-#: `readable_predicate` is imported from `notifications` rather than
-#: restated. This query used to check only `u.is_active`, so between the
+#: `deliverable_predicate` (`readable_predicate`, the centre's rule, and the
+#: element's labels as they stand now) is imported from `notifications` rather
+#: than restated. This query used to check only `u.is_active`, so between the
 #: notification being written and the drain running the recipient could be
 #: taken off the case or have their clearance lowered and the summary went
 #: out by email anyway — on the one path in the system that actually crosses
@@ -785,13 +787,20 @@ def send_webhook(url: str, payload: dict, secret: str | None, *, route,
 #: route is missing is held, not attempted.
 #:
 #: The labels the gate judges are the notification's composed with its
-#: case's AS THEY STAND NOW (`CASE_LABELS_SQL`), the way an export composes
-#: them. The notification's own were fixed when it was raised, so a case
-#: raised to RED, or given a compartment, while a delivery waited (a digest,
-#: quiet hours, a retry) had its code and summary sent under the old marking
-#: (2026-10-07).
-CASE_LABELS_SQL = """greatest(n.classification, coalesce(c.classification, n.classification)),
-       n.compartments || coalesce(c.compartments, '{}'::text[])"""
+#: case's AND its element's AS THEY STAND NOW (`CASE_LABELS_SQL`), the way an
+#: export composes them. The notification's own were fixed when it was raised,
+#: so a case raised to RED, or given a compartment, while a delivery waited (a
+#: digest, quiet hours, a retry) had its code and summary sent under the old
+#: marking (2026-10-07), and so did an exhibit, an entity, a sample or a feed
+#: record raised after the notice was queued (2026-10-08;
+#: `notifications.element_rows_sql` says which elements are read). The
+#: recipient must still dominate all of them (`deliverable_predicate`).
+CASE_LABELS_SQL = f"""greatest(n.classification, coalesce(c.classification, n.classification),
+                (SELECT max(f.classification) FROM ({element_rows_sql('n')}) f)),
+       n.compartments || coalesce(c.compartments, '{{}}'::text[])
+         || coalesce((SELECT array_agg(DISTINCT k)
+                        FROM ({element_rows_sql('n')}) f, unnest(f.compartments) AS k),
+                     '{{}}'::text[])"""
 
 _DUE_SQL = f"""
 SELECT d.id, d.notification_id, d.channel, d.attempts,
@@ -806,7 +815,7 @@ SELECT d.id, d.notification_id, d.channel, d.attempts,
   LEFT JOIN core."case" c ON c.id = n.case_id
  WHERE d.state = 'PENDING' AND d.deliver_after <= now()
    AND d.channel = ANY(%s)
-   AND {readable_predicate('n')}
+   AND {deliverable_predicate('n')}
  ORDER BY n.priority ASC, d.deliver_after ASC
  LIMIT %s
 """
@@ -818,7 +827,7 @@ SELECT count(*)
   JOIN notify.notification n ON n.id = d.notification_id
  WHERE d.state = 'PENDING' AND d.deliver_after <= now()
    AND d.channel = ANY(%s)
-   AND {readable_predicate('n')}
+   AND {deliverable_predicate('n')}
 """
 
 #: The other half of the same rule, and the reason it is not simply a
@@ -841,7 +850,7 @@ UPDATE notify.delivery d
   FROM notify.notification n
  WHERE n.id = d.notification_id
    AND d.state = 'PENDING'
-   AND NOT ({readable_predicate('n')})
+   AND NOT ({deliverable_predicate('n')})
 RETURNING d.id
 """
 
@@ -877,6 +886,16 @@ def revoke_undeliverable(conn: psycopg.Connection) -> int:
 def destination_for(channel: str) -> Destination:
     return {SMTP: Destination.SMTP, WEBHOOK: Destination.WEBHOOK,
             JIRA: Destination.JIRA}[channel]
+
+
+def configured_ceiling(channel: str) -> str | None:
+    """The ceiling the deployment set for the SMTP or webhook channel
+    (`NOCTORNAL_SMTP_CEILING`, `NOCTORNAL_WEBHOOK_CEILING`), or None when it
+    set none. The drain judges every delivery against it, and a report's
+    release judges the document against it too (2026-10-08): the release
+    used the caller's typed ceiling alone, so it allowed what the drain then
+    refused. One reader, so the two cannot differ."""
+    return os.environ.get(f"NOCTORNAL_{channel}_CEILING") or None
 
 
 def dispatch_due(conn: psycopg.Connection, *, limit: int = MAX_PER_DRAIN,
@@ -977,8 +996,7 @@ def dispatch_due(conn: psycopg.Connection, *, limit: int = MAX_PER_DRAIN,
             decision = can_egress(
                 out.classification, destination_for(out.channel),
                 compartments=out.compartments,
-                destination_ceiling=os.environ.get(
-                    f"NOCTORNAL_{out.channel}_CEILING") or None,
+                destination_ceiling=configured_ceiling(out.channel),
             )
             redacted = decision.denied
             route = routes.get(out.channel)

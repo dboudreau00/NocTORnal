@@ -945,6 +945,29 @@ def test_the_triage_script_exits_1_before_opening_a_connection(monkeypatch, caps
     assert ar.SOCKET_ENV in said
 
 
+def test_the_triage_script_exits_1_when_no_policy_is_declared(monkeypatch, capsys):
+    """docs/17, "lab_triage and an undeclared policy": the pass printed
+    `refused:` and exited 0, where an unusable setting and a silent worker
+    exit 1. A queue that was not drained is not a pass that succeeded, and the
+    two are not told apart by an alert on the exit code."""
+    from noctornal_api import db, samples
+    for name in ("NOCTORNAL_PROHIBITED_CONTENT_POLICY", "NOCTORNAL_DESIGNATED_PERSON"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(samples, "policy_declared", lambda: (False, "no policy is declared"))
+
+    def forbidden(*_a, **_k):
+        raise AssertionError("a connection was opened while refused")
+
+    monkeypatch.setattr(db, "connect_system", forbidden)
+    spec = importlib.util.spec_from_file_location(
+        "lab_triage_script_undeclared", ROOT / "scripts" / "lab_triage.py")
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    for command in ("run", "status"):
+        assert script.main([command]) == 1
+        assert capsys.readouterr().out == "refused: no policy is declared\n"
+
+
 # ---------------------------------------------------------------------------
 # Readiness, where it can answer without the database
 # ---------------------------------------------------------------------------

@@ -19,6 +19,7 @@ from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.projections import (
     PRESETS,
     GraphService,
+    PathSearchLimit,
     Projection,
     ProjectionError,
 )
@@ -125,6 +126,9 @@ def ego(
         raise Problem(404, "Not found", "node is not in this projection") from exc
     return {
         "projection": sub.projection,
+        # True when the neighbourhood was cut at the most one view draws
+        # (`NEIGHBOURHOOD_MAX_NODES`), the nearer entities kept.
+        "truncated": sub.truncated,
         "nodes": [{**n, "id": str(n["id"])} for n in sub.nodes],
         "edges": [{**e, "id": str(e["id"]),
                    "src_node_id": str(e["src_node_id"]),
@@ -150,6 +154,10 @@ def path(
     p = _projection(case_id, preset, include_inferred, min_confidence, None)
     try:
         found = _svc(conn, user, case_id).shortest_path(p, src, dst)
+    except PathSearchLimit as exc:
+        # Not "not connected": the search did not finish, and the console
+        # keeps that apart from the finding that no path exists.
+        raise Problem(422, "Search limit reached", safe_detail(exc)) from exc
     except ProjectionError as exc:
         raise Problem(404, "Not found", "both endpoints must be visible") from exc
     return {"projection": p.describe(),

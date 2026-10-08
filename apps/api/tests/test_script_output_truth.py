@@ -179,7 +179,8 @@ def test_the_production_file_describes_the_dev_file_as_it_is():
     minio = "ghcr.io/dboudreau00/minio"
     # The production file also pins the digest (infra-7, 2026-10-03); the tag
     # in front of it is still the dev file's.
-    assert _image(prod, minio).split("@")[0] == _image(dev, minio)
+    # Both files pin the image by digest now: the same tag and the same digest.
+    assert _image(prod, minio) == _image(dev, minio)
     assert ":latest" not in _image(prod, minio)
     # And both Redis services run the policy the notes say they share.
     assert _dev_redis_policy() == "noeviction"

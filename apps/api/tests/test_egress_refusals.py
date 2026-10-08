@@ -102,6 +102,43 @@ def test_a_well_formed_proxy_environment_passes():
     assert egress_proxy.verify_proxy_environment(_proxy_env()) == []
 
 
+@pytest.mark.parametrize("dsn", [
+    "postgresql://noctornal_worker:Sup3rSecret@postgres:5432/noctornal",
+    "postgresql+psycopg://noctornal_worker:Sup3rSecret@postgres/noctornal",
+    "postgresql://noctornal_app:Sup3rSecret@postgres:5432/noctornal",
+    "host=postgres dbname=noctornal user=noctornal_worker password=Sup3rSecret",
+])
+def test_the_proxy_refuses_a_dsn_naming_an_application_role(dsn):
+    """docs/17, the proxy's DSN naming the worker role: that role owns
+    nothing, so the ownership check passes it, and it bypasses row security
+    and holds every table. Operator error, refused before a connection and
+    without quoting the DSN or its password."""
+    for env in (_proxy_env(NOCTORNAL_EGRESS_DATABASE_URL=dsn),
+                {**_proxy_env(NOCTORNAL_EGRESS_DATABASE_URL=dsn), "NOCTORNAL_ENV": "development"}):
+        problems = egress_proxy.verify_proxy_environment(env)
+        named = [p for p in problems if "NOCTORNAL_EGRESS_DATABASE_URL names" in p]
+        assert len(named) == 1, problems
+        assert "noctornal_egress" in named[0] and "Sup3rSecret" not in " ".join(problems)
+
+
+@pytest.mark.parametrize("dsn", [
+    "postgresql://noctornal_egress:x@postgres/noctornal",
+    "host=postgres dbname=noctornal user=noctornal_egress password=x",
+    "postgresql://postgres/noctornal",
+    "not a connection string at all",
+])
+def test_the_proxy_accepts_its_own_role_and_leaves_a_bad_dsn_to_the_connect(dsn):
+    problems = egress_proxy.verify_proxy_environment(
+        _proxy_env(NOCTORNAL_EGRESS_DATABASE_URL=dsn))
+    assert not any("names the application's" in p for p in problems), problems
+
+
+def test_the_roles_the_proxy_refuses_are_the_ones_the_application_uses():
+    from noctornal_api import db
+    assert (egress_proxy.WORKER_ROLE, egress_proxy.APP_ROLE) == (db.WORKER_ROLE, db.APP_ROLE)
+    assert egress_proxy.egress_ledger.EGRESS_ROLE not in (db.WORKER_ROLE, db.APP_ROLE)
+
+
 @pytest.mark.parametrize("name", egress_proxy.FORBIDDEN_ENV)
 def test_the_proxy_refuses_to_hold_a_platform_secret(name):
     problems = egress_proxy.verify_proxy_environment(_proxy_env(**{name: "value-9f2"}))

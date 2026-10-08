@@ -22,8 +22,16 @@ host, and NEVER activates one: a lab member must adopt the version in the
 Lab's Rules tab, and then a Security Officer who is neither of them
 activates it, clearing its licence when the source asks for review.
 
+A source whose entry in yara/sources.json carries a `commit` is pulled at
+exactly that commit: `fetch` checks it out and goes no further, so the rules
+an operator reviewed are the rules that are imported, whatever the upstream
+has pushed since. `fetch --update` follows the default branch instead, past
+any pin, and prints the commit it reached for the operator to pin; a source
+with no pin is refused by `fetch` and pulled by `fetch --update`, which is
+the one explicit way to take the tip of somebody else's repository.
+
 Usage:
-  python scripts/yara_db.py fetch [--only NAME ...] [--jobs N]
+  python scripts/yara_db.py fetch [--only NAME ...] [--jobs N] [--update]
   python scripts/yara_db.py build
   python scripts/yara_db.py stats
   python scripts/yara_db.py import --only NAME [NAME ...] \
@@ -55,13 +63,24 @@ RULE_RE = re.compile(r"(?m)^[ \t]*(?:private[ \t]+|global[ \t]+)*rule[ \t]+([A-Z
 CLONE_TIMEOUT = 600
 
 
+#: A full commit id (SHA-1, or SHA-256 for a repository that uses it): the only
+#: shape a pin may take, so a branch or a tag, which move, is not one.
+COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+
+
 def _now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat()
 
 
 def load_sources() -> list[dict]:
     with open(SOURCES, "r", encoding="utf-8") as fh:
-        return json.load(fh)["sources"]
+        sources = json.load(fh)["sources"]
+    for src in sources:
+        pin = src.get("commit")
+        if pin is not None and not (isinstance(pin, str) and COMMIT_RE.match(pin)):
+            raise ValueError("%s: commit must be a full lower-case hexadecimal "
+                             "commit id (a branch or a tag moves)" % src.get("name"))
+    return sources
 
 
 def git(args: list[str], cwd: str | None = None, timeout: int = 120):
@@ -137,16 +156,55 @@ def _prune_to_rules(dest: str) -> int:
     return removed
 
 
-def fetch_one(src: dict) -> dict:
+UNPINNED = ("no commit is pinned in yara/sources.json; run fetch --update to pull "
+            "the tip of the default branch, then pin the commit it prints")
+
+
+def _checkout_pinned(dest: str, repo: str, pin: str) -> None:
+    """Leave `dest` at exactly `pin`, fetching only that commit when it is not
+    held, and never a later one. RuntimeError, with a sentence, when the
+    source cannot give it."""
+    if not os.path.isdir(os.path.join(dest, ".git")):
+        os.makedirs(dest, exist_ok=True)
+        for args in (["init", "-q", dest], ["-C", dest, "remote", "add", "origin", repo]):
+            r = git(args)
+            if r.returncode != 0:
+                raise RuntimeError((r.stderr or r.stdout).strip()[:300])
+    if git(["-C", dest, "cat-file", "-e", pin + "^{commit}"]).returncode != 0:
+        f = git(["-C", dest, "fetch", "--depth", "1", "origin", pin],
+                timeout=CLONE_TIMEOUT)
+        if f.returncode != 0:
+            raise RuntimeError("the pinned commit could not be fetched from the "
+                               "source: " + (f.stderr or f.stdout).strip()[:200])
+    r = git(["-C", dest, "checkout", "-q", "--detach", "--force", pin], timeout=120)
+    if r.returncode != 0 or git(["-C", dest, "rev-parse", "HEAD"]).stdout.strip() != pin:
+        raise RuntimeError("the checkout is not the pinned commit")
+
+
+def fetch_one(src: dict, update: bool = False) -> dict:
     name, repo = src["name"], src["repo"]
+    pin = src.get("commit")
     dest = os.path.join(VENDOR, name)
     rec = {"name": name, "repo": repo, "license": src.get("license"),
-           "review": src.get("review", True), "fetched_at": _now()}
+           "review": src.get("review", True), "fetched_at": _now(),
+           "pinned": pin}
+    if pin is None and not update:
+        rec["ok"] = False
+        rec["error"] = UNPINNED
+        return rec
     try:
-        if os.path.isdir(os.path.join(dest, ".git")):
-            f = git(["-C", dest, "fetch", "--depth", "1", "origin"], timeout=CLONE_TIMEOUT)
+        if pin is not None and not update:
+            _checkout_pinned(dest, repo, pin)
+        elif os.path.isdir(os.path.join(dest, ".git")):
+            # The remote's own HEAD, by name: with no refspec the first line of
+            # FETCH_HEAD is whichever branch sorts first, which is not the
+            # default branch of a checkout that was made at a pinned commit.
+            f = git(["-C", dest, "fetch", "--depth", "1", "origin", "HEAD"],
+                    timeout=CLONE_TIMEOUT)
             if f.returncode == 0:
                 git(["-C", dest, "reset", "--hard", "FETCH_HEAD"], timeout=120)
+            else:
+                rec["warning"] = "could not reach the source; the earlier checkout is kept"
         else:
             r = git(["clone", "--depth", "1", repo, dest], timeout=CLONE_TIMEOUT)
             if r.returncode != 0:
@@ -157,6 +215,9 @@ def fetch_one(src: dict) -> dict:
         pruned = _prune_to_rules(dest)
         rec.update(ok=True, commit=commit, committed_at=when,
                    pruned_non_rule_files=pruned)
+        if pin is not None and commit != pin:
+            # Only `--update` gets here: it followed the branch past the pin.
+            rec["moved_past_pin"] = pin
     except subprocess.TimeoutExpired:
         rec["ok"] = False
         rec["error"] = "clone/fetch timed out after %ds" % CLONE_TIMEOUT
@@ -168,19 +229,27 @@ def fetch_one(src: dict) -> dict:
 
 def cmd_fetch(args) -> int:
     os.makedirs(VENDOR, exist_ok=True)
-    sources = load_sources()
+    try:
+        sources = load_sources()
+    except ValueError as exc:
+        print("yara/sources.json: %s" % exc, file=sys.stderr)
+        return 2
     if args.only:
         wanted = set(args.only)
         sources = [s for s in sources if s["name"] in wanted]
-    print("fetching %d %s into %s" % (
-        len(sources), "source" if len(sources) == 1 else "sources", VENDOR))
+    update = bool(getattr(args, "update", False))
+    print("fetching %d %s into %s%s" % (
+        len(sources), "source" if len(sources) == 1 else "sources", VENDOR,
+        " (following each default branch)" if update else ""))
     records: list[dict] = []
     with cf.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-        for rec in pool.map(fetch_one, sources):
+        for rec in pool.map(lambda s: fetch_one(s, update), sources):
             state = "ok  " if rec.get("ok") else "FAIL"
             if rec.get("ok"):
                 extra = "%s (pruned %d non-rule files)" % (
                     rec.get("commit", "")[:12], rec.get("pruned_non_rule_files", 0))
+                if rec.get("pinned") and not rec.get("moved_past_pin"):
+                    extra += " at its pin"
             else:
                 extra = rec.get("error", "")
             print("  [%s] %-22s %s" % (state, rec["name"], extra))
@@ -189,6 +258,12 @@ def cmd_fetch(args) -> int:
         json.dump({"generated_at": _now(), "sources": records}, fh, indent=2)
     ok = sum(1 for r in records if r.get("ok"))
     print("fetched %d/%d; provenance -> %s" % (ok, len(records), LOCK))
+    moved = [r for r in records if r.get("ok") and r.get("commit") != r.get("pinned")]
+    if moved:
+        print("to pin what was just pulled, put its commit on the source's entry "
+              "in yara/sources.json and review the rules first:")
+        for rec in moved:
+            print('  %-22s "commit": "%s"' % (rec["name"], rec["commit"]))
     print("run: python scripts/yara_db.py build")
     return 0 if ok else 1
 
@@ -294,9 +369,14 @@ def cmd_stats(args) -> int:
             lock = json.load(fh)
         ok = [s for s in lock["sources"] if s.get("ok")]
         print("sources pulled: %d (lock generated %s)" % (len(ok), lock.get("generated_at")))
+        pins = {s["name"]: s.get("commit") for s in load_sources()}
         for s in lock["sources"]:
             tag = s.get("commit", "")[:12] if s.get("ok") else "FAILED: " + s.get("error", "")[:60]
             flag = " [REVIEW LICENCE]" if s.get("review") else ""
+            if s.get("ok"):
+                pin = pins.get(s["name"])
+                flag += (" [UNPINNED]" if pin is None else
+                         "" if pin == s.get("commit") else " [NOT AT ITS PIN]")
             print("  %-22s %-14s %s%s" % (s["name"], s.get("license", "")[:14], tag, flag))
     else:
         print("no fetch.lock.json yet; run: python scripts/yara_db.py fetch")
@@ -399,6 +479,11 @@ def cmd_import(args) -> int:
                               "source_name": name,
                               "source_url": src.get("homepage") or src.get("repo"),
                               "source_commit": pulled.get("commit"),
+                              # Whether the commit pulled is the one the
+                              # manifest pins, and so the one reviewed.
+                              "source_pinned": bool(
+                                  src.get("commit")
+                                  and pulled.get("commit") == src.get("commit")),
                               "fetched_at": pulled.get("fetched_at")}
                 out = svc.add_version(
                     ruleset_id, _source_bundle(name),
@@ -426,6 +511,10 @@ def main() -> int:
     f = sub.add_parser("fetch", help="clone/update sources into vendor/")
     f.add_argument("--only", nargs="*", default=None, help="only these source names")
     f.add_argument("--jobs", type=int, default=4, help="parallel clones")
+    f.add_argument("--update", action="store_true",
+                   help="follow each source's default branch past its pinned "
+                        "commit (and pull a source that has no pin), then print "
+                        "the commits to pin")
     f.set_defaults(func=cmd_fetch)
     b = sub.add_parser("build", help="validate + index the pulled rules")
     b.set_defaults(func=cmd_build)

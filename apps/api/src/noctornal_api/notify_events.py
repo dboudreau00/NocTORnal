@@ -40,7 +40,7 @@ from noctornal_api.notifications import (
 )
 from noctornal_api.wording import agree, count_of
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("noctornal.notify_events")
 
 
 def _case(conn: psycopg.Connection, case_id: UUID) -> tuple[str, str, frozenset[str]]:

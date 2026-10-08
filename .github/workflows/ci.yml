@@ -97,8 +97,8 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - run: pipx install ruff==0.6.9
@@ -109,8 +109,8 @@ jobs:
     name: Source hygiene
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       # docs/15 records this the hard way: the editing tools on the
@@ -121,12 +121,32 @@ jobs:
       - name: No NUL bytes in source
         run: python scripts/check_source_hygiene.py
 
+  pinned-images:
+    name: Pinned images resolve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      # A digest copied from a local image store can name a manifest the
+      # registry never had (an image pulled from one registry and re-tagged
+      # for another), and the host that copied it starts the stack from its
+      # own store, so only a clean machine fails. Ask each registry.
+      - name: Every pinned image resolves in its registry
+        run: |
+          set -euo pipefail
+          refs=$(grep -hoE '[A-Za-z0-9./_:-]+@sha256:[0-9a-f]{64}' \
+                   infra/docker-compose.yml infra/production/compose.yml Dockerfile | sort -u)
+          [ -n "$refs" ]
+          for ref in $refs; do
+            docker buildx imagetools inspect "$ref" > /dev/null
+            echo "resolves: $ref"
+          done
+
   drift:
     name: Ontology drift
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       # Pinned like every other install here (constraints.txt, below).
@@ -210,8 +230,8 @@ jobs:
       # project's GHCR namespace.
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
