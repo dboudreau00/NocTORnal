@@ -214,7 +214,7 @@ anything missing. Then it builds `.venv` with the two workspace packages;
 generates a fresh TOTP key, persona key and ingest pepper into `.env.local`
 (mode 600), **never overwriting an existing one**; starts Postgres, Redis,
 MinIO and Mailpit and waits for the database to accept connections; applies
-all 173 Alembic migrations (Alembic head 0173); creates your first account,
+all 182 Alembic migrations (Alembic head 0182); creates your first account,
 printing the password **once** with a QR code to scan and waiting until you
 have saved it; offers the demo case; and starts the API, printing the console
 URL, <http://127.0.0.1:8000/ui/>. Detail and troubleshooting:
@@ -312,7 +312,7 @@ export DATABASE_URL=postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:
 .venv/bin/python -m pytest apps/api/tests packages/ontology -q
 ```
 
-With the containers up, expect **no failures** across **7967 tests** (`def test_`
+With the containers up, expect **no failures** across **8358 tests** (`def test_`
 functions across both pytest roots, maintained by
 `scripts/refresh_counters.py`; each parametrises to one or more collected
 items, and the collected total for a given release is in
@@ -656,7 +656,7 @@ test named after it.
 | **Object store** | MinIO, S3 object lock | Every exhibit is written under a per-object COMPLIANCE retention, which not even a root credential can shorten. The shipped compose file sets the BUCKET DEFAULT to `GOVERNANCE 365d`; the default is the floor for anything written by another path, and the guarantee above is the per-object lock `EvidenceStorage.put()` applies. GOVERNANCE alone is bypassable and is not a WORM guarantee. |
 | **Cache / limits** | Redis | GCRA rate limiting in one atomic Lua script. |
 | **Egress** | one pinned client and an egress proxy | Every outbound connection takes its route from one function and goes through one client that connects only to the address it checked. In production the proxy (HTTP CONNECT and SOCKS5 on one internal listener) is the only way out, and records every connection in a ledger the application cannot write ([`docs/20`](docs/20-outbound-connections.md)). |
-| **Migrations** | Alembic | 173 revisions (Alembic head 0173), one concern each. Reversible on an EMPTY database, which is what the round-trip test proves; a downgrade past `0017` on a populated one is refused on purpose, because dropping the seeded ontology would take the assertions with it. |
+| **Migrations** | Alembic | 182 revisions (Alembic head 0182), one concern each. Reversible on an EMPTY database, which is what the round-trip test proves; a downgrade past `0017` on a populated one is refused on purpose, because dropping the seeded ontology would take the assertions with it. |
 | **Live updates** | Postgres `LISTEN`/`NOTIFY` | Over Redis pub/sub because `pg_notify` inside a trigger is **part of the writing transaction**, no dual write, no lost event. |
 
 ### Frontend
@@ -675,7 +675,7 @@ enforces it.
 
 ### Testing
 
-**7967 tests** (`def test_` functions across two pytest roots, maintained by
+**8358 tests** (`def test_` functions across two pytest roots, maintained by
 `scripts/refresh_counters.py`). Every invariant has a test named
 after it. About half are database-backed and gated on `DATABASE_URL`; the
 rest need no services at all.
@@ -702,7 +702,7 @@ noctornal/
 │   └── generated/             TypeScript + SQL seed (do not edit)
 ├── db/
 │   ├── schema.sql             generated mirror (scripts/dump_schema.py; CI diffs it)
-│   └── migrations/versions/   173 Alembic revisions
+│   └── migrations/versions/   182 Alembic revisions
 ├── docs/                      the reasoning, one numbered document per subject
 ├── release/                   installers, INSTALL, MANUAL, CHANGELOG
 ├── scripts/                   launch, bootstrap, demo seeds, screenshots
@@ -755,30 +755,38 @@ noctornal/
 
 **Beta. Unaudited. Not certified for evidential use. Not lawful to operate against real material until the five blocking items above are settled.** It is fit for other people to try on synthetic or published, non-personal data.
 
-This is Beta 1: version 0.9.0, tag `v0.9.0-beta`. What was measured, from
-[`release/CHANGELOG.md`](release/CHANGELOG.md): the whole suite, on a
-database built from nothing with every migration and both runtime database
-roles present, passed 12073 and skipped 51. An adversarial review on
-2026-10-03 kept 82 findings, 16 of them high; every one is fixed or stated in
-`docs/17`, an independent re-verification re-ran each against the merged
-code, and nine release reviews then exercised install, analyst workflows,
-load, authorisation, evidence and egress, collection and the Lab, the
-upgrade from Alpha 7a, the production deployment and code quality. On a clean
-Ubuntu 24.04 machine with the prerequisites in place the console answered 6
-minutes 11 seconds after the install command. Writes, entity and claim reads,
-selectors, search and the audit log hold at 100,000 entities and 1,000,000
-claims per case; the canvas, the metrics, the report and ego are built for
-about 5,000 entities a case. That load was measured from a Windows host with
-Postgres in WSL2.
+This is Beta 1.1, release 0.9.1, tag `v0.9.1-beta`: Beta 1 with the known
+residuals that had a fix in the software closed. The request role is narrower
+(Alembic 0174 to 0182), a request connection carries a statement timeout, the
+ego network and the path search answer for an entity anywhere in a case, a legal
+hold is placed from the console, and the sweep that destroys what no case
+governs covers dead letters and ingest records attached to no case. The whole
+suite's figures, on a database built from nothing with every migration and both
+runtime database roles present, are in
+[`release/CHANGELOG.md`](release/CHANGELOG.md), which also has the steps for
+upgrading from Beta 1. On a clean Ubuntu 24.04 machine the console answered 6
+minutes 1 second after the install command, and the first sign-in came at 6
+minutes 45 seconds. An adversarial review on 2026-10-03 kept 82 findings, 16
+of them high. At Beta 1.1, 78 are fixed, one is fixed apart from who holds which
+role on which case, and three are stated and not fixed in `docs/17`. Before
+Beta 1 an independent re-verification re-ran each against the merged code, and
+nine release reviews then exercised install, analyst workflows, load,
+authorisation, evidence and egress, collection and the Lab, the upgrade from
+Alpha 7a, the production deployment and code quality. Writes, entity and claim
+reads, selectors, search and the audit log hold at 100,000 entities and
+1,000,000 claims per case; the canvas, the metrics and the report are built for
+about 5,000 entities a case, and the ego network and the path search stop at
+5,000. That load was measured from a Windows host with Postgres in WSL2.
 
-Beyond what the tour shows, Beta 1 has entity merge under the two-person
+Beyond what the tour shows, Beta 1.1 has entity merge under the two-person
 policy; PGP verification and vendor keys; collection from feeds, forums and
 Telegram under a two-person authority (the operator's end-to-end Telegram
 check is `docs/17` F31); ingest; similarity search; Jira, the delivery
 ledger and outbound lookups; the egress proxy; the collector service that
 alone holds the persona key; the isolated worker that parses hostile bytes;
-row-level security on every case table; live change push; and the one-command
-installer with its first-sign-in walkthrough.
+row-level security on every case table; live change push; legal holds placed
+from an exhibit's card and a case's header; watches added from the Feeds pane;
+and the one-command installer with its first-sign-in walkthrough.
 
 Deliberately absent: WebAuthn (password and TOTP today), session IP and
 client binding by default in development (a production start refuses to run
@@ -787,14 +795,16 @@ and 7-Zip archives, and live SIP interception. The reasons are in
 [`docs/17`](docs/17-flagged-for-review.md), [`docs/11`](docs/11-malware-handling.md)
 and [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-**What is still open is in `docs/17`.** Its Known residuals at Beta 1 lists,
-by area, what the review, its re-verification and the release reviews left,
-among them a request role that is not a wall in every table, no console
-control for an exhibit's or a case's legal hold, and two outbound paths that
-judge less than they should. Its section on data already recorded that
+**What is still open is in `docs/17`.** Its Known residuals at Beta 1.1 lists,
+by area, what remains, among them a request role that can still read who works
+which case and still writes the collector's heartbeat and four queues, watches
+that cannot be stopped or edited, and YARA sources that ship unpinned until an
+operator pins them; its Closed index has what Beta 1.1 closed, with the date
+and the test that holds each. Its section on data already recorded that
 should not be trusted lists the rows an older instance may hold, such as a
-`CONFIRMED` channel binding recorded before commit `12ff904` and a
-co-participation figure produced before commit `8595602`.
+`CONFIRMED` channel binding recorded before commit `12ff904`, a
+co-participation figure produced before commit `8595602` and a refusal
+recorded with outcome SUCCESS before Beta 1.1.
 
 **The software has been adversarially reviewed nine times, and every pass
 found real defects, four times a critical one. The first eight found them
