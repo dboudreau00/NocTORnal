@@ -157,7 +157,7 @@ x-logging: &logging
 # below is written to /tmp and the Lab's child processes write there too, so
 # it is left as a stated gap (infra/production/README.md, Hardening).
 x-noctornal-app: &noctornal-app
-  image: noctornal-api:0.9.0
+  image: noctornal-api:0.9.1
   pull_policy: never
   env_file: [secrets.env]
   networks: [noctornal]
@@ -1534,7 +1534,7 @@ services:
   # a caller send more than 512 MiB, and a larger sample cap or a higher
   # concurrency multiplies the figures above, so raise mem_limit with them.
   analysis-worker:
-    image: noctornal-api:0.9.0
+    image: noctornal-api:0.9.1
     pull_policy: never
     restart: unless-stopped
     logging: *logging
