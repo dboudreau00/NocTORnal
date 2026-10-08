@@ -617,7 +617,7 @@ services:
     # a personal namespace. The digest is the one quay.io/minio/minio served
     # for this release before it stopped, so "byte for byte" is checkable
     # (docker buildx imagetools inspect on both names).
-    image: ghcr.io/dboudreau00/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+    image: ghcr.io/dboudreau00/minio:RELEASE.2025-04-22T22-12-26Z@sha256:3f97c5651cb6662b880c787a232b6b34fec8d8922e08d6617b25d241a21164bb
     restart: unless-stopped
     logging: *logging
     networks: [noctornal]
@@ -805,7 +805,7 @@ services:
   # to /dev/null. stderr is kept, and
   # `set -e` still sees a failed add.
   minio-init:
-    image: ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+    image: ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z@sha256:eb4ea9884b77704230e2423e9004d2fa738dc272876b9cc41a297d29443b8780
     depends_on: [minio]
     networks: [noctornal]
     env_file: [secrets.env]

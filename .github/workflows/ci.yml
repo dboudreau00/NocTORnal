@@ -121,6 +121,26 @@ jobs:
       - name: No NUL bytes in source
         run: python scripts/check_source_hygiene.py
 
+  pinned-images:
+    name: Pinned images resolve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      # A digest copied from a local image store can name a manifest the
+      # registry never had (an image pulled from one registry and re-tagged
+      # for another), and the host that copied it starts the stack from its
+      # own store, so only a clean machine fails. Ask each registry.
+      - name: Every pinned image resolves in its registry
+        run: |
+          set -euo pipefail
+          refs=$(grep -hoE '[A-Za-z0-9./_:-]+@sha256:[0-9a-f]{64}' \
+                   infra/docker-compose.yml infra/production/compose.yml Dockerfile | sort -u)
+          [ -n "$refs" ]
+          for ref in $refs; do
+            docker buildx imagetools inspect "$ref" > /dev/null
+            echo "resolves: $ref"
+          done
+
   drift:
     name: Ontology drift
     runs-on: ubuntu-latest
