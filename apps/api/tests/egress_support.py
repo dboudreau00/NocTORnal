@@ -34,6 +34,7 @@ from uuid import uuid4
 
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, PublicFormat, NoEncryption
+from db_clock import wait_until_after
 
 ROOT = Path(__file__).resolve().parents[3]
 MIGRATIONS = ROOT / "db" / "migrations" / "versions"
@@ -283,11 +284,43 @@ def run(conn, source_id, *, status="RUNNING", profile=None, persona=None, author
         (source_id, status, age_s, profile, persona, authority)).fetchone()[0]
 
 
+def _after_the_route_last_changed(conn, persona, sources) -> None:
+    """Wait until the database's clock is past the route's last change.
+
+    The proxy counts an authority only when it was recorded and confirmed
+    after the profile last reached further and after the latest binding of
+    the persona or the source (`egress_authz._floor`). A fixture writes the
+    route and then the authority a few milliseconds apart, which holds on a
+    clock that only moves forward. On a host that steps its clock, a route
+    stamped inside a step is AHEAD of an authority stamped just after it, and
+    the proxy refuses what the test arranged correctly (db_clock.py)."""
+    if not (_table(conn, "collect.egress_binding")
+            and _column(conn, "egress_profile", "reach_changed_at")):
+        return
+    floor = conn.execute(
+        """SELECT greatest(
+                  (SELECT max(p.reach_changed_at) FROM collect.egress_profile p
+                    WHERE p.id IN (SELECT a.egress_profile_id
+                                     FROM collect.collection_account a
+                                    WHERE a.id = %(persona)s::uuid
+                                   UNION
+                                   SELECT s.egress_profile_id FROM collect.source s
+                                    WHERE s.id = ANY(%(sources)s::uuid[]))),
+                  (SELECT nullif(max(b.bound_at), '-infinity'::timestamptz)
+                     FROM collect.egress_binding b
+                    WHERE b.collection_account_id = %(persona)s::uuid
+                       OR b.source_id = ANY(%(sources)s::uuid[])))""",
+        {"persona": persona, "sources": list(sources)}).fetchone()[0]
+    wait_until_after(conn, floor)
+
+
 def authority(conn, *, recorder, confirmer, persona=None, sources=(), classification="AMBER",
               recorded="clock_timestamp()", confirmed="clock_timestamp()",
               added="clock_timestamp()", target_confirmed="clock_timestamp()") -> object:
     """A live, confirmed authority (MEMBER_READ with a persona, PUBLIC_READ
-    without), with one confirmed target per source."""
+    without), with one confirmed target per source. It is recorded after the
+    route it covers last changed, by the database's clock."""
+    _after_the_route_last_changed(conn, persona, sources)
     aid = conn.execute(
         f"""INSERT INTO collect.collection_authority
               (collection_account_id, scope, classification, authority_ref, issued_by,
