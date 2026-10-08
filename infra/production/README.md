@@ -1660,9 +1660,9 @@ both names resolve to the same digest, which is how that is checked.
   `compose.yml` does (2026-10-08), and so does the CI step that starts the ACL
   Redis. The CI workflow's other containers still pull by tag
   (`pgvector/pgvector:pg16` and `redis:7-alpine` as service containers, and
-  the MinIO, `mc` and Mailpit images in its `docker run` steps), its two
-  actions (`actions/checkout@v4`, `actions/setup-python@v5`) are pinned by tag
-  and not by commit, and the workflow has no `permissions:` block. The installers
+  the MinIO, `mc` and Mailpit images in its `docker run` steps); its two
+  actions (`actions/checkout`, `actions/setup-python`) are pinned to commits,
+  and the workflow has no `permissions:` block. The installers
   `pip install` an unpinned `pip`, and the Dockerfile installs whatever `gnupg`
   Debian ships that day (`docs/17` F34 depends on its version). What each tag
   resolved to on 2026-10-03, which is the digest the files named below pin:

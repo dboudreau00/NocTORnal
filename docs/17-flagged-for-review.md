@@ -19,7 +19,7 @@ For the legal dependencies see
 about engineering judgement and does not repeat docs/16.
 
 The order is: the data already recorded that should not be trusted; what is
-open; the known residuals at Beta 1, by area; the decisions the owner took;
+open; the known residuals at Beta 1.1, by area; the decisions the owner took;
 and an index of what is closed, ids included, so that a citation of a closed
 id still resolves.
 
@@ -43,8 +43,9 @@ is the section to act on first.**
 | **Records written under older rules** | Triage claims accepted before Alpha 6 with no `observed_at`; ATTRIBUTE claims readable below the material they came from, or attached across cases; captured documents cited by cases that share no compartment, which migration 0071 could not label | Each was written under a rule that was later tightened, and nothing can recompute what was never recorded: an observation date, or the lock every citing case's readers hold. They are counted by the readiness rows `triage_claims_dated`, `triage_claims_within_labels` and `captured_documents_compartmented` | `python scripts/legacy_records.py` lists them per case. An analyst decides each: raise an entity, retract a claim, or file the capture again under the right case. An analyst gives a claim its date by superseding it (the inspector's Date this claim); nothing writes a date onto a recorded claim (docs/00 decision 170) |
 | **Contact blocks parsed under cb-1 with a gpg-spaced PGP line** (F37) | `comms.contact_block` where `parser_version = 'cb-1'` and an entry has `selector_type = 'PGP_FPR'` with a 20-character `durable_value` | The parser cut the value at the first run of two spaces, so a fingerprint copied from gpg kept 20 of 40 hex characters; a CLAIMED proposal may carry the truncated value, the line cannot confirm a key, and the block is not paired with the same text parsed later | Nothing re-reads a stored block: parse the text again in a case of its own and reject the old proposal. Do not edit the rows |
 | **Telegram ids recorded from a bare positive number** before 2026-09-11 | `core.selector` and `comms.channel_binding`, `TELEGRAM_ID` | A bare positive id was assumed to be a user (`u:`), so an MTProto channel observed as a bare number shares a row with a same-numbered user. The normaliser refuses a bare positive now, but nothing can recompute a type that was never observed. | `scripts/telegram_bare_ids.py` lists them per case. Confirm each against its source and re-record typed (`c:<id>`) where a channel is wearing a user's row. |
-| **Credentials that stayed after 0137** | `core.assertion.rationale` where an accepted proposal copied its context; `collect.document` text; `core.selector` e-mail rows read out of the userinfo of a link that is not http or https; URL rows of the `url:login:password` layout written before that shape was refused | 0137 scrubbed URL selectors, entity labels, proposals, extraction rows and a correction's `prior_value`, and does not touch a claim's recorded rationale (invariant 5), the captured text or the audit detail | The queries under Known residuals at Beta 1 list them. Removing one is an owner decision |
+| **Credentials that stayed after 0137** | `core.assertion.rationale` where an accepted proposal copied its context; `collect.document` text; `core.selector` e-mail rows read out of the userinfo of a link that is not http or https; URL rows of the `url:login:password` layout written before that shape was refused | 0137 scrubbed URL selectors, entity labels, proposals, extraction rows and a correction's `prior_value`, and does not touch a claim's recorded rationale (invariant 5), the captured text or the audit detail | The queries under Known residuals at Beta 1.1 list them. Removing one is an owner decision |
 | **Forks in the audit and custody chains from before 0149** | The audit and custody rows at or below the boundary 0149 recorded | Alpha 7a's concurrent writers forked both chains. Verification reports them as legacy and they do not break `intact`; a fork above the boundary is a break | Nothing: they are history, and the log is append-only |
+| **Refusals recorded with outcome SUCCESS** before Beta 1.1 | `audit.event` rows whose action is AUTHZ_DENIED, AUTH_SESSION_REJECTED, RLS_BINDING_FAILED, SESSION_BINDING_REFUSED or CASE_SHARE_REFUSED, the sign-in router's cookie, recovery-code and password-change refusals, the PII reveal and search refusals, and the AUTHZ_DENIED and AUTH_FAILED rows of the egress and Telegram persona scripts | A refusal was stored with outcome SUCCESS, so a filter on outcome missed it. Since Beta 1.1 each is stored with outcome DENIED, and the log is append-only, so the earlier rows keep SUCCESS | Find refusals by action and not by outcome for anything recorded before the upgrade. Do not edit the rows: the ledger refuses it |
 
 ---
 
@@ -60,7 +61,7 @@ would be.
 Decisions the owner took below), and F3 is an accepted cost: it was never a
 defect, because the register already refuses on it.
 
-Every entry under **Known residuals at Beta 1** is CHANGE LIKELY unless it says
+Every entry under **Known residuals at Beta 1.1** is CHANGE LIKELY unless it says
 it is an accepted cost or a judgement to confirm. Read that section before
 reporting a weakness: a residual named there is known.
 
@@ -168,25 +169,27 @@ foreign key from the column to `core.selector_type(key)` would stop a ninth.
 
 #### F30: Collected documents are swept only when an operator runs the sweep
 
-`scripts/retention_sweep.py` sweeps collected documents past their retention
-clock, deployment-wide, by the same purge every other family uses, so a legal
-hold on a document, on any version, or on a case citing it still keeps it. It
-is dry by default. A real run needs `--apply`, an authority reference declared
+`scripts/retention_sweep.py` sweeps collected documents, dead letters and the
+ingest records attached to no case (F55) past their retention clock,
+deployment-wide, by the same purge every other family uses, so a legal hold on
+a document, on any version, or on a case citing it still keeps it. It is dry by
+default. A real run needs `--apply`, an authority reference declared
 in `NOCTORNAL_RETENTION_SWEEP_AUTHORITY` (recorded on every tombstone and in a
 `RETENTION_SWEEP` audit event of counts, refused when missing or a
 placeholder, never verified, as the L1 policy reference is) and a named active
 account that holds `retention.purge`. It is not in the production cron loop,
 and a test holds that; `infra/production/README.md`, Retention sweep, says how
 to schedule it. The readiness row `retention_sweep_current` turns red when a
-document no hold keeps has been past its clock for more than seven days (docs/00
-decisions 171 to 173).
+document, a dead letter or an unattached ingest record that no hold keeps has
+been past its clock for more than seven days (docs/00 decisions 171 to 173 and
+204).
 
 **Confirm the judgement:** that a declared reference and a named account stand
 in for step-up on a script that destroys third-party data; that nobody
 schedules it until the owner and counsel have said who runs it under which
-authority (docs/16 L4); and that the sweep keeps to collected documents. Dead
-letters also have no case and no sweep, and are the next family to decide
-(F55).
+authority (docs/16 L4); and that the sweep keeps to collected documents, dead
+letters and the ingest records attached to no case, and leaves exhibits,
+lookups and every record attached to a case to the case's own purge.
 
 #### F32: Key lookups (F10c) take two people and lapse after 24 hours
 
@@ -232,20 +235,6 @@ topology the application network cannot reach it at all.
 
 **Confirm the judgement:** that the object store stays on the deployment's own
 network, or decide how an off-host store is reached and recorded.
-
-#### F55: Dead letters and caseless ingest records are swept by nothing
-
-A dead letter carries a 90-day clock and third-party victim data, and is
-reached only by `purge_due(case_id=None)`; the case-scoped purge route skips it
-by design, and the F30 sweep keeps to collected documents, so nothing destroys
-a dead letter when its clock runs out. Ingest records attached to no case are
-in the same position. The 2026-10-03 review reported the same gap
-(evidence-unswept-unattached-and-dead-letter, low). **Not fixed.**
-
-**Smallest fix:** either family joins `SWEPT_KINDS` once the owner decides; a
-dead letter's tombstone already carries no case, so the cross-case concern
-decision 172 names does not apply to it. **Confirm the judgement:** that dead
-letters and caseless records may outlive their clock until that decision.
 
 ### 🔵 ACCEPTED COST
 
@@ -393,9 +382,8 @@ decision, and is not made by a migration.
 
 A hold is placed on a document, with every earlier version, or on a case, which
 holds every document it cites. Nothing holds everything a source has collected
-in one act. A case can be held through the API
-(`POST /api/v1/retention/cases/{id}/legal-hold`); the console has no control
-for it (Known residuals at Beta 1).
+in one act. A case is held from the Hold button in its header or through the
+API (`POST /api/v1/retention/cases/{id}/legal-hold`).
 
 #### F46: A raw markup object can be left unreferenced
 
@@ -431,13 +419,6 @@ their own readable facts give, or that it cannot be compared. Whether a claim
 is in an index at all is still visible, because the claim gate includes the
 material it cites.
 
-#### F53: No route or console form creates a watch
-
-Only `scripts/seed_feeds_demo.py` inserts a watch, so a watch of target kind
-TELEGRAM_CHAT can today be written only by hand, and its reference rule (a
-typed chat id) is held by the database (Alembic 0130) and the matcher rather
-than by a creation route (F47).
-
 #### F54: A TELEGRAM_CHAT watch with no term fires on every message
 
 A chat watch with no keyword, selector or pattern matches every message of its
@@ -456,33 +437,27 @@ Not defects, not done. Listed so they are not mistaken for oversights.
 | WebAuthn | TOTP only. A deliberate absence, stated in four documents; SECURITY.md says reporting it is not a finding |
 
 Row-level security stands on 82 tables and defers none (F51). What the request
-role can still reach outside it is under Known residuals at Beta 1.
+role can still reach outside it is under Known residuals at Beta 1.1.
 
 ---
 
-## Known residuals at Beta 1
+## Known residuals at Beta 1.1
 
 The gaps that remain, by area. Each entry says what is true, what it costs and
 what would close it. An entry marked "decision" records a call the owner may
-want to make differently.
+want to make differently. What Beta 1.1 closed is in the Closed index below,
+each with its date and the test that holds it; what stays here is what it left.
 
 ### Access control and row-level security
 
 | Id | What is left, and what it costs | What would close it |
 |---|---|---|
-| rls-6 (part) | The request role, even with no session bound, can still read every `iam.case_assignment` row (who holds which role on which case), `iam.session` (`token_hash`, `rls_binding_hash`, `ip`, `user_agent`) and `iam.break_glass.justification`. The credential columns of `iam.app_user` are closed (0143). `token_hash` is a sha256 of a 256-bit random token and the binding proof is derived from the raw token, not from that hash, so neither opens a session; what is disclosed is who works which case and from where. It takes a statement injected into a request. 0109 made the IAM plane read-only to the request role instead of filtered, because the policies read it on every request. | A column-level REVOKE of the session and break-glass columns with definer functions for the legitimate readers; filtering `iam.case_assignment` needs its readers moved to definer functions first. Each is a migration. |
-| sealed columns outside the accounts table | The unbound request role can read as ciphertext or a keyed hash: `collect.collection_account.secret_ciphertext` and `session_ciphertext`, `ingest.api_key.secret_hmac`, `ingest.provider.secret_ciphertext`, `lab.download_ticket.token_hash`, and, for a bound caller with no assignment, `lab.sample.data_key_ciphertext`. No plaintext follows without the key encryption key or the pepper, which live in the process environment, and the persona key is held only by the collector in production. | A column-level REVOKE with definer readers for the length and null checks the API makes. A migration. |
-| unpolicied configuration tables | The request role can write egress destinations, routes and profiles, `collect.source`, `core.retention_rule`, `ingest.api_key`, `notify.jira_destination` and similar tables, and no row policy filters them. One statement injected through a session could add an egress route or shorten a retention rule without the step-up and the audit the administration routes apply. | Move the writes to a system connection and revoke them from the request role, as 0109 did for the accounts plane. |
-| hold and purge columns, and soft-delete tables | `noctornal_app` holds table-level UPDATE on `core.evidence` and `core."case"`, so a statement injected as that role can set an exhibit's `legal_hold` false, its `purged_at`, `retention_until` or `is_worm_locked`, and a case's `legal_hold` or `retention_until`. The database refuses a row that is both held and destroyed (0142) and fixes an exhibit's hashes, storage key, version id and case (0140); nothing guards `legal_hold` going to false. The request role also holds DELETE on soft-delete-only case tables and UPDATE on columns the application never writes as that role. The same class as F52: a process holding the request role's credentials can do what the application refrains from. | Narrow the request role's UPDATE and DELETE to the columns and tables the application writes as that role, or move those columns behind the system role by trigger, as 0140 did for the anchors. |
-| definer functions answer for any id | `iam.case_facts`, `iam.element_facts` and `iam.countersign_blocked_by` answer the labels and the administration metadata of any id, without content. That is by design (decision 141). `SELECT last_value` on `lab.sample_access_id_seq` reads the Lab ledger's volume. | Not proposed for the facts; the sequence could be revoked as 0169 did for the two ledgers. |
-| idle window at the binding | `iam.rls_actor` checks a session's absolute expiry and not its 30-minute idle window. The HTTP layer refuses first, so this needs a raw token and direct access to the database. | Check the idle window in the function. |
+| rls-6 (part), case membership | The request role, even with no session bound, can still read every `iam.case_assignment` row: who holds which role on which case. It cannot read any session's token hash, binding, address or client or any break-glass justification (0177), or an account's credential columns (0143), so what is disclosed is who works which case. It takes a statement injected into a request. 0109 made the IAM plane read-only to the request role instead of filtered because 31 code paths read the assignments, and a row policy on the table as it stands would silently empty them. The gate's resolver and the live socket's rechecks run on connections bound to nobody, so a recheck would drop every subscriber; the team list, the approvers, the notification fan-out (a notice would reach nobody), the Lab's assignees, lookups, comms and dual control read other people's roles by design. | A definer function for each reader first, then a row policy on the table. Each is a migration. |
+| a case's retention date and governance text | The request role updates ten columns of `core."case"` because its routes write them as that role (0178): `title`, `summary`, `authority_ref`, `review_due`, `retention_until`, `classification`, `status`, `closed_at`, `dual_control_merge` and `withheld_disclosure`. Through SQL it can therefore still change a case's retention date and its governance text without the route's `CASE_UPDATED` row, on a case its policy lets it update. Nothing it can write destroys material: a hold, its lift and a purge are the system role's writes, and a purge also takes `retention.manage`, a second factor and a person. | Write the case record on a system connection after the route's gate, as a case's hold and compartments are. |
+| the heartbeat and the queues | `collect.collector_heartbeat` is still writable by the request role, so a forged heartbeat could turn the readiness row `collector_split` green. The queues `core.embedding_pending`, `lab.yara_compile_job` and `ingest.batch` are writable by it too: 0179 left them because they are not configuration. | Narrow them as 0179 narrowed the configuration tables. |
+| two live LIAISON assignments from before | An account that already held two live LIAISON assignments when a liaison was limited to one case cannot have either extended until one is revoked: extending is a grant on that case, and the other live assignment refuses it. | Revoke one of them; the other is then extended as any assignment is. |
+| the fact functions | `iam.case_facts`, `iam.element_facts` and `iam.countersign_blocked_by` answer the labels and the administration metadata of any id, without content. That is by design (decision 141). | Not proposed. |
 | session clock | The request role may move its own session's `last_seen_at` forward by up to five minutes past the database's clock (`CLOCK_SKEW` in 0144, stated there as intended: it keeps an API host with a fast clock from failing every request). | None proposed. |
-| `notify.enqueue` text | A caller bound to a live session can send arbitrary text to any eligible recipient, as itself, with a pending mail delivery. 0145 stops it being sent as anyone else and stops it forging delivery rows; it does not limit what a bound account may say. | A kind and template allowlist inside the function. A migration. |
-| the audit log's append policy | The insert policy on `audit.event` admits any row, so a bound user who is not on a case can append a state-bearing row naming it (a triage verdict, a category correction, ACH history, a report hypothesis note), and the readers that take the newest row by object id (`triage_state`) then read it. Attribution holds, because the row names the planter. Needs SQL as the request role. | Require the case term (`case_id = ANY(iam.rls_cases())`) or `ingest.manage` in the append policy for those actions. Not for refusals: an honest refusal names a case the caller cannot read. |
-| LIAISON is not single-case | docs/05 says a liaison holds one case; one liaison account can be assigned to several. An assignment with no end is refused (decision 185). | Refuse a second live assignment of a LIAISON. |
-| a second permission check in a handler | `embeddings.py` makes a global-permission check in the handler, outside the gate, and its 403 writes no AUTHZ_DENIED row. | Move it into the gate. |
-| refusals are recorded as SUCCESS | An AUTHZ_DENIED audit row is stored with outcome SUCCESS (`http/deps.py`), so a filter on outcome misses them. | Store DENIED. |
-| `real_name` on an identity | The graph service accepts `attrs.real_name` on an IDENTITY entity, which goes against invariant 2 in spirit though not in the schema. | Refuse the key. |
 | development without row security | On an owner connection (development, a single-role deployment) the layout lists hidden entities and an ACH stance on a hidden claim answers 200. Under the production role both hold. | None: the request role is the control. |
 
 ### Graph, merges and selectors
@@ -494,7 +469,6 @@ want to make differently.
 | conversations above everyone assigned (decision 177) | A RED conversation in an AMBER case can be flagged or minimised only by someone cleared for it; where nobody assigned is, nobody can. Whether a case's closure should look for a conversation no one on the team can minimise is not decided. | Decide it. |
 | a refused reversal names that a later merge exists | The sentence says that a later merge the reader cannot see holds the reversal. That one bit cannot go without allowing the reversal the rule forbids, which would write old endpoints over ties a live merge owns. | None. |
 | hidden and missing differ in time and in the audit log | The status and the sentence are one answer for a hidden element and a missing one. Medians over 40 interleaved in-process calls each were 97.6 ms against 79.1 ms (merge), 95.9 against 80.4 (tie create) and 81.1 against 66.5 (entity correction), and the gate writes an AUTHZ_DENIED row for the hidden id and none for the missing one. Doing the same work for a missing id would append a denial row for every id that names nothing, and the gap was measured with no network in between. | Decide whether a missing id should cost the same. |
-| retiring an entity with a hidden tie | The refusal (`HIDDEN_TIES_REFUSAL`) is the same under NONE, PRESENCE and COUNT, so under NONE it still says that a tie above the caller touches the entity, while docs/14 U2 makes what is said about withheld material a per-case setting. Honouring NONE needs a decision between retiring over ties the caller cannot see and a refusal in words no different from any other. | Decide it. |
 | co-participation weights | A weight divides by the room's raw size, hidden members included, so under NONE a room of two AMBER identities and one RED one weighs 0.5 where a two-person room weighs 1.0, and a reader who knows a room can difference a weight to learn that someone they cannot see is in it. The explicit count is gone under NONE; the weight is not. Migration 0030 already concedes that differencing is possible. | Divide by the visible size, at the cost of a figure that changes with the reader. |
 | credentials no pattern finds (decision 181) | A secret in a URL path with no separator (`/hooks/<workspace>/<channel>/<token>`), a `?l=` or `?hash=` value whose name does not say it is a credential, a pair with one separator, a pair with no path (`https://y.example:carol:pw`), and a bare `alice:pw@host`, which is read as an e-mail selector. A final path segment with two separators that is not a login pair (a time, an IPv6 address, a URN) is cut as if it were one, so two such URLs can collide in the selector index. | Not detectable by shape. |
 | rows stored before the fixes | The 0137 scrub does not touch a claim's rationale, the captured document's text, `audit.event` detail, or an e-mail selector read out of the userinfo of a link that is not http (`mysql://root:Secret123@db.example/app` was read as `Secret123@db.example`). The `url:login:password` layout without an `@` is not cleaned from rows written before the fix either, and no migration was added for it. The queries below find them; run them as the schema owner, they are read-only, and look at each hit before changing anything. A label is corrected through the product, which records the correction as a claim. A claim's rationale is never rewritten by the product (invariant 5): the owner who decides to remove one does it as the schema owner with the `assertion_marked_once` trigger disabled for that statement, and the cost is a claim whose recorded rationale no longer equals what the analyst accepted. | Owner-run, per row. |
@@ -546,30 +520,18 @@ claim rationale that copied its context.
 
 | Id | What is left, and what it costs | What would close it |
 |---|---|---|
-| no console control for a hold | The console has no control to place or lift a hold on an exhibit or on a case. The one hold control is the collected document's (the document card, Place a legal hold). An exhibit is held with `POST /api/v1/retention/legal-hold` (`evidence_id`, `on`, `reason`) and a case with `POST /api/v1/retention/cases/{id}/legal-hold` (`on`, `reason`): both need `retention.manage` through the gate with a fresh second factor and a written reason of at least five characters whichever way the hold goes, and both write `LEGAL_HOLD_APPLIED` or `LEGAL_HOLD_LIFTED`. docs/08 says where an analyst finds this. | A control on the exhibit card and on the case header that calls the two routes. |
 | lifting a hold is one person (decision 193) | Lifting a hold is one person with a written reason. A review suggested two people and the owner did not adopt it, so the code comments, this entry and the tests describe the single-person design. A lift below the material is refused: an exhibit's needs the lifter cleared for it, and a case-level lift needs a ceiling that covers every live exhibit, record, sample, lookup and cited collected document the case holds. | A two-person approval kind. |
-| a hold cannot reach into a delete in flight | A case hold entered while a purge runs waits for the exhibit being destroyed at that moment, and that exhibit is destroyed. Every exhibit after it is read as held and kept, and the purge says so. The records, lookups and samples of a case share one short transaction that holds the case row `FOR SHARE`, so a hold entered during it lands after it; a destroying sample rejection holds the case row for its own delete. The hold's own answer does not say what the purge destroyed while it waited. | Have the hold response report it. |
-| the tombstone and the out-of-schedule purge | `purge_due` marks each exhibit destroyed in the transaction that deleted it and writes the tombstones afterwards. If a tombstone cannot be written the exhibits are destroyed and marked and the error says how many; they are no longer due, so another purge does not write it. `purge_out_of_schedule` is one transaction with the approval's spend, because the approval must be spent with the destruction, so a failure there after a store delete rolls the marks back, leaves the approval usable and the object gone. A destroying Lab rejection opens a second, system connection for the length of the delete, to hold the case row. | None proposed. |
-| the purge's own answer | The purge dry run's totals and its withheld notice follow the case's setting, as the due list's do. The real run's response and its tombstone still total what the sweep acted on, exhibits above the caller included, so a caller who may run a real purge learns the count afterwards. A refused case-hold lift names nothing above the lead under NONE, but the refusal itself still differs from a lift that succeeds, which no wording can hide. | The same counts over the visible items for the real run. |
-| report counts (decision 179) | Only the exhibit figure follows the case's withheld-disclosure setting. The entity and relationship counts, and the hypothesis matrix's count of withheld evidence, are still printed as exact numbers under PRESENCE, and under NONE the redaction statement reads "nothing has been withheld" when entities or exhibits were. | Carry the mode into `Redaction` and say "some" for all three figures. |
-| reports and the destination's ceilings | `POST /report/release` judges SMTP, webhook and Jira on the caller's typed ceiling only. It ignores `NOCTORNAL_SMTP_CEILING`, `NOCTORNAL_WEBHOOK_CEILING`, `NOCTORNAL_JIRA_CEILING` and the Jira destination's own ceiling, which the drain applies, so a release is allowed that the drain then refuses. A lead read into a compartment can never release a report on a case that holds compartmented material. | Judge against the destination's ceiling at release. |
-| a sample download does not call the egress gate | `SampleService.download` never calls `can_egress`, while the production of an exhibit containing attacker markup does. The download is the one authorised outbound act of a sample, behind a one-shot ticket (F22). | Decide whether a download is egress. |
+| the tombstone and the out-of-schedule purge | `purge_due` marks each exhibit destroyed in the transaction that deleted it and writes the tombstones afterwards. If a tombstone cannot be written the exhibits are destroyed and marked and the error says how many; they are no longer due, so another purge does not write it. `purge_out_of_schedule` is one transaction with the approval's spend, because the approval must be spent with the destruction, so a failure there after a store delete rolls the marks back, leaves the approval usable and the object gone. A destroying Lab rejection opens a second, system connection for the length of the delete, to hold the case row. A tombstone, and the Destroyed list that reads it, total everything a batch destroyed, exhibits above the caller included, because counts per label would need data the tombstone does not store. | None proposed. |
+| a compartmented report | A report that carries a compartment is refused by the egress gate for every destination, because compartmented material does not cross the boundary at all: a lead read into a compartment can never release a report on a case that holds compartmented material. | None proposed: it is the gate's rule. |
+| a refused case-hold lift | A refused case-hold lift names nothing above the lead under NONE, but the refusal itself differs from a lift that succeeds, which no wording can hide. | None. |
 | same bytes at other labels (0141) | The same bytes at different labels are separate exhibits, each with its own object, custody trail and register row. A case can therefore hold several copies of one file. The upload route takes a classification and no compartments, so lodging the same bytes into another compartment is reachable only through the service (capture, lookups, deception e-mails). | None proposed. |
-| hold rows name no exhibit | A hold or lift writes an audit row with `object_id` NULL, and `/audit/events` omits `detail`, so an officer cannot tell which exhibit was held. | Carry the exhibit's id in `object_id`. |
-| upload answers | An unknown classification answers 403 where 400 is right. A store that is down answers a raw 500 after about 18 seconds, with an audit row saying an object was orphaned when none was stored. | Validate the classification first; bound the store's timeout. |
 | rows from before the key fix | An exhibit stored at a nested key before the key fix (development and test databases only, since no released build wrote them) stays unpurgeable. | Re-lodge it. |
-| the destruction meter | Lifts and dry runs still share the `retention.destroy` meter, and a request refused for a stale sign-in uses it too, so after about three actions a lead waits roughly six minutes per action. Placing a hold does not spend it (decision 192). | A meter per act. |
 
 ### Sessions, HTTP and the console
 
 | Id | What is left, and what it costs | What would close it |
 |---|---|---|
-| a junk credential is still read | The refusal before an upload is about a request that presents nothing. A request that carries any Bearer value or a session cookie is still read, and spooled to disk up to the route's cap, before the route judges it, because telling a live session from a junk one takes the database and the layer that refuses is deliberately free of it. The API container has no size-limited `/tmp` and the proxy sets no body limit, so one request can still write up to 256 MiB, bounded by the per-address request meter. | A size-limited tmpfs for `/tmp` on the API service and a `request_body` `max_size` in the Caddyfile for the upload routes. |
 | the failed-sign-in email | A password that is itself shaped like an address (`Hunter2@home.net`) is not told apart from an address and is stored as typed. For everything else the sha256 prefix is unsalted, so a short typed secret can be guessed from it by anyone who can read the audit log. The same hashing already stands in `ip_hash`. | A keyed hash under a server secret the audit path does not hold today. |
-| the socket says ready early | The live socket answers "ready" before the hub's LISTEN is registered, so a write in that gap is missed; the tests wait a second to cover it. | Answer ready after the registration. |
-| no compression of the console | Caddy does not compress `/ui/*`: 2.35 MiB goes out where 0.66 MiB would. | An `encode` directive limited to `/ui/*`. |
-| the case list at 375 px | The case list page scrolls sideways by 280 to 390 px on a phone-width window; the panes inside a case do not. The cause was not isolated. | Find it. |
-| `parse` with a case id | `POST /ingest/batches/{id}/parse` with `case_id` always answers 403, because no case role carries `ingest.manage`; parse and then attach works. | Give the permission to a case role or drop the parameter. |
 
 ### Egress, notifications and collection
 
@@ -577,15 +539,7 @@ claim rationale that copied its context.
 |---|---|---|
 | mail with no trusted stamp (http_ui-007) | `Authentication-Results` is believed only when its authserv-id is a trusted MTA (`NOCTORNAL_TRUSTED_MTA_HOSTS`), the topmost `Received` header was written by a trusted MTA and the header sits above every `Received` header (`deception.py`, `_auth_results_believed`). A message the receiving MTA never stamped (forwarded, exported, handed over as a file) carries only sender-written headers, and a sender who writes a forged `Received: by mx.<trusted host>` line and a forged `Authentication-Results` above it passes all three tests: the message then records `dkim=pass` for a domain of the sender's choosing and proposes it as a durable DOMAIN candidate. A lone header, and a header below a `Received` line, are still refused. The check is only as good as the border MTA removing inbound headers that carry its own authserv-id, which RFC 8601's security considerations name. Until it is closed, treat the recorded SPF, DKIM and DMARC of a message that did not arrive through the trusted MTA as the sender's claim. | A stamp the sender cannot compute (an HMAC header the MTA adds under a deployment key), or reading a verdict only for mail the capture path received from the MTA itself. |
 | the withheld count of the connection log | The listing reports how many rows of the whole log the caller's clearance hides, and that count does not move with the route, event or window asked about. It is still one number for the whole log, so a reader below a label who polls it and subtracts successive answers learns when hidden egress rows arrive and roughly how many, though not which route, destination or case. | Report no count, only that some rows are withheld, which would also stop telling an officer how incomplete the view is for them. |
-| collection checks pass no compartments | Collection's TLP checks (`collection.py` `_feed_floor_refusal`, `collection_authority.ceiling_refusal`, `telegram_service.py`) pass no compartments, while the gate's collection rule refuses compartmented material and F43 deliberately polls compartmented sources. | A decision on which is right. |
-| a notice raised after it was queued | A drain judges a case at its current labels, but an element raised after its notification was queued is not rechecked. | Recheck the element. |
-| the MISP floor can fail open | An unknown answer shape from MISP becomes NOT_FOUND with no TLP floor, and the floor reads only the first 50 attributes (`lookup_adapters.py`). | Fail closed on an unknown shape. |
-| the proxy's shutdown | `egress_proxy.py`'s `stop()` does not wait for open tunnels, so the ledger's CLOSE rows can be lost on SIGTERM. | Wait for tunnels, bounded. |
-| the pinned client's TLS check | `pinned_http.open_connection` skips `_refuse_unverifying`. Hardening only: its one caller passes a verifying context. | Call it. |
-| a poll killed by SIGTERM | A poll child killed by SIGTERM leaves its collection runs in the RUNNING state for good. | Mark them on the next pass. |
-| a member mark's requeue | `mark_member` commits before it takes the persona lock, so a retry reports the wrong outcome. | Take the lock first. |
-| a stopped persona resealed | A stop racing the seal can leave a burnt persona holding a sealed forum session (`forum_member.py`). | Seal under the persona lock. |
-| the lookup's raw body | The raw body of a lookup answer is not scrubbed of live secrets, so a vendor that echoed the API key would have it stored. Uncertain; no vendor is known to. | Scrub with the live key. |
+| stopping or editing a watch | A watch is made from the Collected tab, or with `POST /cases/{case_id}/collection/watches`, by an account that holds the global `watch.manage`, which only the collection manager's role holds, and that is assigned to the case, so a collection manager has to be assigned to a case before tasking it. Nothing stops or edits a watch afterwards: no route and no control does either. | A route and a control to stop and to edit a watch, behind the same two checks. |
 | echoed secrets in a transformed form | The member walk removes the persona's password and session cookie exactly, in the plain, URL-encoded, form-encoded, base64 and (for markup) HTML-escaped forms, and only for a secret of at least six characters. A board that echoes a transformed form (hashed, case-changed, split across tags) is not caught. | None proposed. |
 | the feed parser and a wide feed | A clean BOM-less UTF-16 feed that does not start with an XML declaration is refused too, and says why. No such feed is known. | None. |
 | watch patterns | A pattern that does not finish costs `STARTUP_S` (3 seconds, `watch_regex.py`) beyond its 5-second wall, and the run's 30-second budget caps the sum. A pattern its CPU-time limit stops is reported as its time limit: the limit is set one second under its hard ceiling, so the kernel ends it with SIGXCPU, which the runner reads as a timeout. A pattern that is slow but finishes inside its limits, and a defect in the interpreter's own matcher, are as the module's docstring says. | Wording. |
@@ -596,14 +550,9 @@ claim rationale that copied its context.
 |---|---|---|
 | lab-6 | A duplicate upload is refused (409) when the bytes are already held and accepted (201) when they are not. The refusal names no hash and says nothing more to a caller who may not see the existing sample, and nothing is stored in the prober's name, but the status code is still one bit across a compartment or label boundary: a holder of `sample.submit` who has a candidate file can learn whether this deployment already holds that exact file in a case they cannot see, which is the fact that somebody else is working the same intrusion. A probe that is accepted stores a sample, so each probe of a novel file leaves a row. This is inherent in content deduplication (`samples.py`, the comment at the dedupe branch, and `test_review46_duplicate_residual_pg.py` pin what still holds). | Store a second copy per label set, which for live malware is a decision for the owner. |
 | a download ticket is burned before the refusal | A download ticket is spent, and a `SAMPLE_DOWNLOAD_TICKET_REDEEMED` audit row written, when it is presented, before the download checks the caller's live clearance and the sample's screening state. If the download then refuses, the holder gets "no such sample", the ticket is gone, and there is a REDEEMED row and no `DOWNLOADED` custody row, so the audit row reads as a redemption that served nothing. Spending first is deliberate (one statement makes the ticket one-shot); `lab.sample_access` is the record of what was served. | None proposed. |
-| the archive tree count is not locked | The tree's member count is read before the members are stored and not locked, so two archives of one tree expanded at the same moment by two processes can each pass the cap, by at most one archive's member cap each. The count includes members that turn out to be duplicates, which errs toward refusing. | A lock. |
-| archive limits the pre-check trusts | `zip_preflight` trusts the end record's entry count, so about 150 MiB of directory records are parsed before the count refusal; the parent's checks of a child's answer miss RecursionError and non-finite floats (exploiting this needs a compromised child); an archive answer is held about four times in the parent. | Bound the directory read; harden the checks. |
-| an oversize sample is re-queued every pass | A `worker_refused` for size re-queues the sample on every pass. Depends on configuration. | Mark it skipped. |
 | YARA in the worker | The worker image installs yara-x only when it is built with `--build-arg NOCTORNAL_EXTRAS=yara`; without it samples are not YARA-scanned and the readiness register says so. | Build the image with the extra. |
-| `yara_db.py` is outside the single client | `scripts/yara_db.py fetch` runs `git` outside the one HTTP client. It is an operator tool, and the single-exit test does not scan `scripts/`. | Scan `scripts/`. |
-| the YARA fetch does not pin the head | `scripts/yara_db.py fetch` clones (or fast-forwards to) the default branch of each of the nine third-party repositories in `yara/sources.json`, depth 1. The commit pulled is recorded in `yara/fetch.lock.json`, but nothing reads it back as a pin. `import` never activates a rule set: a lab member adopts the imported version and a Security Officer who is neither of them activates it, so a changed rule reaches a reviewer and not a scan. | A `commit` field in `sources.json` that `fetch` will not move past without a flag. |
-| the proxy's DSN naming the worker role | `verify_proxy_environment` does not refuse `NOCTORNAL_EGRESS_DATABASE_URL` naming `noctornal_worker` (BYPASSRLS, owns nothing). The schema owner is refused by `egress_proxy.start_checks`. Operator error only: the worker's DSN is not in a file the proxy reads. | A role check beside the ownership query. |
-| `lab_triage` and an undeclared policy | `scripts/lab_triage.py` prints "refused:" for an undeclared prohibited-content policy and exits 0, where an unusable setting exits 1. | Decide the exit code. |
+| YARA sources ship unpinned | `yara/sources.json` ships with no pin on any of its nine sources, so `scripts/yara_db.py fetch` refuses every one of them until an operator runs `fetch --update` once, reads the rules it pulled and puts the commits it printed on the entries (`yara/README.md`). | An operator's review: that is what a pin records. |
+| the lab-triage loop while no policy is declared | With no prohibited-content policy declared (docs/16 L1), every pass of `scripts/lab_triage.py` prints `refused:` and exits 1, so the production `lab-triage` service logs `lab_triage exit=1` on every pass until the policy is declared. | Declare the policy, which is for counsel (docs/16 L1). |
 
 ### The ledgers and the migrations
 
@@ -623,24 +572,17 @@ claim rationale that copied its context.
 | the `.env.local` deny list | The loaders (`release/install.sh`, `scripts/launch.sh`, `scripts/_env.py`, `release/install.ps1`, `scripts/launch.ps1`, `scripts/open-ui.ps1` and the one-line loader in `release/INSTALL.md`) leave out names that change how the next program starts: `DOCKER_*`, `COMPOSE_*`, `GIT_*`, `PIP_*`, `NODE_*`, `PSModulePath` and the earlier set. A name outside the list still loads: `HTTPS_PROXY`, `SSL_CERT_FILE` or `REQUESTS_CA_BUNDLE` are read by pip and the other tools the installer starts. An allow-list would silently stop loading every new setting, which is a quieter failure; the attack needs a handed-over `.env.local` on the victim's machine. | Add a name to every loader's list when a tool is found to read it. |
 | a MinIO key is an argument, once | `mc admin user svcacct add --secret-key ...` for the `SAMPLE_` and `PRESERVE_` accounts is visible in the host's process list for the moment it runs, the first time each account is created; its stdout, which echoed the secret into `docker logs minio-init`, is discarded. One bucket each, once, and `hidepid=2` on the Docker host hides it from other local accounts. | `mc` takes the key only as an argument. |
 | the application image and the proxy hops | Caddy still runs as uid 0, has a route out, and the hops to Postgres and Redis are plaintext; `./tls` with `private.key` is mounted into every application container. | Terminate TLS in a service of its own; TLS to Postgres and Redis. |
-| unpinned inputs | The development compose file's images (`pgvector:pg16`, `redis:7-alpine`), the CI actions, pip and gnupg are pulled by tag, not pinned by digest. | Pin them. |
-| a missing hop count | `NOCTORNAL_TRUSTED_PROXY_HOPS` at 0 or unset is neither refused nor reported in production, so the rate limiter meters the whole internet as one subject. | Report it in the register. |
-| bucket names have no shell default | `$EVIDENCE_BUCKET`, `$INGEST_BUCKET` and `$SAMPLE_BUCKET` have no default in the `minio-init` script, though the code defaults them. | Default them. |
-| the volume name | `release/install.sh` detects a new database volume by the fixed name `noctornal-prod_prod-pgdata`. | Ask Docker. |
-| `Server: uvicorn` | The header passes through Caddy to clients. Information only. | Strip it. |
+| unpinned inputs | The CI workflow's own containers are pulled by tag: `pgvector/pgvector:pg16` and `redis:7-alpine` as its service containers, and the MinIO, `mc` and Mailpit images its `docker run` steps start. The installers `pip install` an unpinned `pip`, and the Dockerfile installs whatever `gnupg` Debian ships that day (F34 depends on its version). The production and development compose files are pinned by digest, the CI actions by commit, and the CI step that starts the ACL Redis by digest. | Pin them; the digests the compose files carry can be reused in the workflow. |
 
 ### Load and performance
 
 Measured on a database of 300 users and 60 cases with one AMBER case of 101,000
 entities, 300,000 ties and 1,000,000 claims, at 1, 10 and 50 concurrent users
-(`release/CHANGELOG.md`, Beta 1, has the numbers).
+(`release/CHANGELOG.md`, Beta 1 and Beta 1.1, has the numbers).
 
 | Id | What is left, and what it costs | What would close it |
 |---|---|---|
-| the ceiling | Writes, entity and claim reads, selectors, search and audit hold at 100,000 entities and 1,000,000 claims per case, with single-user reads under a second (the register 2.4 s, a report 2.7 s) and no errors at 10 concurrent users. The canvas, the metrics, the report and ego are built for about 5,000 entities per case and past that answer truncated. At 50 users cheap reads reach about 3 seconds at the 95th percentile. | Not proposed. |
-| ego and path past 5,000 entities | The ego and path views build only the first 5,000 entities of a case by creation time (`projections.py`) and answer 404 for a centre outside them: 88 of 100 ego requests on the large case. | Build from the centre outward, not from the first 5,000. |
-| no statement timeout | Nothing sets a `statement_timeout` on request connections, so an abandoned request keeps running: ten stacked register queries were seen, the oldest ten minutes old. | Set one on request connections. |
-| the register grows with the case | The evidence register computes what each exhibit backs for every exhibit on every page (2.4 s at 15,000 exhibits), so a page costs more as the case grows. | Compute it for the page only. |
+| the ceiling | Writes, entity and claim reads, selectors, search and audit hold at 100,000 entities and 1,000,000 claims per case, with single-user reads under a second but for the report build, which takes seconds, and no errors at 10 concurrent users. The canvas, the metrics and the report are built for about 5,000 entities per case and past that answer truncated; the ego network stops at 5,000 entities and says so, and a path search that reaches 5,000 answers 422. At 50 users cheap reads reach about 3 seconds at the 95th percentile. | Not proposed. |
 | a connection for every request | Each request opens a database connection (about 14 ms on the measuring host) and the fixed cost is 45 to 55 ms a request; one process topped out near 75 requests a second, and four workers on Windows reached 101. A pool needs a new dependency. | A pool. |
 | measured on one host | Every number is from a Windows host talking to Postgres in WSL2, where a statement costs about 1.2 ms of round trip. The fixed per-request cost and the throughput ceiling are pessimistic for a Linux deployment. | None proposed. |
 
@@ -648,8 +590,7 @@ entities, 300,000 ties and 1,000,000 claims, at 1, 10 and 50 concurrent users
 
 | Id | What is left, and what it costs | What would close it |
 |---|---|---|
-| duplicated rules | About ten copies of the "is this production" check exist and several hard-code the variable name; about 14 tuples order the TLP levels beside `security/access.Tlp`; `compartments._refuse` duplicates `admin._refuse`. | One `config.is_production()`, one TLP order. |
-| test isolation | Some tests skip or fail depending on rows other suites leave (`test_screening_readiness_pg`, `test_review46_screening_window_pg`, `test_telegram_readiness_pg`, the ledger anchor tests), and CI's no-skip gate turns the skips into failures whenever another suite leaves rows; 82 of 99 `client` fixtures repeat the same app and limiter set-up; one module logs under `noctornal.*` and 13 under `noctornal_api.*`; one test sleeps a second four times waiting for lock waits. | Roll back in the tests; one `api_client` fixture; one logger namespace; poll `pg_stat_activity`. |
+| the shared `client` fixture | 82 of 99 `client` fixtures repeat the same app and limiter set-up. | One `api_client` fixture. |
 
 ---
 
@@ -659,8 +600,9 @@ The owner's instruction on the roles was "keep the split": `CASE_OWNER` is the
 law-enforcement or threat investigator who controls their case, displayed as
 **Lead investigator** (the key is unchanged, so no permission check moved), and
 `SECURITY_OFFICER` is the independent overseer who cannot read case content.
-F14 and F16 follow from that, and migration 0062 holds both. All four
-decisions below were taken on 2026-09-22.
+F14 and F16 follow from that, and migration 0062 holds both. The first four
+decisions below were taken on 2026-09-22, and the four after them on
+2026-10-08.
 
 ### F2: a `REJECTED` sample is preserved, and destroyed only by declaration
 
@@ -810,6 +752,69 @@ development MinIO with throwaway accounts carrying the production policies.
 reachable from inside the deployment's network, or if the store is ever exposed
 beyond it.
 
+### Compartmented sources keep being polled, and collection's ceiling stays label-only
+
+Taken on 2026-10-08 (docs/00 decision 202).
+
+**Why:** collection's ceiling checks (`collection.py` `_feed_floor_refusal`,
+`collection_authority.ceiling_refusal` and `telegram_service.py`) hand the egress
+gate a source's TLP level and no compartments, and the gate refuses compartmented
+material outright, while F43 lets a source carry compartments and polls it on
+purpose. The register asked which of the two is right.
+
+**Decided:** a compartmented source keeps being polled. What it collects carries
+its compartments (F43), so the readers, the notices, the Telegram path and the
+capture path hold it to them; the ceiling decides only whether the fact of
+reading the source may leave the platform, which is a question about its label.
+Nothing passes the compartments to the gate.
+
+### A sample download is not an egress
+
+Taken on 2026-10-08 (docs/00 decision 203).
+
+**Why:** `SampleService.download` never calls `can_egress`, while the production
+of an exhibit containing attacker markup does, and the register asked whether a
+download is egress.
+
+**Decided:** it is not. The one-shot ticket stands as its design (F22): a
+download is an analyst's authorised act on a sample they may read, behind a fresh
+second factor and a ticket spent once, whose redemption re-derives the holder's
+live permission, clearance and compartments and the sample's screening state
+before a byte moves, and it hands over the encrypted archive from the separate
+sample origin. No `can_egress` call is added.
+
+### F55: dead letters and ingest records attached to no case join the sweep
+
+Taken on 2026-10-08 (docs/00 decision 204).
+
+**Why:** a dead letter carries a 90-day clock and third-party victim data, and was
+reached only by `purge_due(case_id=None)`; the case-scoped purge route skips it by
+design and the F30 sweep kept to collected documents, so nothing destroyed one when
+its clock ran out. Ingest records attached to no case were in the same position.
+
+**Decided:** both join the operator-run sweep, which is built. `scripts/retention_sweep.py`
+destroys them under the same declared authority and named account as before, dry by
+default, and nothing schedules it. A dead letter's tombstone carries no case, so the
+cross-case concern decision 172 names does not apply to it. An ingest record attached
+to a case stays that case's, with its clock and its hold. The readiness row
+`retention_sweep_current` counts all three families.
+
+### Retiring an entity over a tie the caller cannot see
+
+Taken on 2026-10-08 (docs/00 decision 205).
+
+**Why:** the refusal said, under every setting, that a tie above the caller touches
+the entity, while docs/14 U2 makes what is said about withheld material a per-case
+setting.
+
+**Decided:** the retirement stays refused whole, and under a case whose
+`withheld_disclosure` is NONE the refusal reads like any other refusal of an act that
+was not done: "this entity was not retired and nothing was changed. If it should be
+retired, ask the case's lead investigator." It names no tie, no clearance and no
+compartment. PRESENCE and COUNT keep the sentence that says why. The live-merge guard
+answers in the same words as the tie guard under each setting, so the two cannot be
+told apart, and a setting that cannot be read counts as NONE.
+
 ---
 
 ## Closed
@@ -817,10 +822,67 @@ beyond it.
 Kept as an index, because the value of this register is that a reader can tell
 a judgement nobody has confirmed from one that somebody has, and so that a code
 comment that cites a closed id still finds it. The reasoning behind each
-closure is in `release/CHANGELOG.md` under its date.
+closure is in `release/CHANGELOG.md` under its date. The rows dated 2026-10-08 are
+what Beta 1.1 closed, in the order of the areas under Known residuals.
 
 | Id | What it was | Closed |
 |---|---|---|
+| **rls-6 (part)** | The request role read every session's token hash, binding hash, address and client, and every break-glass justification | 2026-10-08: the request role reads no session's token hash, binding, address or client and no break-glass justification, which it reaches only through `iam.session_by_token` and through `iam.break_glass_justification` for the grant's holder and `break_glass.review` (Alembic 0177, `test_rls_iam_columns_pg.py`), while `iam.case_assignment` stays readable because its readers include unbound rechecks and reads of other people's roles (Known residuals) |
+| **sealed columns outside the accounts table** | The request role read as ciphertext or a keyed hash a persona's sealed credential and forum session, an ingest key's HMAC, a lookup provider's sealed key, a download ticket's hash and a sample's sealed data key | 2026-10-08: the request role is granted none of a persona's sealed credential or session, an ingest key's HMAC, a lookup provider's sealed key, a download ticket's hash or a sample's sealed data key, and the API reads generated columns for whether one is held and definer functions for a provider's key, a sample's key and the ticket spends (Alembic 0180, `test_sealed_columns_pg.py`) |
+| **unpolicied configuration tables** | The request role could write the egress, collection, retention, ingest-key, lookup-provider, Jira, screening and embedding configuration tables, which no row policy filters, without the step-up and the audit the administration routes apply | 2026-10-08: the egress profiles, routes and destinations, sources, personas, collection authorities, retention rules, embedding indexes, ingest keys, lookup providers, Jira destinations, screening lists and each person's delivery settings are read-only to the request role, their routes write them on a system connection after the same gate, step-up and audit, and an ingest key's use is stamped only by a definer handed the key's secret (Alembic 0179 and 0182, `test_configuration_read_only_pg.py`) |
+| **hold and purge columns, and soft-delete tables** | The request role could update an exhibit's `legal_hold`, `purged_at`, `retention_until` and `is_worm_locked` and a case's `legal_hold` and `retention_until`, and delete from case tables the product only marks | 2026-10-08: the request role updates only `storage_version_id` on an exhibit and the ten case columns its routes write, so holds, purges, exhibit retention dates and WORM locks are the system role's alone, and it deletes from no policied table but the four a request deletes from (Alembic 0178, `test_case_material_writes_pg.py`); a case's retention date and governance text stay writable by SQL (Known residuals) |
+| **definer functions answer for any id** | `SELECT last_value` on `lab.sample_access_id_seq` read the Lab custody ledger's volume | 2026-10-08: `lab.sample_access.id` is drawn by a definer trigger and neither runtime role holds its sequence, so `last_value` no longer reads the Lab ledger's volume (Alembic 0175, `test_sample_access_sequence_pg.py`), and the fact functions still answer any id, by design (decision 141) |
+| **idle window at the binding** | `iam.rls_actor` checked a session's absolute expiry and not its 30-minute idle window | 2026-10-08: `iam.rls_actor` binds a session only inside its 30-minute idle window as well as before its absolute expiry (Alembic 0174, `test_rls_idle_binding_pg.py`) |
+| **`notify.enqueue` text** | A caller bound to a live session could send arbitrary text to any eligible recipient, as itself, with a pending mail delivery | 2026-10-08: a request-role caller raises only the seven kinds a request raises, at their own priority, as itself, with a subject and summary in one of the product's templates and about a case it may act on (Alembic 0181, `test_notify_templates_pg.py`) |
+| **the audit log's append policy** | The insert policy on `audit.event` admitted any row, so a bound user who was not on a case could append a state-bearing row naming it | 2026-10-08: the request role appends a state-bearing row (an ACH stance or status, a tie review, a triage verdict, attachment or category correction, an account event, a screening pass, a break-glass invocation) only naming one of its cases, or case-less as an `ingest` row under a global `ingest.manage`, and refusals and every other row append as before (Alembic 0176, `test_rls_audit_append_pg.py`) |
+| **LIAISON is not single-case** | docs/05 says a liaison holds one case, and one liaison account could be assigned to several | 2026-10-08: granting LIAISON to an account that already holds a live LIAISON assignment on another case is refused in `CaseService._grant` (live is the gate's own test, no end or an end still to come, and a lock per account makes two simultaneous grants meet), a re-grant on the same case still moves the end date, and a share by address is refused without saying why and recorded as CASE_SHARE_REFUSED (`test_case_lifecycle_api_pg.py`). An account that already held two live assignments is under Known residuals |
+| **a second permission check in a handler** | `GET /admin/embeddings/gaps` made a global-permission check in the handler, outside the gate, and its 403 wrote no AUTHZ_DENIED row | 2026-10-08: `GET /admin/embeddings/gaps` asks for the global `collection.read` as a second gate dependency after `embedding.manage`, so a refusal is the gate's 403 with its AUTHZ_DENIED row instead of an unrecorded one from the handler (`test_embedding_admin_pg.py`) |
+| **refusals are recorded as SUCCESS** | An AUTHZ_DENIED audit row was stored with outcome SUCCESS, so a filter on outcome missed it | 2026-10-08: every row `deps.audit_auth_event` writes (AUTHZ_DENIED, AUTH_SESSION_REJECTED, RLS_BINDING_FAILED, SESSION_BINDING_REFUSED, CASE_SHARE_REFUSED) is stored with outcome DENIED, as are the sign-in router's cookie, recovery-code and password-change refusals, the PII reveal and search refusals, and the AUTHZ_DENIED and AUTH_FAILED rows of the egress and Telegram persona scripts; no reader of the log filters on outcome, and rows written earlier keep SUCCESS (`test_authz_denied_outcome_pg.py`) |
+| **`real_name` on an identity** | The graph service accepted `attrs.real_name` on an IDENTITY entity, which goes against invariant 2 in spirit though not in the schema | 2026-10-08: the graph service refuses a `real_name` attribute on an IDENTITY at creation and at correction, whatever its case, separators or width and at any depth, in one sentence that names no value, while a PERSON may carry one and a correction that leaves it out removes an older one (`test_identity_real_name_pg.py`) |
+| **retiring an entity with a hidden tie** | The refusal to retire an entity with a tie above the caller was the same under NONE, PRESENCE and COUNT, so under NONE it still said that such a tie exists | 2026-10-08, decided by the owner: a retirement over a tie the caller cannot see is refused whole under every setting, and under `withheld_disclosure = NONE` the refusal is `HIDDEN_TIES_REFUSAL_NONE`, which names no tie, clearance or compartment, while PRESENCE and COUNT keep today's sentence and the live-merge guard answers in the same words as the tie guard under each (`test_hidden_ties_none_pg.py`; Decisions the owner took) |
+| **no console control for a hold** | The console had no control to place or lift a legal hold on an exhibit or on a case; only the collected document's had one | 2026-10-08: an exhibit's card has a Place or Lift the legal hold button and the case header a Hold button and dialog, each asking for a written reason and a sign-in from the last 15 minutes as the collected document's does, offered only where the register or case record says `may_hold`, with a LEGAL HOLD chip for every reader (`test_hold_controls_ui.py`, `test_legal_holds_http_pg.py`) |
+| **a hold cannot reach into a delete in flight** | A case hold entered while a purge ran waited for the exhibit being destroyed at that moment, and its own answer did not say what the purge destroyed while it waited | 2026-10-08: the case hold's answer and audit row say what a purge or sample rejection destroyed while the hold waited, counted over what the holder may see; a delete already running is still not stopped, and every item after it is kept (`test_legal_holds_http_pg.py`) |
+| **the purge's own answer** | The real run's response and its tombstone totalled what the sweep acted on, exhibits above the caller included | 2026-10-08: a real purge answers with the counts, warnings and tombstone ids of what the caller may see, as the dry run does, and the tombstone still totals everything destroyed (`test_retention_visible_answer_pg.py`) |
+| **report counts (decision 179)** | Only the exhibit figure of a report followed the case's withheld-disclosure setting; the entity, relationship and matrix counts were exact under PRESENCE, and under NONE the statement said nothing had been withheld when something had | 2026-10-08: the builder passes the case's setting into `Redaction`, so entities, relationships, exhibits and the hypothesis matrix's evidence are stated as the number under COUNT, as some under PRESENCE and not at all under NONE, and a statement never says nothing was withheld when something was (`test_report_redaction_statement.py`, `test_report_withheld_figures_pg.py`) |
+| **reports and the destination's ceilings** | `POST /report/release` judged SMTP, webhook and Jira on the caller's typed ceiling only, so it allowed a release that the drain then refused | 2026-10-08: a release is judged against the lower of the typed ceiling and the one configured for SMTP, webhook (`NOCTORNAL_*_CEILING`) or Jira (the destination under `NOCTORNAL_JIRA_CEILING`), the audit row and answer name it, and an unreadable value refuses (`test_release_ceiling_pg.py`) |
+| **hold rows name no exhibit** | A hold or lift wrote an audit row with `object_id` NULL, so an officer could not tell which exhibit was held | 2026-10-08: hold and lift audit rows carry the exhibit (`object_type` evidence, `object_id`) or, for a case hold, the case (`test_legal_holds_http_pg.py`) |
+| **upload answers** | An unknown classification answered 403 where 400 is right, and a store that was down answered a raw 500 after about 18 seconds, with an audit row saying an object was orphaned when none was stored | 2026-10-08: an unknown classification is a 400 naming the valid ones, the store pool gives up in seconds, an unanswered store is a 503 with Retry-After, and an orphan audit row is written only when a request may have landed (`test_upload_answers_pg.py`) |
+| **the destruction meter** | Lifts and dry runs shared the `retention.destroy` meter, and a request refused for a stale sign-in used it too | 2026-10-08: lifts, dry runs and real purges each have a meter of their own (`retention.lift`, `retention.dry_run`, `retention.destroy`), spent after the global gate so a stale sign-in spends none (`test_retention_visible_answer_pg.py`) |
+| **F55** | Dead letters and ingest records attached to no case were swept by nothing | 2026-10-08, decided by the owner: dead letters and ingest records attached to no case join `scripts/retention_sweep.py` (dry run by default, `--apply` with the same declared authority and named account, never scheduled), a record attached to a case stays that case's, and `retention_sweep_current` counts them (`test_retention_sweep_unattached_pg.py`; Decisions the owner took) |
+| **a sample download does not call the egress gate** | `SampleService.download` never called `can_egress`, while the production of an exhibit containing attacker markup does | 2026-10-08, decided by the owner: a sample download is not an egress, and the one-shot ticket (F22) stands as its design (Decisions the owner took) |
+| **a junk credential is still read** | A request carrying any Bearer value or a session cookie was read, and spooled to disk up to the route's cap, before the route judged it, in an API container with no size-limited `/tmp` and behind a proxy with no body limit | 2026-10-08: the API's `/tmp` is a 1 GiB size-limited tmpfs and the sample origin's is 64 MiB, and Caddy refuses a body over 256 MiB on the five multipart routes with a 413, so a request carrying a junk credential cannot write more than the tmpfs holds (`test_proxy_upload_limits.py`) |
+| **the socket says ready early** | The live socket answered ready before the hub's LISTEN was registered, so a write in that gap was missed, and the tests waited a second to cover it | 2026-10-08: the live socket answers ready only after the hub's LISTEN is registered and closes 1013 when it cannot register it, and the socket tests no longer wait a second (`test_live_ready_after_listen.py`) |
+| **no compression of the console** | Caddy did not compress `/ui`, so the console went out whole | 2026-10-08: Caddy compresses `/ui` with gzip or zstd and nothing else, so the console's three files go out as 0.67 MiB where 2.27 MiB went (`test_proxy_upload_limits.py`) |
+| **the case list at 375 px** | The case list page scrolled sideways by 280 to 390 px on a phone-width window | 2026-10-08: the case list no longer scrolls sideways at a phone width, because the scroll box around a table is now the containing block of the visually hidden heading inside it (`test_console_phone_width.py`) |
+| **`parse` with a case id** | `POST /ingest/batches/{id}/parse` with `case_id` always answered 403, because no case role carries `ingest.manage` | 2026-10-08: `POST /ingest/batches/{id}/parse` takes no case and answers 400, naming the attach route, if it is sent one; a record goes into a case by attach on `ingest.replay` (`test_rls_ingest_pg.py`) |
+| **console tab** | A pane chosen while a case was opening was undone when the open ended on the Graph | 2026-10-08: a pane chosen while a case opens is kept, the open ends on the Graph only when nobody chose, and a deep link no longer takes a chosen pane back (`test_console_tab_choice.py`) |
+| **a notice raised after it was queued** | A drain judged a case at its current labels, but an element raised after its notification was queued was not rechecked | 2026-10-08: the outbox drain judges a notice at the labels its element has now (the exhibit of an integrity alarm, the entities of a merge or its approval, the sample of a detonation or a screening, a feed record) composed with its case's, and revokes a delivery whose recipient no longer dominates them (`notifications.element_rows_sql`, `deliverable_predicate`; `test_notifications_pg.py`, `test_jira_transport_pg.py`) |
+| **the MISP floor can fail open** | An unknown answer shape from MISP became NOT_FOUND with no TLP floor, and the floor read only the first 50 attributes | 2026-10-08: a MISP answer's TLP floor is read from every attribute and event it carries, and a shape the adapter does not read (a tag with no readable name, a response that is not the expected object) is unreadable and labelled RED, never NOT_FOUND with no floor (`test_lookup_adapters.py`, `test_lookup_results_pg.py`) |
+| **the proxy's shutdown** | `stop()` did not wait for open tunnels, so the ledger's CLOSE rows could be lost on SIGTERM | 2026-10-08: a SIGTERM closes every tunnel with `proxy_shutdown`, waits up to 5 seconds for each connection to write its CLOSE row, then cancels what is left and waits 2 seconds more, and a tunnel authorised while the proxy is stopping is closed with it; the connection handler now runs as a task of its own, which it did not, so `stop()` had never waited for one (`test_egress_proxy_pg.py`) |
+| **the pinned client's TLS check** | `pinned_http.open_connection` skipped the check that a TLS context verifies the certificate | 2026-10-08: `open_connection` refuses a TLS context that does not verify the certificate against the host name, before anything is resolved or dialled (`test_pinned_http.py`) |
+| **a poll killed by SIGTERM** | A poll child killed by SIGTERM left its collection runs in the RUNNING state for good | 2026-10-08: a pass of `scripts/collection_poll.py` first marks the runs an earlier pass left RUNNING as FAILED with the class Interrupted, only when no runner holds their source's lock, counted as `interrupted` and not as the source failing (`test_collection_interrupted_pg.py`) |
+| **a member mark's requeue** | `mark_member` committed before it took the persona lock, so a retry reported the wrong outcome | 2026-10-08: marking a chat as a member chat takes the persona's lock first, reads the chat again under it and runs the membership check under the same lock, so a busy persona refuses the act with nothing marked and the retry starts clean (`test_telegram_http_e2e.py`) |
+| **a stopped persona resealed** | A stop racing the seal could leave a burnt persona holding a sealed forum session | 2026-10-08: `forum_session.seal_session` reads whether the persona is locked or burnt under the row lock it already takes, and a stopped persona is sealed nothing and loses what it held (`test_forum_member.py`) |
+| **the lookup's raw body** | The raw body of a lookup answer was not scrubbed of live secrets, so a vendor that echoed the API key would have it stored | 2026-10-08: a lookup's answer is stored with every live secret removed from its body, in the forms a request and a JSON string spell it, and its hash is of what is stored (`test_lookup_results_pg.py`, `test_collection_hardening.py`) |
+| **F53** | No route or console form created a watch | 2026-10-08: `POST` and `GET /cases/{case_id}/collection/watches` and the Collected tab's Add a watch form create and list a case's watches behind the global `watch.manage` and the case's own gate (refused on a closed case), with a source the creator can see, a typed chat id that the source reads for a Telegram chat, patterns that parse, and an audit row of counts and never terms (`test_collection_watch_create_pg.py`, `test_watch_create_ui.py`); stopping or editing a watch is not built (Known residuals) |
+| **collection checks pass no compartments** | Collection's TLP checks passed no compartments, while the gate's collection rule refuses compartmented material and F43 deliberately polls compartmented sources | 2026-10-08, decided by the owner: a compartmented source keeps being polled and collection's ceiling stays label-only (Decisions the owner took) |
+| **the archive tree count is not locked** | The tree's member count was read before the members were stored and not locked, so two archives of one tree expanded at the same moment could each pass the cap | 2026-10-08: the tree's count is read and its members stored under an advisory lock named by the tree's root, and a second archive of the tree waits up to the archive wall clock or records a pending gap that running static triage again clears (`test_lab_archive_pg.py`) |
+| **archive limits the pre-check trusts** | `zip_preflight` trusted the end record's entry count, the parent's checks of a child's answer missed RecursionError and non-finite floats, and an archive answer was held about four times in the parent | 2026-10-08: a zip's central directory is counted by walking at most the member cap of records and not by the end record's claim, a child's answer that is nested too deeply or carries NaN or an infinity is a bad answer wherever a parent reads one, and the parent holds the answer once (`test_lab_archive_child.py`) |
+| **an oversize sample is re-queued every pass** | A `worker_refused` for size re-queued the sample on every pass | 2026-10-08: a sample the isolated worker refuses for its size ends its run SKIPPED, with the worker's reported limit in the reason, and is not queued again (`test_analysis_interrupted_pg.py`) |
+| **`yara_db.py` is outside the single client** | `scripts/yara_db.py fetch` ran `git` outside the one HTTP client, and the single-exit test did not scan `scripts/` | 2026-10-08: the single-exit test scans `scripts/` and refuses a script that starts `git` with a verb that talks to a remote, with `scripts/yara_db.py` the one allowance and its reason written beside it (`test_egress_single_exit.py`) |
+| **the YARA fetch does not pin the head** | `fetch` followed the default branch of each of the nine third-party repositories in `yara/sources.json`, and nothing read the recorded commit back as a pin | 2026-10-08: a source in `yara/sources.json` can carry a `commit`, `fetch` pulls exactly that commit and refuses an unpinned source, `fetch --update` is the one way to follow the default branch and prints the commits to pin, and `stats` and `import` record whether the commit pulled is the pinned one (`test_yara_db_pin.py`); the manifest carries no pin until an operator runs `fetch --update` and reads the rules (Known residuals) |
+| **the proxy's DSN naming the worker role** | `verify_proxy_environment` did not refuse an egress DSN naming `noctornal_worker`, a role that bypasses row security | 2026-10-08: the proxy refuses to start when its `DATABASE_URL` names `noctornal_worker` or `noctornal_app`, and in production when its database role is a superuser or bypasses row-level security (`test_egress_refusals.py`, `test_egress_role_privileges_pg.py`) |
+| **`lab_triage` and an undeclared policy** | `scripts/lab_triage.py` printed `refused:` for an undeclared prohibited-content policy and exited 0, where an unusable setting exits 1 | 2026-10-08: `scripts/lab_triage.py` exits 1, printing `refused:`, when no prohibited-content policy is declared, as an unusable setting does (`test_analysis_runner.py`); the production loop then logs `exit=1` on every pass (Known residuals) |
+| **unpinned inputs (part)** | The development compose file's images, the CI actions, pip and gnupg were pulled by tag, not pinned by digest | 2026-10-08: the development compose file's five images are pinned by digest and a test holds them to the table in `infra/production/README.md`, the checkout and setup-python actions are pinned to commits, and a CI job, Pinned images resolve, asks each registry about every image pinned in both compose files and the Dockerfile (`test_g48_image_context.py`, `test_dependency_pins.py`); the CI workflow's own containers, pip and gnupg stay (Known residuals) |
+| **a missing hop count** | `NOCTORNAL_TRUSTED_PROXY_HOPS` at 0 or unset was neither refused nor reported in production | 2026-10-08: the readiness register has `proxy_hops_declared` (46 checks), which fails in production when `NOCTORNAL_TRUSTED_PROXY_HOPS` is unset or below one, says what that costs where the server is not told to trust the proxy, and is not blocking (`test_deployment_defaults.py`) |
+| **bucket names have no shell default** | `$EVIDENCE_BUCKET`, `$INGEST_BUCKET` and `$SAMPLE_BUCKET` had no default in the `minio-init` script, though the code defaults them | 2026-10-08: `minio-init` defaults the three buckets to the names the code falls back to, and an empty value counts as unset (`test_deployment_defaults.py`) |
+| **the volume name** | `release/install.sh` detected a new database volume by the fixed name `noctornal-prod_prod-pgdata` | 2026-10-08: both installers find the database volume by Compose's label as well as the documented name, and an engine that does not answer is `unknown`, never `new` (`test_deployment_defaults.py`) |
+| **`Server: uvicorn`** | The `Server` header passed through Caddy to clients | 2026-10-08: Caddy takes the `Server` header off every answer on both hostnames, including its own errors and the websocket upgrade (`test_proxy_upload_limits.py`) |
+| **ego and path past 5,000 entities** | The ego and path views built only the first 5,000 entities of a case by creation time and answered 404 for a centre outside them | 2026-10-08: the ego network is built outward from the entity and the path from both ends until they meet, under the projection's filters, so an entity anywhere in the case has an answer (114 of 120 sampled ego requests on the large case had answered 404); each stops at 5,000 entities, the ego network saying `truncated` and a path search that reached it answering 422, never "not connected" (`test_ego_path_from_the_centre_pg.py`) |
+| **no statement timeout** | Nothing set a `statement_timeout` on request connections, so an abandoned request kept running | 2026-10-08: a request connection is opened with a `statement_timeout` (`NOCTORNAL_REQUEST_STATEMENT_TIMEOUT`, 120 seconds by default, from 5 to 3600, nothing switches it off), set against a case of 101,000 entities where the slowest request statement was 1.4 s alone and 20.8 s with fifty users; a request that hits it answers a 504 problem with a reference, and the system connections, the jobs and the migrations are not bounded (`test_request_statement_timeout_pg.py`) |
+| **the register grows with the case** | The evidence register computed what each exhibit backs for every exhibit on every page | 2026-10-08: what each exhibit backs is counted for the page's rows only, and the case-wide "backs nothing" figure and filter ask each exhibit only whether it backs anything, stopping at the first live attachment, so a register request on the 15,300-exhibit case went from 5.8 s to 0.8 s cold with identical pages; the figure is still one pass over the case's exhibits (`test_evidence_register_page_pg.py`) |
+| **duplicated rules** | About ten copies of the "is this production" check, about 14 tuples ordering the TLP levels beside `security/access.Tlp`, and a second `_refuse` existed | 2026-10-08: `config.is_production()` is the one reader of `NOCTORNAL_ENV` (ten modules and two scripts spelt it by hand; `db/migrations/env.py` keeps its own on purpose because it must decide before the package imports), `security.access.TLP_NAMES` is the one order of the five levels (fourteen tuples), and the compartment routes use the administration router's `_refuse` (`test_duplicated_rules.py`) |
+| **test isolation** | Some tests skipped or failed depending on rows other suites left, 82 of 99 `client` fixtures repeated the same set-up, modules logged under two namespaces, and one test slept a second four times waiting for lock waits | 2026-10-08: the Telegram readiness, screening readiness, screening window and both ledger-anchor suites run in one rolled-back transaction with what other suites left hidden inside it, so none skips; every logger of ours is `noctornal.<name>`; the lock-wait suite polls `pg_stat_activity` instead of sleeping a second four times; still open: the 82 of 99 repeated `client` fixtures (`test_suite_isolation.py`, `test_log_namespace.py`) |
 | **F51** | Five tables were not under row-level security: the audit log, and the ingest records, victim credentials, dead letters and PII authorisations | 2026-10-03: all five are under policy and no table is deferred, 82 under policy (Alembic 0152 to 0155 and 0166 to 0169, docs/00 decisions 76, 143 and 151). `rls_registry.DEFERRED` is empty and a registry test names any table that carries labels and is in none of the three lists. Row security stays enabled and never forced (decision 143) |
 | **F52** | The schema owner's password still reached the runtime services | 2026-10-02 to 2026-10-03: `POSTGRES_PASSWORD` and `NOCTORNAL_MIGRATION_DATABASE_URL` moved into `postgres-init.env` and `migrate.env`, each read by one service, and the API and every cron job refuse to run holding either; the rate limiter's Redis runs under an ACL and the limiter signs in as `noctornal_limiter`; every job script makes one refusal on a published credential (`release/secrets-upgrade/README.md`) |
 | **F42** | Parse and analysis children were bounded, not isolated, so a parser exploit in a hostile sample or page was a compromise of the deployment | 2026-10-03: in production each hostile read (static triage, archive expansion, watch patterns, forum pages) runs in `analysis-worker`, a container with no secrets and no network, reached over a Unix socket (`infra/production/README.md`, Analysis worker). A local child remains for development, and `NOCTORNAL_ANALYSIS_LOCAL=1` keeps it in production on purpose, which the register reports |
@@ -830,7 +892,7 @@ closure is in `release/CHANGELOG.md` under its date.
 | **F36** | A run's warning lost a typed Telegram id | 2026-10-02: the ids this product's adapters write (`c:`, `g:`, `post:`, `member:`) are kept in a run's item label, and every other id still passes the redactor (`test_item_label_typed_ids.py`, decision 165) |
 | **F37** | gpg's own fingerprint display did not parse in a contact block | 2026-10-02: whole hex groups are kept on `PGP_FPR` lines and the parser version is cb-2 (decision 166). Blocks parsed under cb-1 keep their reading and are in the untrusted-data table above |
 | **F39** | The second person on a case's merge switch had no seasoning rule | 2026-10-02: the second person must have held `case.update` on the case for a window the deployment sets (`NOCTORNAL_RELAX_SEASONING_DAYS`, 7 by default, 0 off), checked when they approve and again where the approval is spent (docs/00 decision 169). Still open inside it: an administrator who resets a seasoned colleague's credentials and signs in as them is not covered |
-| **F47** | Watches matched neither forum signatures nor Telegram chats | 2026-10-02: a post's signature is matched with reasons of its own, and a watch can target a Telegram chat by its typed id, which Alembic 0130 holds (decision 168). No route creates a watch (F53), and a chat watch with no term fires on every message (F54) |
+| **F47** | Watches matched neither forum signatures nor Telegram chats | 2026-10-02: a post's signature is matched with reasons of its own, and a watch can target a Telegram chat by its typed id, which Alembic 0130 holds (decision 168). A watch is made from the Collected tab and the watches route (F53), and a chat watch with no term fires on every message (F54) |
 | **F33** | The production compose file did not run the similarity pass, although readiness said to start one | 2026-09-25: an `embed-pass` service runs it in a loop of its own |
 | **F34** | The production image carried no gpg, so every PGP check recorded NO_VERIFIER | 2026-09-25: the image installs the distribution's gnupg; a deployment attests it with `NOCTORNAL_GPG_PATCHED_AS` after checking its changelog |
 | **SSRF through an egress proxy** | Persona traffic had no egress proxy, and a forward proxy resolves a name again, so the collector could not simply consult one | 2026-09-24: the egress proxy is the only way out of production (docs/00 decision 68, docs/20). It resolves each name once and dials only the admitted answers, with the same `egress_policy` functions the pinned client applies in development, and a chained exit receives the name, never an address this platform resolved |
@@ -848,29 +910,29 @@ closure is in `release/CHANGELOG.md` under its date.
 | **F20** | The ACH matrix ranked an untested hypothesis top, and the warning that would have caught it could not fire | 2026-07-26 |
 | **Approvals UI** | Phase 6 dual control had no analyst surface, so Merge was unreachable from a browser whenever it was on | 2026-08-10, Triage, Dual control |
 | **Key ring** | A mismatched `NOCTORNAL_TOTP_KEK` made login answer 500, and the readiness check could not see it, because it verified the key decoded and not that it decrypted anything | 2026-09-11: `key_id` selects the key, the register opens stored secrets and counts, and login refuses with a named 503 |
-| **The 2026-10-03 review** | 82 findings, 16 high, 25 medium and 41 low | 2026-10-07: 77 fixed, one fixed for credentials and stated for the rest (rls-6), four stated and not fixed. Each finding's status is below, and what the fixes left is in Known residuals at Beta 1 |
+| **The 2026-10-03 review** | 82 findings, 16 high, 25 medium and 41 low | 2026-10-07: 77 fixed, one fixed for credentials and stated for the rest (rls-6), four stated and not fixed. 2026-10-08: 78 fixed, rls-6 fixed apart from case membership, three stated and not fixed. Each finding's status is below, and what the fixes left is in Known residuals at Beta 1.1 |
 
-### The 2026-10-03 review: its 82 findings at Beta 1
+### The 2026-10-03 review: its 82 findings at Beta 1.1
 
 An adversarial review of the build at commit 718f92d (2026-10-03) kept 82 of 84
 findings after a second reader tried to refute each: 16 high, 25 medium and 41
-low, none critical. At Beta 1, 77 are fixed, one (rls-6) is fixed for account
-credentials and stated for the rest, and four are stated and not fixed
-(evidence-unswept-unattached-and-dead-letter, evidence-chain-no-anchor, lab-6
+low, none critical. At Beta 1.1, 78 are fixed, one (rls-6) is fixed for account
+credentials, session metadata and break-glass justifications and stated for case
+membership, and three are stated and not fixed (evidence-chain-no-anchor, lab-6
 and, narrowed, http_ui-007). A fixed finding that leaves something carries the
 sentence here and an entry under Known residuals. Reproduction steps are not
 published.
 
 #### Row-level security and accounts
 
-| Id | Severity | At Beta 1 |
+| Id | Severity | At Beta 1.1 |
 |---|---|---|
 | rls-1 | high | Fixed (Alembic 0132): merge history and the merge approvals are visible only where both entities are. |
 | rls-2 | medium | Fixed (0134): a selector's key includes its labels, so the owner and the counters of a hidden row are never returned. |
 | rls-3 | medium | Fixed (0133): a live tie's key includes its labels, so creating one says nothing about a hidden one. A merge over a duplicate the merger cannot read sets it aside and records it. |
 | rls-4 | medium | Fixed (0141): the bytes of a hidden exhibit upload as novel bytes. |
 | rls-5 | low | Fixed (0147): a conversation's external key is unique per labels. |
-| rls-6 | medium | Fixed for credentials (0143): the request role cannot read the password hash, the sealed TOTP secret, its key id, the recovery hashes or the last counter. Case membership, session metadata and break-glass justifications are still readable by it (Known residuals). |
+| rls-6 | medium | Fixed for credentials (0143), and for session metadata and break-glass justifications (0177): the request role cannot read the password hash, the sealed TOTP secret, its key id, the recovery hashes or the last counter, any session's token hash, binding, address or client, or any break-glass justification. Case membership is still readable by it (Known residuals). |
 | rls-7 | low | Fixed (0144): the request role cannot write step-up freshness, and a session guard confines the idle clock. |
 | rls-8 | low | Fixed (0145): `notify.enqueue` answers only a bound caller, as itself. |
 | rls-9 | low | Fixed: a node set's member list follows the case's disclosure setting. |
@@ -878,7 +940,7 @@ published.
 
 #### Graph
 
-| Id | Severity | At Beta 1 |
+| Id | Severity | At Beta 1.1 |
 |---|---|---|
 | graph-merge-ledger-and-approvals-leak | high | Fixed (0132 and the approval routes): hidden entities' ids and the merger's reason are not shown, and a hidden approval answers as a missing one. |
 | graph-merge-no-element-label-gate | high | Fixed: merge and reversal check the entities' own labels, and a hidden entity answers as a missing one. |
@@ -895,11 +957,11 @@ published.
 
 #### Evidence, retention, reports and the ledgers
 
-| Id | Severity | At Beta 1 |
+| Id | Severity | At Beta 1.1 |
 |---|---|---|
 | evidence-hold-lift-below-label | high | Fixed: lifting a hold needs the lifter cleared for the exhibit, and a written reason. |
-| evidence-case-hold-unreachable | high | Fixed in the API (`POST /api/v1/retention/cases/{id}/legal-hold`). The console has no control for it (Known residuals). |
-| evidence-purge-hold-race | high | Fixed: the purge runs one exhibit per transaction and reads the case hold again for each item. A delete already running is not stopped (Known residuals). |
+| evidence-case-hold-unreachable | high | Fixed in the API (`POST /api/v1/retention/cases/{id}/legal-hold`) and, since Beta 1.1, from the Hold button in the case header. |
+| evidence-purge-hold-race | high | Fixed: the purge runs one exhibit per transaction and reads the case hold again for each item. A delete already running is not stopped, and the hold's answer says what it destroyed while the hold waited. |
 | evidence-report-case-raise-leak | high | Fixed: a report built below the case's label leaves out what was created before the raise, and says it was withheld. |
 | evidence-integrity-anchors-mutable | medium | Fixed (0139, 0140): hashes, key, size and case are fixed when an exhibit is lodged, reads ask for its recorded version, and a missing or replaced version raises an integrity alarm. |
 | evidence-audit-chain-forks | medium | Fixed (0149): both chains take their number inside the chain lock. |
@@ -910,13 +972,13 @@ published.
 | evidence-orphan-locked-object | low | Fixed: the row is inserted first and the object second, and a short write records `EVIDENCE_OBJECT_ORPHANED`. |
 | evidence-reingest-after-purge-dropped | low | Fixed: bytes whose exhibit was purged lodge as a new exhibit. |
 | evidence-report-release-in-app | low | Fixed: `in_app` and `model_host` answer 400. |
-| evidence-unswept-unattached-and-dead-letter | low | Not fixed, stated (F55). |
+| evidence-unswept-unattached-and-dead-letter | low | Fixed (F55): dead letters and ingest records attached to no case join the operator-run sweep. |
 | evidence-chain-no-anchor | low | Not fixed, stated: `/audit/verify` returns the tail it checked and says what a verification cannot see, and the anchor that would catch a cut tail is the operator's to record. |
 | evidence-purge-stalls-audit-chain | low | Fixed: an unrelated audit insert does not wait on a purge. |
 
 #### Egress, notifications and collection
 
-| Id | Severity | At Beta 1 |
+| Id | Severity | At Beta 1.1 |
 |---|---|---|
 | egress-notify-address-list | high | Fixed (0148): a personal address is one plain address, and the drain refuses a stored list. |
 | egress-rss-floor | medium | Fixed: a RED or AMBER_STRICT feed is refused, and the adopt step caps a feed's ceiling at AMBER. |
@@ -928,7 +990,7 @@ published.
 
 #### The Lab
 
-| Id | Severity | At Beta 1 |
+| Id | Severity | At Beta 1.1 |
 |---|---|---|
 | lab-1 | high | Fixed: with a live machine listed, a send that names none is refused. |
 | lab-2 | low | Fixed: while a screening pass runs over a newly imported list, the sample's ticket, download, triage claim and sandbox send answer "no such sample". |
@@ -939,14 +1001,14 @@ published.
 
 #### HTTP, sessions and the console
 
-| Id | Severity | At Beta 1 |
+| Id | Severity | At Beta 1.1 |
 |---|---|---|
 | authz-session-revoke-bypass | medium | Fixed: a revoked session stays revoked, tested under concurrent requests. |
 | http_ui-001 | high | Fixed: see rls-1. |
 | http_ui-002 | high | Fixed: see graph-selector-record-oracle. |
 | http_ui-003 | medium | Fixed: the row is inserted before the object, and a label below the case's floor or a NUL in a field is a 400. |
 | http_ui-004 | high | Fixed: a bad bearer token writes no audit row, and replaying a revoked real token writes one row in all, however often it is replayed. |
-| http_ui-005 | high | Fixed for JSON and form routes (a 1 MiB ceiling, chunked bodies included). An upload with a junk credential is still read to its cap (Known residuals). |
+| http_ui-005 | high | Fixed for JSON and form routes (a 1 MiB ceiling, chunked bodies included). An upload with a junk credential is still read to its cap, into a size-limited `/tmp` and under a 256 MiB limit at the proxy. |
 | http_ui-006 | high | Fixed: a failed sign-in's email is 254 characters at most, and is recorded as typed only when it is shaped like an address (Known residuals). |
 | http_ui-007 | low | Narrowed, stated (Known residuals). |
 | http_ui-008 | low | Fixed: a binding to a node of another case, above the caller or unknown answers alike. |
@@ -962,7 +1024,7 @@ published.
 
 #### Infrastructure
 
-| Id | Severity | At Beta 1 |
+| Id | Severity | At Beta 1.1 |
 |---|---|---|
 | infra-1 | medium | Fixed: `.dockerignore` leaves out every secret file the stack names, and local working notes. |
 | infra-2 | high | Fixed: the documented backup writes outside the checkout, private from the first byte and encrypted in the pipe, and the dump names are ignored by the image and by git. |
@@ -970,7 +1032,7 @@ published.
 | infra-4 | low | Fixed: a boot refuses a request role named `noctornal` or `postgres`, and a connection as the owner or a bypassing role is refused when it is made. |
 | infra-5 | low | Fixed: every service drops all capabilities and Caddy holds only `NET_BIND_SERVICE`. What stays is in Known residuals. |
 | infra-6 | low | Fixed: Caddy sends Strict-Transport-Security, speaks TLS 1.3 only and redirects plain HTTP. |
-| infra-7 | low | Fixed for the production stack, whose images are pinned by digest. The development compose file, the CI actions, pip and gnupg are not (Known residuals). |
+| infra-7 | low | Fixed: the images of the production stack and of the development compose file are pinned by digest and the CI actions by commit. The CI workflow's own containers, pip and gnupg are pulled by tag (Known residuals). |
 | infra-8 | low | Fixed: Postgres runs with `log_parameter_max_length=0` and its error twin. |
 | infra-9 | low | Fixed in `install.sh`, `launch.sh` and `start.sh`: `.env.local` is parsed as data. |
 | infra-10 | low | Fixed apart from one argument (Known residuals). |

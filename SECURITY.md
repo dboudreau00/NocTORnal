@@ -59,12 +59,16 @@ use**. That means:
   lock (0149), and the request role cannot name another user, date a row or
   draw the ledger sequences (0150, 0151, 0169). A verification cannot see
   the newest rows being cut off, which an anchor held by the operator
-  catches. The request role reads no account's credential columns (0143),
-  cannot write step-up freshness (0144), and cannot write the ontology
-  (0172). What the request role can still reach is listed in the register.
+  catches. The request role reads no account's credential columns (0143), no
+  session's token hash, binding, address or client and no break-glass
+  justification (0177), and no sealed column outside the accounts table
+  (0180); it cannot write step-up freshness (0144), the ontology (0172) or
+  the configuration tables (0179, 0182), and it updates only the exhibit and
+  case columns its routes write (0178). What the request role can still
+  reach is listed in the register.
 - **Known and already documented:** everything in
   [`docs/17-flagged-for-review.md`](docs/17-flagged-for-review.md), above
-  all its Known residuals at Beta 1. Please read it before reporting.
+  all its Known residuals at Beta 1.1. Please read it before reporting.
   WebAuthn is absent *on purpose and on the record*, and session binding is
   recorded on every session (0058) and enforced under
   `NOCTORNAL_SESSION_STRICT_BINDING`, which a production start requires

@@ -1,5 +1,357 @@
 # Changelog
 
+## Beta 1.1: 2026-10-08
+
+The first revision of the beta, version 0.9.1. It closes the known residuals of
+Beta 1 that had a fix in the software, apart from filtering who holds which role
+on which case and the last unpinned inputs, which stay in docs/17, and it puts
+two things in the console that an analyst could not do from it: place and lift
+a legal hold on an exhibit or a case, and add a watch to a case. It has not been
+audited, and it is still not lawful to operate against real material until
+docs/16 L1 to L5 are settled outside this codebase. Legal review is required
+before any active case load.
+
+The request role is narrower again. It reads no session's token hash or binding,
+no break-glass justification and no sealed column outside the accounts table, it
+writes none of the configuration tables, and it updates only the exhibit and
+case columns its routes write (Alembic 0174 to 0182). A request connection
+carries a statement timeout, and the ego network and the path search are built
+outward from the entity, so an entity anywhere in a case has an answer. The
+sweep that destroys what no case governs now covers dead letters and the ingest
+records attached to no case, a report's release is judged against the
+destination's configured ceiling, a hold's answer says what a purge destroyed
+while it waited, and an upload is bounded at the proxy and in memory. The owner
+answered four questions the register had open: compartmented sources keep being
+polled, a sample download is not an egress, dead letters join the sweep, and a
+retirement over a tie the caller cannot see reads like any other refusal under
+NONE. The decisions this release took are docs/00 202 to 228.
+
+Beta 1 stands at Alembic 0173, so an upgrade applies nine revisions, 0174 to
+0182. None refuses to run and none changes a value anyone entered; one (0180)
+rewrites two tables once to add a generated column to each. The readiness
+register grows from 45 checks to 46, the new one not blocking. The steps an
+existing deployment takes are the next subsection.
+
+FIGURES_PENDING
+
+On a clean Ubuntu 24.04 machine the install took 6 minutes 45 seconds from the
+install command to the first sign-in, the console answered at 6 minutes 1
+second, and the readiness register showed 46 checks.
+
+### Upgrading from Beta 1
+
+The nine revisions below are the whole upgrade. Each commits on its own and has
+a downgrade, which puts the privileges, the policy and the functions back as
+Beta 1 had them and drops what 0175 and 0180 added. To go from Alpha 7a straight
+to Beta 1.1, take the steps under "Upgrading from Alpha 7a" first: the revisions
+run in one chain, 0125 to 0182.
+
+**1. Stop what writes, and start the new code after the migrations.** Stop the
+API, the sample origin and, on a production stack, every job that runs the
+application image (`cron`, `lab-triage`, `lab-cron`, `embed-pass` and
+`collector`); in development stop `scripts/launch.*`. Beta 1's routes write the
+configuration tables and the exhibit and case columns that 0178, 0179 and 0182
+take from the request role, and Beta 1.1's code calls functions that 0177, 0180
+and 0181 create, so neither version runs against the other's schema. Three
+revisions take an exclusive lock for as long as they need it: 0175 on
+`lab.sample_access` and 0176 on `audit.event`, each for a change that touches
+no row, and 0180 on `collect.collection_account` and `lab.sample` while it
+rewrites each to add a generated column.
+
+**2. Back up.** The database (`pg_dump -Fc`), the evidence and raw buckets and
+every env file beside the compose file, as `infra/production/README.md`,
+Day-to-day, says. This release adds nothing to what is backed up.
+
+**3. The runtime roles.** No role is new. Six revisions narrow the two that
+exist: 0175 takes the Lab custody ledger's sequence from both, and for
+`noctornal_app` alone 0177 takes the session and break-glass columns, 0178 the
+exhibit and case columns it may update and the tables it may delete from, 0179
+and 0182 the writes on the configuration tables and on a person's delivery
+settings, and 0180 the sealed columns outside the accounts table. Each is a
+no-op for a role that does not exist, so a cluster whose roles are created later
+runs `python scripts/runtime_roles.py ensure` afterwards, which replays every
+grant and revoke in chain order, these included. Do not run
+`release/alpha6-upgrade/app-role-grants.sql` on an upgraded database: its
+blanket grant hands back what 0175 and 0177 to 0182 took away. `noctornal_egress`
+is unchanged, and `noctornal_worker` loses only the Lab custody ledger's
+sequence.
+
+**4. Apply the migrations.** `alembic upgrade head` from the repository root, as
+the schema owner (production: `docker compose ... up -d --build`, whose
+`migrate` service runs `scripts/migrate_job.py`). What each revision does to an
+existing deployment:
+
+| Revision | What it does | Held until it commits | Notes |
+|---|---|---|---|
+| 0174 | `iam.rls_actor()` binds a connection to a session only inside the session's 30-minute idle window as well as before its absolute expiry | nothing | the ticket branch is unchanged |
+| 0175 | The Lab custody ledger's id is drawn by a trigger of the table's owner, the column default goes, and both runtime roles lose USAGE and SELECT on its sequence | ACCESS EXCLUSIVE on `lab.sample_access`, briefly | a row written with the trigger stood down names its own number |
+| 0176 | The request role appends a state-bearing audit row only naming a case it may read, or case-less as an `ingest` row under a global `ingest.manage`; every other row appends as before | ACCESS EXCLUSIVE on `audit.event`, briefly | replaces one policy |
+| 0177 | The request role reads no session token hash, binding hash, address or client and no break-glass justification; `iam.session_by_token` and `iam.break_glass_justification` answer for the legitimate readers | none on tables | |
+| 0178 | The request role updates only `storage_version_id` on an exhibit and ten columns of a case, and deletes from no policied table but four | none on tables | the system role keeps what it held |
+| 0179 | Fifteen configuration tables are read-only to the request role; `ingest.api_key_used` stamps a key's use for a caller that holds the key's secret | none on tables | |
+| 0180 | The request role reads no sealed column outside the accounts table; two generated columns say whether a persona's credential and a sample's data key are held; five definer functions read a provider's key and a sample's key and spend the download tickets | **ACCESS EXCLUSIVE on `collect.collection_account` and `lab.sample` while each is rewritten** | the only revision that rewrites a table |
+| 0181 | `notify.enqueue` answers a request-role caller only for the seven notices a request raises, as itself, in the product's templates, about a case it may act on | nothing | |
+| 0182 | A person's delivery settings (`notify.preference`) are read-only to the request role | none on tables | |
+
+**5. Settings.** One is new, and three act where they did not.
+
+| Setting | Where | What it means |
+|---|---|---|
+| `NOCTORNAL_REQUEST_STATEMENT_TIMEOUT` | API | New. 120 seconds unless set: the longest one database statement of a web request may run before the database cancels it and the request answers 504 with a reference. A whole number from 5 to 3600; anything else, 0 included, reads as 120. The system connections, the jobs and the migrations are not bounded |
+| `NOCTORNAL_TRUSTED_PROXY_HOPS` | `secrets.env` | Unchanged, and now reported: unset or below 1 in production fails the readiness row `proxy_hops_declared`. `secrets.env.example` sets 1 |
+| `NOCTORNAL_SMTP_CEILING`, `NOCTORNAL_WEBHOOK_CEILING`, `NOCTORNAL_JIRA_CEILING` | API, cron | Unchanged for deliveries, and now also the ceiling a report's release is judged against, the lower of this and the one typed. A release that was allowed because only the typed ceiling was read can be refused now |
+| `NOCTORNAL_MAX_EVIDENCE_BYTES`, `NOCTORNAL_MAX_SAMPLE_BYTES` | `secrets.env` | Unchanged: 256 MiB each unless declared otherwise (a production start needs the evidence cap declared, and `secrets.env.example` sets it to 256 MiB). Each is now also bounded in front by the Caddyfile's `request_body max_size` and behind by the API's `/tmp`: raise all three together (`infra/production/README.md`, Upload sizes) |
+
+The Configuration table in `release/INSTALL.md` lists these and the other
+settings the code reads, with their defaults.
+
+**6. The production stack.** No service and no env file is new. `up -d --build`
+applies all of this:
+
+- The API's `/tmp` is a 1 GiB tmpfs and the sample origin's a 64 MiB one
+  (`noexec`, `nosuid`, `nodev`). It is memory and not disk: a spooled upload
+  counts against it while it is held, and a full `/tmp` fails the upload that
+  found it full and nobody else's.
+- Caddy refuses a body over 256 MiB on the five routes that take a multipart file
+  (an exhibit, a sample, an e-mail exhibit, a YARA rule set version and a hash
+  list), with a 413 problem that names the Caddyfile setting. If you raised
+  either size cap above 256 MiB, raise that limit, which is written in MiB, and
+  `/tmp` with it.
+- Caddy compresses `/ui` with gzip or zstd and nothing else, and takes the
+  `Server` header off every answer on both hostnames.
+- `minio-init` defaults the three buckets to `noctornal-evidence`,
+  `noctornal-raw` and `noctornal-samples` when `secrets.env` leaves one out, and
+  an empty value counts as unset.
+- MinIO and `mc` are pinned by digests the registry serves. Beta 1's production
+  compose file pinned both by digests that `ghcr.io` does not serve (they were
+  quay's manifest digests, copied from a local store where the image had been
+  re-tagged for ghcr), so `docker compose up` on a host that had not pulled
+  them failed at MinIO. The development compose file's new pins of the same two
+  had the same fault, and the installer, which starts that stack, would have
+  failed on them. Both files now pin:
+
+  ```
+  ghcr.io/dboudreau00/minio:RELEASE.2025-04-22T22-12-26Z@sha256:3f97c5651cb6662b880c787a232b6b34fec8d8922e08d6617b25d241a21164bb
+  ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z@sha256:eb4ea9884b77704230e2423e9004d2fa738dc272876b9cc41a297d29443b8780
+  ```
+
+  A production deployment that pinned the old digests pulls the new ones on its
+  next `up`. CI has a new job, Pinned images resolve, that asks each registry
+  about every image pinned in both compose files and the Dockerfile.
+- The development compose file's five images are pinned by digest
+  (`tag@sha256:...`), so the first `docker compose up` of the development stack
+  recreates its containers.
+
+**7. YARA sources.** `yara/sources.json` ships with no pin on any of its nine
+sources, and `scripts/yara_db.py fetch` refuses an unpinned source. Run
+`fetch --update` once, read the rules it pulled, and put the commits it printed
+on the entries; after that `fetch` pulls exactly those commits
+(`yara/README.md`). `import` still never activates a rule set.
+
+**8. The lab-triage loop.** `scripts/lab_triage.py` exits 1, printing
+`refused:`, when no prohibited-content policy is declared (docs/16 L1), where it
+exited 0. The production `lab-triage` service runs it in a loop and logs
+`lab_triage exit=<code>` on every pass, so a deployment that has not declared the
+policy logs `exit=1` on every pass until it does. The pass did nothing before
+either; it now says so in its exit code.
+
+**9. Read the readiness register.** It has 46 checks. The new one,
+`proxy_hops_declared`, is not blocking: in production it fails when
+`NOCTORNAL_TRUSTED_PROXY_HOPS` is unset or below 1 and says what that costs
+(`infra/production/README.md`, The readiness register).
+`retention_sweep_current` now counts dead letters and ingest records attached to
+no case as well as collected documents, so a deployment with any of them more
+than seven days past their clock fails it until the sweep has run:
+`python scripts/retention_sweep.py` shows what a sweep would destroy, and
+`--apply` needs the declared authority and a named account, as before.
+
+**10. What a client or a monitor can see change.**
+
+- A refusal is stored with outcome DENIED (AUTHZ_DENIED, AUTH_SESSION_REJECTED,
+  RLS_BINDING_FAILED, SESSION_BINDING_REFUSED, CASE_SHARE_REFUSED, and the
+  sign-in, PII-reveal and persona-script refusals). Rows written before the
+  upgrade keep SUCCESS, because the log is append-only: find refusals by action
+  and not by outcome.
+- `POST /ingest/batches/{id}/parse` takes no case. A request that sends
+  `case_id` gets a 400 that names the attach route, where it always got a 403.
+- `GET /admin/embeddings/gaps` also needs the global `collection.read`; without
+  it the refusal is the gate's 403 and writes an AUTHZ_DENIED row.
+- A request whose statement runs past the timeout answers a 504 problem with a
+  reference, and a path search that stops at 5,000 entities answers 422, never
+  "not connected".
+- The live socket closes 1013 when it cannot register its LISTEN, and answers
+  ready only after it has.
+- An upload with an unknown classification is a 400 naming the valid ones, and
+  a store that does not answer is a 503 with Retry-After.
+- Granting LIAISON to an account that already holds a live LIAISON assignment on
+  another case is refused (a 400). An account that already held two such
+  assignments cannot have either extended until one is revoked.
+
+### What changed, by area
+
+By area, in plain words:
+
+- **Access control and row-level security.** A connection binds to a session only
+  inside its 30-minute idle window (0174), where it had checked the absolute
+  expiry alone. The request role reads no session's token hash, binding, address
+  or client and no break-glass justification (0177): a session is validated
+  through `iam.session_by_token`, and a justification is read through
+  `iam.break_glass_justification` by the grant's holder and by
+  `break_glass.review`. It reads no persona credential or session, ingest key
+  HMAC, provider key, ticket hash or sample data key (0180): the API reads
+  generated columns for whether one is held and definer functions for a
+  provider's key, a sample's key and the two ticket spends. It writes none of
+  the configuration tables (egress, sources, personas, collection authorities,
+  retention rules, embedding indexes, ingest keys, lookup providers, the Jira
+  destination, screening lists) and not a person's delivery settings (0179,
+  0182): the routes write them on a system connection after the same gate,
+  step-up and audit, and an ingest key's use is stamped by a definer that is
+  handed the key's secret. It updates only `storage_version_id` on an exhibit and
+  ten columns of a case, and deletes from no policied table but four (0178), so
+  holds, purges, exhibit retention dates and WORM locks are the system role's
+  alone. Neither runtime role holds the Lab custody ledger's sequence (0175), so
+  `last_value` no longer reads the ledger's volume. A state-bearing audit row
+  must name a case the writer may read (0176), and a request raises only the
+  seven notices it raises, as itself and in the product's own words (0181).
+- **Sharing, refusals and identities.** Granting LIAISON to an account that
+  already holds a live LIAISON assignment on another case is refused, under a
+  lock per account so two simultaneous grants meet; a re-grant on the same case
+  still moves the end date, and a share by address is refused without saying
+  why. Every refusal the gate and the sign-in routes record is stored with
+  outcome DENIED, where it was SUCCESS. The embeddings gaps list asks for
+  `collection.read` inside the gate, so its refusal writes an AUTHZ_DENIED row,
+  and the graph service refuses a `real_name` on an IDENTITY at creation and at
+  correction, whatever its case, separators or width.
+- **Graph.** Retiring an entity over a tie the caller cannot see is refused whole
+  under every setting, and under NONE the refusal reads like any other, naming
+  no tie, clearance or compartment; the live-merge guard answers in the same
+  words.
+- **Evidence, retention and reports.** An exhibit's card has Place and Lift the
+  legal hold, and the case header a Hold button and dialog, each asking for a
+  written reason and a sign-in from the last 15 minutes and offered only where
+  the register or the case record says `may_hold`; a LEGAL HOLD chip shows to
+  every reader. The hold's answer and audit row say what a purge or a sample
+  rejection destroyed while the hold waited, and a hold or lift row names the
+  exhibit or the case. A real purge answers over what the caller may see, as the
+  dry run does, and the tombstone still totals everything destroyed. A report
+  states its entities, relationships, exhibits and the hypothesis matrix's
+  evidence as the number under COUNT, as some under PRESENCE and not at all under
+  NONE. A release is judged against the lower of the typed ceiling and the one
+  configured for SMTP, a webhook or Jira, and an unreadable value refuses. A
+  lift, a dry run and a real purge each have a meter, spent after the global
+  gate, so a stale sign-in spends none. An upload's refusals are exact: a 400 for
+  an unknown classification, a store pool that gives up in seconds and a 503 with
+  Retry-After for a store that does not answer. The sweep covers dead letters and
+  ingest records attached to no case under the same declared authority and named
+  account, and nothing schedules it.
+- **Sessions, HTTP and the console.** A request carrying a junk credential cannot
+  write more than the API's 1 GiB tmpfs holds, and Caddy refuses a body over
+  256 MiB on the five multipart routes. The live socket answers ready only after
+  its LISTEN is registered. Caddy compresses the console, so its three files go
+  out as 0.67 MiB where 2.27 MiB went. The case list no longer scrolls sideways at
+  a phone width, a pane chosen while a case opens is kept, and the ingest parse
+  route takes no case.
+- **Egress, notifications and collection.** The outbox drain judges a notice at
+  the labels its element has now (the exhibit of an integrity alarm, the entities
+  of a merge, the sample of a detonation, a feed record), and revokes a delivery
+  whose recipient no longer dominates them. A MISP answer's TLP floor is read from
+  every attribute it carries, and a shape the adapter does not read is unreadable
+  and labelled RED, never answered with no floor. The egress proxy's SIGTERM
+  closes every tunnel, waits up to 5 seconds for each to write its CLOSE row, and
+  then cancels what is left; the pinned client refuses a TLS context that does
+  not verify the certificate against the host name. A collection pass marks the
+  runs an earlier pass left RUNNING as FAILED with the class Interrupted. Marking
+  a chat as a member chat takes the persona's lock first, a stopped persona is
+  sealed nothing, and a lookup's answer is stored with every live secret removed.
+  The Feeds pane's Collected tab lists a case's watches and adds one, and
+  `POST` and `GET /cases/{case_id}/collection/watches` do the same: a collection
+  manager who is assigned to the case chooses a source they can see, names the
+  watch, and gives keywords, selectors and patterns (a Telegram chat by its typed
+  id), and the audit row records the counts of the terms and never the terms.
+  The form is shown only to an account that holds the Collection manager role
+  and is assigned to the case, so the account the installer creates does not see
+  it until an administrator grants the role (Admin, Accounts).
+- **The Lab and the isolated worker.** An archive tree's count is read and its
+  members stored under an advisory lock, a zip's directory is counted by walking
+  it and not by the end record's claim, and a child's answer that is nested too
+  deeply or carries NaN is a bad answer. A sample the isolated worker refuses for
+  its size ends SKIPPED and is not queued again. The single-exit test scans
+  `scripts/`. `yara_db.py fetch` pulls the commit a source pins and refuses an
+  unpinned one. The egress proxy refuses to start on a database role that is the
+  worker's or the application's, or in production a superuser or one that
+  bypasses row security; `lab_triage.py` exits 1 when no policy is declared.
+- **Deployment, installers and backups.** The readiness register reports a missing
+  proxy hop count in production. `minio-init` defaults the bucket names the code
+  defaults. Both installers find the database volume by Compose's label as well
+  as its documented name, and an engine that does not answer is "unknown", never
+  "new". Caddy takes the `Server` header off every answer. The development compose
+  file's images and the CI actions are pinned, MinIO and `mc` by digests the
+  registry serves, and CI checks that each pinned image resolves.
+- **Load and performance.** A request connection carries a statement timeout.
+  On a copy of the 101,000-entity case the slowest request statement took 1.4
+  seconds alone and 20.8 with fifty users, so the 120-second default is about 5.8
+  times the worst: no request in the load plan answered 504 at the default, and
+  with the limit at 5 seconds 82 requests answered a clean 504, and none of them
+  a 500. The ego network is built outward from the entity and the path from both
+  ends until they meet, so an entity anywhere in the case has an answer (114 of
+  120 sampled ego requests on that case had answered 404), and each stops at
+  5,000 entities. The evidence register counts what each exhibit backs for its
+  page's rows only: a register request on the 15,300-exhibit case went from 5.8
+  to 0.8 seconds cold, with identical pages.
+- **Tests and code structure.** `config.is_production()` is the one reader of
+  `NOCTORNAL_ENV` and `security.access.TLP_NAMES` the one order of the five
+  levels. The Telegram readiness, screening readiness and ledger-anchor suites
+  run in one rolled-back transaction, so none skips; every logger of ours is
+  `noctornal.<name>`.
+- **Four questions answered.** The owner decided on 2026-10-08 that a compartmented
+  collection source keeps being polled and the collection ceiling stays
+  label-only, that a sample download is not an egress and the one-shot ticket
+  stands, that dead letters and ingest records attached to no case join the
+  sweep, and that a retirement over a tie the caller cannot see reads like any
+  other refusal under NONE (docs/00 202 to 205; docs/17, Decisions the owner took).
+
+### Known and not fixed
+
+docs/17, "Known residuals at Beta 1.1", lists each with its area and what would
+close it; the material ones, in plain words:
+
+- **The request role still reads who works which case, and still writes a few
+  tables.** `iam.case_assignment` stays readable to it: 31 code paths read that
+  table, some on connections bound to nobody, and a row policy would silently
+  empty them, so each needs a definer function first. It still writes the
+  collector's heartbeat, so a forged heartbeat could turn the readiness row
+  `collector_split` green, and the queues `core.embedding_pending`,
+  `lab.yara_compile_job` and `ingest.batch`, and through SQL it can change a
+  case's retention date and governance text without the route's audit row. No
+  application route does any of this.
+- **A watch cannot be stopped or edited.** A collection manager who is assigned
+  to the case makes one, and no route or control stops or edits it afterwards.
+- **Two steps follow the upgrade.** YARA sources ship with no pin, so `fetch`
+  refuses until an operator pins them, and the lab-triage loop logs `exit=1` on
+  every pass until the prohibited-content policy is declared.
+- **An account that held two live LIAISON assignments before the upgrade** cannot
+  have either extended until one is revoked.
+- **Judgements the owner has not taken.** How a co-participation weight divides,
+  whether a case's closure should look for a conversation nobody on the team can
+  minimise, whether a missing id should cost the same as a hidden one, whether
+  the lab keeps a copy per label set (lab-6), and whether lifting a hold takes two
+  people.
+- **Unpinned inputs.** The CI workflow's own containers, pip and gnupg are pulled
+  by tag.
+- **Credentials a pattern cannot find.** A secret in a URL path with no
+  separator, a `?l=` or `?hash=` value, and a bare `alice:pass@host` are not
+  recognised, and claim rationales written before 0137 keep a credential they
+  copied.
+- **The backup does not carry exhibit version ids**, and a restore needs the
+  runtime roles first (above). The audit chain's tail anchor is the operator's
+  to record.
+- **Not audited.** No third party has audited any of it.
+- **Deliberate absences.** WebAuthn (password and TOTP today) and the object
+  stores reached outside the egress routes (F41).
+
+Legal review is required before any active case load. docs/16 L1 to L5 are
+still open, and nothing in this release settles them.
+
 ## Beta 1: 2026-10-07
 
 The first beta. It is a usable product: one command installs it on Linux,
@@ -226,7 +578,7 @@ SELECT user_id, channel FROM notify.preference
 credential URL before this release keeps it (invariant 5), and so does an
 e-mail selector read out of a non-http link's userinfo
 (`ftp://user:pass@host` stored as `pass@host`). docs/17, "Known residuals at
-Beta 1", has the queries that find both.
+Beta 1.1", has the queries that find both.
 
 Nobody is signed out: sessions Alpha 7a minted work after the upgrade
 (verified: Alpha 7a's bearer tokens served each user's cases), and passwords
@@ -637,8 +989,9 @@ area and fixed what it found with a test that failed before the fix:
 
 ### Known and not fixed
 
-docs/17, "Known residuals at Beta 1", lists each with its area and what would
-close it; the material ones, in plain words:
+docs/17 listed each with its area and what would close it, under "Known residuals
+at Beta 1" (now "Known residuals at Beta 1.1", with what Beta 1.1 closed in its
+Closed index); the material ones, in plain words:
 
 - **The request role is not a wall in every table.** A statement injected into
   a request can still write the unpolicied configuration tables (egress
