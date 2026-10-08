@@ -73,6 +73,7 @@ from noctornal_api.collection import (
     _utc,
     active_window,
     persona_session,
+    persona_locked,
     record_outcome,
     secret_in_scope,
 )
@@ -885,24 +886,38 @@ class TelegramChats:
         chat = _chat_row(self._c, source_id, clearance, compartments)
         if chat["access_mode"] != "PUBLIC_READ":
             raise TelegramActError(409, "This chat is already read as a member.")
-        with self._c.transaction():
-            # The chat first: a mark that changed no chat must not leave the
-            # source alone read as a member chat (F51, 2026-10-02).
-            _changed_the_chat(self._c.execute(
-                """UPDATE collect.telegram_chat
-                      SET access_mode = 'MEMBER', provenance_class = 'PERSONA_PARTY'
-                    WHERE source_id = %s""", (source_id,)))
-            self._c.execute(
-                """UPDATE collect.source
-                      SET parser_config = parser_config
-                          || '{"access_mode": "MEMBER"}'::jsonb
-                    WHERE id = %s""", (source_id,))
-            _audit(self._c, actor_id, "SOURCE_ACCESS_MODE_CHANGED", "source",
-                   source_id, {"from": "PUBLIC_READ", "to": "MEMBER",
-                               "reason": reason.strip()})
-        answer = self.check_membership(source_id, actor_id=actor_id,
-                                       clearance=clearance,
-                                       compartments=compartments)
+        # The persona's lock first, then the mark (docs/17, "a member mark's
+        # requeue"). The mark committed before the membership check took the
+        # lock, so a busy persona refused the act with the chat already
+        # marked, the collector requeued it, and the retry met a member chat
+        # and answered "already read as a member". Busy now means nothing
+        # was done and the retry starts clean; the mark and the check hold
+        # the one lock.
+        locked = (persona_locked(self._c, chat["persona_id"])
+                  if chat["persona_id"] is not None else contextlib.nullcontext())
+        with locked:
+            # Read again under the lock: another runner may have marked it.
+            if _chat_row(self._c, source_id, clearance,
+                         compartments)["access_mode"] != "PUBLIC_READ":
+                raise TelegramActError(409, "This chat is already read as a member.")
+            with self._c.transaction():
+                # The chat first: a mark that changed no chat must not leave
+                # the source alone read as a member chat (F51, 2026-10-02).
+                _changed_the_chat(self._c.execute(
+                    """UPDATE collect.telegram_chat
+                          SET access_mode = 'MEMBER', provenance_class = 'PERSONA_PARTY'
+                        WHERE source_id = %s""", (source_id,)))
+                self._c.execute(
+                    """UPDATE collect.source
+                          SET parser_config = parser_config
+                              || '{"access_mode": "MEMBER"}'::jsonb
+                        WHERE id = %s""", (source_id,))
+                _audit(self._c, actor_id, "SOURCE_ACCESS_MODE_CHANGED", "source",
+                       source_id, {"from": "PUBLIC_READ", "to": "MEMBER",
+                                   "reason": reason.strip()})
+            answer = self.check_membership(source_id, actor_id=actor_id,
+                                           clearance=clearance,
+                                           compartments=compartments)
         answer["marked"] = True
         return answer
 

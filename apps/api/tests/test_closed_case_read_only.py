@@ -119,6 +119,9 @@ CONTENT = {
     ("POST", "/cases/{case_id}/lookups/results/{result_id}/file"),
     ("POST", "/cases/{case_id}/lookups/batches"),
     # Keeping a case out of Jira is governance, below.
+    # F53 (2026-10-08): a new standing tasking on the case. Unlike the hits it
+    # raises, which are housekeeping, a closed case takes no new watch.
+    ("POST", "/cases/{case_id}/collection/watches"),
 }
 
 #: Why a similarity route is a read (F6.3, F6.4, 2026-09-24).
@@ -694,6 +697,9 @@ CONSOLE_CONTENT = {
         ("drawn", ".case-write", "ingestRow", "verb('Correct category…', "),
         ("drawn", ".case-write", "ingestRow", "const cases = attachTargets();"),
     ],
+    # F53 (2026-10-08): the Collected tab's Add a watch box, the whole box
+    # (the summary included), as Add a hypothesis is.
+    "addWatch": [("id", "col-watch-box", "col-watch-btn")],
 }
 
 #: Console writes on one case that stay live, and why (NOT_CONTENT above

@@ -477,7 +477,10 @@ its addresses again before dialling.
 is for protocols that are not HTTP. It checks the destination; DIRECT
 resolves, pins and dials; PROXY opens the CONNECT tunnel of section 8.2;
 `tls` wraps the socket with the host as server name, under the watchdog
-(implicit TLS on 465). The deadline must be an entered `Deadline`, the
+(implicit TLS on 465). A `tls` context must verify the certificate and check
+it against the host name, as `fetch_response`'s `tls_context` must: one that
+does not is refused as `tls_context_refused` before anything is resolved or
+dialled. The deadline must be an entered `Deadline`, the
 caller keeps it entered for the whole session and watches the new socket
 after STARTTLS replaces it. The SMTP transport (`transports.py`) opens its
 relay connection this way, on port 465 with implicit TLS and otherwise
@@ -488,6 +491,13 @@ with STARTTLS on the returned socket.
 `redact()`, `secret_in_scope()` and the credential patterns live here and
 `collection.py` re-exports them under the collector's names;
 `live_secret_in(text)` says whether a live secret appears in a text.
+`scrub_live_secrets(text, markup=False, json_escaped=False)` removes exactly
+the live secrets the process holds and nothing else, for material that is kept
+as evidence: with `markup` also in the forms a page spells them in, and with
+`json_escaped` in the forms a JSON string spells them in (escaped, or with the
+solidus escaped as PHP writes it). A lookup's answer is scrubbed this way with
+the key it was asked under before it is hashed and stored, so a vendor that
+echoes the key back leaves no copy of it in the stored answer.
 
 `collection.fetch(url, ..., route=None)` returns the collector's tuple
 and `collection.fetch_response(url, route=None, **kwargs)` a `Fetched`;
@@ -684,6 +694,20 @@ default). A global connection cap (`NOCTORNAL_EGRESS_MAX_CONNECTIONS`,
 bound it. Authorisation and ledger writes run on a bounded pool of
 database threads and DNS on its own pool, never on the event loop.
 
+The proxy refuses to start when its `DATABASE_URL` names the application's own
+login, `noctornal_worker` (which bypasses row-level security and holds every
+table) or `noctornal_app`: it connects as `noctornal_egress`, which reads the
+routes and appends to the connection ledger and holds no more. In production
+it also refuses a database role that is a superuser or bypasses row-level
+security, whatever the role is called. A stop (SIGTERM) closes the listener,
+closes every open tunnel with the close reason `proxy_shutdown` and waits, for
+at most `SHUTDOWN_WAIT_S` (5 seconds), for each connection to write its CLOSE
+row; what is still running is then cancelled, each writing its CLOSE row as it
+goes, and given `SHUTDOWN_CANCEL_S` (2 seconds) more. A stop is therefore
+answered inside a container's default 10 second grace period, and the ledger
+loses no CLOSE row a connection had time to write. A tunnel authorised while
+the proxy is already stopping is closed the same way.
+
 ### 8.2 HTTP CONNECT
 
 The client sends exactly:
@@ -868,7 +892,13 @@ private network where the consumer has one.
 No consumer opens a socket, or calls urllib, http.client, smtplib's own
 connect, requests, httpx or urllib3, for an outbound connection outside
 these calls, and nothing builds a route outside `route_for`
-(`test_egress_single_exit.py`). The object stores (MinIO for evidence,
+(`test_egress_single_exit.py`). The same scan reads `scripts/`, and also
+refuses a script that starts `git` with a verb that talks to a remote. One
+script has an allowance that says why: `scripts/yara_db.py`, an operator's
+tool that clones the public rule repositories named in `yara/sources.json`
+from a workstation, never from the API, the collector or the cron loop, holds
+no case material and no credential, and pulls the commit `sources.json` pins
+unless the person asks for `--update` (`yara/README.md`). The object stores (MinIO for evidence,
 raw ingest, collected markup and samples) are reached directly on the
 internal network, not through a route (docs/17).
 

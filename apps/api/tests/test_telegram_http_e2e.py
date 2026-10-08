@@ -369,6 +369,58 @@ def test_marking_without_a_member_authority_keeps_the_mark_and_answers_409(conn,
                         (ch["source"],)).fetchone()[0] == "MEMBER"
 
 
+def test_a_mark_refused_for_a_busy_persona_marks_nothing_and_its_retry_does(conn, api, world):
+    """docs/17, "a member mark's requeue": the mark was committed before the
+    persona's lock was taken, so a busy persona refused the act with the chat
+    already marked. The collector requeues a busy act, and the retry met a
+    member chat and answered that it was already read as one. The lock is
+    taken first now: busy means nothing was done."""
+    from noctornal_api.collection import _PERSONA_LOCK, CollectionBusy, RssAdapter
+    from noctornal_api.db import connect
+    from noctornal_api.telegram import TelegramAdapter
+    from noctornal_api.telegram_service import TelegramChats
+
+    ch = tp.chat(conn, P, persona_id=world["persona"], resolved_by=world["recorder"])
+    h.authority(conn, recorder=world["recorder"], confirmer=world["confirmer"],
+                persona_id=world["persona"], source_ids=[ch["source"]],
+                scope="MEMBER_READ", member_ref="COVERT-2026-9")
+    factory = api.telegram(tp.fixture_for(dict(ch["spec"], is_member=True), world["uid"]))
+    chats = TelegramChats(
+        conn, adapters={"rss": RssAdapter(),
+                        "telegram": TelegramAdapter(factory, sleep=tf._no_sleep)},
+        transport_factory=factory, sleep=tf._no_sleep)
+
+    def mark():
+        return chats.mark_member(ch["source"], reason="the persona joined on its phone",
+                                 actor_id=world["caller"], clearance="RED")
+
+    def mode():
+        return conn.execute("SELECT access_mode FROM collect.telegram_chat "
+                            "WHERE source_id = %s", (ch["source"],)).fetchone()[0]
+
+    other = connect()
+    try:
+        assert other.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
+                             (f"{_PERSONA_LOCK}:{world['persona']}",)).fetchone()[0]
+        with pytest.raises(CollectionBusy):
+            mark()
+        assert mode() == "PUBLIC_READ", "a busy persona leaves the chat unmarked"
+        assert conn.execute(
+            "SELECT count(*) FROM audit.event WHERE action = 'SOURCE_ACCESS_MODE_CHANGED' "
+            "AND object_id = %s", (ch["source"],)).fetchone()[0] == 0
+        assert factory.methods() == [], "and nothing was asked of Telegram"
+    finally:
+        other.close()
+    answer = mark()
+    assert answer["marked"] is True and answer["member"] is True
+    assert mode() == "MEMBER"
+    # Once marked it is marked: a second mark is the honest 409.
+    from noctornal_api.telegram_service import TelegramActError
+    with pytest.raises(TelegramActError) as caught:
+        mark()
+    assert caught.value.status == 409
+
+
 def test_a_rebound_basic_group_is_readable_again_without_a_join(conn, api, world):
     ch = _member_chat(conn, api, world, username=False, peer_type="CHAT", member_since=True)
     new_pid, _e, new_uid = tp.persona(conn, P)

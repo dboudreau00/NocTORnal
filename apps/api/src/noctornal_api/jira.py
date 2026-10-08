@@ -837,10 +837,10 @@ SELECT d.id, d.notification_id, d.channel, d.attempts,
 
 
 def _due(conn, limit: int) -> list:
-    from noctornal_api.notifications import readable_predicate
+    from noctornal_api.notifications import deliverable_predicate
     from noctornal_api.transports import CASE_LABELS_SQL, Outgoing
 
-    rows = conn.execute(_JIRA_DUE_SQL.format(readable=readable_predicate("n"),
+    rows = conn.execute(_JIRA_DUE_SQL.format(readable=deliverable_predicate("n"),
                                              labels=CASE_LABELS_SQL),
                         (limit,)).fetchall()
     return [Outgoing(
@@ -852,12 +852,12 @@ def _due(conn, limit: int) -> list:
 
 
 def count_due(conn) -> int:
-    from noctornal_api.notifications import readable_predicate
+    from noctornal_api.notifications import deliverable_predicate
     return int(conn.execute(
         f"""SELECT count(*) FROM notify.delivery d
               JOIN notify.notification n ON n.id = d.notification_id
              WHERE d.state = 'PENDING' AND d.deliver_after <= now()
-               AND d.channel = 'JIRA' AND {readable_predicate('n')}""").fetchone()[0])
+               AND d.channel = 'JIRA' AND {deliverable_predicate('n')}""").fetchone()[0])
 
 
 def _set_health(conn, dest_id: UUID, health: str, detail: str | None) -> None:

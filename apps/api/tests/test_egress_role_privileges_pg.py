@@ -107,6 +107,24 @@ def test_as_the_role_it_appends_and_cannot_read_secrets_or_rewrite(conn):
         assert egress_ledger.verify(conn)["first_break_seq"] is None
 
 
+def test_a_role_that_bypasses_row_security_is_refused_at_start(conn):
+    """docs/17, the proxy's DSN naming the worker role: the system role owns
+    nothing, so the ownership query passes it, and it holds every table. In
+    production the proxy refuses to serve as any role that bypasses row
+    security, whatever the DSN called it."""
+    worker = os.environ.get("NOCTORNAL_WORKER_DB_ROLE", "noctornal_worker").strip()
+    assert conn.execute("SELECT rolbypassrls FROM pg_roles WHERE rolname = %s",
+                        (worker,)).fetchone() == (True,), \
+        f"{worker} must exist (CI and scripts/runtime_roles.py create it)"
+    conn.execute(f"SET ROLE {worker}")
+    try:
+        problems = egress_proxy.start_checks(conn, production=True)
+    finally:
+        conn.execute("RESET ROLE")
+    assert [p for p in problems if "bypasses row-level security" in p], problems
+    assert egress_proxy.start_checks(conn, production=False) == []
+
+
 def test_a_role_missing_one_grant_is_refused_at_start(conn):
     conn.execute(f"REVOKE SELECT (base_url) ON collect.source FROM {ROLE}")
     try:

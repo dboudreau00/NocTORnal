@@ -50,6 +50,9 @@ if TYPE_CHECKING:  # annotations only: this module imports no network code
 LOOKUP_USER_AGENT = "NocTORnal-lookup/1"
 LOOKUP_MAX_SECONDS = 20.0
 MAX_FINDINGS_PER_RESULT = 25
+#: How many of a MISP answer's attributes the summary lists. The TLP floor
+#: reads all of them.
+MAX_EVENTS_LISTED = 50
 SUMMARY_MAX_BYTES = 65536
 MAX_JSON_DEPTH = 64
 ERROR_SUMMARY_MAX = 200
@@ -483,13 +486,27 @@ class MispRestSearch(Adapter):
         return None
 
     @staticmethod
+    def _tag_name(tag) -> str:
+        """The name of one tag, or AdapterError: a tag whose name cannot be
+        read is a tag whose TLP marking was never read."""
+        name = tag.get("name") if isinstance(tag, dict) else tag
+        if not isinstance(name, str):
+            raise AdapterError("a tag in the answer has no readable name")
+        return name
+
+    @staticmethod
+    def _tag_list(value) -> list:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise AdapterError("a Tag in the answer is not a list")
+        return value
+
+    @staticmethod
     def tlp_of(tags) -> str | None:
         worst = None
         for tag in tags or []:
-            name = tag.get("name") if isinstance(tag, dict) else tag
-            if not isinstance(name, str):
-                continue
-            text = name.strip().lower()
+            text = MispRestSearch._tag_name(tag).strip().lower()
             if not text.startswith("tlp:"):
                 continue
             level = _MISP_TLP.get(text, "RED")
@@ -497,33 +514,54 @@ class MispRestSearch(Adapter):
                 worst = level
         return worst
 
-    def interpret(self, op, selector_type, value, fetched):
-        body = sanitise(parse_json(fetched.body))
-        attributes = _get(body, "response", "Attribute")
-        if attributes is None:
-            attributes = []
+    @staticmethod
+    def _attributes(body) -> list:
+        """The answer's attribute list, or AdapterError for a shape this
+        adapter does not read. The floor is set from the tags that were
+        read, so an answer whose tags may not have been is unreadable (the
+        caller labels it RED), never NOT_FOUND with no floor. An empty
+        `response` holds no attribute and nothing to mark."""
+        if not isinstance(body, dict):
+            raise AdapterError("the answer is not an object")
+        response = body.get("response")
+        if isinstance(response, (list, dict)) and not response:
+            return []
+        if not isinstance(response, dict):
+            raise AdapterError("the answer carries no response object")
+        attributes = response.get("Attribute")
         if not isinstance(attributes, list):
             raise AdapterError("the answer's response.Attribute is not a list")
+        return attributes
+
+    def interpret(self, op, selector_type, value, fetched):
+        body = sanitise(parse_json(fetched.body))
+        attributes = self._attributes(body)
         if not attributes:
             return Interpreted("NOT_FOUND", {"events": []}, None)
         events = []
         floor = None
-        for attr in attributes[:50]:
+        # Every attribute sets the floor, however many came back: the whole
+        # body is kept as the answer, so its label covers all of it. Only the
+        # summary lists the first 50.
+        for attr in attributes:
             if not isinstance(attr, dict):
-                continue
-            event = attr.get("Event") if isinstance(attr.get("Event"), dict) else {}
-            attr_tags = attr.get("Tag") if isinstance(attr.get("Tag"), list) else []
-            event_tags = event.get("Tag") if isinstance(event.get("Tag"), list) else []
-            tags = attr_tags + event_tags
+                raise AdapterError("an attribute in the answer is not an object")
+            event = attr.get("Event")
+            if event is None:
+                event = {}
+            elif not isinstance(event, dict):
+                raise AdapterError("an attribute's Event is not an object")
+            tags = self._tag_list(attr.get("Tag")) + self._tag_list(event.get("Tag"))
             level = self.tlp_of(tags)
             if level and (floor is None or _TLP_ORDER.index(level) > _TLP_ORDER.index(floor)):
                 floor = level
-            events.append({"event_id": attr.get("event_id"),
-                           "event_info": event.get("info"),
-                           "event_date": event.get("date"),
-                           "category": attr.get("category"), "type": attr.get("type"),
-                           "to_ids": attr.get("to_ids"),
-                           "tags": [t.get("name") for t in tags if isinstance(t, dict)]})
+            if len(events) < MAX_EVENTS_LISTED:
+                events.append({"event_id": attr.get("event_id"),
+                               "event_info": event.get("info"),
+                               "event_date": event.get("date"),
+                               "category": attr.get("category"), "type": attr.get("type"),
+                               "to_ids": attr.get("to_ids"),
+                               "tags": [self._tag_name(t) for t in tags]})
         return Interpreted("FOUND", cap_summary({"events": events}), floor)
 
     def findings(self, op, selector_type, value, interpreted, *, subject_node_id,

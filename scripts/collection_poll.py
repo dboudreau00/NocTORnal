@@ -246,6 +246,15 @@ tried, and the sources it counts are first on the next pass. A `deferred`
 that is above zero on every pass is worth reading, though, because it
 means passes routinely run out of time, and the usual cause is a source
 that answers slowly on every poll.
+
+`interrupted` is not a failure of this pass and does not affect the exit
+code. It counts runs an earlier pass left RUNNING because its process was
+stopped where Python could not finish them (the collector stops the poll
+child with a terminate request the child does not catch): they are marked
+FAILED with the class Interrupted before this pass looks at what is due, only
+when no runner holds their source's lock, and the source is not counted as
+having failed. The source's schedule was never rolled, so the same pass polls
+it again. A `--dry-run` marks nothing.
 """
 from __future__ import annotations
 
@@ -377,7 +386,7 @@ def main() -> int:
     counters = {"due": 0, "selected": 0, "polled": 0, "skipped": 0,
                 "deferred": 0, "failed": 0, "blocked": 0, "rate_limited": 0,
                 "held": 0, "too_long": 0, "items_seen": 0, "items_new": 0,
-                "watch_hits": 0, "warnings": 0}
+                "watch_hits": 0, "warnings": 0, "interrupted": 0}
     conn = connect()
     try:
         # ONCE per pass, and before `due_sources()` is asked anything, so
@@ -403,6 +412,14 @@ def main() -> int:
                   "the action for each.")
             return 1
         service = CollectionService(conn)
+        if not args.dry_run:
+            # A poll stopped where Python cannot unwind it (a terminate
+            # request: the collector stops its poll child that way) leaves its run
+            # RUNNING for good. Runs no one is polling any more are marked
+            # here, before this pass looks at what is due, and counted.
+            # Not a failure: it is the previous pass that was cut short.
+            counters["interrupted"] = getattr(
+                service, "mark_interrupted_runs", lambda: 0)()
         # No `clearance`, which is the worker's reading and applies no
         # filter: a collector has no user, and a NULL ceiling read as "see
         # nothing" would be a runner that polls nothing and reports no

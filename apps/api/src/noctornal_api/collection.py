@@ -274,6 +274,13 @@ class CollectionBusy(CollectionError):
     counts it as `skipped` and still exits 0."""
 
 
+class CollectionConflict(CollectionError):
+    """The write would repeat something that is already there (a watch's
+    name on its case). A distinct type because the router's answer is a 409
+    where a bad argument is a 400: the request was well formed, and it is
+    the case that already holds the thing."""
+
+
 # Redaction -- `redact`, `secret_in_scope` and their patterns live in
 # pinned_http.py since 2026-09-24 (docs/20 section 5.8): the transport has
 # to redact what it reports. Re-exported above as the SAME objects, so
@@ -1275,6 +1282,30 @@ class RunWarning:
 #: own comment ("NULL keywords = capture everything from the target") meant.
 WATCH_TELEGRAM_CHAT = "TELEGRAM_CHAT"
 
+#: What a watch may be made with (F53, 2026-10-08). `target_kind` is free text
+#: in the database, so the creation path holds the list: the six kinds 0010
+#: names, and the one kind the matcher acts on. Exactly this spelling, upper
+#: case: 0130 refuses a TELEGRAM_CHAT written in any other case, and a kind
+#: outside the list is a watch the console has no word for.
+WATCH_TARGET_KINDS = ("BOARD", "THREAD", "USER", "CHANNEL", "FEED", "SEARCH",
+                      WATCH_TELEGRAM_CHAT)
+#: How much one watch may carry. Every term is tried against every item the
+#: source yields, so the lists are bounded the way the other inputs a person
+#: chooses are.
+WATCH_MAX_TERMS = 100
+WATCH_MAX_TERM_CHARS = 500
+WATCH_MAX_REF_CHARS = 2048
+#: How long a watch may fold repeat hits on one thread: up to a week. The
+#: default is an hour, and 0 is one hit per message.
+WATCH_MAX_SUPPRESS_S = 7 * 86400
+#: Watches on one case. Every poll of a source tries every watch on it
+#: against every item, so the count is bounded as the lists are.
+WATCH_MAX_PER_CASE = 500
+#: A Telegram chat is named by its typed durable id, never by an @username
+#: (a username is recycled, invariant 9). 0130 holds the database to the same
+#: shape; this is the refusal that says why, before the CHECK would.
+_WATCH_CHAT_REF = re.compile(r"[cg]:[1-9][0-9]{0,19}")
+
 PARSER_DRIFT = "PARSER_DRIFT"
 ITEM_SKIPPED = "ITEM_SKIPPED"
 RAW_NOT_KEPT = "RAW_NOT_KEPT"
@@ -2176,6 +2207,10 @@ CONFIRMER_SENTENCE = ("The person who confirmed this authority does not run "
                       "the collection it covers. Somebody else runs it.")
 SUSPENDED_SOURCE_SENTENCE = ("The persona that reads this source was "
                              "suspended by its platform.")
+#: What `mark_interrupted_runs` writes on a run whose poll ended before it did.
+INTERRUPTED_RUN_SENTENCE = ("The process polling this source ended before the "
+                            "run did, so the run stored nothing. The source "
+                            "is polled again at its next turn.")
 
 #: The labels a watch may match an item's `meta['match_ids']` under.
 _MATCH_LABEL = re.compile(r"^[a-z_]{1,24}$")
@@ -2210,6 +2245,83 @@ def _watch_texts(item: Item) -> tuple[str, str]:
     forum = meta.get("forum")
     signature = forum.get("signature") if isinstance(forum, dict) else None
     return haystack, (signature.lower() if isinstance(signature, str) else "")
+
+
+def _watch_line(value, what: str, low: int, high: int) -> str:
+    """One line of text a watch carries, stripped. A control character is
+    refused: NUL cannot be stored, and a line break would read as two terms
+    in a list the console draws one to a line."""
+    text = value.strip() if isinstance(value, str) else ""
+    if not text and low <= 1:
+        raise CollectionError(f"{what} cannot be empty.")
+    if not low <= len(text) <= high:
+        raise CollectionError(
+            f"{what} is between {low} and {high} characters." if low > 1 else
+            f"{what} is at most {high} characters.")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
+        raise CollectionError(f"{what} cannot contain a control character.")
+    return text
+
+
+def _pattern_problem(pattern: str) -> str | None:
+    """Why `pattern` is not a regular expression, or None. The same
+    flags the matching child compiles with (`watch_regex`). This only
+    PARSES: no text is ever matched in this process (that is the child's
+    bounded run), and the pattern's length is capped before it gets here."""
+    try:
+        re.compile(pattern, re.IGNORECASE)
+    except re.error as exc:
+        where = f" at position {exc.pos}" if exc.pos is not None else ""
+        return f"{exc.msg}{where}"
+    except (RecursionError, OverflowError, ValueError):
+        return "it is nested or repeated beyond what can be compiled"
+    return None
+
+
+def _watch_terms(values, one: str, many: str, *,
+                 patterns: bool = False) -> list[str]:
+    """A list of keywords, selectors or patterns, each a stripped line.
+    An empty entry is refused, not dropped: it would be a term that matches
+    nothing, and a person who typed it meant something else."""
+    if values is None:
+        return []
+    if not isinstance(values, (list, tuple)):
+        raise CollectionError(f"The {many} are a list.")
+    if len(values) > WATCH_MAX_TERMS:
+        raise CollectionError(
+            f"A watch carries at most {WATCH_MAX_TERMS} {many}.")
+    out = []
+    for value in values:
+        text = _watch_line(value, f"A {one}", 1, WATCH_MAX_TERM_CHARS)
+        if patterns:
+            problem = _pattern_problem(text)
+            if problem:
+                raise CollectionError(f"A pattern does not compile: {problem}.")
+        out.append(text)
+    return out
+
+
+_WATCH_COLUMNS = (
+    "w.id, w.source_id, s.name, s.kind::text, s.is_active, w.name, "
+    "w.target_kind, w.target_ref, w.keywords, w.selector_watch, w.regexes, "
+    "w.priority, w.suppress_window_s, w.is_active, w.created_at, "
+    "w.last_hit_at")
+
+
+def _watch_dict(row) -> dict:
+    """A watch as the console reads it, from `_WATCH_COLUMNS`. The selector
+    list is `selectors` here and `selector_watch` in the table: the column's
+    name says what the matcher does with it, and the word a person types is
+    the one that goes out."""
+    return {"id": str(row[0]), "source_id": str(row[1]),
+            "source_name": row[2], "source_kind": row[3],
+            "source_active": bool(row[4]), "name": row[5],
+            "target_kind": row[6], "target_ref": row[7],
+            "keywords": list(row[8] or []), "selectors": list(row[9] or []),
+            "regexes": list(row[10] or []), "priority": row[11],
+            "suppress_window_s": row[12], "is_active": bool(row[13]),
+            "created_at": row[14].isoformat() if row[14] else None,
+            "last_hit_at": row[15].isoformat() if row[15] else None}
 
 
 def _feed_floor_refusal(source) -> tuple[str, str] | None:
@@ -2582,6 +2694,55 @@ class CollectionService:
         """A count of held sources from a reading of its own. The cron
         uses due_and_held instead, for the reason given there."""
         return len(self.held_sources())
+
+    def mark_interrupted_runs(self) -> int:
+        """Finish every run still RUNNING whose poll is no longer running:
+        FAILED, class Interrupted, with the sentence INTERRUPTED_RUN_SENTENCE.
+        Returns how many. Called at the start of a pass, between polls and
+        never inside one (a session lock is re-entrant on its own
+        connection).
+
+        A poll stopped where Python cannot unwind it (the collector sends
+        its poll child SIGTERM and the child installs no handler; an
+        out-of-memory kill; a host that lost power) never reaches the
+        handler that finishes its row, and the row was committed RUNNING
+        before the first request. A poll holds its source's advisory lock
+        (`run_once`) for exactly as long as it runs, and a session lock ends
+        with its connection, so a RUNNING run whose source's lock is free is
+        being polled by no one. A lock somebody holds is a live poll, and
+        its run is left alone.
+
+        It is not counted against the source's health and the source is not
+        rescheduled: nothing about the source failed, and its `next_due_at`
+        was never rolled, so the same pass polls it again."""
+        marked = 0
+        for (source_id,) in self._c.execute(
+                "SELECT DISTINCT source_id FROM collect.collection_run "
+                "WHERE status = 'RUNNING'").fetchall():
+            held = self._c.execute(
+                "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
+                (_poll_lock_key(source_id),)).fetchone()[0]
+            if not held:
+                continue
+            try:
+                marked += len(self._c.execute(
+                    """UPDATE collect.collection_run
+                          SET status = 'FAILED', finished_at = now(),
+                              error_class = 'Interrupted', error_detail = %s
+                        WHERE source_id = %s AND status = 'RUNNING'
+                    RETURNING id""",
+                    (INTERRUPTED_RUN_SENTENCE, source_id)).fetchall())
+            finally:
+                self._c.execute(
+                    "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
+                    (_poll_lock_key(source_id),))
+        if marked:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "%s left RUNNING by a poll that ended, marked FAILED, Interrupted",
+                count_of(marked, "collection run was", "collection runs were"))
+        return marked
 
     def poll_seconds(self, source_id: UUID) -> float:
         """The wall clock a poll of this source may take: the adapter's
@@ -4274,7 +4435,9 @@ class CollectionService:
         its watch belongs to -- recorded here rather than silently
         assumed covered, because whether a watch may be placed on a
         source above its owner's ceiling is a question about watch
-        creation and belongs with that, not here.
+        creation and belongs with that, not here. `create_watch` (F53,
+        2026-10-08) answers it: a watch goes only on a source its creator
+        can see.
         """
         rows = self._c.execute(
             """SELECT h.id, h.watch_id, w.name, h.document_id, d.title,
@@ -4346,6 +4509,166 @@ class CollectionService:
                 "no such watch hit, or it is above your clearance")
         return {"id": str(row[0]), "acknowledged_by": str(row[1]),
                 "acknowledged_at": row[2].isoformat() if row[2] else None}
+
+    # ── creating a watch (F53, 2026-10-08) ────────────────────────────
+    #
+    # Until now only a seeding script inserted a watch, so a watch of target
+    # kind TELEGRAM_CHAT could be written only by hand, and the rule for its
+    # reference (a typed chat id) was held by the database (0130) and the
+    # matcher but by no writer that could say why in words. The caller's gate
+    # (the case, `collection.read`, and the global `watch.manage`) has run
+    # before either of these; they are the part of the decision that needs
+    # the data.
+
+    def create_watch(self, case_id: UUID, *, source_id: UUID, name: str,
+                     target_kind: str, target_ref: str, keywords=None,
+                     selectors=None, regexes=None, priority: int = 3,
+                     suppress_window_s: int = 3600, actor_id: UUID,
+                     clearance: str, compartments=None) -> dict:
+        """A new watch on this case, owned by the person who made it.
+
+        Every refusal is a sentence (CollectionError, a 400), except a source
+        the caller may not see (CollectionNotFound, the 404 a random id gets)
+        and a name the case already holds (CollectionConflict, a 409).
+
+        The source is one the caller can see, by its label and its
+        compartments. That is the question `watch_hits` leaves to this
+        writer ("whether a watch may be placed on a source above its
+        owner's ceiling"): it may not, because what the watch matches is
+        what the source's documents carry, and the person who tasked it has
+        to be entitled to read the source they tasked.
+
+        A watch of any kind but TELEGRAM_CHAT with no keyword, selector or
+        pattern matches nothing (docs/04), and a watch that is silent reads
+        exactly like one that is quiet, so it is refused here rather than
+        left to a warning on some later poll. A TELEGRAM_CHAT watch with
+        none is the documented "every message of the chat" (F54) and is
+        allowed. It names, by its typed id, the chat its source reads: aimed
+        at another chat it would match nothing, and the poll would say so
+        only after it had run.
+
+        Patterns are PARSED here, so a typo is refused now and not found as
+        a PARTIAL run later, and are never matched here: matching is the
+        bounded child's (`watch_regex`).
+
+        The audit row carries the counts and never the terms: the audit
+        trail is read by people who have no access to the case's content.
+        """
+        name = _watch_line(name, "A watch's name", 3, 200)
+        if target_kind not in WATCH_TARGET_KINDS:
+            raise CollectionError(
+                "A watch looks at one of " + ", ".join(WATCH_TARGET_KINDS) + ".")
+        chat_watch = target_kind == WATCH_TELEGRAM_CHAT
+        ref = _watch_line(target_ref, "A watch's target", 1, WATCH_MAX_REF_CHARS)
+        if chat_watch and not _WATCH_CHAT_REF.fullmatch(ref):
+            raise CollectionError(
+                "A Telegram chat is named by its typed id, c:<number> for a "
+                "channel or a supergroup and g:<number> for a basic group, "
+                "never by an @username: a username is recycled.")
+        terms = (_watch_terms(keywords, "keyword", "keywords"),
+                 _watch_terms(selectors, "selector", "selectors"),
+                 _watch_terms(regexes, "pattern", "patterns", patterns=True))
+        if not chat_watch and not any(terms):
+            raise CollectionError(
+                "A watch needs a keyword, a selector or a pattern: with none "
+                "it matches nothing. Only a Telegram chat watch may have "
+                "none, and it then fires on every message of that chat.")
+        if (isinstance(priority, bool) or not isinstance(priority, int)
+                or not 1 <= priority <= 5):
+            raise CollectionError(
+                "A watch's priority is a whole number from 1 (most urgent) "
+                "to 5.")
+        if (isinstance(suppress_window_s, bool)
+                or not isinstance(suppress_window_s, int)
+                or not 0 <= suppress_window_s <= WATCH_MAX_SUPPRESS_S):
+            raise CollectionError(
+                "The time a watch folds repeat hits on one thread is "
+                f"between 0 and {WATCH_MAX_SUPPRESS_S} seconds.")
+        source = _source_row(self._c, source_id, clearance, compartments)
+        if chat_watch:
+            if source.kind != "TELEGRAM":
+                raise CollectionError(
+                    "A Telegram chat watch goes on a Telegram source.")
+            chat = self._c.execute(
+                "SELECT durable_id FROM collect.telegram_chat "
+                "WHERE source_id = %s", (source_id,)).fetchone()
+            if chat is None or chat[0] != ref:
+                raise CollectionError(
+                    (f"This source reads Telegram chat {chat[0]}. "
+                     if chat else "This source has no Telegram chat recorded. ")
+                    + "A chat watch fires only on a message collected from "
+                    "the chat it names, so it has to name that one.")
+        # What the case holds already. Read, not locked: two creators at one
+        # moment may each pass, and the worst of that is two watches with one
+        # name.
+        on_case = self._c.execute(
+            "SELECT count(*), bool_or(lower(name) = lower(%s)) "
+            "FROM collect.watch WHERE case_id = %s",
+            (name, case_id)).fetchone()
+        if on_case[1]:
+            raise CollectionConflict(
+                "This case already has a watch with that name.")
+        if on_case[0] >= WATCH_MAX_PER_CASE:
+            raise CollectionError(
+                f"A case carries at most {WATCH_MAX_PER_CASE} watches.")
+        with self._c.transaction():
+            row = self._c.execute(
+                """INSERT INTO collect.watch
+                       (case_id, source_id, name, target_kind, target_ref,
+                        keywords, selector_watch, regexes, priority,
+                        suppress_window_s, owner_user_id)
+                   VALUES (%s, %s, %s, %s, %s, %s::text[], %s::text[],
+                           %s::text[], %s, %s, %s)
+                RETURNING id, created_at""",
+                (case_id, source_id, name, target_kind, ref,
+                 terms[0] or None, terms[1] or None, terms[2] or None,
+                 priority, suppress_window_s, actor_id)).fetchone()
+            self._audit(actor_id, "WATCH_CREATED", "watch", row[0],
+                        {"source_id": str(source_id),
+                         "target_kind": target_kind,
+                         "keywords": len(terms[0]), "selectors": len(terms[1]),
+                         "regexes": len(terms[2]), "priority": priority,
+                         "suppress_window_s": suppress_window_s},
+                        case_id=case_id)
+        return _watch_dict((row[0], source_id, source.name, source.kind,
+                            source.is_active, name, target_kind, ref,
+                            terms[0], terms[1], terms[2], priority,
+                            suppress_window_s, True, row[1], None))
+
+    def watches(self, case_id: UUID, *, clearance: str,
+                compartments=None) -> list[dict]:
+        """The watches on this case whose source the reader may see.
+
+        A watch on a source above the reader is left out, as that source is
+        from every other list: hidden is missing, and its name and kind are
+        what would otherwise be shown. The case is the caller's, already
+        gated; `collect.watch` is under row-level security (0124), so the
+        request connection reads only a case it may read as well."""
+        rows = self._c.execute(
+            f"""SELECT {_WATCH_COLUMNS}
+                  FROM collect.watch w
+                  JOIN collect.source s ON s.id = w.source_id
+                 WHERE w.case_id = %(case)s AND {_SOURCE_VISIBLE_HELD}
+                 ORDER BY w.is_active DESC, lower(w.name), w.created_at
+                 LIMIT {2 * WATCH_MAX_PER_CASE}""",
+            {"case": case_id, "clearance": clearance,
+             "held": _held(compartments)}).fetchall()
+        return [_watch_dict(r) for r in rows]
+
+    def watch_sources(self, *, clearance: str, compartments=None) -> list[dict]:
+        """The sources the caller can put a watch on, for the form: those
+        they may see, a paused one marked, and a Telegram source with the
+        typed id of the chat it reads, which is what a chat watch names."""
+        rows = self._c.execute(
+            f"""SELECT s.id, s.name, s.kind::text, s.is_active, c.durable_id
+                  FROM collect.source s
+                  LEFT JOIN collect.telegram_chat c ON c.source_id = s.id
+                 WHERE {_SOURCE_VISIBLE_HELD}
+                 ORDER BY s.is_active DESC, s.name
+                 LIMIT 1000""",
+            {"clearance": clearance, "held": _held(compartments)}).fetchall()
+        return [{"id": str(r[0]), "name": r[1], "kind": r[2],
+                 "is_active": bool(r[3]), "chat": r[4]} for r in rows]
 
     # ── the writers the Collected pane was describing ─────────────────
     #
@@ -4890,6 +5213,34 @@ class PersonaGate:
 
             logging.getLogger(__name__).warning(
                 "persona unlock failed for %s", self.persona_id, exc_info=True)
+
+
+@contextmanager
+def persona_locked(conn: psycopg.Connection, persona_id: UUID):
+    """Hold the persona's advisory lock for a block, the lock
+    `PersonaGate.lock` takes, or raise `CollectionBusy` before the block
+    runs. For an act that commits something before its persona act and must
+    not leave it behind when the persona is busy: the collector requeues a
+    busy act, and a retry that finds the first attempt's commit reports the
+    wrong outcome. A session lock is re-entrant on its own connection, so
+    the gate the act opens inside takes it again and gives back its own
+    hold only."""
+    key = f"{_PERSONA_LOCK}:{persona_id}"
+    held = conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
+                        (key,)).fetchone()[0]
+    if not held:
+        raise CollectionBusy(
+            "this persona is already in use by another runner; nothing was done")
+    try:
+        yield
+    finally:
+        try:
+            conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
+        except Exception:  # noqa: BLE001 - must not mask the real failure
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "persona unlock failed for %s", persona_id, exc_info=True)
 
 
 def record_outcome(conn: psycopg.Connection, *, persona_id: UUID | None,

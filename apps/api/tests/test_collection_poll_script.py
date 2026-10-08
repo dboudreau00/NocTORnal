@@ -288,6 +288,42 @@ def test_a_pass_that_runs_out_of_time_defers_the_rest(monkeypatch, capsys):
     assert code == 0, "running out of time is not a failure"
 
 
+def test_a_pass_marks_the_runs_an_earlier_pass_left_running(monkeypatch, capsys):
+    """docs/17, "a poll killed by SIGTERM": the collector ends its poll child
+    where Python cannot finish a run's row, so each pass first marks the runs
+    no poll holds any more, counts them, and does not call it a failure."""
+    from types import SimpleNamespace
+
+    module = _load_script()
+    calls: list[str] = []
+
+    class Service:
+        def __init__(self, _conn):
+            pass
+
+        def mark_interrupted_runs(self):
+            calls.append("mark")
+            return 2
+
+        def due_sources(self):
+            calls.append("due")
+            return []
+
+    monkeypatch.setattr(module, "connect",
+                        lambda: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(module, "blocking_failures", lambda _conn: [])
+    monkeypatch.setattr(module, "CollectionService", Service)
+    monkeypatch.setattr("sys.argv", ["collection_poll.py"])
+    assert module.main() == 0
+    assert calls == ["mark", "due"], "marked before the pass looks at what is due"
+    assert "interrupted=2" in capsys.readouterr().out
+
+    calls.clear()
+    monkeypatch.setattr("sys.argv", ["collection_poll.py", "--dry-run"])
+    assert module.main() == 0
+    assert calls == ["due"], "a dry run writes nothing, so it marks nothing"
+
+
 def test_the_runner_owns_no_sql_and_asks_what_is_due() -> None:
     """Hazard (b), enforced structurally rather than by comment.
 

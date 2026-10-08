@@ -1868,6 +1868,7 @@ const CASE_CONTENT_CONTROLS = [
   'comms-pgpkey-form', 'comms-pgpkey-wkd-form',   // comms F10b, F10c
   'dcp-cap-new', 'dcp-eml-new', 'dcp-call-new',               // deception
   'ach-score-card', 'ach-add-card', 'asm-create',             // analysis
+  'col-watch-box',                                            // feeds: a watch
 ];
 
 /** The content controls a pane builds at render time, by the class its
@@ -31523,6 +31524,261 @@ function watchHitRow(h) {
   return card;
 }
 
+/* --- Watches (F53, 2026-10-08) -----------------------------------------
+ *
+ * Only a seeding script wrote a watch until now, so this tab listed what
+ * watches had matched and offered no way to make one, and a watch of kind
+ * TELEGRAM_CHAT could be written only by hand. The list is case-scoped
+ * behind `collection.read` on the case, like the hits; the form is drawn
+ * only for a caller who holds `watch.manage` (the listing says so), and
+ * the server refuses it for anyone else and on a read-only case. The
+ * Add a watch box is one of CASE_CONTENT_CONTROLS, so a closed case turns
+ * it off as it does every other write.
+ *
+ * What a watch looks at is a note for the people reading the list; the
+ * collector reads the SOURCE's address. A Telegram chat is the exception:
+ * it is named by its typed id, and choosing the Telegram source fills the
+ * id in from the listing, so it cannot be mistyped or aimed at a chat the
+ * source does not read.
+ */
+const WATCH_KIND_WORDS = {
+  BOARD: 'Board', THREAD: 'Thread', USER: 'User profile', CHANNEL: 'Channel',
+  FEED: 'Feed', SEARCH: 'Search', TELEGRAM_CHAT: 'Telegram chat',
+};
+const WATCH_CHAT_KIND = 'TELEGRAM_CHAT';
+const COL_WATCHES_NOT_LOADED = 'Not loaded for this case yet.';
+
+/* The last listing, for the form: the sources it may offer. Dropped with
+   the case, so one case's source list is never offered on the next. */
+const WATCH = { form: null };
+
+onCaseSwitch(() => {
+  clear($('col-watch-list'));
+  $('col-watch-counts').textContent = '';
+  $('col-watch-empty').textContent = COL_WATCHES_NOT_LOADED;
+  show($('col-watch-empty'), true);
+  clearLoadFailure('col-watch-empty');
+  /* The box and what was typed in it go with the case: a selector typed for
+     one case is not left in the form of the next. */
+  $('col-watch-form').reset();
+  $('col-watch-box').open = false;
+  show($('col-watch-box'), false);
+  setMsg($('col-watch-error'), '');
+  setMsg($('col-watch-ok'), '');
+  WATCH.form = null;
+});
+
+async function loadWatches() {
+  if (!state.caseId) return;
+  const token = caseToken();
+  try {
+    const body = await api(cpath('/collection/watches'));
+    if (caseChanged(token)) return;
+    const rows = body.watches || [];
+    WATCH.form = body;
+    renderList('col-watch-list', 'col-watch-empty', rows, watchRow);
+    $('col-watch-counts').textContent = rows.length
+      ? countOf(rows.length, 'watch', 'watches') : '';
+    if (!rows.length) {
+      $('col-watch-empty').textContent = body.can_create
+        ? 'No watch is set on this case yet. Add one below.'
+        : 'No watch is set on this case yet.';
+    }
+    paintWatchForm(body);
+  } catch (err) {
+    if (caseChanged(token)) return;
+    renderList('col-watch-list', 'col-watch-empty', [], watchRow);
+    $('col-watch-counts').textContent = '';
+    WATCH.form = null;
+    show($('col-watch-box'), false);
+    if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
+      listRefused('col-watch-empty', refusalText(
+        err, 'Watches need collection.read on this case.'));
+      return;
+    }
+    $('col-watch-empty').textContent = COL_WATCHES_NOT_LOADED;
+    showLoadFailure('col-watch-empty', "This case's watches", err,
+      loadWatches);
+  }
+}
+
+/** The thinning time in the unit it was given in. */
+function watchWindowText(seconds) {
+  const s = Number(seconds);
+  if (s === 0) return 'none: a hit for every match';
+  if (s % 60 === 0) {
+    return 'one hit per thread each ' + countOf(s / 60, 'minute', 'minutes');
+  }
+  return 'one hit per thread each ' + countOf(s, 'second', 'seconds');
+}
+
+function watchRow(w) {
+  const card = el('div', 'card row-card');
+  const head = el('div', 'row-head');
+  head.appendChild(el('span', 'row-title', visibleText(w.name)));
+  head.appendChild(el('span', 'chip small',
+    WATCH_KIND_WORDS[w.target_kind] || visibleText(w.target_kind)));
+  head.appendChild(el('span', 'chip small', 'priority ' + w.priority));
+  if (!w.is_active) head.appendChild(el('span', 'chip', 'stopped'));
+  if (!w.source_active) {
+    const chip = el('span', 'chip warn', 'source paused');
+    chip.title = 'Nothing is read from this watch’s source until it is '
+      + 'activated, so the watch cannot fire.';
+    head.appendChild(chip);
+  }
+  card.appendChild(head);
+
+  const facts = el('div', 'facts');
+  facts.appendChild(fact('source', visibleText(w.source_name)));
+  facts.appendChild(fact(w.target_kind === WATCH_CHAT_KIND ? 'chat' : 'looks at',
+    visibleText(w.target_ref)));
+  facts.appendChild(fact('thinning', watchWindowText(w.suppress_window_s)));
+  facts.appendChild(fact('last hit', w.last_hit_at ? fmtTime(w.last_hit_at) : 'none yet'));
+  card.appendChild(facts);
+
+  const terms = el('div', 'facts');
+  let named = 0;
+  for (const [label, list] of [['keywords', w.keywords], ['selectors', w.selectors],
+    ['patterns', w.regexes]]) {
+    if (!list || !list.length) continue;
+    terms.appendChild(fact(label, list.map((t) => visibleText(t)).join(', ')));
+    named += 1;
+  }
+  if (named) {
+    card.appendChild(terms);
+  } else {
+    /* The documented difference (docs/04): a chat watch with no term is the
+       chat itself, and any other kind with none matches nothing. */
+    card.appendChild(el('p', 'help', w.target_kind === WATCH_CHAT_KIND
+      ? 'No term: this watch fires on every message of its chat.'
+      : 'No term: this watch matches nothing.'));
+  }
+  /* A poll's warning names a watch by its id. */
+  card.appendChild(el('p', 'muted small mono', 'Watch ' + w.id));
+  return card;
+}
+
+/** The add form, once a listing has said whether the caller may use it. */
+function paintWatchForm(body) {
+  const may = Boolean(body && body.can_create);
+  show($('col-watch-box'), may);
+  if (!may) return;
+  const kind = $('col-watch-kind');
+  if (!kind.children.length) {
+    for (const k of body.kinds || []) {
+      kind.appendChild(selectOption(k, WATCH_KIND_WORDS[k] || k));
+    }
+  }
+  paintWatchSources();
+}
+
+/** The sources the form offers: every source the caller may see, or for a
+ *  chat watch the Telegram sources that read a chat. */
+function paintWatchSources() {
+  const chat = $('col-watch-kind').value === WATCH_CHAT_KIND;
+  const select = $('col-watch-source');
+  const keep = select.value;
+  clear(select);
+  const sources = ((WATCH.form && WATCH.form.sources) || [])
+    .filter((s) => !chat || (s.kind === 'TELEGRAM' && s.chat));
+  for (const s of sources) {
+    select.appendChild(selectOption(s.id,
+      visibleText(s.name) + (s.is_active ? '' : ' (paused)')));
+  }
+  if (!sources.length) {
+    select.appendChild(selectOption('', chat ? 'No Telegram chat is added'
+      : 'No source is available'));
+  }
+  if (sources.some((s) => s.id === keep)) select.value = keep;
+  show($('col-watch-chat-help'), chat);
+  paintWatchRef();
+}
+
+/** The target field: a chat's id is the source's own and not typed; any
+ *  other kind's is the person's note. */
+function paintWatchRef() {
+  const ref = $('col-watch-ref');
+  const chat = $('col-watch-kind').value === WATCH_CHAT_KIND;
+  $('col-watch-ref-label').textContent = chat ? 'Chat' : 'Address or id';
+  ref.readOnly = chat;
+  /* The example addresses are the markup's (the script carries none). */
+  if (!ref.dataset.hintNote) ref.dataset.hintNote = ref.placeholder;
+  ref.placeholder = chat ? ref.dataset.hintChat : ref.dataset.hintNote;
+  if (chat) {
+    const source = (((WATCH.form && WATCH.form.sources) || [])
+      .find((s) => s.id === $('col-watch-source').value));
+    ref.value = (source && source.chat) || '';
+    ref.dataset.filled = 'yes';
+  } else if (ref.dataset.filled === 'yes') {
+    /* What the chat mode wrote is not kept as a note for another kind. */
+    ref.value = '';
+    delete ref.dataset.filled;
+  }
+}
+
+/** A textarea's lines as a list of terms: trimmed, none empty. */
+function watchLines(id) {
+  return $(id).value.split('\n').map((line) => line.trim()).filter(Boolean);
+}
+
+async function addWatch(e) {
+  e.preventDefault();
+  const err = $('col-watch-error');
+  setMsg(err, '');
+  setMsg($('col-watch-ok'), '');
+  const source = $('col-watch-source').value;
+  if (!source) { setMsg(err, 'Choose the source this watch reads.'); return; }
+  const name = $('col-watch-name').value.trim();
+  if (name.length < 3) { setMsg(err, 'Name the watch, in at least 3 characters.'); return; }
+  const kind = $('col-watch-kind').value;
+  const chat = kind === WATCH_CHAT_KIND;
+  const ref = $('col-watch-ref').value.trim();
+  if (!ref) {
+    setMsg(err, chat ? 'Choose a Telegram source that reads a chat.'
+      : 'Say what the watch looks at: an address or an id.');
+    return;
+  }
+  const keywords = watchLines('col-watch-keywords');
+  const selectors = watchLines('col-watch-selectors');
+  const regexes = watchLines('col-watch-regexes');
+  if (!chat && !(keywords.length || selectors.length || regexes.length)) {
+    setMsg(err, 'Give the watch a keyword, a selector or a pattern, or it '
+      + 'matches nothing.');
+    return;
+  }
+  const minutes = Number($('col-watch-window').value);
+  if (!(Number.isInteger(minutes) && minutes >= 0 && minutes <= 10080)) {
+    setMsg(err, 'Thin repeats for a whole number of minutes, from 0 to 10080.');
+    return;
+  }
+  const json = {
+    source_id: source, name, target_kind: kind, target_ref: ref,
+    keywords, selectors, regexes,
+    priority: Number($('col-watch-priority').value),
+    suppress_window_s: minutes * 60,
+  };
+  const token = caseToken();
+  $('col-watch-btn').disabled = true;
+  try {
+    const out = await api(cpath('/collection/watches'), { method: 'POST', json });
+    if (caseChanged(token)) return;
+    $('col-watch-name').value = '';
+    for (const id of ['col-watch-keywords', 'col-watch-selectors',
+      'col-watch-regexes']) $(id).value = '';
+    setMsg($('col-watch-ok'), 'Added. ' + (out.next || ''));
+    loadWatches();
+  } catch (ex) {
+    if (caseChanged(token)) return;
+    if (ex instanceof ApiError && ex.status >= 400 && ex.status < 500) {
+      setMsg(err, ex.detail || ex.title);
+    } else {
+      fail(ex);
+    }
+  } finally {
+    $('col-watch-btn').disabled = false;
+  }
+}
+
 async function loadCollectedDocuments() {
   const triage = $('col-doc-triage').value;
   // Whether a row can offer Similar (F6.3); read once, cached.
@@ -35680,13 +35936,18 @@ function initOpsPanes() {
        entry: that list is global rather than case-scoped and can be long,
        so it sits behind its own Load, the way co-participation and the
        report do. */
-    if (name === 'collected') loadWatchHits();
+    if (name === 'collected') { loadWatchHits(); loadWatches(); }   // F53
     if (name === 'keys') loadKeys();
     /* The issued key's secret leaves with the Keys tab (r2 u25). */
     else clearKeySecret();
   });
   $('col-hits-refresh').addEventListener('click', loadWatchHits);
   $('col-hits-unack').addEventListener('change', loadWatchHits);
+  // F53 (2026-10-08). The watches, and the form that adds one.
+  $('col-watch-refresh').addEventListener('click', loadWatches);
+  $('col-watch-form').addEventListener('submit', addWatch);
+  $('col-watch-kind').addEventListener('change', paintWatchSources);
+  $('col-watch-source').addEventListener('change', paintWatchRef);
   $('col-doc-refresh').addEventListener('click', loadCollectedDocuments);
   $('col-doc-triage').addEventListener('change', loadCollectedDocuments);
   /* The delivery ledger moved to Administration, Integrations (F8,
