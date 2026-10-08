@@ -843,7 +843,7 @@ def _proxy_hops_declared(conn: psycopg.Connection) -> Check:
     deliberately not a boot refusal either, because a count cannot be told
     from a deployment that really has no proxy in front of it.
     """
-    from noctornal_api.config import ENV_VAR, PRODUCTION
+    from noctornal_api.config import is_production
     from noctornal_api.http.limits import HOPS_ENV, trusted_proxy_hops
 
     name = "proxy_hops_declared"
@@ -856,7 +856,7 @@ def _proxy_hops_declared(conn: psycopg.Connection) -> Check:
             f"{HOPS_ENV} is {hops}: {count_of(hops, 'proxy stands', 'proxies stand')} "
             f"in front of this process, and the client's address is the entry "
             f"{hops} from the right of X-Forwarded-For")
-    if os.environ.get(ENV_VAR, "").strip().lower() != PRODUCTION:
+    if not is_production():
         return Check(
             name, True,
             f"{HOPS_ENV} is {shown}, so the peer's address is the client's. That is "

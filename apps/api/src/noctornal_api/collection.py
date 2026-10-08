@@ -2739,7 +2739,7 @@ class CollectionService:
         if marked:
             import logging
 
-            logging.getLogger(__name__).warning(
+            logging.getLogger("noctornal.collection").warning(
                 "%s left RUNNING by a poll that ended, marked FAILED, Interrupted",
                 count_of(marked, "collection run was", "collection runs were"))
         return marked
@@ -5239,7 +5239,7 @@ def persona_locked(conn: psycopg.Connection, persona_id: UUID):
         except Exception:  # noqa: BLE001 - must not mask the real failure
             import logging
 
-            logging.getLogger(__name__).warning(
+            logging.getLogger("noctornal.collection").warning(
                 "persona unlock failed for %s", persona_id, exc_info=True)
 
 
