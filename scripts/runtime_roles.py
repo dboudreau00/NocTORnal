@@ -198,7 +198,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--production", action="store_true",
                         help="allow ensure under NOCTORNAL_ENV=production")
     args = parser.parse_args(argv)
-    production = os.environ.get("NOCTORNAL_ENV", "").strip().lower() == "production"
+    from noctornal_api.config import is_production
+    production = is_production()
     if args.command == "ensure" and production and not args.production:
         print("NOCTORNAL_ENV is production: in production the runtime roles are "
               "created at initdb. Pass --production to repair a cluster on purpose.")

@@ -63,6 +63,7 @@ from noctornal_api.egress import Destination, can_egress
 from noctornal_api.egress_policy import EgressRoute
 from noctornal_api.ingest import IngestError, hash_secret
 from noctornal_api.proposals import KIND_ATTRIBUTE, KIND_NODE, ProposalStore
+from noctornal_api.security.access import TLP_NAMES
 from noctornal_api.wording import count_of
 
 log = logging.getLogger("noctornal.lookups")
@@ -82,7 +83,7 @@ _SOCIAL_PROFILE_HOSTS = frozenset({
     "linkedin.com", "vk.com", "ok.ru", "threads.net", "youtube.com"})
 _HASH_TYPES = {"HASH_MD5": "md5", "HASH_SHA1": "sha1", "HASH_SHA256": "sha256"}
 _URL_SEPARATORS = re.compile(r"[/?#&=;,]+")
-_TLP = ("CLEAR", "GREEN", "AMBER", "AMBER_STRICT", "RED")
+_TLP = TLP_NAMES
 
 PII_REFUSAL = ("This value is personal data or looks like it. Sending personal data to a "
                "provider needs a transfer authority this deployment has not recorded, "

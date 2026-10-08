@@ -1233,7 +1233,7 @@ class EvidenceService:
                     self._c, case_id=case_id, evidence_id=evidence_id,
                     actor_id=actor_id, on_read=False)
             except Exception:  # noqa: BLE001 - audited already; the alarm is logged
-                logging.getLogger(__name__).exception(
+                logging.getLogger("noctornal.evidence").exception(
                     "integrity alarm for exhibit %s was audited but its "
                     "notification failed", evidence_id)
         return ok
@@ -1356,7 +1356,7 @@ class EvidenceService:
                     self._c, case_id=case_id, evidence_id=evidence_id,
                     actor_id=actor_id, on_read=True)
             except Exception:  # noqa: BLE001 - audited already; the alarm is logged
-                logging.getLogger(__name__).exception(
+                logging.getLogger("noctornal.evidence").exception(
                     "integrity alarm for exhibit %s was audited but its "
                     "notification failed", evidence_id)
             raise IntegrityError(

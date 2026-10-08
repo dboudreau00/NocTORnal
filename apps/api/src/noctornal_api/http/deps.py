@@ -64,7 +64,7 @@ from noctornal_api.security.sessions import (
 from noctornal_api.stores import PgAccessResolver, PgSessionStore
 from noctornal_api.wording import agree
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("noctornal.api")
 
 _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 SESSION_COOKIE = "__Host-session"

@@ -77,6 +77,7 @@ from noctornal_api.http.limits import rate_limit
 from noctornal_api.projections import PRESETS
 from noctornal_api.security.access import (
     CHECK_STEP_UP,
+    TLP_NAMES,
     AccessResolutionError,
     evaluate,
     tlp_from_name,
@@ -92,7 +93,7 @@ from noctornal_api.stores import PgAccessResolver
 
 router = APIRouter(prefix="/cases/{case_id}/report", tags=["reports"])
 
-_TLP = frozenset({"CLEAR", "GREEN", "AMBER", "AMBER_STRICT", "RED"})
+_TLP = frozenset(TLP_NAMES)
 
 
 def _target_within_ceiling(conn: psycopg.Connection, user: CurrentUser,

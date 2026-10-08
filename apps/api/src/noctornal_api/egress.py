@@ -58,7 +58,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 
 from noctornal_api import egress_policy
-from noctornal_api.config import ENV_VAR, PRODUCTION
+from noctornal_api.config import is_production
 from noctornal_api.egress_policy import (
     DECISION_REF,
     PASSIVE_PROFILE,
@@ -402,8 +402,7 @@ def proxy_settings(env=None) -> ProxySettings | None:
 
 def _production(env=None) -> bool:
     """config's reading of NOCTORNAL_ENV, the one reader of the mode."""
-    env = os.environ if env is None else env
-    return env.get(ENV_VAR, "").strip().lower() == PRODUCTION
+    return is_production(env)
 
 
 #: Integration route names and what each carries. APPEND-ONLY, one line

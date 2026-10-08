@@ -67,7 +67,7 @@ from noctornal_api.approvals import (
 from noctornal_api.cases import CONTENT_READ_ONLY_STATES
 from noctornal_api.wording import agree, count_of
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("noctornal.dual_control")
 
 #: The approvals catalogue key of a policy change. Written as the literal at
 #: the consume call too, so the catalogue test finds it there.

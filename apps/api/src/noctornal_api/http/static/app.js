@@ -3294,6 +3294,15 @@ async function enterEgo(nodeId, depth) {
     state.needFit = true;
     setRendered(sub.nodes || [], sub.edges || []);
     renderProjectionBar();
+    if (sub.truncated) {
+      /* Built outward from the entity and stopped at what one view draws,
+         the nearer entities kept: said, because a partial neighbourhood
+         read as the whole one misleads. */
+      banner('Neighbourhood cut',
+        'This entity has more neighbours within ' + (depth || 1) + ' hops than one ' +
+        'view draws, so the nearest are shown. A smaller depth shows all of them.',
+        'warn');
+    }
   } catch (err) {
     if (seq !== state.graphSeq) return;
     fail(err);

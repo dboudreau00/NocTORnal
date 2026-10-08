@@ -77,6 +77,7 @@ import psycopg
 from psycopg.types.json import Json
 
 from noctornal_api.security import passwords, totp
+from noctornal_api.security.access import TLP_NAMES
 from noctornal_api.security.envelope import _load_kek
 from noctornal_api.stores import PgSessionStore, PgUserStore
 from noctornal_api.wording import agree
@@ -111,7 +112,7 @@ _LOAD_BEARING = ("SYS_ADMIN", "SECURITY_OFFICER")
 #: Every clearance `core.tlp` holds. AMBER_STRICT was missing, so an
 #: AMBER_STRICT account (bootstrap and break-glass grant it) could not be
 #: set from the panel, and the panel's select could not show it.
-_TLP = ("CLEAR", "GREEN", "AMBER", "AMBER_STRICT", "RED")
+_TLP = TLP_NAMES
 
 #: The key format, identical to 0057's CHECK constraint. Checked here too
 #: so the refusal is an authored message naming the rule, not a

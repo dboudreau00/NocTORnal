@@ -78,6 +78,7 @@ from noctornal_api.egress_routes import (
     persona_policy,
 )
 from noctornal_api.pinned_http import RouteUnavailable
+from noctornal_api.security.access import TLP_NAMES
 
 #: A run older than this is never a context to open a tunnel for: a run
 #: stranded at RUNNING by a crashed process must not be a key for ever.
@@ -95,7 +96,7 @@ STOP_MAX_BYTES = 256 * 1024
 STOP_MAX_PER_HOUR = 4
 
 #: The TLP order, lowest first, for comparing labels read as text.
-TLP_ORDER = ("CLEAR", "GREEN", "AMBER", "AMBER_STRICT", "RED")
+TLP_ORDER = TLP_NAMES
 
 USABLE_SQL = (
     "(a.status IN ('HEALTHY', 'COOLDOWN') "

@@ -41,6 +41,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from noctornal_api.security.access import TLP_NAMES
+
 EMBED_DIM = 768
 MAX_CHARS = 20_000
 NORMALISER = "nfkc-casefold-translit-skeleton-v1"
@@ -534,8 +536,6 @@ NETWORK_ENV = MEANING_PREFIX + "NETWORK"
 #: (name, default, lowest, highest) for the numeric settings.
 _NUMBERS = ((MAX_CHARS_ENV, 2000, 200, 32000), (BATCH_ENV, 16, 1, 128),
             (TIMEOUT_ENV, 30, 1, 300))
-
-TLP_NAMES = ("CLEAR", "GREEN", "AMBER", "AMBER_STRICT", "RED")
 
 
 @dataclass(frozen=True)

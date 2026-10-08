@@ -15,6 +15,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from rolled_back import empty_ledgers, seed_ledgers
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DATABASE_URL"), reason="needs a migrated database")
@@ -32,9 +33,14 @@ def tool():
 
 @pytest.fixture()
 def tamperable():
+    """A transaction that is rolled back, with both ledgers emptied inside it
+    and a few rows written to each: the walk meets only those, whatever
+    another suite left."""
     from noctornal_api.db import dsn
     conn = psycopg.connect(dsn())
     try:
+        empty_ledgers(conn)
+        seed_ledgers(conn)
         yield conn
     finally:
         conn.rollback()
@@ -48,8 +54,7 @@ def anchors(tmp_path):
 
 def _starts_clean(tool, conn) -> None:
     audit, custody, _, status = tool.check(conn)
-    if status != 0:
-        pytest.skip("this database does not verify before the test touches it")
+    assert status == 0, "an emptied ledger verifies; the fixture did not empty it"
 
 
 def test_a_first_run_records_the_tails_and_a_second_one_holds_them(

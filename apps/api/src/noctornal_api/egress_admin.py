@@ -68,9 +68,9 @@ from noctornal_api.egress_policy import (
 )
 from noctornal_api.pinned_http import RouteUnavailable
 from noctornal_api.security import egress_seal
+from noctornal_api.security.access import TLP_NAMES
 
 PROFILE_KINDS = ("RESIDENTIAL", "DATACENTRE", "TOR", "VPN")
-TLP_NAMES = ("CLEAR", "GREEN", "AMBER", "AMBER_STRICT", "RED")
 
 ONE_PERSONA_NOTICE = ("One persona, one profile: two personas sharing an exit can be "
                       "correlated by any competent forum admin.")

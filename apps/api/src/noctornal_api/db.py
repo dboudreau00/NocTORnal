@@ -17,6 +17,8 @@ from uuid import UUID
 
 import psycopg
 
+from noctornal_api.config import is_production
+
 
 def dsn() -> str:
     url = os.environ.get("DATABASE_URL")
@@ -44,7 +46,7 @@ def dsn() -> str:
     return url.replace("postgresql+psycopg://", "postgresql://", 1)
 
 
-def connect() -> psycopg.Connection:
+def connect(*, for_request: bool = False) -> psycopg.Connection:
     # autocommit=True: the stores are single-statement and atomic (the TOTP
     # counter advance and the lockout increment are compare-and-set UPDATEs),
     # so no multi-statement transaction is needed and read paths never leave
@@ -57,10 +59,14 @@ def connect() -> psycopg.Connection:
     # Found 2026-09-01 when the dev stack was down and a read-only audit
     # hung for five minutes with no message. A connect that cannot complete
     # in ten seconds is not going to; say so.
+    #
+    # for_request: only `connect_request` asks for it, and it adds the
+    # statement timeout (see REQUEST_STATEMENT_TIMEOUT_ENV); every other
+    # connection is opened as it always was.
     url = dsn()
     return psycopg.connect(url, autocommit=True,
                            connect_timeout=connect_timeout_seconds(),
-                           options=session_options(url))
+                           options=session_options(url, for_request=for_request))
 
 
 #: Server settings every application connection is opened with (2026-10-07). JIT compiles a query's expressions once the planner's
@@ -73,13 +79,64 @@ def connect() -> psycopg.Connection:
 SESSION_OPTIONS = "-c jit=off"
 
 
-def session_options(conninfo: str) -> str:
+#: The most one statement on a REQUEST connection may run before the
+#: database cancels it, in seconds (docs/17, Load and performance).
+#: `NOCTORNAL_REQUEST_STATEMENT_TIMEOUT` sets it; a value that is not a whole
+#: number from 5 to 3600 is ignored and the default holds, so a typo bounds
+#: requests rather than freeing them, and nothing switches it off.
+#:
+#: Nothing bounded a request's statements, so an abandoned request ran on:
+#: ten register queries were seen stacked, the oldest ten minutes old. The
+#: default is 120 seconds, measured with the whole load plan against a case of
+#: 101,000 entities, 300,000 ties and 1,000,000 claims (59 smaller cases, a
+#: 215,000-row audit log): the slowest single statement a request made, as
+#: the request role, was 1.4 s with one user (the projection's read of the
+#: entities) and 20.8 s with fifty at once, so the limit ends a statement that
+#: is not going to finish without touching one that is. The whole-chain audit
+#: verify, 2.2 s on that log, is a system connection's in production.
+#:
+#: Request connections only. System connections, the jobs and the migrations
+#: run the whole-chain audit verify, the purge, the merge and the schema
+#: changes, whose statements take as long as the data is big, and they are not
+#: bounded here. (In development and the suite a system connection IS the
+#: request's own, so it is bounded there.)
+REQUEST_STATEMENT_TIMEOUT_ENV = "NOCTORNAL_REQUEST_STATEMENT_TIMEOUT"
+REQUEST_STATEMENT_TIMEOUT_DEFAULT = 120
+REQUEST_STATEMENT_TIMEOUT_MIN = 5
+REQUEST_STATEMENT_TIMEOUT_MAX = 3600
+
+
+def request_statement_timeout() -> tuple[int, bool]:
+    """`(seconds, whether the operator set it)` for a request connection's
+    statements: the setting when it is a whole number from 5 to 3600, else
+    the default."""
+    raw = os.environ.get(REQUEST_STATEMENT_TIMEOUT_ENV, "").strip()
+    try:
+        seconds = int(raw)
+    except ValueError:
+        return REQUEST_STATEMENT_TIMEOUT_DEFAULT, False
+    if not REQUEST_STATEMENT_TIMEOUT_MIN <= seconds <= REQUEST_STATEMENT_TIMEOUT_MAX:
+        return REQUEST_STATEMENT_TIMEOUT_DEFAULT, False
+    return seconds, True
+
+
+def session_options(conninfo: str, *, for_request: bool = False) -> str:
     """The `options` a connection to `conninfo` is opened with: whatever the
     DSN already names, then SESSION_OPTIONS, so an operator's own settings
-    in DATABASE_URL are kept rather than replaced."""
+    in DATABASE_URL are kept rather than replaced.
+
+    A request connection also gets its statement timeout. The operator's own
+    word decides, the latest first: the setting when they made it, else a
+    `statement_timeout` the DSN names (a stricter bound of theirs is not
+    loosened by a default), else the default."""
     from psycopg.conninfo import conninfo_to_dict
     named = conninfo_to_dict(conninfo).get("options")
-    return f"{named} {SESSION_OPTIONS}" if named else SESSION_OPTIONS
+    options = f"{named} {SESSION_OPTIONS}" if named else SESSION_OPTIONS
+    if not for_request:
+        return options
+    seconds, explicit = request_statement_timeout()
+    limit = f"-c statement_timeout={seconds * 1000}"
+    return f"{options} {limit}" if explicit else f"{limit} {options}"
 
 
 def connect_timeout_seconds() -> int:
@@ -241,7 +298,7 @@ def _assume_role() -> bool:
 
 
 def _production() -> bool:
-    return os.environ.get("NOCTORNAL_ENV", "").strip().lower() == "production"
+    return is_production()
 
 
 def is_exempt(conn) -> bool:
@@ -306,7 +363,7 @@ def refuse_privileged_request_role(conn: psycopg.Connection) -> None:
 def connect_request() -> psycopg.Connection:
     """A connection for one HTTP request (or one websocket): the request
     role in production, bound to its user by `bind_session`."""
-    conn = connect()
+    conn = connect(for_request=True)
     try:
         if _assume_role():
             conn.execute(f"SET ROLE {APP_ROLE}")

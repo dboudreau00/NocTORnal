@@ -57,7 +57,7 @@ from noctornal_api.proposals import (
     strictest,
 )
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("noctornal.proposals")
 
 router = APIRouter(prefix="/cases/{case_id}/proposals", tags=["proposals"])
 

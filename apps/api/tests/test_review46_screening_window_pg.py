@@ -17,7 +17,8 @@ import pytest
 
 import capev2_stub
 from lab_static_fixtures import MemoryStore, make_user
-from screening_fixtures import assert_scrubbed, declare, import_list, listed, payload, scrub
+from rolled_back import rolled_back
+from screening_fixtures import declare, import_list, listed, payload, stand_alone
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 pytestmark = pytest.mark.skipif(not DATABASE_URL, reason="DATABASE_URL not set")
@@ -29,16 +30,16 @@ LOCK = "SELECT pg_try_advisory_lock(hashtextextended('noctornal.sample_screen', 
 
 @pytest.fixture
 def conn(monkeypatch):
-    from noctornal_api.db import connect
+    """One transaction, rolled back, with what other suites left hidden in it
+    (docs/17, test isolation): no test here skips for the state of the
+    database."""
     declare(monkeypatch)
     monkeypatch.setenv("NOCTORNAL_BASE_URL", APP)
     monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", SAMPLES)
     monkeypatch.delenv("NOCTORNAL_PUBLIC_ORIGIN", raising=False)
-    c = connect()
-    yield c
-    scrub(c, PREFIX)
-    assert_scrubbed(c, PREFIX)
-    c.close()
+    with rolled_back() as c:
+        stand_alone(c)
+        yield c
 
 
 @pytest.fixture
@@ -128,9 +129,7 @@ def test_no_active_list_leaves_the_download_as_it_was(conn):
     from noctornal_api import screening
     store = MemoryStore()
     _lab, _officer, _svc, bad, _clean, _b = _world(conn, store)
-    active = conn.execute("SELECT count(*) FROM lab.screening_list "
-                          "WHERE retired_at IS NULL").fetchone()[0]
-    if active:
-        pytest.skip("this database holds an active list")
+    assert conn.execute("SELECT count(*) FROM lab.screening_list "
+                        "WHERE retired_at IS NULL").fetchone()[0] == 0
     assert screening.bytes_may_move(conn, bad.id) is True
     assert screening.bytes_may_move(conn, uuid4()) is True

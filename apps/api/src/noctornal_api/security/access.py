@@ -44,6 +44,13 @@ class Tlp(IntEnum):
     RED = 4
 
 
+#: The five levels' names, lowest first: the one spelling of the order
+#: outside `Tlp` itself, derived from it so a level added to the enum is added
+#: everywhere at once. It is `core.tlp`'s order in the database (0002), which
+#: is what `<=` and GREATEST compare by in SQL.
+TLP_NAMES: tuple[str, ...] = tuple(level.name for level in Tlp)
+
+
 def tlp_from_name(name: str) -> Tlp:
     """Parse a TLP label into the ordered enum, failing closed on anything
     unexpected rather than crashing with a bare KeyError."""

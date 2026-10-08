@@ -597,7 +597,7 @@ def _credentials_not_published(conn: psycopg.Connection) -> Check:
     off within a week. Values are never quoted, only variable names and
     which published value each one carries.
     """
-    from noctornal_api.config import ENV_VAR, PRODUCTION, published_credentials
+    from noctornal_api.config import ENV_VAR, PRODUCTION, is_production, published_credentials
 
     name = "credentials_not_published"
     found = published_credentials()
@@ -608,7 +608,7 @@ def _credentials_not_published(conn: psycopg.Connection) -> Check:
             "repository, its CI workflow, its test suites or MinIO publish; a "
             "store configured outside this environment is not visible from here")
     listed = "; ".join(f"{p.variable} ({p.label})" for p in found)
-    production = os.environ.get(ENV_VAR, "").strip().lower() == PRODUCTION
+    production = is_production()
     mode = ("this process runs as production, so it should not have started "
             "at all" if production else
             f"{ENV_VAR} is not {PRODUCTION}, so the boot check that refuses "
@@ -1294,7 +1294,7 @@ def _redis_limiter_isolated(conn: psycopg.Connection) -> Check:
     `_acl_posture`), and under NOCTORNAL_ENV=production a limiter the ACL
     does not confine fails the row before the census runs.
     """
-    from noctornal_api.config import ENV_VAR, PRODUCTION
+    from noctornal_api.config import is_production
     from noctornal_api.http.limits import redacted_url
     from noctornal_api.ratelimit_redis import (
         CONNECT_TIMEOUT_S,
@@ -1333,7 +1333,7 @@ def _redis_limiter_isolated(conn: psycopg.Connection) -> Check:
         # holding the whole register.
         posture = _acl_posture(backend._redis)
         faults = _acl_faults(posture, shown)
-        if faults and os.environ.get(ENV_VAR, "").strip().lower() == PRODUCTION:
+        if faults and is_production():
             return Check(
                 name, False,
                 f"Redis at {where} answers PING, and its ACL does not confine "

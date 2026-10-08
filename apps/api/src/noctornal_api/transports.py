@@ -91,7 +91,7 @@ from uuid import UUID
 import psycopg
 
 from noctornal_api import pinned_http
-from noctornal_api.config import ENV_VAR, PRODUCTION
+from noctornal_api.config import is_production
 from noctornal_api.egress import Destination, can_egress
 from noctornal_api.egress_policy import Refusal, Rule, split_url
 from noctornal_api.notifications import (
@@ -286,7 +286,7 @@ def base_url() -> str:
 
 def production() -> bool:
     """config's reading of NOCTORNAL_ENV: the one reader of the mode."""
-    return os.environ.get(ENV_VAR, "").strip().lower() == PRODUCTION
+    return is_production()
 
 
 # ---------------------------------------------------------------------------

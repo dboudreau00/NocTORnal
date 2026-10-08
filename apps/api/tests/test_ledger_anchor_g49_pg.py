@@ -31,6 +31,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from rolled_back import empty_ledgers
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DATABASE_URL"), reason="needs a migrated database")
@@ -43,9 +44,12 @@ PASSWORD = "correct-horse-battery-staple"
 
 @pytest.fixture()
 def tamperable():
+    """A transaction that is rolled back, with both ledgers emptied inside it:
+    the walk meets only what the test writes, whatever another suite left."""
     from noctornal_api.db import dsn
     conn = psycopg.connect(dsn())
     try:
+        empty_ledgers(conn)
         yield conn
     finally:
         conn.rollback()
@@ -340,18 +344,27 @@ def test_half_an_anchor_or_a_malformed_one_is_a_422(client, officer):
         "anchor_hash": "0" * 64}).status_code == 422
 
 
-def test_the_custody_answer_carries_the_same_pair(client, officer):
-    first = client.get("/api/v1/audit/custody/verify", headers=officer).json()
+def test_the_custody_answer_carries_the_same_pair(tamperable):
+    """The route function itself, on the transaction that holds the custody
+    rows it needs (it used to ask the API and skip when the database held
+    none)."""
+    from noctornal_api.http.routers.audit import verify_custody
+
+    _custody(tamperable)
+
+    def ask(**anchor):
+        return verify_custody(
+            evidence_id=None, anchor_id=anchor.get("anchor_id"),
+            anchor_hash=anchor.get("anchor_hash"), user=None,
+            conn=tamperable, chain=tamperable)
+
+    first = ask()
     assert first["caveat"] and "END" in first["caveat"]
     assert "anchor_id" in first["caveat"] and "anchor_hash" in first["caveat"]
-    assert first["rows_in_ledger"] >= 0
-    if first["tail_row_hash"] is None:
-        pytest.skip("no custody rows on this database yet")
-    held = client.get("/api/v1/audit/custody/verify", headers=officer, params={
-        "anchor_id": first["tail_id"], "anchor_hash": first["tail_row_hash"]}).json()
+    assert first["rows_in_ledger"] == 4 and first["tail_row_hash"]
+    held = ask(anchor_id=first["tail_id"], anchor_hash=first["tail_row_hash"])
     assert held["anchor"]["held"] is True
-    missing = client.get("/api/v1/audit/custody/verify", headers=officer, params={
-        "anchor_id": first["tail_id"] + 10 ** 12, "anchor_hash": "1" * 64}).json()
+    missing = ask(anchor_id=first["tail_id"] + 10 ** 12, anchor_hash="1" * 64)
     assert missing["anchor"]["status"] == "MISSING" and missing["intact"] is False
 
 
