@@ -102,6 +102,89 @@ def test_a_run_the_worker_could_not_run_waits_at_the_same_attempt(conn, monkeypa
         ("FAILED", "SUBMIT", 1), ("DONE", "RETRY", 1)]
 
 
+def test_a_run_the_worker_refused_for_its_size_is_skipped_and_not_queued_again(
+        conn, monkeypatch):
+    """docs/17, "an oversize sample is re-queued every pass": a worker whose
+    own limit (NOCTORNAL_ANALYSIS_WORKER_MAX_BYTES) is under this deployment's
+    refused the same sample on every pass, and every pass decrypted it and
+    sent it again. When the worker's own report of its limit explains the
+    refusal, the run ends SKIPPED with the reason, its steps are gaps that
+    say so, and nothing is queued."""
+    from noctornal_api.samples import SampleService
+    store = MemoryStore()
+    who = make_user(conn, PREFIX)
+    data = pe_image() + uuid4().bytes
+    sample = SampleService(conn, store).submit(data, submitted_by=who,
+                                               original_filename="x.bin")
+    queued = conn.execute("SELECT id FROM lab.static_run WHERE sample_id = %s "
+                          "AND status = 'QUEUED'", (sample.id,)).fetchone()[0]
+    cap = len(data) - 1
+    monkeypatch.setattr(lab_triage, "run_child", _failing("worker_refused"))
+    monkeypatch.setattr(ar, "worker_request_cap", lambda *_a, **_k: cap)
+    assert drain(conn, store, run_id=queued) == ["SKIPPED"]
+    reason = lab_triage.WORKER_TOO_LARGE_REASON.format(cap=cap)
+    assert _runs(conn, sample.id) == [("SKIPPED", "SUBMIT", 1, reason)]
+    assert "NOCTORNAL_ANALYSIS_WORKER_MAX_BYTES" in reason and str(cap) in reason
+    gaps = conn.execute("SELECT triage_gaps FROM lab.sample WHERE id = %s",
+                        (sample.id,)).fetchone()[0]
+    by_step = {g["step"]: g for g in gaps}
+    for step in ("imphash", "rich_header_hash", "ssdeep", "tlsh"):
+        assert by_step[step]["status"] == "skipped" and by_step[step]["reason"] == reason
+    assert conn.execute("SELECT count(*) FROM lab.sample_analysis WHERE sample_id = %s",
+                        (sample.id,)).fetchone()[0] == 0
+
+
+def test_a_refusal_the_workers_limit_does_not_explain_still_waits_at_the_same_attempt(
+        conn, monkeypatch):
+    """The controls: a worker that is silent about its limit, one whose limit
+    is above the sample, and a sample under it that the worker refused for
+    another reason, are the sandbox's state and not a fact about the sample."""
+    from noctornal_api.samples import SampleService
+    store = MemoryStore()
+    who = make_user(conn, PREFIX)
+    data = pe_image() + uuid4().bytes
+    sample = SampleService(conn, store).submit(data, submitted_by=who,
+                                               original_filename="x.bin")
+    monkeypatch.setattr(lab_triage, "run_child", _failing("worker_refused"))
+    for cap in (None, len(data), len(data) * 10):
+        monkeypatch.setattr(ar, "worker_request_cap", lambda *_a, cap=cap, **_k: cap)
+        queued = conn.execute("SELECT id FROM lab.static_run WHERE sample_id = %s "
+                              "AND status = 'QUEUED'", (sample.id,)).fetchone()[0]
+        assert drain(conn, store, run_id=queued) == [lab_triage.INTERRUPTED], cap
+    assert [r[0] for r in _runs(conn, sample.id)] == ["FAILED", "FAILED", "FAILED",
+                                                      "QUEUED"]
+    # And a refusal that is not a refusal, with a limit under the sample, is
+    # the child's own failure as ever.
+    monkeypatch.setattr(lab_triage, "run_child", _failing("crashed"))
+    monkeypatch.setattr(ar, "worker_request_cap", lambda *_a, **_k: 1)
+    queued = conn.execute("SELECT id FROM lab.static_run WHERE sample_id = %s "
+                          "AND status = 'QUEUED'", (sample.id,)).fetchone()[0]
+    assert drain(conn, store, run_id=queued) == ["DONE"]
+
+
+def test_the_runner_asks_the_worker_for_its_limit_and_only_the_isolated_runner_has_one(
+        monkeypatch, tmp_path):
+    sock = str(tmp_path / "w.sock")
+    env = {ar.SOCKET_ENV: sock, "NOCTORNAL_ENV": "production"}
+    monkeypatch.setattr(ar, "runner_choice", lambda _e=None: ar.RunnerChoice(
+        "isolated", socket_path=sock, production=True))
+    monkeypatch.setattr(ar, "hello", lambda *_a, **_k: {"max_request_bytes": 1 << 30})
+    assert ar.worker_request_cap(env) == 1 << 30
+    for said in ({}, {"max_request_bytes": 0}, {"max_request_bytes": "big"},
+                 {"max_request_bytes": True}):
+        monkeypatch.setattr(ar, "hello", lambda *_a, _said=said, **_k: _said)
+        assert ar.worker_request_cap(env) is None, said
+
+    def gone(*_a, **_k):
+        raise ar.WorkerUnavailable("unreachable")
+
+    monkeypatch.setattr(ar, "hello", gone)
+    assert ar.worker_request_cap(env) is None
+    monkeypatch.setattr(ar, "runner_choice", lambda _e=None: ar.RunnerChoice(
+        "local", production=False))
+    assert ar.worker_request_cap() is None
+
+
 def test_a_step_whose_child_crashed_is_still_a_failed_step(conn, monkeypatch):
     """The control: the child's own failure finishes the run DONE with a
     failed gap, as before the review."""

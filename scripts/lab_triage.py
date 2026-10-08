@@ -33,8 +33,9 @@ other script here loads it; an exported DATABASE_URL still wins.
 Prints the counters on one line (queued, done, failed, skipped,
 abandoned, left, compiled, compile_failed) and exits 1 when a run FAILED
 or a compile failed for good in this pass. While no prohibited-content
-policy is declared it says so and exits 0 having touched nothing (docs/16
-L1): that is the deployment's state, not this pass's failure. When the
+policy is declared it says so and exits 1 having touched nothing (docs/16
+L1), as an unusable setting does: the queue is not drained, and an alert
+watching the exit code should hear it. When the
 isolated analysis worker does not answer, or a production deployment
 configures none, it says so and exits 1 having touched nothing (docs/17
 F42): that is a fault, and the queue waits for it. When the worker fails
@@ -107,8 +108,13 @@ def main(argv: list[str] | None = None) -> int:
 
     declared, detail = policy_declared()
     if not declared:
+        # Exit 1, as an unusable setting and a silent worker are: the queue
+        # was not drained, and a pass that did nothing is not a pass that
+        # succeeded. It was 0 as "the deployment's state, not this pass's
+        # failure", which an alert watching the exit code could not tell from
+        # a drained queue (2026-10-08).
         print(f"refused: {detail}")
-        return 0
+        return 1
     settings, problem = lab_triage.analysis_settings()
     if problem:
         print(f"refused: {problem}")

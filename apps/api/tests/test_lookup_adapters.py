@@ -115,6 +115,73 @@ def test_misp_tlp_tags_set_the_floor_case_insensitively_and_fail_closed():
     assert misp.tlp_of([{"name": "other:tag"}]) is None
 
 
+def _misp_answer(attributes) -> bytes:
+    return json.dumps({"response": {"Attribute": attributes}}).encode()
+
+
+def _misp_attr(n: int, *tags: str, event_tags: tuple = ()) -> dict:
+    out = {"event_id": str(n), "category": "Network activity", "type": "domain",
+           "to_ids": False, "Event": {"info": f"Event {n}", "date": "2026-09-01"}}
+    if tags:
+        out["Tag"] = [{"name": t} for t in tags]
+    if event_tags:
+        out["Event"]["Tag"] = [{"name": t} for t in event_tags]
+    return out
+
+
+def test_misp_floor_reads_every_attribute_not_the_first_fifty():
+    """docs/17, the MISP floor: the floor was set from the first 50 attributes
+    of an answer whose whole body is kept, so a tlp:red marking on the 51st
+    left the stored answer below its own marking."""
+    misp = la.ADAPTERS["misp_rest"]
+    attributes = [_misp_attr(n, "tlp:white") for n in range(60)]
+    attributes[55] = _misp_attr(55, "tlp:amber+strict")
+    attributes[59] = _misp_attr(59, event_tags=("tlp:red",))
+    got = misp.interpret("attribute_search", "DOMAIN", "example.org",
+                         fetched(200, _misp_answer(attributes)))
+    assert got.tlp_floor == "RED"
+    # The summary still lists no more than it did.
+    assert len(got.summary["events"]) == la.MAX_EVENTS_LISTED == 50
+
+
+@pytest.mark.parametrize("body", [
+    b"[]", b"{}", b"null", b'"x"',
+    b'{"response": "none"}',
+    b'{"response": {"Event": [{"Attribute": [{"Tag": [{"name": "tlp:red"}]}]}]}}',
+    b'{"response": {"Attribute": null}}',
+    b'{"response": {"Attribute": {"a": 1}}}',
+    b'{"response": {"Attribute": ["tlp:red"]}}',
+    b'{"response": {"Attribute": [{"Tag": "tlp:red"}]}}',
+    b'{"response": {"Attribute": [{"Tag": {"name": "tlp:red"}}]}}',
+    b'{"response": {"Attribute": [{"Event": ["tlp:red"]}]}}',
+    b'{"response": {"Attribute": [{"Event": {"Tag": {"name": "tlp:red"}}}]}}',
+    b'{"response": {"Attribute": [{"Tag": [{"nam": "tlp:red"}]}]}}',
+    b'{"response": {"Attribute": [{"Tag": [{"name": 5}]}]}}',
+    b'{"response": {"Attribute": [{"Tag": [null]}]}}',
+])
+def test_misp_fails_closed_on_a_shape_it_does_not_read(body):
+    """An answer whose tags may not have been read is unreadable, which the
+    lookup service labels RED, and never NOT_FOUND with no floor."""
+    misp = la.ADAPTERS["misp_rest"]
+    with pytest.raises(la.AdapterError):
+        misp.interpret("attribute_search", "DOMAIN", "example.org", fetched(200, body))
+
+
+@pytest.mark.parametrize("body", [b'{"response": {"Attribute": []}}', b'{"response": []}',
+                                  b'{"response": {}}'])
+def test_misp_an_empty_answer_is_still_not_found(body):
+    got = la.ADAPTERS["misp_rest"].interpret("attribute_search", "DOMAIN", "example.org",
+                                            fetched(200, body))
+    assert got.outcome == "NOT_FOUND" and got.tlp_floor is None
+
+
+def test_misp_an_attribute_with_no_tags_is_found_with_no_floor():
+    got = la.ADAPTERS["misp_rest"].interpret(
+        "attribute_search", "DOMAIN", "example.org",
+        fetched(200, _misp_answer([_misp_attr(1), _misp_attr(2, "other:tag")])))
+    assert got.outcome == "FOUND" and got.tlp_floor is None
+
+
 def test_misp_refuses_a_percent_sign_and_a_leading_negation():
     misp = la.ADAPTERS["misp_rest"]
     assert "wildcard" in misp.refuse_value("attribute_search", "URL", "http://a/%2f")

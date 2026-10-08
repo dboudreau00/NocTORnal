@@ -1970,6 +1970,14 @@ th[aria-sort="descending"] .th-sort::after { content: " \2193"; }
 #src-auth-form > .field { flex: 1 1 10em; }
 #src-add-form > .field.grow, #src-persona-form > .field.grow { flex: 1 1 16em; }
 #src-auth-form > .field.grow { flex: 1 1 100%; }
+/* The Collected tab's Add a watch form (F53, 2026-10-08), laid out as the
+   Sources forms are: a field keeps a readable width and wraps before it
+   squeezes; the name and the target take room, and each of the three term
+   lists is as wide as a source's name. */
+#col-watch-box > summary { cursor: pointer; }
+#col-watch-form { margin: 8px 0; }
+#col-watch-form > .field { flex: 0 1 12em; }
+#col-watch-form > .field.grow { flex: 1 1 16em; }
 .row-head {
   display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
 }

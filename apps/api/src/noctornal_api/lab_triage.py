@@ -50,7 +50,6 @@ whole deployment (API workers and cron together).
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
 import sys
@@ -271,8 +270,8 @@ def _child_json(result: ChildResult) -> tuple[dict | None, str | None]:
     if not result.ok:
         return None, result.failure or "crashed"
     try:
-        out = json.loads(result.output.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+        out = analysis_runner.loads_child_json(result.output)
+    except ValueError:
         return None, "bad_output"
     if not isinstance(out, dict) or not out.get("ok"):
         return None, "bad_output"
@@ -441,6 +440,14 @@ DISCARDED_REASON = ("rejected, withdrawn or closed while triage ran; findings "
 RESULTS_REASON = "the findings could not be written"
 TOO_LARGE_REASON = (f"larger than {MAX_BYTES_ENV}; static triage did not "
                     f"read it")
+#: The isolated worker refused the request for its size: its own limit
+#: (`NOCTORNAL_ANALYSIS_WORKER_MAX_BYTES`) is under this deployment's
+#: `MAX_BYTES_ENV`. The same sample would be refused on every pass, so the run
+#: ends SKIPPED with this, as it does for `TOO_LARGE_REASON`.
+WORKER_TOO_LARGE_REASON = ("larger than the {cap} bytes the isolated analysis "
+                           "worker takes in one request (" +
+                           analysis_runner.MAX_BYTES_ENV +
+                           " on the worker); static triage did not analyse it")
 ENGINE_ABSENT_REASON = ("the YARA engine (yara-x) is not installed in this "
                         "deployment: install noctornal-api[yara]")
 
@@ -739,9 +746,10 @@ def _audit_run(conn, run, outcome: str, detail: dict) -> None:
 
 def _finish(conn, c: Claimed, status: str, failure: str, *,
             retry: bool, outcome: dict | None = None,
-            spend_attempt: bool = True) -> None:
+            spend_attempt: bool = True, gap_status: str = "failed") -> None:
     """End the run FAILED (or SKIPPED) on its own, its pending gaps
-    marked, a RETRY queued when allowed, and the audit row last.
+    marked (`gap_status`: failed, or skipped for a sample the run would never
+    read), a RETRY queued when allowed, and the audit row last.
     `spend_attempt=False` queues the RETRY at this run's own attempt,
     whatever it is: the run failed for the sandbox's sake, not its own."""
     with conn.transaction():
@@ -754,7 +762,7 @@ def _finish(conn, c: Claimed, status: str, failure: str, *,
         if done is None:
             return
         _set_gaps(conn, c.sample_id,
-                  {g: {"status": "failed", "reason": failure}
+                  {g: {"status": gap_status, "reason": failure}
                    for g in _gap_steps(c.steps)}, only_pending=True)
         if retry and (not spend_attempt or c.attempt < MAX_ATTEMPTS):
             _requeue(conn, {"requested_by": c.requested_by,
@@ -1140,9 +1148,22 @@ def run_claimed(conn: psycopg.Connection, storage, c: Claimed,
             # the findings are on the record.
             archive = lab_archive.prefetch(conn, c, data, settings)
         except AnalysisInterrupted as stop:
+            data = archive = None
+            # A worker that refuses a request for its size would refuse the
+            # same sample on every pass (its own limit is under this
+            # deployment's): that is a fact about the sample here, so the run
+            # ends SKIPPED with its reason, as for TOO_LARGE_REASON, and the
+            # pass goes on to the next run. Only when the worker's own report
+            # of its limit explains the refusal.
+            cap = (analysis_runner.worker_request_cap()
+                   if stop.failure == "worker_refused" else None)
+            if cap is not None and nbytes > cap:
+                _finish(conn, c, "SKIPPED", WORKER_TOO_LARGE_REASON.format(cap=cap),
+                        retry=False, gap_status="skipped",
+                        outcome={"skipped": "worker_too_large"})
+                return "SKIPPED"
             # Nothing it found is written: the whole run waits for the
             # worker, at the same attempt (F42 review, 2026-10-02).
-            data = archive = None
             log.warning("static triage run %s waits for the worker: %s",
                         c.id, stop.failure)
             _finish(conn, c, "FAILED", CHILD_FAILURES[stop.failure],
@@ -1462,7 +1483,7 @@ def _compile_one(conn, key, vid, ruleset_id, number, source_gz, files,
                 elif report.get("status") not in ("COMPILED", "PARTIAL",
                                                   "FAILED"):
                     kind = "error"
-            except (ValueError, UnicodeDecodeError):
+            except (ValueError, UnicodeDecodeError, RecursionError):
                 kind = "bad_output"
     if kind is not None:
         # Transient (COMPILE_TRANSIENT, the child's own failures): no build

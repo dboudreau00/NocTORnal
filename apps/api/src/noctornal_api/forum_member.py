@@ -396,16 +396,6 @@ def transport_problem(url: str | None) -> str | None:
     return PLAIN_HTTP
 
 
-def _persona_stopped(conn: psycopg.Connection, persona_id: UUID) -> bool:
-    """Whether the persona is LOCKED, BURNED or machine-locked now."""
-    row = conn.execute(
-        """SELECT status::text IN ('LOCKED', 'BURNED')
-                  OR machine_lock_code IS NOT NULL
-             FROM collect.collection_account WHERE id = %s""",
-        (persona_id,)).fetchone()
-    return bool(row and row[0])
-
-
 def _origin(url: str) -> tuple | None:
     try:
         parts = urllib.parse.urlsplit(url)
@@ -609,14 +599,14 @@ class MemberForumAdapter(ForumAdapter):
         try:
             if (persona_id is not None and jar is not None and changed
                     and origin is not None):
-                if _persona_stopped(conn, persona_id):
-                    # The run's own outcome stopped the persona (a credential
-                    # the board refused locks it): nothing is sealed for a
-                    # stopped persona, whatever cookies the board handed out
-                    # on its way to refusing it (2026-10-03).
-                    forum_session.clear_session(conn, persona_id)
-                else:
-                    forum_session.seal_session(conn, persona_id, origin, jar)
+                # Nothing is sealed for a stopped persona, whatever cookies
+                # the board handed out on its way to refusing it (2026-10-03):
+                # a credential the board refused locks the persona, and so
+                # does a person's stop that lands during the run. Whether it
+                # is stopped is read by `seal_session` under the persona's
+                # row lock, so no stop can land between the check and the
+                # seal (2026-10-08).
+                forum_session.seal_session(conn, persona_id, origin, jar)
         finally:
             super().settle(conn, source_id=source_id, persona_id=persona_id,
                            run_id=run_id, status=status, error=error)

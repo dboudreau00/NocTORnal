@@ -42,6 +42,7 @@ def conn():
         c.execute(f"DELETE FROM core.node_merge_edge WHERE merge_id IN "
                   f"(SELECT id FROM core.node_merge WHERE case_id IN {csub})")
         c.execute(f"DELETE FROM core.node_merge WHERE case_id IN {csub}")
+        c.execute(f"DELETE FROM core.evidence WHERE case_id IN {csub}")
         # Assertions, then their elements, in ONE transaction: the deferred
         # invariant-1 triggers fire at commit, and the second of them stops
         # the last assertion of a live element being deleted.
@@ -550,6 +551,143 @@ def test_a_case_compartment_added_after_queueing_keeps_the_summary_in(conn, svc)
                  (["OPERATION-X"], case_id))
     dispatch_due(conn, send_mail=lambda m: None)
     assert _smtp_row(conn, alice) == ("REFUSED", True, "compartmented_material")
+
+
+def _exhibit(conn, case_id, actor, classification="AMBER"):
+    import rls_support
+    return rls_support.exhibit(conn, case_id, actor, classification)
+
+
+@pytest.mark.parametrize("change, detail", [
+    ("classification = 'RED'", "above_platform_floor"),
+    ("classification = 'AMBER_STRICT'", "above_platform_floor"),
+    ("compartments = '{OPERATION-X}'", "compartmented_material"),
+])
+def test_an_exhibit_raised_after_queueing_is_gated_at_its_new_label(
+        conn, svc, change, detail):
+    """docs/17, "a notice raised after it was queued": the drain composed the
+    case's labels as they stand and not the element's, so an exhibit raised
+    (or put in a compartment) while its notice waited had the notice's summary
+    sent under the label the exhibit had when it was queued."""
+    from noctornal_api.transports import dispatch_due
+
+    alice, bob = _user(conn, clearance="RED", compartments=("OPERATION-X",)), _user(conn)
+    case_id = _case(conn, alice)
+    exhibit = _exhibit(conn, case_id, alice)
+    address = conn.execute("SELECT email FROM iam.app_user WHERE id = %s",
+                           (alice,)).fetchone()[0]
+    _raise(svc, alice, actor_id=bob, case_id=case_id, classification="AMBER",
+           object_type="evidence", object_id=exhibit)
+    conn.execute(f"UPDATE core.evidence SET {change} WHERE id = %s", (exhibit,))
+    sent = []
+    dispatch_due(conn, send_mail=lambda m: sent.append(m))
+    assert _smtp_row(conn, alice) == ("REFUSED", True, detail)
+    mine = [m.get_content() for m in sent if m["To"] == address]
+    assert len(mine) == 1 and "no case material" in mine[0]
+    assert "Something happened on OP-X." not in mine[0]
+
+
+def test_an_exhibit_left_as_it_was_does_not_change_the_notice(conn, svc):
+    """The control: the element is read, and an unchanged one costs nothing."""
+    from noctornal_api.transports import dispatch_due
+
+    alice, bob = _user(conn, clearance="RED"), _user(conn)
+    case_id = _case(conn, alice)
+    exhibit = _exhibit(conn, case_id, alice)
+    _raise(svc, alice, actor_id=bob, case_id=case_id, classification="AMBER",
+           object_type="evidence", object_id=exhibit)
+    # An element that is gone is not an element: the notice stands on its own labels.
+    _raise(svc, alice, actor_id=bob, case_id=case_id, classification="AMBER",
+           object_type="evidence", object_id=uuid4())
+    sent = []
+    dispatch_due(conn, send_mail=lambda m: sent.append(m))
+    rows = conn.execute(
+        """SELECT d.state, d.redacted FROM notify.delivery d
+             JOIN notify.notification n ON n.id = d.notification_id
+            WHERE n.recipient_id = %s AND d.channel = 'SMTP'""", (alice,)).fetchall()
+    assert rows == [("SENT", False), ("SENT", False)]
+
+
+def test_a_recipient_below_the_exhibits_new_label_is_not_sent_the_summary(conn, svc):
+    """The other half: the recipient has to dominate the element as it stands.
+    Raised to AMBER, an exhibit a GREEN analyst could read is one they can
+    not, and AMBER is a label the email channel carries, so the gate alone
+    would have sent them its summary."""
+    from noctornal_api.transports import dispatch_due
+
+    green, bob = _user(conn, clearance="GREEN"), _user(conn)
+    case_id = _case(conn, green, classification="GREEN")
+    exhibit = _exhibit(conn, case_id, green, "GREEN")
+    _raise(svc, green, actor_id=bob, case_id=case_id, classification="GREEN",
+           object_type="evidence", object_id=exhibit)
+    conn.execute("UPDATE core.evidence SET classification = 'AMBER' WHERE id = %s",
+                 (exhibit,))
+    sent = []
+    dispatch_due(conn, send_mail=lambda m: sent.append(m))
+    assert sent == []
+    state, cause = conn.execute(
+        """SELECT d.state, d.cause FROM notify.delivery d
+             JOIN notify.notification n ON n.id = d.notification_id
+            WHERE n.recipient_id = %s AND d.channel = 'SMTP'""", (green,)).fetchone()
+    assert (state, cause) == ("SUPPRESSED", "REVOKED")
+
+
+def test_an_entity_of_a_merge_raised_after_queueing_gates_the_merge_notice(conn, svc):
+    from noctornal_api.graph import AssertionInput, GraphWriteService
+    from noctornal_api.merges import MergeService
+    from noctornal_api.transports import dispatch_due
+
+    owner, analyst = _user(conn, clearance="RED"), _user(conn, clearance="RED")
+    case_id = _case(conn, owner)
+    conn.execute("INSERT INTO iam.case_assignment (case_id, user_id, role_key, granted_by) "
+                 "VALUES (%s, %s, 'ANALYST', %s)", (case_id, analyst, owner))
+    writer = GraphWriteService(conn)
+    ids = [writer.create_node(
+        case_id=case_id, node_type="IDENTITY", label=label, created_by=owner,
+        assertion=AssertionInput(basis="DIRECT_OBSERVATION", created_by=owner))
+        for label in ("a", "b")]
+    MergeService(conn).merge(case_id=case_id, source_node_id=ids[0],
+                             target_node_id=ids[1], merged_by=analyst,
+                             reason="same fingerprint")
+    conn.execute("UPDATE core.node SET classification = 'RED' WHERE id = %s", (ids[1],))
+    dispatch_due(conn, send_mail=lambda m: None)
+    assert _smtp_row(conn, owner) == ("REFUSED", True, "above_platform_floor")
+
+
+def test_an_approval_request_names_entities_that_are_read_the_same_way(conn, svc):
+    from noctornal_api.approvals import ApprovalService
+    from noctornal_api.graph import AssertionInput, GraphWriteService
+    from noctornal_api.transports import dispatch_due
+
+    owner, approver = _user(conn, clearance="RED"), _user(conn, clearance="RED")
+    case_id = _case(conn, owner)
+    conn.execute("INSERT INTO iam.case_assignment (case_id, user_id, role_key, granted_by) "
+                 "VALUES (%s, %s, 'ANALYST', %s)", (case_id, approver, owner))
+    writer = GraphWriteService(conn)
+    ids = [writer.create_node(
+        case_id=case_id, node_type="IDENTITY", label=label, created_by=owner,
+        assertion=AssertionInput(basis="DIRECT_OBSERVATION", created_by=owner))
+        for label in ("a", "b")]
+    ApprovalService(conn).request(
+        operation="node.merge", case_id=case_id,
+        payload={"source_node_id": str(ids[0]), "target_node_id": str(ids[1]),
+                 "reason": "r", "basis_selector_id": None},
+        justification="identical fingerprints", requested_by=owner)
+    conn.execute("UPDATE core.node SET classification = 'RED' WHERE id = %s", (ids[0],))
+    dispatch_due(conn, send_mail=lambda m: None)
+    assert _smtp_row(conn, approver) == ("REFUSED", True, "above_platform_floor")
+
+
+def test_a_notice_about_no_element_is_left_to_its_own_labels(conn, svc):
+    """Notices that name a case, a persona or nothing carry no element."""
+    from noctornal_api.transports import due
+
+    alice, bob = _user(conn, clearance="RED"), _user(conn)
+    case_id = _case(conn, alice)
+    _raise(svc, alice, actor_id=bob, case_id=case_id, classification="AMBER",
+           object_type="case_review", object_id=uuid4())
+    got = [o for o in due(conn) if o.recipient_id == alice]
+    assert [(o.classification, sorted(o.compartments)) for o in got] == [("AMBER", [])]
 
 
 def test_a_transport_failure_is_a_row_and_backs_off(conn, svc):

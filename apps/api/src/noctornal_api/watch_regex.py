@@ -31,8 +31,12 @@ most the budget below.
 
 A memory-safety defect in the interpreter's own matcher, and the cost of a
 pattern that is slow but finishes inside its limit, are not closed here.
-No HTTP route in this build writes a watch's regexes, so the pattern is
-operator-authored; this is the second line, behind that.
+Since F53 (2026-10-08) a collection manager writes patterns through the
+console (`POST /cases/{case_id}/collection/watches`, behind `watch.manage`
+and the case), so a pattern's author is a person holding that role and not
+only an operator. The route bounds a pattern's length and their number and
+only PARSES one, so that a typo is refused at once; it never matches one.
+This child is still the only place a pattern meets text.
 """
 from __future__ import annotations
 

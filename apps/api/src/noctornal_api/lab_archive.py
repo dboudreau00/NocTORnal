@@ -62,8 +62,8 @@ partial one.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
-import json
 import logging
 import os
 import struct
@@ -451,24 +451,30 @@ def _ask_child(data: bytes, settings: ArchiveSettings,
     return result
 
 
-def unframe(raw: bytes) -> tuple[dict, bytes]:
+def unframe(raw: bytes) -> tuple[dict, memoryview]:
     """The child's frame: an 8-byte length, the report, then the members'
-    bytes. ValueError when it is not one."""
+    bytes, as a window onto `raw` and not a copy of it. ValueError when it
+    is not a frame, or when its report is not JSON this process can store
+    (`analysis_runner.loads_child_json`)."""
     if len(raw) < 8:
         raise ValueError("short frame")
-    (n,) = struct.unpack(">Q", raw[:8])
+    whole = memoryview(raw)
+    (n,) = struct.unpack(">Q", whole[:8])
     if n > len(raw) - 8 or n > 64 * MIB:
         raise ValueError("bad frame length")
-    report = json.loads(raw[8:8 + n].decode("utf-8"))
+    report = analysis_runner.loads_child_json(whole[8:8 + n])
     if not isinstance(report, dict):
         raise ValueError("not a report")
-    return report, raw[8 + n:]
+    return report, whole[8 + n:]
 
 
 @dataclass
 class Member:
     path: str
-    data: bytes
+    #: A window onto the child's one answer (`unframe`), not a copy of the
+    #: member: the parent holds the answer once, and `_expand` copies the one
+    #: member it is submitting.
+    data: memoryview
     sha256: str
     compressed_size: int | None = None
     ratio: float | None = None
@@ -496,7 +502,7 @@ def _clean(result: lab_triage.ChildResult, settings: ArchiveSettings) -> Expansi
             result.failure or "crashed", lab_triage.CHILD_FAILURES["crashed"]))
     try:
         report, blob = unframe(result.output)
-    except (ValueError, UnicodeDecodeError, RecursionError):
+    except (ValueError, UnicodeDecodeError, RecursionError, struct.error):
         return Expansion(failure=lab_triage.CHILD_FAILURES["bad_output"])
     if report.get("ok") is not True or report.get("mode") != MODE:
         return Expansion(failure=lab_triage.CHILD_FAILURES["bad_output"])
@@ -540,7 +546,7 @@ def _clean(result: lab_triage.ChildResult, settings: ArchiveSettings) -> Expansi
                 or isinstance(size, bool) or size < 1
                 or size > settings.max_member_bytes or at + size > len(blob)):
             return Expansion(failure=lab_triage.CHILD_FAILURES["bad_output"])
-        data = bytes(blob[at:at + size])
+        data = blob[at:at + size]
         at += size
         total += size
         if total > settings.max_total_bytes:
@@ -834,6 +840,53 @@ SANDBOX_WAITS = ("the analysis sandbox could not expand this archive ({why}); "
                  "expands it")
 
 
+class TreeBusy(Exception):
+    """Another archive of this tree was still storing its members when the
+    wait for it ran out."""
+
+
+#: The lock one archive tree's expansions are serialised by: the count of
+#: what the tree holds is read, and the members are stored, under it.
+_TREE_LOCK = "noctornal.archive_tree"
+
+
+@contextlib.contextmanager
+def tree_locked(conn: psycopg.Connection, root: UUID, *, wait_s: float,
+                sleep=time.sleep):
+    """The tree's expansion lock for a block, or TreeBusy after `wait_s`.
+
+    A session advisory lock (this connection is autocommit, so a
+    transaction-scoped one would end with the statement that took it),
+    named by the root. Two archives of one tree expanded in the same moment
+    by two processes each read the tree's count before either stored a
+    member, so each passed the cap by up to one archive's cap
+    (docs/17, "the archive tree count is not locked"); under the lock the
+    second reads what the first stored. The waiter holds no database lock
+    while it waits."""
+    key = f"{_TREE_LOCK}:{root}"
+    ends = time.monotonic() + wait_s
+    while not conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
+                           (key,)).fetchone()[0]:
+        if time.monotonic() >= ends:
+            raise TreeBusy(str(root))
+        sleep(0.25)
+    try:
+        yield
+    finally:
+        try:
+            conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
+        except Exception:  # noqa: BLE001 - must not mask what unwinds through here
+            log.warning("the archive tree lock of %s could not be released", root,
+                        exc_info=True)
+
+
+#: The gap while another archive of the tree was still being stored: not a
+#: finding about this archive, and nothing of it is stored.
+TREE_WAITS = ("another archive of this tree was still being expanded after {s} "
+              "seconds; nothing was expanded, and running static triage on it "
+              "again expands it")
+
+
 def expand_after_triage(conn: psycopg.Connection, storage, c, data: bytes,
                         analysis: lab_triage.AnalysisSettings,
                         child=None) -> dict | None:
@@ -842,9 +895,23 @@ def expand_after_triage(conn: psycopg.Connection, storage, c, data: bytes,
     the members through `submit`, the ARCHIVE finding and the gap on the
     parent, and the tree isolation when a member matched. Never raises into
     the run that called it: the run is already on the record, and an
-    expansion that fails is recorded as that."""
+    expansion that fails is recorded as that.
+
+    The tree's count and the members stored from it are one step under the
+    tree's lock (`tree_locked`)."""
     try:
-        return _expand(conn, storage, c, data, analysis, child)
+        wait_s = wall_s()
+        with tree_locked(conn, root_of(conn, c.sample_id), wait_s=wait_s):
+            return _expand(conn, storage, c, data, analysis, child)
+    except TreeBusy:
+        log.warning("archive expansion of sample %s waits for its tree", c.sample_id)
+        try:
+            _set_gap(conn, c.sample_id, {
+                "status": "pending", "reason": TREE_WAITS.format(s=int(wait_s))})
+        except Exception:  # noqa: BLE001
+            log.warning("the archive gap of sample %s could not be written",
+                        c.sample_id, exc_info=True)
+        return None
     except lab_triage.AnalysisInterrupted as stop:
         # Only when no prefetch ran (the run's own interruption is
         # `prefetch`'s): the sandbox's state, never a fact about the
@@ -957,9 +1024,10 @@ def _expand(conn, storage, c, data: bytes, analysis,
     # alone let a small upload make
     # thousands of samples, each with an encrypted object and a triage run.
     # Only what this run has still to store is counted; a duplicate it will
-    # find is counted too, which errs toward refusing. Two archives of one
-    # tree expanded in the same moment by two processes may each pass this
-    # read, by at most one archive's cap each (docs/17).
+    # find is counted too, which errs toward refusing. The read and the
+    # storing below are one step under the tree's lock (`tree_locked`, taken
+    # by `expand_after_triage`), so a second archive of the tree reads what
+    # the first stored.
     held_now = len(tree_ids(conn, root_of(conn, c.sample_id))) - 1
     new = sum(1 for m in expansion.members
               if (have.get(m.path) or (None, None))[1]
@@ -1017,7 +1085,7 @@ def _expand(conn, storage, c, data: bytes, analysis,
                 break
         try:
             sample = svc.submit(
-                m.data, submitted_by=submitted_by, case_id=case_id,
+                bytes(m.data), submitted_by=submitted_by, case_id=case_id,
                 original_filename=_basename(m.path),
                 source_note=f"expanded from archive sample {c.sample_id}",
                 classification=classification,
@@ -1160,10 +1228,10 @@ __all__ = [
     "ARCHIVE_SENTENCES", "ARCHIVE_TOOL", "ArchiveSettings", "CHILD_ARGV",
     "CHILD_KIND", "DEPTH_ENV", "EXPANDABLE", "MEMBERS_ENV", "MEMBER_ENV",
     "MEMBER_SENTENCES", "PENDING_REASON", "RATIO_ENV", "SETTINGS_ENV",
-    "TOTAL_ENV", "TREE_ENV", "TREE_SENTENCE", "TREE_TRIGGER", "UNSUPPORTED",
-    "WALL_ENV",
+    "TOTAL_ENV", "TREE_ENV", "TREE_SENTENCE", "TREE_TRIGGER", "TREE_WAITS",
+    "TreeBusy", "UNSUPPORTED", "WALL_ENV",
     "archive_settings", "complete_isolations", "depth_of",
     "expand_after_triage", "isolate_tree",
     "limits_words", "root_of", "settings_or_default", "tree_for", "tree_ids",
-    "unframe", "wall_s",
+    "tree_locked", "unframe", "wall_s",
 ]

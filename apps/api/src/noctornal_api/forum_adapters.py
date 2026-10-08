@@ -263,8 +263,8 @@ def parse_bounded(platform: str, page_kind: str, fetched, *, config: dict,
     if not result.ok:
         raise ParseAbandoned(result.failure or "crashed")
     try:
-        answer = json.loads(result.output.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+        answer = analysis_runner.loads_child_json(result.output)
+    except ValueError:
         raise ParseAbandoned("bad_output") from None
     if not isinstance(answer, dict) or not answer.get("ok") or not isinstance(
             answer.get("result"), dict):

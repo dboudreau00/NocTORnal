@@ -117,8 +117,11 @@ from noctornal_api.collection import (
     _SOURCE_VISIBLE_HELD,
     PERSONA_VISIBLE_SQL,
     SOURCE_KINDS,
+    WATCH_TARGET_KINDS,
+    WATCH_TELEGRAM_CHAT,
     Adapter,
     CollectionBusy,
+    CollectionConflict,
     CollectionError,
     CollectionNotFound,
     CollectionService,
@@ -918,6 +921,113 @@ def unsuppress_watch_hit(
             compartments=held)
     except CollectionNotFound as exc:
         raise Problem(404, "Not found", safe_detail(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# Watches (F53, 2026-10-08)
+# ---------------------------------------------------------------------------
+#
+# Only a seeding script wrote a watch until now. A watch is a standing
+# tasking: the terms it names are what the case's collection looks for, and
+# the terms are the case's content. So the list is read behind
+# `collection.read` on the case, like the hits it produces; and a watch is
+# made behind TWO gates, because it needs two things: the verb (the global
+# `watch.manage`, which only the collection manager's role holds, as
+# `source.manage` is) and the case (the five-part gate on this case, which
+# also refuses a closed one). Either alone is the wrong door: the verb
+# without the case would let a collection manager task a case they are not
+# on (row-level security would refuse the write, but the refusal belongs
+# here), and the case without the verb would let any analyst point the
+# collector at a source.
+
+class WatchCreate(BaseModel):
+    #: No length or range constraints here, on purpose, as `SuppressBody`
+    #: says of its reason: the floors and ceilings are the service's
+    #: (`WATCH_*` in collection.py), so every caller meets one rule and a
+    #: refusal is a 400 carrying its words rather than a 422 from a
+    #: validator that restates them.
+    source_id: UUID
+    name: str
+    target_kind: str
+    target_ref: str
+    keywords: list[str] = Field(default_factory=list)
+    selectors: list[str] = Field(default_factory=list)
+    regexes: list[str] = Field(default_factory=list)
+    priority: int = 3
+    suppress_window_s: int = 3600
+
+
+@case_router.get("/watches", response_model=dict)
+def list_watches(
+    case_id: UUID,
+    user: CurrentUser = Depends(require("collection.read")),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """The watches on this case, and whether the caller may add one.
+
+    A watch on a source above the caller's ceiling is not listed (hidden is
+    missing). `sources` is what the add form offers, and is sent only to a
+    caller who holds `watch.manage`: it is the sources they may see, which
+    is what a watch may be put on."""
+    clearance, held = user_ceiling(conn, user.user_id)
+    service = CollectionService(conn)
+    rows = service.watches(case_id, clearance=clearance.name, compartments=held)
+    can_create = _holds(conn, user, "watch.manage")
+    return {"watches": rows, "count": len(rows), "can_create": can_create,
+            "kinds": list(WATCH_TARGET_KINDS),
+            "sources": (service.watch_sources(clearance=clearance.name,
+                                              compartments=held)
+                        if can_create else [])}
+
+
+def _watch_next(watch: dict) -> str:
+    """What happens to a watch that was just made, in words: when it starts,
+    and the two cases the analyst should hear before the first hit."""
+    said = ["It applies from the next poll of its source, to what that poll "
+            "reads. Documents already collected are not matched again, and "
+            "its hits are listed for this case."]
+    if not watch["source_active"]:
+        said.append("Its source is paused, so nothing is read from it until "
+                    "it is activated.")
+    if (watch["target_kind"] == WATCH_TELEGRAM_CHAT and not watch["keywords"]
+            and not watch["selectors"] and not watch["regexes"]):
+        said.append("It has no keyword, selector or pattern, so it fires on "
+                    "every message of that chat, thinned only by its repeat "
+                    "window.")
+    return " ".join(said)
+
+
+@case_router.post("/watches", response_model=dict, status_code=201,
+                  dependencies=[Depends(require_global("watch.manage")),
+                                Depends(rate_limit("collection.config"))])
+def create_watch(
+    case_id: UUID,
+    body: WatchCreate,
+    user: CurrentUser = Depends(require("collection.read", content_write=True)),
+    conn: psycopg.Connection = Depends(get_conn),
+) -> dict:
+    """A new watch on this case. The source must be one the caller can see
+    (a 404 otherwise, as for an id that is not one); a Telegram chat watch
+    must name the chat its source reads, by its typed id; a watch of any
+    other kind must carry at least one term. A name the case already holds
+    is a 409. Audited as WATCH_CREATED, with the counts of its terms and
+    never the terms."""
+    clearance, held = user_ceiling(conn, user.user_id)
+    try:
+        watch = CollectionService(conn).create_watch(
+            case_id, source_id=body.source_id, name=body.name,
+            target_kind=body.target_kind, target_ref=body.target_ref,
+            keywords=body.keywords, selectors=body.selectors,
+            regexes=body.regexes, priority=body.priority,
+            suppress_window_s=body.suppress_window_s, actor_id=user.user_id,
+            clearance=clearance.name, compartments=held)
+    except CollectionNotFound as exc:
+        raise Problem(404, "Not found", safe_detail(exc)) from exc
+    except CollectionConflict as exc:
+        raise Problem(409, "Conflict", safe_detail(exc)) from exc
+    except CollectionError as exc:
+        raise Problem(400, "Invalid request", safe_detail(exc)) from exc
+    return {"watch": watch, "next": _watch_next(watch)}
 
 
 # ---------------------------------------------------------------------------

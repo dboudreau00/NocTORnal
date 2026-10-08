@@ -143,10 +143,13 @@ readiness row names the gap.
 - *How it is read decides its provenance.* A chat read without joining is
   OPEN_GROUP and needs the persona's public authority; a chat read as a
   member is PERSONA_PARTY and needs a member authority. A public chat can
-  be marked as a member chat, never back. Joining is its own act, behind a
-  fresh second factor and an explicit acknowledgement that the chat's
-  administrators see it. A membership check reads the persona's own view
-  of the chat and never joins.
+  be marked as a member chat, never back. The mark takes the persona's lock
+  first, reads the chat again under it, and runs the membership check it
+  queues under the same lock, so a persona that is busy refuses the whole
+  act with nothing marked, and the retry starts clean. Joining is its own
+  act, behind a fresh second factor and an explicit acknowledgement that the
+  chat's administrators see it. A membership check reads the persona's own
+  view of the chat and never joins.
 - *What a poll reads.* The newest 200 messages on a first poll, then up to
   500 a poll oldest first from the last message read, then a recheck of up
   to 100 messages captured in the last 48 hours: one gone is marked deleted
@@ -186,7 +189,13 @@ readiness row names the gap.
   never been polled is due now. `scripts/collection_poll.py` is a cron entry
   that asks `due_sources()` what is ready and polls that; the operator
   chooses how often to look and each source's own `next_due_at` decides when
-  it is polled.
+  it is polled. A pass begins by marking the runs an earlier pass left
+  RUNNING because its process was stopped where Python could not finish them
+  (the collector sends the poll child SIGTERM): each is FAILED with the class
+  Interrupted, only when no runner holds its source's lock, counted as
+  `interrupted` and not as the source failing, and the source, whose schedule
+  was never rolled, is polled again in the same pass. A dry run marks
+  nothing.
 - Per-source `max_rps`, spaced rather than bursted, from
   `collect.source.last_request_at`, which survives the process and is shared
   between workers. It is held in Postgres, not Redis.
@@ -395,11 +404,38 @@ warning (PARTIAL), the way it reports a pattern that will not compile. Every
 other target kind keeps the free text it had, and a watch of any other kind with
 no term matches nothing.
 
+**Making one (F53).** The Collected tab of the Feeds pane lists a case's
+watches and, for a collection manager, adds one.
+`POST /cases/{case_id}/collection/watches` takes the source, a name, what it
+looks at (`BOARD`, `THREAD`, `USER`, `CHANNEL`, `FEED`, `SEARCH` or
+`TELEGRAM_CHAT`), keywords, selectors and patterns, a priority from 1 (most
+urgent) to 5, and the time within which further matches on one thread add no
+hit. It needs the global `watch.manage` (which only the collection manager's
+role holds) and the case's own gate with `collection.read`, and a closed case
+takes no new watch. `GET /cases/{case_id}/collection/watches` lists the case's
+watches behind `collection.read` and says whether the caller may add one. The
+writer refuses, in a sentence: a source the caller cannot see (a 404, the one
+a random id gets, so a watch goes only on a source its creator may read); a
+kind outside the list; a watch of any kind but a Telegram chat with no
+keyword, selector or pattern, which would match nothing and read as quiet; a
+pattern that does not parse (it is parsed there and never matched there); and
+a name the case already holds (a 409). A
+Telegram chat watch names the chat by its typed id and must name the one its
+source reads, so it cannot be aimed at a chat that never fires; with no term it
+fires on every message of that chat. For every other kind the reference is a
+note for the people reading the list: the collector reads the source's own
+address and does not visit it. A watch applies from the next poll, and
+documents already collected are not matched again. Each is audited as
+`WATCH_CREATED` with the counts of its terms and never the terms, because the
+audit trail is read by people with no access to the case's content. Stopping or
+editing a watch is not built: only its creation is.
+
 **Where it runs.** `collect.watch` and `collect.watch_hit` are under row-level
 security (0124). The poll, a manual run and a pasted capture read the watches
 and write the hits as the COLLECTION system purpose, which sees every case's
-watches; the hit listing and its verbs are the only readers on the request
-connection, and they are scoped to the case. A purge of a document keeps a
+watches; the watch list and the route that makes a watch, and the hit listing
+and its verbs, are the only users of them on the request connection, and they
+are scoped to the case. A purge of a document keeps a
 hit's reasons that are the watch's own configuration (its terms and the chat it
 names) and replaces what was read from the document (an author or forward id)
 with `[purged]`.

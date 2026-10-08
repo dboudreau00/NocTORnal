@@ -73,7 +73,7 @@ def test_the_counters_line_keeps_its_order_and_adds_blocked_rate_limited_and_hel
     keys = [part.split("=")[0] for part in line.split()]
     assert keys == ["due", "selected", "polled", "skipped", "deferred", "failed",
                     "blocked", "rate_limited", "held", "too_long", "items_seen",
-                    "items_new", "watch_hits", "warnings"]
+                    "items_new", "watch_hits", "warnings", "interrupted"]
     assert "polled=1 skipped=0 deferred=0 failed=0 blocked=1 rate_limited=1 held=4" in line
 
 

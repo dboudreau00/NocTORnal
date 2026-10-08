@@ -82,6 +82,7 @@ import psycopg
 
 from noctornal_api import egress, egress_authz, egress_ledger, egress_policy, egress_routes
 from noctornal_api.config import published_credentials
+from noctornal_api.db import APP_ROLE, WORKER_ROLE
 from noctornal_api.egress_authz import Decision, Refused
 from noctornal_api.egress_policy import (
     PROXY_STATUS,
@@ -114,6 +115,11 @@ DNS_TIMEOUT_S = 5.0
 CONNECT_TIMEOUT_S = 10.0
 UPSTREAM_TIMEOUT_S = 10.0
 RECHECK_S = 30.0
+#: A SIGTERM waits this long for open tunnels to write their CLOSE rows, then
+#: cancels what is left and waits this long again: inside the 10 seconds a
+#: container is given by default.
+SHUTDOWN_WAIT_S = 5.0
+SHUTDOWN_CANCEL_S = 2.0
 PREAUTH_FLUSH_S = 60.0
 MAX_ANSWERS = 16
 REALM = 'Basic realm="noctornal-egress"'
@@ -221,6 +227,13 @@ def verify_proxy_environment(env: Mapping[str, str] | None = None) -> list[str]:
         elif any(network.overlaps(i) for i in internal if i.version == 4):
             problems.append(f"{UPSTREAM_ALLOW_ENV} overlaps this deployment's own "
                             f"networks.")
+    named = _dsn_role(env.get(DATABASE_URL_ENV, ""))
+    if named in (WORKER_ROLE, APP_ROLE):
+        # The system role bypasses row security and holds every table, and the
+        # request role is the application's: neither is the proxy's.
+        problems.append(f"{DATABASE_URL_ENV} names the application's {named} role: the "
+                        f"proxy connects as {egress_ledger.EGRESS_ROLE}, which reads the "
+                        f"routes and appends to the connection ledger and holds no more.")
     if production:
         if not env.get(DATABASE_URL_ENV, "").strip():
             problems.append(f"{DATABASE_URL_ENV} is not set: the proxy connects as "
@@ -237,6 +250,20 @@ def verify_proxy_environment(env: Mapping[str, str] | None = None) -> list[str]:
             except egress_seal.SealError as exc:
                 problems.append(str(exc))
     return problems
+
+
+def _dsn_role(url: str) -> str | None:
+    """The login a connection string names, or None when it names none or
+    is not a connection string (the connect then fails on its own)."""
+    from psycopg.conninfo import conninfo_to_dict
+
+    url = url.strip().replace("postgresql+psycopg://", "postgresql://", 1)
+    if not url:
+        return None
+    try:
+        return conninfo_to_dict(url).get("user") or None
+    except psycopg.ProgrammingError:
+        return None
 
 
 def _dsn(env: Mapping[str, str]) -> str:
@@ -545,14 +572,24 @@ class EgressProxy:
         return self.address
 
     async def stop(self) -> None:
+        """Close every tunnel with proxy_shutdown and wait, for at most
+        SHUTDOWN_WAIT_S, for each connection to write its CLOSE row. What is
+        still running then is cancelled (each connection writes its CLOSE row
+        in a `finally`) and given SHUTDOWN_CANCEL_S more, so a SIGTERM is
+        answered inside a container's stop grace period and the ledger loses
+        no CLOSE row it had time to write."""
         self._stopping = True
         if self.server is not None:
             self.server.close()
         for tunnel in list(self.tunnels.values()):
             tunnel.close("proxy_shutdown")
-        pending = [t for t in self._tasks if not t.done()]
+        pending = {t for t in self._tasks if not t.done()}
         if pending:
-            await asyncio.wait(pending, timeout=10)
+            _done, pending = await asyncio.wait(pending, timeout=SHUTDOWN_WAIT_S)
+        if pending:
+            for task in pending:
+                task.cancel()
+            await asyncio.wait(pending, timeout=SHUTDOWN_CANCEL_S)
         await self._flush_preauth()
         for task in self._background:
             task.cancel()
@@ -573,12 +610,15 @@ class EgressProxy:
 
     # --- one client -------------------------------------------------------------
 
-    def _client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    async def _client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        # A coroutine, so the stream protocol runs it as a task and this is
+        # that task. As a plain function it ran in the protocol's callback,
+        # where there is no current task, and `stop()` waited for nothing.
         task = asyncio.current_task()
         if task is not None:
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
-        return self._handle(reader, writer)
+        await self._handle(reader, writer)
 
     async def _handle(self, reader, writer) -> None:
         peer = (writer.get_extra_info("peername") or ("?", 0))[0]
@@ -952,6 +992,10 @@ class EgressProxy:
         tunnel = Tunnel(connection_id, claim, decision, self.clock(),
                         last_activity=self.clock())
         self.tunnels[connection_id] = tunnel
+        if self._stopping:
+            # Authorised while the proxy was already stopping: stop() closed
+            # the tunnels it could see, and this one is closed as they were.
+            tunnel.close("proxy_shutdown")
         close_reason = "error"
         upstream_writer = None
         early = b""
@@ -1349,7 +1393,8 @@ def open_stop(conn: psycopg.Connection, row: egress_ledger.Row, persona_id: UUID
 
 def start_checks(conn: psycopg.Connection, *, production: bool) -> list[str]:
     """What the database must say before the proxy serves: in production the
-    role must not own the ledger, and every EGRESS_GRANTS entry must hold."""
+    role must not own the ledger and must be subject to row security, and
+    every EGRESS_GRANTS entry must hold."""
     problems = []
     if production:
         owner = conn.execute(
@@ -1360,6 +1405,16 @@ def start_checks(conn: psycopg.Connection, *, production: bool) -> list[str]:
             problems.append("The proxy's database role owns the connection ledger (or it "
                             "is missing): connect as noctornal_egress, which can append "
                             "and cannot rewrite.")
+        # The system role owns nothing, so the ownership query above passes it,
+        # and it holds every table: a role that bypasses row security is not the
+        # proxy's, whatever it is called.
+        privileged = conn.execute(
+            "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user"
+        ).fetchone()
+        if privileged is None or privileged[0]:
+            problems.append("The proxy's database role bypasses row-level security (or is "
+                            "a superuser): connect as noctornal_egress, which is subject "
+                            "to it and reads only the collection plane.")
     missing = egress_ledger.missing_grants(conn)
     if missing:
         problems.append(f"The proxy's database role lacks {missing[0]}"

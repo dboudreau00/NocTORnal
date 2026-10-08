@@ -402,6 +402,31 @@ def test_a_case_raised_after_queueing_sends_nothing(conn):
     assert (state, cause) == ("REFUSED", "EGRESS_REFUSED")
 
 
+def test_an_exhibit_raised_after_queueing_sends_nothing(conn):
+    """docs/17, "a notice raised after it was queued": the case's labels were
+    composed at the drain and the exhibit's were not, so a notice about an
+    exhibit raised while its row waited went to Jira under its old label."""
+    import rls_support
+    from noctornal_api.notifications import NotificationService
+    world = _world(conn)
+    fake = FakeJira()
+    exhibit = rls_support.exhibit(conn, world["case"], world["owner"], "AMBER")
+    try:
+        n = NotificationService(conn).notify(
+            recipient_id=world["people"][0], case_id=world["case"],
+            kind="APPROVAL_REQUESTED", subject="OP-X: an exhibit failed its check",
+            summary="Someone asks.", body="b", classification="AMBER",
+            object_type="evidence", object_id=exhibit)
+        conn.execute("UPDATE core.evidence SET classification = 'RED' WHERE id = %s",
+                     (exhibit,))
+        _drain(conn, fake)
+        assert not fake.issues
+        state, cause, *_ = _jira_row(conn, n)
+        assert (state, cause) == ("REFUSED", "EGRESS_REFUSED")
+    finally:
+        conn.execute("DELETE FROM core.evidence WHERE id = %s", (exhibit,))
+
+
 def test_compartmented_material_sends_nothing(conn):
     world = _world(conn)
     for uid in world["people"]:

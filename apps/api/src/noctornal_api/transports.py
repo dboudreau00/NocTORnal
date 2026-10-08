@@ -100,8 +100,9 @@ from noctornal_api.notifications import (
     SENT,
     SMTP,
     WEBHOOK,
+    deliverable_predicate,
+    element_rows_sql,
     escalate_unacknowledged,
-    readable_predicate,
     single_address_domain,
 )
 from noctornal_api.notify_events import case_reviews_due
@@ -770,8 +771,9 @@ def send_webhook(url: str, payload: dict, secret: str | None, *, route,
 #: Due, AND still deliverable to this recipient, on a channel that is not
 #: held.
 #:
-#: `readable_predicate` is imported from `notifications` rather than
-#: restated. This query used to check only `u.is_active`, so between the
+#: `deliverable_predicate` (`readable_predicate`, the centre's rule, and the
+#: element's labels as they stand now) is imported from `notifications` rather
+#: than restated. This query used to check only `u.is_active`, so between the
 #: notification being written and the drain running the recipient could be
 #: taken off the case or have their clearance lowered and the summary went
 #: out by email anyway — on the one path in the system that actually crosses
@@ -785,13 +787,20 @@ def send_webhook(url: str, payload: dict, secret: str | None, *, route,
 #: route is missing is held, not attempted.
 #:
 #: The labels the gate judges are the notification's composed with its
-#: case's AS THEY STAND NOW (`CASE_LABELS_SQL`), the way an export composes
-#: them. The notification's own were fixed when it was raised, so a case
-#: raised to RED, or given a compartment, while a delivery waited (a digest,
-#: quiet hours, a retry) had its code and summary sent under the old marking
-#: (2026-10-07).
-CASE_LABELS_SQL = """greatest(n.classification, coalesce(c.classification, n.classification)),
-       n.compartments || coalesce(c.compartments, '{}'::text[])"""
+#: case's AND its element's AS THEY STAND NOW (`CASE_LABELS_SQL`), the way an
+#: export composes them. The notification's own were fixed when it was raised,
+#: so a case raised to RED, or given a compartment, while a delivery waited (a
+#: digest, quiet hours, a retry) had its code and summary sent under the old
+#: marking (2026-10-07), and so did an exhibit, an entity, a sample or a feed
+#: record raised after the notice was queued (2026-10-08;
+#: `notifications.element_rows_sql` says which elements are read). The
+#: recipient must still dominate all of them (`deliverable_predicate`).
+CASE_LABELS_SQL = f"""greatest(n.classification, coalesce(c.classification, n.classification),
+                (SELECT max(f.classification) FROM ({element_rows_sql('n')}) f)),
+       n.compartments || coalesce(c.compartments, '{{}}'::text[])
+         || coalesce((SELECT array_agg(DISTINCT k)
+                        FROM ({element_rows_sql('n')}) f, unnest(f.compartments) AS k),
+                     '{{}}'::text[])"""
 
 _DUE_SQL = f"""
 SELECT d.id, d.notification_id, d.channel, d.attempts,
@@ -806,7 +815,7 @@ SELECT d.id, d.notification_id, d.channel, d.attempts,
   LEFT JOIN core."case" c ON c.id = n.case_id
  WHERE d.state = 'PENDING' AND d.deliver_after <= now()
    AND d.channel = ANY(%s)
-   AND {readable_predicate('n')}
+   AND {deliverable_predicate('n')}
  ORDER BY n.priority ASC, d.deliver_after ASC
  LIMIT %s
 """
@@ -818,7 +827,7 @@ SELECT count(*)
   JOIN notify.notification n ON n.id = d.notification_id
  WHERE d.state = 'PENDING' AND d.deliver_after <= now()
    AND d.channel = ANY(%s)
-   AND {readable_predicate('n')}
+   AND {deliverable_predicate('n')}
 """
 
 #: The other half of the same rule, and the reason it is not simply a
@@ -841,7 +850,7 @@ UPDATE notify.delivery d
   FROM notify.notification n
  WHERE n.id = d.notification_id
    AND d.state = 'PENDING'
-   AND NOT ({readable_predicate('n')})
+   AND NOT ({deliverable_predicate('n')})
 RETURNING d.id
 """
 

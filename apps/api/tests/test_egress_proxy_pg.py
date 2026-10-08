@@ -258,6 +258,136 @@ def test_an_unwritable_ledger_refuses_and_dials_nothing(
     assert origin.accepted == 0
 
 
+def _open_tunnel_on_the_passive_route(conn, resolver, runner, origin):
+    es.profile(conn, PREFIX, ports=(origin.port, 80, 443), passive=True)
+    resolver.names["feed.rebind.test"] = ["127.0.0.1"]
+    sid = es.source(conn, PREFIX, base_url=f"http://feed.rebind.test:{origin.port}/")
+    run = es.run(conn, sid)
+    head, sock = _connect(runner, f"persona.passive~run.{run}",
+                          f"feed.rebind.test:{origin.port}")
+    assert _status(head) == (200, "Connection established")
+    sock.sendall(b"ping")
+    assert sock.recv(4) == b"ping"
+    return run, sock
+
+
+def _stop_once(runner):
+    """ProxyRunner.stop twice would wait on a loop that is no longer running."""
+    if not getattr(runner, "_stopped", False):
+        runner._stopped = True
+        runner.stop()
+
+
+def test_stop_waits_for_an_open_tunnel_to_write_its_close_row(
+        conn, people, loopback_public, resolver, origin, monkeypatch):
+    """docs/17, the proxy's shutdown: `stop()` waited for no connection (the
+    handler was never registered in the task set, the stream protocol having
+    run it as a bare callback), so a SIGTERM with a tunnel open could shut
+    the database threads and the connections under the CLOSE row that was
+    being written. The row is slow here, longer than the one thing that
+    incidentally waited."""
+    runner = es.ProxyRunner()
+    sock = None
+    try:
+        run, sock = _open_tunnel_on_the_passive_route(conn, resolver, runner, origin)
+        assert len(runner.proxy._tasks) == 1, "the open connection is a registered task"
+        real = egress_ledger.write
+
+        def slow(c, row):
+            if row.event == "CLOSE":
+                time.sleep(2.6)
+            return real(c, row)
+
+        monkeypatch.setattr(egress_ledger, "write", slow)
+        _stop_once(runner)
+        rows = _rows(conn, run)
+        assert [(r[0], r[1]) for r in rows] == [("OPEN", "allowed"),
+                                                ("CLOSE", "proxy_shutdown")], rows
+    finally:
+        if sock is not None:
+            sock.close()
+        _stop_once(runner)
+
+
+def test_stop_gives_up_on_a_tunnel_that_cannot_close_and_is_bounded(
+        conn, people, loopback_public, resolver, origin, monkeypatch):
+    from noctornal_api import egress_proxy
+    monkeypatch.setattr(egress_proxy, "SHUTDOWN_WAIT_S", 0.3)
+    monkeypatch.setattr(egress_proxy, "SHUTDOWN_CANCEL_S", 0.3)
+    runner = es.ProxyRunner()
+    sock = None
+    try:
+        _run, sock = _open_tunnel_on_the_passive_route(conn, resolver, runner, origin)
+        real = egress_ledger.write
+        release = threading.Event()
+
+        def stuck(c, row):
+            if row.event == "CLOSE":
+                release.wait(10)
+            return real(c, row)
+
+        monkeypatch.setattr(egress_ledger, "write", stuck)
+        started = time.monotonic()
+        _stop_once(runner)
+        release.set()
+        assert time.monotonic() - started < 6, "stop is bounded, not as long as the stuck write"
+    finally:
+        if sock is not None:
+            sock.close()
+        _stop_once(runner)
+
+
+def test_a_tunnel_authorised_while_the_proxy_stops_is_closed_with_it(
+        conn, people, loopback_public, resolver, origin, monkeypatch):
+    """The tunnel stop() could not see: authorised before it, registered
+    after. It is closed as the others are, and not left for the allowance."""
+    import asyncio
+
+    runner = es.ProxyRunner()
+    dialled: dict = {}
+    try:
+        es.profile(conn, PREFIX, ports=(origin.port, 80, 443), passive=True)
+        resolver.names["feed.rebind.test"] = ["127.0.0.1"]
+        sid = es.source(conn, PREFIX, base_url=f"http://feed.rebind.test:{origin.port}/")
+        run = es.run(conn, sid)
+        entered, release = threading.Event(), threading.Event()
+        real = egress_authz.authorise
+
+        def held(*args, **kwargs):
+            entered.set()
+            release.wait(10)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(egress_authz, "authorise", held)
+
+        def dial():
+            try:
+                dialled["head"], dialled["sock"] = _connect(
+                    runner, f"persona.passive~run.{run}", f"feed.rebind.test:{origin.port}")
+            except OSError as exc:
+                dialled["error"] = exc
+
+        client = threading.Thread(target=dial, daemon=True)
+        client.start()
+        assert entered.wait(10), "the connection reached its authorisation"
+        stopping = asyncio.run_coroutine_threadsafe(runner.proxy.stop(), runner.loop)
+        time.sleep(0.3)
+        assert not stopping.done(), "stop waits for the connection it can see"
+        started = time.monotonic()
+        release.set()
+        stopping.result(20)
+        assert time.monotonic() - started < 3, "it is closed with the proxy, not left to time out"
+        client.join(5)
+        rows = _rows(conn, run)
+        assert [(r[0], r[1]) for r in rows] == [("OPEN", "allowed"),
+                                                ("CLOSE", "proxy_shutdown")], rows
+    finally:
+        sock = dialled.get("sock")
+        if sock is not None:
+            sock.close()
+        runner.stop()
+
+
 # ---------------------------------------------------------------------------
 # Persona runs
 # ---------------------------------------------------------------------------

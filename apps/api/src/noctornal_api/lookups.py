@@ -37,6 +37,7 @@ reserve) / 100)), so interactive work always has room.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import hashlib
 import logging
 import math
@@ -122,6 +123,20 @@ def _max(*labels) -> str:
 
 def _above(a: str, b: str) -> bool:
     return _TLP.index(a) > _TLP.index(b)
+
+
+def _without_live_secrets(fetched):
+    """The answer with every live secret removed from its body: the key the
+    request was sent under, in each form it takes on the wire and in a JSON
+    string. Bytes that are not UTF-8 survive unchanged (a lossless round trip
+    through surrogateescape), and an answer that carries no key is returned
+    as it came."""
+    body = bytes(fetched.body or b"")
+    text = body.decode("utf-8", "surrogateescape")
+    clean = pinned_http.scrub_live_secrets(text, json_escaped=True)
+    if clean == text:
+        return fetched
+    return dataclasses.replace(fetched, body=clean.encode("utf-8", "surrogateescape"))
 
 
 def query_fingerprint(selector_type: str, value: str) -> bytes:
@@ -1008,6 +1023,11 @@ class LookupService:
                  FROM ingest.lookup WHERE id = %s""", (lookup_id,)).fetchone()
         case_id, operation, stype, value, cls, node_id, fingerprint, kind, requester = lk
         fetched_at = datetime.now(timezone.utc)
+        # The answer is scrubbed of the key this lookup was sent under before
+        # anything reads it, so neither the stored body nor the summary and
+        # findings made from it can carry a key the vendor echoed. The hash
+        # is of what is stored.
+        fetched = _without_live_secrets(fetched)
         raw = bytes(fetched.body or b"")
         digest = hashlib.sha256(raw).digest()
         if 300 <= fetched.status < 400:

@@ -27,7 +27,7 @@ import zipfile
 
 import pytest
 
-from noctornal_api import lab_archive, lab_archive_child, lab_triage
+from noctornal_api import analysis_runner, lab_archive, lab_archive_child, lab_triage
 
 CAPS = {"members": 50, "total_bytes": 8 << 20, "member_bytes": 2 << 20,
         "ratio": 100}
@@ -302,6 +302,57 @@ def test_member_count_over_the_cap_is_refused_before_anything_is_read():
     assert report["refusal"]["code"] == "member_count" and payloads == []
 
 
+def _claiming(data: bytes, count: int) -> bytes:
+    """`data` with its end record claiming `count` entries and the central
+    directory left as it was: the claim zipfile never reads."""
+    at = data.rfind(b"PK\x05\x06")
+    forged = bytearray(data)
+    forged[at + 8:at + 12] = struct.pack("<HH", count, count)
+    return bytes(forged)
+
+
+def test_a_directory_longer_than_the_cap_behind_a_small_claim_is_counted_not_parsed(
+        monkeypatch):
+    """docs/17, "archive limits the pre-check trusts": the preflight read the
+    count the end record claims, zipfile reads records until the directory's
+    size is used and never looks at that count, so a directory of thousands
+    of records behind a claim of one was built whole (up to the archive's
+    size) before the count refusal. The directory is now counted by walking
+    it, and the walk stops at the first record past the cap."""
+    data = _claiming(zip_of([(f"m{i}", b"x" * 10) for i in range(300)]), 1)
+    built = []
+    real = zipfile.ZipFile
+    monkeypatch.setattr(zipfile, "ZipFile",
+                        lambda *a, **k: built.append(1) or real(*a, **k))
+    report, payloads = expand(data, {**CAPS, "members": 3})
+    assert report["refusal"] == {"code": "member_count",
+                                 "detail": {"entries": 4, "cap": 3}}
+    assert built == [] and payloads == [], "zipfile never saw the archive"
+
+
+def test_an_honest_archive_at_its_cap_and_one_with_a_zip64_end_still_expand():
+    exactly = zip_of([(f"m{i}", b"x" * 10) for i in range(3)])
+    report, payloads = expand(exactly, {**CAPS, "members": 3})
+    assert report["refusal"] is None and len(payloads) == 3
+    assert lab_archive_child.zip_preflight(exactly, 3) == 3
+    # A zip64 end record and its locator between the directory and the end
+    # record, as a writer that needed them leaves it.
+    at = exactly.rfind(b"PK\x05\x06")
+    (_s, _d, _cd, _h, total, cd_size, cd_offset, _c) = struct.unpack(
+        "<4sHHHHIIH", exactly[at:at + 22])
+    record = struct.pack("<4sQHHIIQQQQ", b"PK\x06\x06", 44, 45, 45, 0, 0,
+                         total, total, cd_size, cd_offset)
+    locator = struct.pack("<4sIQI", b"PK\x06\x07", 0, at, 1)
+    zip64 = exactly[:at] + record + locator + exactly[at:]
+    assert lab_archive_child.zip_preflight(zip64, 3) == 3
+    report, payloads = expand(zip64, {**CAPS, "members": 3})
+    assert report["refusal"] is None and len(payloads) == 3
+    over = _claiming(zip_of([(f"m{i}", b"x" * 10) for i in range(5)]), 5)
+    with pytest.raises(lab_archive_child.Refused) as caught:
+        lab_archive_child.zip_preflight(over, 3)
+    assert caught.value.code == "member_count"
+
+
 def test_an_unprintable_name_is_refused_and_recorded_escaped():
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
@@ -550,6 +601,71 @@ def test_a_child_that_lies_is_not_believed(tmp_path, settings, analysis, monkeyp
     out = lab_archive._clean(lab_archive._expand_child(b"PK", settings, analysis),
                              settings)
     assert out.failure == lab_triage.CHILD_FAILURES["bad_output"]
+
+
+def _answer(report: dict, blob: bytes = b"") -> lab_triage.ChildResult:
+    body = json.dumps(report, allow_nan=True).encode()
+    return lab_triage.ChildResult(True, struct.pack(">Q", len(body)) + body + blob)
+
+
+def _report(**over) -> dict:
+    return {"ok": True, "mode": "archive", "family": "zip", "refusal": None,
+            "refused": [], "counts": {"entries": 1, "accepted": 1, "refused": 0},
+            "members": [{"index": 0, "path": "x.bin", "size": 4,
+                         "sha256": hashlib.sha256(b"abcd").hexdigest(),
+                         "compressed_size": 4, "ratio": 1.0}], **over}
+
+
+def test_the_parent_holds_a_childs_answer_once_and_its_members_are_windows_onto_it(
+        settings, analysis):
+    """docs/17: the answer sat in the runner's buffer, in the slice
+    `unframe` cut from it and in one more copy for every member, about three
+    times at once for an archive of the total cap. A member is now a window
+    onto the one answer, and `_expand` copies only the member it submits."""
+    result = _answer(_report(), b"abcd")
+    out = lab_archive._clean(result, settings)
+    assert out.failure is None and len(out.members) == 1
+    member = out.members[0]
+    assert isinstance(member.data, memoryview) and member.data.obj is result.output
+    assert member.data == b"abcd" and bytes(member.data) == b"abcd"
+    real = lab_archive_child.expand(zip_of([("a", b"MZ" + bytes(40))]), CAPS, PASSWORD)
+    framed = lab_archive_child.frame(*real)
+    _, blob = lab_archive.unframe(framed)
+    assert isinstance(blob, memoryview) and blob.obj is framed
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_a_non_finite_number_anywhere_in_a_childs_answer_fails_the_whole_answer(
+        settings, constant):
+    """PostgreSQL's jsonb refuses the three constants Python's decoder
+    accepts, and a ratio of NaN was silently dropped from a member the parent
+    then accepted. Nothing a child says is believed past one it could not
+    have said."""
+    body = json.dumps(_report()).replace('"ratio": 1.0', f'"ratio": {constant}')
+    assert constant in body
+    raw = body.encode()
+    out = lab_archive._clean(lab_triage.ChildResult(
+        True, struct.pack(">Q", len(raw)) + raw + b"abcd"), settings)
+    assert out.failure == lab_triage.CHILD_FAILURES["bad_output"] and out.members == []
+    assert lab_archive._clean(_answer(_report()), settings).failure is not None  # no bytes
+    with pytest.raises(ValueError):
+        analysis_runner.loads_child_json(raw)
+
+
+def test_an_answer_nested_past_the_decoders_depth_is_unreadable_not_a_crash(settings):
+    from noctornal_api.analysis_runner import loads_child_json
+    deep = b"[" * 100_000 + b"]" * 100_000
+    with pytest.raises(ValueError):
+        loads_child_json(deep)
+    out = lab_archive._clean(lab_triage.ChildResult(
+        True, struct.pack(">Q", len(deep)) + deep), settings)
+    assert out.failure == lab_triage.CHILD_FAILURES["bad_output"]
+    # The same answer from a pe, fuzzy or yara child: `_child_json` is the
+    # one reader, and its `except ValueError` did not catch a RecursionError.
+    assert lab_triage._child_json(lab_triage.ChildResult(True, deep)) == (
+        None, "bad_output")
+    assert lab_triage._child_json(lab_triage.ChildResult(
+        True, b'{"ok": true, "x": NaN}')) == (None, "bad_output")
 
 
 def test_a_child_over_the_wall_clock_is_killed(tmp_path, settings, analysis, monkeypatch):
