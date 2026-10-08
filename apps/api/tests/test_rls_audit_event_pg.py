@@ -413,10 +413,17 @@ def test_the_countersign_rule_sees_a_reset_the_signer_may_not_read(owner):
     countersign that administrator's change."""
     from noctornal_api.approvals import countersign_block
 
+    from db_clock import wait_until_after
+
     admin = _user(owner, "AMBER", "SYS_ADMIN")
     signer = _user(owner, "AMBER", "ANALYST")
     _append(owner, object_id=signer, actor_id=admin, object_type="app_user",
             action="PASSWORD_RESET")
+    # The rule reads rows stamped up to now(): the reset must not be stamped
+    # ahead of the reading (db_clock).
+    wait_until_after(owner, owner.execute(
+        "SELECT max(occurred_at) FROM audit.event WHERE object_id = %s "
+        "AND action = 'PASSWORD_RESET'", (signer,)).fetchone()[0])
     app = _bound(owner, signer)
     try:
         assert _seen(app, signer) == set()
