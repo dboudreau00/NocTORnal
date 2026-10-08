@@ -187,8 +187,23 @@ def _runtime_column_updates() -> dict[str, tuple[str, ...]]:
     """The tables whose UPDATE a later migration narrowed to named columns
     for the runtime role, with those columns: 0109's two on the IAM plane,
     and 0155's ingest records, credentials and authorisations (F51,
-    2026-10-02)."""
+    2026-10-02), 0178's exhibits and cases (Beta 1.1), and the download
+    tickets, of which 0180 left the request role no column at all."""
     return _later_migration_dicts("RUNTIME_COLUMN_UPDATES")
+
+
+def _no_longer_deleted() -> set[str]:
+    """The tables a later migration took DELETE from because no request
+    deletes from them (0178, Beta 1.1: the case material), unquoted."""
+    out: set[str] = set()
+    for path in sorted(MIGRATION.parent.glob("[0-9][0-9][0-9][0-9]_*.py")):
+        if path.name <= MIGRATION.name:
+            continue
+        spec = importlib.util.spec_from_file_location(f"m{path.stem[:4]}", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        out.update(t.replace('"', "") for t in getattr(module, "NO_LONGER_DELETED", ()))
+    return out
 
 
 def _scalar(conn, sql, params=None):
@@ -339,8 +354,13 @@ def test_the_guarded_records_keep_exactly_what_their_migration_declares(conn):
     assert "lab.preservation_authorisation" in guarded, (
         "0063 declares the preservation authorisations; the loader is not "
         "reading the migrations after 0060")
+    column_selects = _column_selects()
     for table, keeps in guarded.items():
         got = _table_privileges(conn, table)
+        if table in column_selects:  # 0180: read by named column only
+            got["SELECT"] = _scalar(
+                conn, "SELECT has_any_column_privilege(%s, %s, 'SELECT')",
+                (APP_DB_ROLE, table))
         held = {p for p, on in got.items() if on}
         # A read-only table keeps only the reads its entry declared.
         expected = set(keeps) & {"SELECT"} if _read_only(table) else set(keeps)
@@ -370,8 +390,10 @@ def test_the_ledgers_are_readable_appendable_and_nothing_else(conn):
 #: The ledger sequences drawn by a SECURITY DEFINER chain trigger (0149,
 #: 2026-10-03): the trigger draws them as the owner inside the chain lock, so
 #: since 0169 the runtime role holds no privilege on them and the column has
-#: no default.
-DEFINER_DRAWN = {"audit.event": "seq", "core.evidence_custody": "id"}
+#: no default. The Lab's custody ledger joined them in 0175 (Beta 1.1): its
+#: own definer trigger draws the number, with no chain to lock.
+DEFINER_DRAWN = {"audit.event": "seq", "core.evidence_custody": "id",
+                 "lab.sample_access": "id"}
 
 
 def test_the_ledger_sequences_are_usable_or_every_audited_action_fails(conn):
@@ -383,13 +405,15 @@ def test_the_ledger_sequences_are_usable_or_every_audited_action_fails(conn):
     `permission denied for sequence ...`, which names the sequence and not
     the table, sending whoever reads the log to the wrong place.
 
-    Two of the three ledger sequences are not like that any more. 0149 moved
-    their draw into the chain trigger, which runs as the owner INSIDE the
-    chain lock (so seq order is chain order), and 0169 took the runtime
-    role's USAGE and SELECT away and dropped the defaults: nothing legitimate
-    draws them, and `SELECT last_value` read the whole log's volume to a
-    caller who may read none of it. That is
-    `test_the_definer_drawn_sequences_are_the_triggers_alone`.
+    None of the three ledger sequences is like that any more. 0149 moved
+    the audit and custody chains' draw into the chain trigger, which runs as
+    the owner INSIDE the chain lock (so seq order is chain order), and 0169
+    took the runtime role's USAGE and SELECT away and dropped the defaults:
+    nothing legitimate draws them, and `SELECT last_value` read the whole
+    log's volume to a caller who may read none of it. 0175 (Beta 1.1) did the
+    same for the Lab's custody ledger. That is
+    `test_the_definer_drawn_sequences_are_the_triggers_alone`; what is left
+    here is the map's own honesty about the tombstones, which have none.
     """
     seen = 0
     for table, column in LEDGER_SEQUENCE_COLUMN.items():
@@ -414,7 +438,7 @@ def test_the_ledger_sequences_are_usable_or_every_audited_action_fails(conn):
         assert _scalar(conn, "SELECT has_sequence_privilege(%s, %s, 'SELECT')",
                        (APP_DB_ROLE, seq))
         seen += 1
-    assert seen == 1, f"expected one default-drawn ledger sequence, checked {seen}"
+    assert seen == 0, f"expected no default-drawn ledger sequence, checked {seen}"
 
 
 def test_the_definer_drawn_sequences_are_the_triggers_alone(conn):
@@ -447,12 +471,15 @@ def test_an_ordinary_table_carries_the_full_four(conn):
     into it and `graph.py` and `merges.py` update it -- so a control that made
     it unwritable would have replaced a security problem with an outage.
 
-    DELETE is asserted for the shape of the grant, not for a path the product
-    walks: nothing in `apps/api/src` deletes a `core.node` row, because history
-    here is superseded rather than overwritten (docs/01). The blanket grant
-    confers it, and this table is the control that the blanket grant landed --
-    an ordinary table keeping all four while the four ledgers keep two."""
+    DELETE used to be asserted here for the shape of the grant, though
+    nothing in `apps/api/src` deletes a `core.node` row (history is
+    superseded rather than overwritten, docs/01). 0178 (Beta 1.1) took it:
+    the request role deletes only where a request deletes, so the table that
+    keeps all four is one a request removes rows from, a tag on an entity."""
     got = _table_privileges(conn, "core.node")
+    assert got["SELECT"] and got["INSERT"] and got["UPDATE"], got
+    assert not got["DELETE"] and not got["TRUNCATE"], got
+    got = _table_privileges(conn, "core.tag_assignment")
     assert got["SELECT"] and got["INSERT"] and got["UPDATE"] and got["DELETE"], got
     assert not got["TRUNCATE"], got
 
@@ -481,6 +508,7 @@ def test_every_table_in_every_product_schema_is_reachable(conn):
     guarded = _guarded_after_0060()
     column_selects = _column_selects()
     by_column = _runtime_column_updates()
+    no_delete = _no_longer_deleted()
     unreachable = {}
     for table in tables:
         got = _table_privileges(conn, table)
@@ -492,6 +520,8 @@ def test_every_table_in_every_product_schema_is_reachable(conn):
             table, ("SELECT", "INSERT", "UPDATE", "DELETE"))
         if table in by_column:  # 0155: UPDATE by column, checked below
             wanted = tuple(p for p in wanted if p != "UPDATE")
+        if table in no_delete:  # 0178: no request deletes from it
+            wanted = tuple(p for p in wanted if p != "DELETE")
         if _read_only(table):  # 0109, the IAM plane
             wanted = ("SELECT",)
         missing = [p for p in wanted if not got[p]]

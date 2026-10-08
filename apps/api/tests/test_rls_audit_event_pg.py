@@ -3,7 +3,8 @@
 0168 puts `audit.event` under a policy of its own (CUSTOM_AUDIT): a request
 reads a row in a case it may read, a case-less row it wrote, every row
 under a global `audit.read`, or a case-less `ingest` row under a global
-`ingest.manage`, and appends any row. Each test runs the policy, a reader
+`ingest.manage`, and appends any row but a state-bearing one naming a case
+it may not read (0176, test_rls_audit_append_pg.py). Each test runs the policy, a reader
 or a route as the request role, bound by a real session's proof, or as the
 system role, with the fixtures seeded as the owner (rls_support); the
 routes run in production's shape (NOCTORNAL_TEST_ASSUME_ROLE):
@@ -255,12 +256,14 @@ def test_the_policy_is_initplans_only_and_reads_and_appends(owner):
         """SELECT cmd, coalesce(with_check, '') FROM pg_policies
             WHERE schemaname = 'audit' AND tablename = 'event'""").fetchall()}
     assert {cmd for cmd, _check in policies} == {"SELECT", "INSERT"}
-    # Every writer appends. What a request may NAME is not the policy's to
-    # say: 0150's trigger pins it before the policy is checked, and says it
-    # once (`test_ledger_isolation_clock_pg.
+    # Every writer appends but a state-bearing row naming a case it may not
+    # read (0176, Beta 1.1; test_rls_audit_append_pg.py proves both halves).
+    # What a request may NAME is not the policy's to say: 0150's trigger pins
+    # it before the policy is checked, and says it once
+    # (`test_ledger_isolation_clock_pg.
     # test_the_attribution_pin_holds_with_the_insert_policy_in_place`).
     (check,) = [c for cmd, c in policies if cmd == "INSERT"]
-    assert check.strip().lower() == "true", check
+    assert "<> ALL" in check and "iam.rls_cases()" in check, check
     triggers = [r[0] for r in owner.execute(
         """SELECT tgname FROM pg_trigger
             WHERE tgrelid = 'audit.event'::regclass AND NOT tgisinternal

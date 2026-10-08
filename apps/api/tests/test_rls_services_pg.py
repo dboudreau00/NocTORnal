@@ -10,6 +10,7 @@ that held nothing.
 """
 from __future__ import annotations
 
+import psycopg
 import pytest
 
 import rls_support as s
@@ -98,10 +99,11 @@ def test_a_legal_hold_reaches_an_exhibit_above_the_officer_and_refuses_a_ghost(o
             with pytest.raises(RetentionError, match="no such exhibit"):
                 RetentionService(sconn).set_legal_hold(
                     uuid4(), actor_id=scene["analyst"], on=True, reason="court order 7")
-        # On the request connection alone the same UPDATE touches nothing.
-        cur = app.execute("UPDATE core.evidence SET legal_hold = true, "
-                          "legal_hold_reason = 'x' WHERE id = %s", (exhibit,))
-        assert cur.rowcount == 0
+        # On the request connection alone the same UPDATE is refused: the
+        # request role writes no hold column since 0178 (Beta 1.1).
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            app.execute("UPDATE core.evidence SET legal_hold = true, "
+                        "legal_hold_reason = 'x' WHERE id = %s", (exhibit,))
     finally:
         app.close()
     held = owner.execute("SELECT legal_hold FROM core.evidence WHERE id = %s",

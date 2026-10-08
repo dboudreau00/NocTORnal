@@ -41,7 +41,10 @@ request role sees a chat only where its source is within the caller's
 case-less ceiling, the same reading as `_SOURCE_VISIBLE`. So the duplicate
 check of a new chat, which must see a chat added under a source above the
 adder, runs as the TELEGRAM_INTAKE purpose, and every act that writes a
-chat refuses a write that changed no row.
+chat refuses a write that changed no row. An act runs on a system
+connection (the collector's, and since 0179 the inline runner's), where no
+policy applies, so before it writes it also reads the chat's source again
+at its caller's labels now and holds it until the write commits.
 """
 from __future__ import annotations
 
@@ -143,7 +146,7 @@ class EnrolmentGate(PersonaGate):
         except PersonaUnavailable:
             row = self._c.execute(
                 f"""SELECT a.machine_lock_code IS NOT NULL,
-                           coalesce(octet_length(a.secret_ciphertext), 0) = 0,
+                           NOT a.secret_stored,
                            {USABLE_IGNORING_LOCK_SQL}
                       FROM collect.collection_account a
                      WHERE a.id = %(id)s AND {PERSONA_VISIBLE_SQL}""",
@@ -556,6 +559,25 @@ def _changed_the_chat(cursor) -> None:
         raise CollectionNotFound(CHAT_NOT_FOUND)
 
 
+def _still_yours(conn, source_id: UUID, actor_id: UUID) -> None:
+    """An act writes its chat only while the caller may still see it, at
+    their labels now, with the source held FOR SHARE until the write
+    commits (Beta 1.1). An act runs on a system connection, the collector's
+    and since 0179 the inline runner's too, where no policy hides a chat
+    whose source was raised above the caller, or whose caller was lowered,
+    while the persona acted: answered exactly as a missing chat."""
+    from noctornal_api.http.deps import user_ceiling
+
+    ceiling, held = user_ceiling(conn, actor_id)
+    if conn.execute(
+            f"""SELECT 1 FROM collect.source s
+                 WHERE s.id = %(id)s AND {_SOURCE_VISIBLE_HELD}
+                   FOR SHARE OF s""",
+            {"id": source_id, "clearance": ceiling.name,
+             "held": _held(held)}).fetchone() is None:
+        raise CollectionNotFound(CHAT_NOT_FOUND)
+
+
 def _existing_chat(conn, durable_id: str, clearance: str,
                    compartments=None) -> tuple | None:
     """(source id, source name, visible to the caller) of the chat already
@@ -819,6 +841,7 @@ class TelegramChats:
                          transport_factory=self._factory, sleep=self._sleep,
                          compartments=compartments)
         with self._c.transaction():
+            _still_yours(self._c, source_id, actor_id)
             has_hash = joined.access_hash is not None
             _changed_the_chat(self._c.execute(
                 """UPDATE collect.telegram_chat
@@ -856,6 +879,7 @@ class TelegramChats:
                        compartments=compartments)
         member = bool(seen.is_member)
         with self._c.transaction():
+            _still_yours(self._c, source_id, actor_id)
             if member:
                 _changed_the_chat(self._c.execute(
                     """UPDATE collect.telegram_chat
@@ -903,6 +927,7 @@ class TelegramChats:
             with self._c.transaction():
                 # The chat first: a mark that changed no chat must not leave
                 # the source alone read as a member chat (F51, 2026-10-02).
+                _still_yours(self._c, source_id, actor_id)
                 _changed_the_chat(self._c.execute(
                     """UPDATE collect.telegram_chat
                           SET access_mode = 'MEMBER', provenance_class = 'PERSONA_PARTY'
@@ -974,6 +999,7 @@ class TelegramChats:
                 reason=reason, reset_cursor=chat["peer_type"] == "CHAT",
                 actor_id=actor_id, clearance=clearance,
                 compartments=compartments)
+            _still_yours(self._c, source_id, actor_id)
             _changed_the_chat(self._c.execute(
                 """UPDATE collect.telegram_chat
                       SET access_hash = %s, access_hash_account_id = %s,

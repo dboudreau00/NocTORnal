@@ -288,8 +288,10 @@ def test_the_request_role_plants_no_record_and_learns_nothing_from_a_key(owner):
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             app.execute("UPDATE ingest.record SET classification = 'RED' WHERE id = %s",
                         (a_in,))
-        assert app.execute("DELETE FROM ingest.record WHERE id = %s",
-                           (a_in,)).rowcount == 0
+        # No DELETE at all since 0178 (Beta 1.1): records are destroyed on
+        # system connections only.
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            app.execute("DELETE FROM ingest.record WHERE id = %s", (a_in,))
     finally:
         app.close()
     assert owner.execute("SELECT classification::text FROM ingest.record WHERE id = %s",
@@ -316,8 +318,8 @@ def test_a_credential_follows_its_record_and_is_never_planted_or_removed(owner):
             lead.execute("INSERT INTO ingest.victim_credential (record_id, kind, "
                          "value_fingerprint) VALUES (%s, 'PASSWORD', %s)",
                          (s_in, os.urandom(32)))
-        assert lead.execute("DELETE FROM ingest.victim_credential WHERE id = %s",
-                            (cred,)).rowcount == 0
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            lead.execute("DELETE FROM ingest.victim_credential WHERE id = %s", (cred,))
     finally:
         blind.close()
         lead.close()
@@ -371,8 +373,8 @@ def test_a_dead_letter_is_seen_through_the_cases_its_batch_fed_or_by_the_operato
                            "redacted) VALUES (%s, 'x', 'X', true)", (dl_none,))
         assert reader.execute("UPDATE ingest.dead_letter SET resolution = 'x' "
                               "WHERE id = %s", (dl_fed,)).rowcount == 0
-        assert reader.execute("DELETE FROM ingest.dead_letter WHERE id = %s",
-                              (dl_fed,)).rowcount == 0
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            reader.execute("DELETE FROM ingest.dead_letter WHERE id = %s", (dl_fed,))
     finally:
         for c in (reader, outsider, operator):
             c.close()
@@ -415,8 +417,9 @@ def test_an_authorisation_is_granted_by_its_officer_and_counted_by_its_grantee_a
         count = "UPDATE ingest.pii_authorisation SET query_count = query_count + 1 WHERE id = %s"
         assert conns["officer"].execute(count, (granted,)).rowcount == 0
         assert conns["lead"].execute(count, (granted,)).rowcount == 1
-        assert conns["lead"].execute("DELETE FROM ingest.pii_authorisation WHERE id = %s",
-                                     (granted,)).rowcount == 0
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            conns["lead"].execute("DELETE FROM ingest.pii_authorisation WHERE id = %s",
+                                  (granted,))
         owner.execute("UPDATE ingest.pii_authorisation SET revoked_at = now() WHERE id = %s",
                       (granted,))
         # Not the request role's column at all (0155), so never revived.

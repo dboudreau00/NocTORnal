@@ -4,7 +4,8 @@ The policies read the IAM plane and lab.download_ticket, so a request
 role that could write them could rebind itself as anyone (a forged
 session row, a rewritten binding hash) or widen its own reach (its
 clearance, a role, an assignment, a grant). 0109 makes them read-only to
-the request role; 0112 confines the two column grants that remain. Each
+the request role; 0112 confines the two column grants that remained, and
+0180 took the ticket's back (a ticket is spent through its definer). Each
 forging write below is attempted as SET ROLE noctornal_app, bound as an
 ordinary analyst, and must be refused.
 """
@@ -121,23 +122,30 @@ def test_the_request_role_keeps_its_own_session_activity_and_nothing_else(owner,
         app.close()
 
 
-def test_a_ticket_can_be_spent_once_by_the_request_role_and_never_unspent(owner, people):
+def test_a_ticket_is_spent_once_by_the_request_role_and_never_written_by_it(owner, people):
+    """Since 0180 the request role spends a ticket only through its definer,
+    by the hash of the ticket it holds, once; it writes no ticket column,
+    so a spent ticket is never unspent and never given to somebody else."""
     exhibit = s.exhibit(owner, people["case"], people["admin"])
+    digest = s.os.urandom(32)
     ticket = owner.execute(
         """INSERT INTO lab.download_ticket (token_hash, evidence_id, user_id, expires_at,
                                             purpose)
            VALUES (%s, %s, %s, now() + interval '1 minute', 'exhibit_production')
-           RETURNING id""", (s.os.urandom(32), exhibit, people["analyst"])).fetchone()[0]
+           RETURNING id""", (digest, exhibit, people["analyst"])).fetchone()[0]
+    spend = ("SELECT id FROM lab.spend_production_ticket(%s, %s, 'exhibit_production', %s)")
     app = s.app_conn()
     try:
-        assert app.execute("UPDATE lab.download_ticket SET redeemed_at = now() "
-                           "WHERE id = %s", (ticket,)).rowcount == 1
-        with pytest.raises(psycopg.errors.InsufficientPrivilege, match="spent, once"):
-            app.execute("UPDATE lab.download_ticket SET redeemed_at = NULL WHERE id = %s",
-                        (ticket,))
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            app.execute("UPDATE lab.download_ticket SET user_id = %s WHERE id = %s",
-                        (people["admin"], ticket))
+        assert app.execute(spend, (digest, exhibit, people["case"])).fetchall() == [(ticket,)]
+        assert app.execute(spend, (digest, exhibit, people["case"])).fetchall() == []
+        for sql, params in (
+                ("UPDATE lab.download_ticket SET redeemed_at = NULL WHERE id = %s", (ticket,)),
+                ("UPDATE lab.download_ticket SET redeemed_at = now() WHERE id = %s",
+                 (ticket,)),
+                ("UPDATE lab.download_ticket SET user_id = %s WHERE id = %s",
+                 (people["admin"], ticket))):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                app.execute(sql, params)
     finally:
         app.close()
         owner.execute("DELETE FROM lab.download_ticket WHERE id = %s", (ticket,))

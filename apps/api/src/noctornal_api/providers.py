@@ -140,6 +140,11 @@ _COLUMNS = (
     "consecutive_429, secret_ciphertext, secret_key_id, secret_origin, secret_set_at, "
     "secret_set_by, rotate_by, last_request_at, created_by, created_at, updated_at, "
     "retired_at, retired_by, retired_reason, private_cidr")
+#: What a read selects (0180): the sealed key through its definer, which
+#: answers it to the system role (the drain, the provider test) and NULL to
+#: the request role, which may not read it. Whether a key is held is read
+#: from `secret_key_id`, which 0098's `provider_secret_complete` pairs with it.
+_READ_COLUMNS = _COLUMNS.replace("secret_ciphertext", "ingest.provider_secret(id)", 1)
 
 
 @dataclass(frozen=True)
@@ -211,7 +216,7 @@ class Provider:
 
     @property
     def secret_held(self) -> bool:
-        return bool(self.secret_ciphertext)
+        return self.secret_key_id is not None
 
 
 def _provider(row) -> Provider:
@@ -224,7 +229,7 @@ def _provider(row) -> Provider:
 def get_provider(conn: psycopg.Connection, provider_id: UUID, *,
                  for_update: bool = False) -> Provider | None:
     row = conn.execute(
-        f"SELECT {_COLUMNS} FROM ingest.provider WHERE id = %s"
+        f"SELECT {_READ_COLUMNS} FROM ingest.provider WHERE id = %s"
         + (" FOR UPDATE" if for_update else ""), (provider_id,)).fetchone()
     return _provider(row) if row else None
 
@@ -514,7 +519,7 @@ class ProviderRegistry:
     def list(self, *, include_retired: bool = False, actor_id: UUID | None = None) -> list[dict]:
         self.expire_lapsed()
         rows = self._c.execute(
-            f"SELECT {_COLUMNS} FROM ingest.provider "
+            f"SELECT {_READ_COLUMNS} FROM ingest.provider "
             + ("" if include_retired else "WHERE retired_at IS NULL ")
             + "ORDER BY display_name").fetchall()
         return [self.provider_out(_provider(r), actor_id=actor_id) for r in rows]

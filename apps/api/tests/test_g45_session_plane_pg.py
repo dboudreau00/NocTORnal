@@ -36,8 +36,12 @@ pytestmark = s.GATED
 PREFIX = "g45ses-"
 MIGRATIONS = Path(__file__).resolve().parents[3] / "db" / "migrations" / "versions"
 
+#: A notice a request raises, in the product's own words: since 0181 a
+#: request-role caller raises only those (test_notify_templates_pg.py).
 ENQUEUE = ("SELECT outcome, raised_id FROM notify.enqueue("
-           "%s::uuid, NULL, 'MERGE_PERFORMED', 1::smallint, 'subject text', 'summary text', "
+           "%s::uuid, NULL, 'APPROVAL_DECIDED', 2::smallint, "
+           "'Your request was countersigned: Change a role definition', "
+           "'Your deployment-wide request was countersigned.', "
            "'body text', 'CLEAR'::core.tlp, '{}'::text[], NULL, NULL, %s::uuid, NULL, "
            "%s::jsonb, NULL)")
 
@@ -499,13 +503,14 @@ def test_a_bound_caller_cannot_sign_a_notice_as_somebody_else(owner):
         with pytest.raises(psycopg.errors.InsufficientPrivilege,
                            match="actor of a notice is the account that raises it"):
             _enqueue_rolled_back(app, victim, impersonated, _plan(IN_APP_SENT))
-        # Its own id, and no actor at all, are both fine.
+        # Its own id is fine. No actor at all was fine until 0181: a
+        # request's notice now always names the account that raises it.
         outcome, stored = _enqueue_rolled_back(app, victim, caller, _plan(IN_APP_SENT),
                                                read_back=True)
         assert outcome == "WRITTEN" and stored[0] == caller
-        outcome, stored = _enqueue_rolled_back(app, victim, None, _plan(IN_APP_SENT),
-                                               read_back=True)
-        assert outcome == "WRITTEN" and stored[0] is None
+        with pytest.raises(psycopg.errors.InsufficientPrivilege,
+                           match="actor of a notice is the account that raises it"):
+            _enqueue_rolled_back(app, victim, None, _plan(IN_APP_SENT))
     finally:
         app.close()
 
@@ -576,9 +581,10 @@ def test_the_notification_service_still_raises_a_notice_for_a_bound_request_role
     try:
         with app.transaction(force_rollback=True):
             raised = NotificationService(app).enqueue(
-                recipient_id=recipient, kind="MERGE_PERFORMED",
-                subject="subject text", summary="summary text", body="body text",
-                classification="CLEAR", actor_id=caller)
+                recipient_id=recipient, kind="APPROVAL_DECIDED",
+                subject="Your request was countersigned: Change a role definition",
+                summary="Your deployment-wide request was countersigned.",
+                body="body text", classification="CLEAR", actor_id=caller)
             assert raised.outcome == "WRITTEN"
             assert raised.notification.actor_id == caller
     finally:

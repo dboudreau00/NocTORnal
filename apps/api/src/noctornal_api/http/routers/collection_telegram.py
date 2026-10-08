@@ -57,6 +57,7 @@ from noctornal_api.http.deps import (
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
 from noctornal_api.http.routers.collection import (
+    _CONFIG,
     L3_NOTICE,
     get_adapters,
     refuse_unready,
@@ -203,13 +204,16 @@ def persona_window(
     persona_id: UUID, body: WindowBody,
     user: CurrentUser = Depends(require_global("collection_account.manage")),
     conn: psycopg.Connection = Depends(get_conn),
+    # Written on a system connection: personas are read-only to the
+    # request role (0179, Beta 1.1).
+    sconn: psycopg.Connection = Depends(_CONFIG),
 ) -> dict:
     """A Telegram persona's active hours in UTC, or none. Outside them the
     persona rests and its chats wait. 404 for a persona the caller may not
     see."""
     clearance, held = user_ceiling(conn, user.user_id)
     try:
-        return set_window(conn, persona_id, body.active_window_utc,
+        return set_window(sconn, persona_id, body.active_window_utc,
                           actor_id=user.user_id, clearance=clearance.name,
                           compartments=held)
     except CollectionNotFound as exc:
@@ -397,10 +401,13 @@ def check_membership(
                 params={}, adapters=adapters, factory=factory)
 
 
-def _set_active(source_id, body, user, conn, adapters, active: bool) -> dict:
+def _set_active(source_id, body, user, conn, adapters, active: bool,
+                sconn) -> dict:
     clearance, held = user_ceiling(conn, user.user_id)
     try:
-        return _chats(conn, adapters, None).set_active(
+        # Written on a system connection: sources are read-only to the
+        # request role (0179, Beta 1.1).
+        return _chats(sconn, adapters, None).set_active(
             source_id, active=active, reason=body.reason, actor_id=user.user_id,
             clearance=clearance.name, compartments=held)
     except CollectionError as exc:
@@ -412,11 +419,12 @@ def stop_chat(
     source_id: UUID, body: ReasonBody,
     user: CurrentUser = Depends(require_global("source.manage")),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
     adapters: dict = Depends(get_adapters),
 ) -> dict:
     """Stop reading a chat. No persona act and no rate limit beyond the
     global one: stopping is always allowed."""
-    return _set_active(source_id, body, user, conn, adapters, False)
+    return _set_active(source_id, body, user, conn, adapters, False, sconn)
 
 
 @router.post("/chats/{source_id}/resume", response_model=dict)
@@ -424,8 +432,9 @@ def resume_chat(
     source_id: UUID, body: ReasonBody,
     user: CurrentUser = Depends(require_global("source.manage")),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
     adapters: dict = Depends(get_adapters),
 ) -> dict:
     """Read a stopped chat again. Its authority and its refusals decide
     whether it is read; a chat that became a supergroup is not resumed."""
-    return _set_active(source_id, body, user, conn, adapters, True)
+    return _set_active(source_id, body, user, conn, adapters, True, sconn)

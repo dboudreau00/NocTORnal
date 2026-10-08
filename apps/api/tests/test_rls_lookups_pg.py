@@ -515,10 +515,12 @@ def test_a_provider_is_withdrawn_tested_and_counted_across_every_case(owner, mon
 
 
 def test_a_providers_move_lowering_and_retirement_withdraw_every_cases_lookups(owner):
-    """Each is an administrator's act on the request connection, by people
-    on no case, and each reaches the waiting sign-offs of a case they
-    cannot see."""
+    """Each is an administrator's act, by people on no case, and each
+    reaches the waiting sign-offs of a case they cannot see. Written on a
+    system connection, as the routes write the registry since 0179 (Beta
+    1.1): the request role may only read it."""
     from noctornal_api import providers
+    from noctornal_api.db import SystemPurpose, system_connection
     w = lookup_world(owner, PREFIX, fetcher=FakeFetcher(fetched(200, VT_DOMAIN)))
     made = {"moved": (w.provider, w.route_for),
             "lowered": make_provider(owner, w.admin, w.approver),
@@ -532,18 +534,24 @@ def test_a_providers_move_lowering_and_retirement_withdraw_every_cases_lookups(o
     try:
         assert s.count(admin, "SELECT count(*) FROM ingest.lookup WHERE id = ANY(%s)",
                        (list(waiting.values()),)) == 0
-        (p, rf) = made["moved"]
-        providers.ProviderRegistry(admin, route_for=rf).update(
-            p.id, {"base_url": "https://mirror.example.net"}, actor_id=w.admin)
-        (p, rf) = made["lowered"]
-        change = providers.ProviderRegistry(admin, route_for=rf).request_exposure_change(
-            p.id, to_level="NONE", basis="Moved to our own mirror on our network.",
-            actor_id=w.admin)
-        providers.ProviderRegistry(approver, route_for=rf).decide_exposure_change(
-            p.id, change, approve=True, note=None, actor_id=w.approver)
-        (p, rf) = made["retired"]
-        providers.ProviderRegistry(admin, route_for=rf).retire(
-            p.id, reason="the contract ended", actor_id=w.admin)
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            admin.execute("UPDATE ingest.provider SET enabled = false WHERE id = %s",
+                          (made["retired"][0].id,))
+        with system_connection(SystemPurpose.CONFIGURATION, reuse=admin) as sconn:
+            (p, rf) = made["moved"]
+            providers.ProviderRegistry(sconn, route_for=rf).update(
+                p.id, {"base_url": "https://mirror.example.net"}, actor_id=w.admin)
+            (p, rf) = made["lowered"]
+            change = providers.ProviderRegistry(sconn, route_for=rf).request_exposure_change(
+                p.id, to_level="NONE", basis="Moved to our own mirror on our network.",
+                actor_id=w.admin)
+        with system_connection(SystemPurpose.CONFIGURATION, reuse=approver) as sconn:
+            providers.ProviderRegistry(sconn, route_for=rf).decide_exposure_change(
+                p.id, change, approve=True, note=None, actor_id=w.approver)
+        with system_connection(SystemPurpose.CONFIGURATION, reuse=admin) as sconn:
+            (p, rf) = made["retired"]
+            providers.ProviderRegistry(sconn, route_for=rf).retire(
+                p.id, reason="the contract ended", actor_id=w.admin)
     finally:
         admin.close()
         approver.close()

@@ -953,7 +953,7 @@ class PersonaVault:
                        a.machine_lock_code,
                        a.fingerprint_profile->>'active_window_utc',
                        coalesce(a.fingerprint_profile ? 'user_agent', false),
-                       coalesce(octet_length(a.secret_ciphertext), 0) > 0,
+                       a.secret_stored,
                        (SELECT count(*) FROM collect.source b
                          WHERE b.collection_account_id = a.id AND b.is_active
                            AND (%(clearance)s::core.tlp IS NULL
@@ -5084,7 +5084,7 @@ class PersonaGate:
             f"""SELECT a.id, a.handle, a.platform::text, a.platform_uid,
                        a.status, a.cooldown_until, a.machine_hold_until,
                        a.machine_lock_code, a.egress_profile_id,
-                       coalesce(octet_length(a.secret_ciphertext), 0) > 0,
+                       a.secret_stored,
                        a.fingerprint_profile, {PERSONA_USABLE_SQL}
                   FROM collect.collection_account a
                  WHERE a.id = %(id)s AND {PERSONA_VISIBLE_SQL}""",

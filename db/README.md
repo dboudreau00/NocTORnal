@@ -88,10 +88,10 @@ to run rather than skip must `CREATE ROLE` before the migration step and export
 ### Recovery: "ERROR: must be owner of table ..."
 
 Symptom: the test suite, or a migration, fails with `must be owner of table
-audit.event` (or `permission denied for schema core`, or `permission denied for
-sequence sample_access_id_seq` on the first Lab access write; the audit and
-custody sequences are drawn by their chain triggers as the owner since 0149,
-and the runtime roles hold no privilege on them since 0169).
+audit.event` (or `permission denied for schema core`; the audit and custody
+sequences are drawn by their chain triggers as the owner since 0149, and the
+Lab custody ledger's by its own trigger since 0175, and the runtime roles hold
+no privilege on any of the three since 0169 and 0175).
 Cause, almost always:
 `DATABASE_URL` is pointed at `noctornal_app`.
 

@@ -392,12 +392,25 @@ def test_no_role_rewrites_an_exhibits_anchors(conn, store, column, value):
     _, raw = s.session(conn, boss)
     a = s.app_conn(raw)
     try:
-        with pytest.raises(psycopg.errors.CheckViolation, match="fixed when it is lodged"):
+        # Since 0178 (Beta 1.1) the request role holds UPDATE of
+        # storage_version_id alone, so the privilege check refuses it before
+        # 0140's guard is reached; the guard still holds the system role.
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
             with a.transaction():
                 a.execute(f"UPDATE core.evidence SET {column} = %s WHERE id = %s",
                           (value, res.evidence_id))
     finally:
         a.close()
+    from noctornal_api.db import connect
+    w = connect()
+    try:
+        w.execute(f"SET ROLE {s.WORKER_ROLE}")
+        with pytest.raises(psycopg.errors.CheckViolation, match="fixed when it is lodged"):
+            with w.transaction():
+                w.execute(f"UPDATE core.evidence SET {column} = %s WHERE id = %s",
+                          (value, res.evidence_id))
+    finally:
+        w.close()
     # The schema owner is refused too: correcting a row means disabling the
     # guard by name, in a transaction that is itself on the record.
     with pytest.raises(psycopg.errors.CheckViolation):

@@ -149,6 +149,7 @@ from noctornal_api.http.deps import (
     get_conn,
     require,
     require_global,
+    system_conn,
     user_ceiling,
 )
 from noctornal_api.http.errors import Problem, safe_detail
@@ -158,6 +159,12 @@ from noctornal_api.security.access import AccessResolutionError, evaluate
 from noctornal_api.stores import PgAccessResolver
 
 router = APIRouter(prefix="/collection", tags=["collection"])
+
+#: A source's and a persona's administration writes on a system connection
+#: (0179, Beta 1.1): the request role may only read the collection plane, so
+#: a statement injected into a request cannot add or rebind a source, or
+#: create or restore a persona, past these gates and their audit rows.
+_CONFIG = system_conn(SystemPurpose.CONFIGURATION)
 
 #: Repeated on every route that can put a persona in front of a site. The
 #: legal-review item by its register number, not a design document's path
@@ -604,6 +611,7 @@ def set_persona_status(
     persona_id: UUID, body: PersonaStatusBody,
     user: CurrentUser = Depends(require_global("collection_account.manage")),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
     adapters: dict = Depends(get_adapters),
 ) -> dict:
     """Suspend or restore a persona, with a reason.
@@ -633,7 +641,7 @@ def set_persona_status(
                                   adapters)
                   if body.status in _STOPS else None)
     try:
-        written = PersonaVault(conn).set_status(
+        written = PersonaVault(sconn).set_status(
             persona_id, body.status, actor_id=user.user_id,
             reason=body.reason, cooldown=cooldown, clearance=clearance.name,
             compartments=held)
@@ -1104,6 +1112,7 @@ def create_source(
     body: SourceCreate,
     user: CurrentUser = Depends(require_global("source.manage")),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
     adapters: dict = Depends(get_adapters),
 ) -> dict:
     """A new source. A binding (a persona, or an exit for a persona-less
@@ -1114,7 +1123,7 @@ def create_source(
         authorize_global(conn, user, "collection_account.manage")
     clearance, held = user_ceiling(conn, user.user_id)
     try:
-        source = CollectionService(conn, adapters).create_source(
+        source = CollectionService(sconn, adapters).create_source(
             kind=body.kind, name=body.name, base_url=body.base_url,
             parser_key=body.parser_key, classification=body.classification,
             default_reliability=body.default_reliability,
@@ -1140,13 +1149,14 @@ class ReasonBody(BaseModel):
 
 
 def _set_active(source_id: UUID, body: ReasonBody, user: CurrentUser,
-                conn: psycopg.Connection, active: bool) -> dict:
+                conn: psycopg.Connection, active: bool,
+                sconn: psycopg.Connection) -> dict:
     # The holder's own compartments (2026-10-03): this
     # passed none, so the key holder who created a compartmented source met
     # a 404 on the one control that stops it.
     clearance, held = user_ceiling(conn, user.user_id)
     try:
-        return CollectionService(conn).set_source_active(
+        return CollectionService(sconn).set_source_active(
             source_id, active=active, reason=body.reason,
             actor_id=user.user_id, clearance=clearance.name,
             compartments=held)
@@ -1162,9 +1172,10 @@ def deactivate_source(
     source_id: UUID, body: ReasonBody,
     user: CurrentUser = Depends(require_global("source.manage")),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
 ) -> dict:
     """Stop reading a source, with a reason; 404 above the caller."""
-    return _set_active(source_id, body, user, conn, False)
+    return _set_active(source_id, body, user, conn, False, sconn)
 
 
 @router.post("/sources/{source_id}/activate", response_model=dict,
@@ -1173,9 +1184,10 @@ def activate_source(
     source_id: UUID, body: ReasonBody,
     user: CurrentUser = Depends(require_global("source.manage")),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
 ) -> dict:
     """Read a source again, with a reason; 404 above the caller."""
-    return _set_active(source_id, body, user, conn, True)
+    return _set_active(source_id, body, user, conn, True, sconn)
 
 
 @router.get("/runs/{run_id}", response_model=dict)
@@ -1247,6 +1259,7 @@ def create_persona(
     body: PersonaCreate,
     user: CurrentUser = Depends(require_global("collection_account.manage")),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
     adapters: dict = Depends(get_adapters),
 ) -> dict:
     """A persona with no credential, on one platform, through one exit that
@@ -1270,7 +1283,7 @@ def create_persona(
              "held": _held(held)}).fetchone() is None:
         raise Problem(404, "Not found", "no such source, or it is above your clearance")
     try:
-        persona = PersonaVault(conn).create(
+        persona = PersonaVault(sconn).create(
             handle=body.handle, platform=body.platform,
             egress_profile_id=body.egress_profile_id,
             fingerprint=dict(body.fingerprint), notes=body.notes,
@@ -1315,6 +1328,7 @@ def bind_source(
     source_id: UUID, body: BindingBody,
     user: CurrentUser = Depends(require_global("collection_account.manage")),
     conn: psycopg.Connection = Depends(get_conn),
+    sconn: psycopg.Connection = Depends(_CONFIG),
     adapters: dict = Depends(get_adapters),
 ) -> dict:
     """Who reads a source and through which exit. Needs both permissions,
@@ -1323,7 +1337,7 @@ def bind_source(
     so."""
     clearance, held = user_ceiling(conn, user.user_id)
     try:
-        return CollectionService(conn, adapters).bind_source(
+        return CollectionService(sconn, adapters).bind_source(
             source_id, persona_id=body.collection_account_id,
             egress_profile_id=body.egress_profile_id, reason=body.reason,
             reset_cursor=body.reset_cursor, actor_id=user.user_id,

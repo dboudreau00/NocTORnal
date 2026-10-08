@@ -1,7 +1,7 @@
 -- =====================================================================
 -- NocTORnal -- db/schema.sql
 --
--- GENERATED MIRROR of the schema at Alembic revision 0173.
+-- GENERATED MIRROR of the schema at Alembic revision 0182.
 -- Produced by scripts/dump_schema.py from
 --   pg_dump --schema-only --no-owner --no-privileges
 -- with session SET lines, version comments and pg_dump's per-run
@@ -26,7 +26,7 @@
 -- superseded, never overwritten; edges are signed and time-bounded;
 -- the ontology lives in reference tables, not enums.
 --
--- Alembic revision: 0173
+-- Alembic revision: 0182
 -- =====================================================================
 
 --
@@ -2531,6 +2531,28 @@ END
 $$;
 
 --
+-- Name: break_glass_justification(uuid); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.break_glass_justification(p_grant uuid) RETURNS text
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  SELECT g.justification
+    FROM iam.break_glass g
+   WHERE g.id = p_grant
+     AND (iam.rls_caller_exempt()
+          OR g.user_id = iam.rls_actor()
+          OR iam.rls_holds_global('break_glass.review'))
+$$;
+
+--
+-- Name: FUNCTION break_glass_justification(p_grant uuid); Type: COMMENT; Schema: iam; Owner: -
+--
+
+COMMENT ON FUNCTION iam.break_glass_justification(p_grant uuid) IS 'A grant''s justification, for its holder and for break_glass.review alone (rls-6, 0177); NULL to anyone else.';
+
+--
 -- Name: case_code(uuid); Type: FUNCTION; Schema: iam; Owner: -
 --
 
@@ -3348,6 +3370,7 @@ CREATE FUNCTION iam.rls_actor() RETURNS uuid
               'UTF8'))
         AND s.revoked_at IS NULL
         AND s.expires_at > pg_catalog.now()
+        AND s.last_seen_at > pg_catalog.now() - interval '30 minutes'
         AND u.is_active),
     (SELECT t.user_id
        FROM lab.download_ticket t
@@ -3609,6 +3632,26 @@ CREATE FUNCTION iam.separated_duty_violations() RETURNS TABLE(role_key text, per
 $$;
 
 --
+-- Name: session_by_token(bytea); Type: FUNCTION; Schema: iam; Owner: -
+--
+
+CREATE FUNCTION iam.session_by_token(p_token_hash bytea) RETURNS TABLE(id uuid, user_id uuid, issued_at timestamp with time zone, expires_at timestamp with time zone, last_seen_at timestamp with time zone, mfa_satisfied_at timestamp with time zone, revoked_at timestamp with time zone, revoke_reason text, ip inet, user_agent text)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  SELECT s.id, s.user_id, s.issued_at, s.expires_at, s.last_seen_at,
+         s.mfa_satisfied_at, s.revoked_at, s.revoke_reason, s.ip, s.user_agent
+    FROM iam.session s
+   WHERE s.token_hash = p_token_hash
+$$;
+
+--
+-- Name: FUNCTION session_by_token(p_token_hash bytea); Type: COMMENT; Schema: iam; Owner: -
+--
+
+COMMENT ON FUNCTION iam.session_by_token(p_token_hash bytea) IS 'The one session whose token hashes to this, for the validation that runs before a connection is bound (rls-6, 0177): the request role cannot read a session''s token hash, binding, address or client.';
+
+--
 -- Name: session_guard(); Type: FUNCTION; Schema: iam; Owner: -
 --
 
@@ -3659,6 +3702,30 @@ CREATE FUNCTION iam.unregistered_compartments(keys text[]) RETURNS text[]
    WHERE k IS NULL
       OR NOT EXISTS (SELECT 1 FROM iam.compartment c WHERE c.key = k)
 $$;
+
+--
+-- Name: api_key_used(uuid, bytea); Type: FUNCTION; Schema: ingest; Owner: -
+--
+
+CREATE FUNCTION ingest.api_key_used(p_key uuid, p_hmac bytea) RETURNS boolean
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  WITH used AS (
+    UPDATE ingest.api_key k
+       SET last_used_at = pg_catalog.now()
+     WHERE k.id = p_key
+       AND p_hmac IS NOT NULL
+       AND pg_catalog.sha256(k.secret_hmac) = pg_catalog.sha256(p_hmac)
+    RETURNING 1)
+  SELECT EXISTS (SELECT 1 FROM used)
+$$;
+
+--
+-- Name: FUNCTION api_key_used(p_key uuid, p_hmac bytea); Type: COMMENT; Schema: ingest; Owner: -
+--
+
+COMMENT ON FUNCTION ingest.api_key_used(p_key uuid, p_hmac bytea) IS 'Stamps an ingest key''s last use, for a caller that presents its secret''s HMAC, and answers whether it matched (0179): the keys are read-only to the request role.';
 
 --
 -- Name: exposure_rank(text); Type: FUNCTION; Schema: ingest; Owner: -
@@ -3931,6 +3998,24 @@ BEGIN
   RETURN NEW;
 END
 $$;
+
+--
+-- Name: provider_secret(uuid); Type: FUNCTION; Schema: ingest; Owner: -
+--
+
+CREATE FUNCTION ingest.provider_secret(p_provider uuid) RETURNS bytea
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  SELECT p.secret_ciphertext FROM ingest.provider p
+   WHERE p.id = p_provider AND iam.rls_caller_exempt()
+$$;
+
+--
+-- Name: FUNCTION provider_secret(p_provider uuid); Type: COMMENT; Schema: ingest; Owner: -
+--
+
+COMMENT ON FUNCTION ingest.provider_secret(p_provider uuid) IS 'A lookup provider''s sealed key for an exempt caller (the drain, the provider test, the readiness register); NULL to the request role (0180).';
 
 --
 -- Name: provider_starts_unapproved(); Type: FUNCTION; Schema: ingest; Owner: -
@@ -4392,6 +4477,129 @@ BEGIN
 END $$;
 
 --
+-- Name: sample_access_numbered(); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.sample_access_numbered() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+BEGIN
+  NEW.id := pg_catalog.nextval('lab.sample_access_id_seq'::pg_catalog.regclass);
+  RETURN NEW;
+END $$;
+
+--
+-- Name: FUNCTION sample_access_numbered(); Type: COMMENT; Schema: lab; Owner: -
+--
+
+COMMENT ON FUNCTION lab.sample_access_numbered() IS 'Draws lab.sample_access.id as the owner, so neither runtime role holds the sequence and none can read the ledger''s volume from it (0175).';
+
+--
+-- Name: sample_data_key(uuid); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.sample_data_key(p_sample uuid) RETURNS TABLE(data_key_ciphertext bytea, data_key_id text)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  SELECT s.data_key_ciphertext, s.data_key_id
+    FROM lab.sample s
+   WHERE s.id = p_sample
+     AND (iam.rls_caller_exempt()
+          OR EXISTS (
+               SELECT 1 FROM lab.download_ticket t
+                WHERE t.sample_id = s.id
+                  AND t.token_hash = pg_catalog.sha256(pg_catalog.convert_to(
+                        nullif(pg_catalog.current_setting('noctornal.rls_ticket', true), ''),
+                        'UTF8'))
+                  AND t.redeemed_at IS NOT NULL
+                  AND t.redeemed_at > pg_catalog.now() - interval '5 minutes'
+                  AND t.user_id = iam.rls_actor())
+          OR ((iam.rls_holds_global('sample.download')
+               OR iam.rls_holds_global('sample.analyse'))
+              AND s.classification <= iam.rls_clearance()
+              AND s.compartments OPERATOR(pg_catalog.<@) iam.rls_compartments()
+              AND (s.case_id IS NULL
+                   OR iam.rls_cases_in_reach() OPERATOR(pg_catalog.?) s.case_id::text)))
+$$;
+
+--
+-- Name: FUNCTION sample_data_key(p_sample uuid); Type: COMMENT; Schema: lab; Owner: -
+--
+
+COMMENT ON FUNCTION lab.sample_data_key(p_sample uuid) IS 'A sample''s sealed data key: for an exempt caller, for the sample origin on the sample its spent ticket names, and for a holder of sample.download or sample.analyse on a sample within their reach (0180).';
+
+--
+-- Name: spend_production_ticket(bytea, uuid, text, uuid); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.spend_production_ticket(p_token_hash bytea, p_evidence uuid, p_purpose text, p_case uuid) RETURNS TABLE(id uuid, user_id uuid, session_id uuid, token_hash bytea, issued_at timestamp with time zone)
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  UPDATE lab.download_ticket t
+     SET redeemed_at = pg_catalog.now()
+   WHERE t.token_hash = p_token_hash
+     AND t.evidence_id = p_evidence
+     AND t.purpose = p_purpose
+     AND t.redeemed_at IS NULL
+     AND t.expires_at > pg_catalog.now()
+     AND (SELECT f.case_id FROM iam.element_facts('evidence', p_evidence) f) = p_case
+  RETURNING t.id, t.user_id, t.session_id, t.token_hash, t.issued_at
+$$;
+
+--
+-- Name: FUNCTION spend_production_ticket(p_token_hash bytea, p_evidence uuid, p_purpose text, p_case uuid); Type: COMMENT; Schema: lab; Owner: -
+--
+
+COMMENT ON FUNCTION lab.spend_production_ticket(p_token_hash bytea, p_evidence uuid, p_purpose text, p_case uuid) IS 'Spends an exhibit production ticket in one statement (0180): evidence.redeem_production_ticket.';
+
+--
+-- Name: spend_sample_ticket(bytea, uuid); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.spend_sample_ticket(p_token_hash bytea, p_sample uuid) RETURNS TABLE(id uuid, user_id uuid, session_id uuid, token_hash bytea, purpose text)
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  UPDATE lab.download_ticket t
+     SET redeemed_at = pg_catalog.now()
+   WHERE t.token_hash = p_token_hash
+     AND t.sample_id = p_sample
+     AND t.redeemed_at IS NULL
+     AND t.expires_at > pg_catalog.now()
+  RETURNING t.id, t.user_id, t.session_id, t.token_hash, t.purpose
+$$;
+
+--
+-- Name: FUNCTION spend_sample_ticket(p_token_hash bytea, p_sample uuid); Type: COMMENT; Schema: lab; Owner: -
+--
+
+COMMENT ON FUNCTION lab.spend_sample_ticket(p_token_hash bytea, p_sample uuid) IS 'Spends a sample ticket in one statement, for the sample origin, which may not read a ticket''s hash (0180): samples.redeem_download_ticket.';
+
+--
+-- Name: ticket_by_hash(bytea); Type: FUNCTION; Schema: lab; Owner: -
+--
+
+CREATE FUNCTION lab.ticket_by_hash(p_token_hash bytea) RETURNS TABLE(user_id uuid, sample_id uuid, evidence_id uuid, redeemed_at timestamp with time zone, expired boolean, evidence_case uuid)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+  SELECT t.user_id, t.sample_id, t.evidence_id, t.redeemed_at,
+         t.expires_at <= pg_catalog.now(),
+         (SELECT f.case_id FROM iam.element_facts('evidence', t.evidence_id) f)
+    FROM lab.download_ticket t
+   WHERE t.token_hash = p_token_hash
+$$;
+
+--
+-- Name: FUNCTION ticket_by_hash(p_token_hash bytea); Type: COMMENT; Schema: lab; Owner: -
+--
+
+COMMENT ON FUNCTION lab.ticket_by_hash(p_token_hash bytea) IS 'Why a presented ticket matched no spend, for the refusal''s audit row (0180).';
+
+--
 -- Name: yara_activation_rules(); Type: FUNCTION; Schema: lab; Owner: -
 --
 
@@ -4469,7 +4677,7 @@ CREATE FUNCTION notify.announce_notification() RETURNS trigger
 CREATE FUNCTION notify.enqueue(p_recipient uuid, p_case uuid, p_kind text, p_priority smallint, p_subject text, p_summary text, p_body text, p_classification core.tlp, p_compartments text[], p_object_type text, p_object_id uuid, p_actor uuid, p_event uuid, p_deliveries jsonb, p_open jsonb) RETURNS TABLE(outcome text, raised_id uuid, raised_at timestamp with time zone)
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'pg_temp'
-    AS $$
+    AS $_$
 DECLARE
   v_labels text[] := coalesce(p_compartments, '{}'::text[]);
   v_exempt boolean := iam.rls_caller_exempt();
@@ -4480,6 +4688,7 @@ DECLARE
   v_ceil jsonb;
   v_id uuid;
   v_at timestamptz;
+  v_code text;
 BEGIN
   IF NOT v_exempt THEN
     v_bound := iam.rls_actor();
@@ -4487,7 +4696,7 @@ BEGIN
       RAISE EXCEPTION 'notify.enqueue: the caller is bound to no session'
         USING ERRCODE = '42501';
     END IF;
-    IF p_actor IS NOT NULL AND p_actor IS DISTINCT FROM v_bound THEN
+    IF p_actor IS DISTINCT FROM v_bound THEN
       RAISE EXCEPTION 'notify.enqueue: the actor of a notice is the account that raises it'
         USING ERRCODE = '42501';
     END IF;
@@ -4500,6 +4709,42 @@ BEGIN
             OR (x.blocked IS NOT NULL
                 AND (x.blocked ->> 'state') IS DISTINCT FROM 'SUPPRESSED')) THEN
       RAISE EXCEPTION 'notify.enqueue: a delivery is planned PENDING or SUPPRESSED, or SENT for the in-app copy alone'
+        USING ERRCODE = '42501';
+    END IF;
+    -- The kinds a request raises, at their own priority and in the
+    -- product's own words (0181). A case's code is the named case's,
+    -- escaped for the expression, or the `?` notify_events writes for one
+    -- the caller may not read.
+    v_code := (SELECT c.code FROM core."case" c WHERE c.id = p_case);
+    v_code := '(' || coalesce(pg_catalog.regexp_replace(
+                 v_code, '([][\\^$.|()*+?{}-])', '\\\1', 'g') || '|', '')
+              || '\?)';
+    IF NOT EXISTS (
+        SELECT 1
+          FROM (VALUES
+              ('APPROVAL_REQUESTED', 2, '^{code}: a second signature is needed$', '^Someone on {code} is asking for a second signature on a [a-z][a-z_]*(\.[a-z][a-z_]*)+ operation\. Sign in to review it\.$'),
+              ('APPROVAL_REQUESTED', 2, '^A second signature is needed: (Change a role definition|Reveal a persona credential|Change which operations need two people|[a-z][a-z_]*(\.[a-z][a-z_]*)+)$', '^A deployment-wide change is waiting for a second signature\. Sign in to review it\.$'),
+              ('APPROVAL_DECIDED', 2, '^{code}: your request was (approved|declined)$', '^Your [a-z][a-z_]*(\.[a-z][a-z_]*)+ request on {code} was (approved|declined)\.$'),
+              ('APPROVAL_DECIDED', 2, '^Your request was (countersigned|refused): (Change a role definition|Reveal a persona credential|Change which operations need two people|[a-z][a-z_]*(\.[a-z][a-z_]*)+)$', '^Your deployment-wide request was (countersigned|refused)\.$'),
+              ('PROPOSAL_QUEUED', 3, '^{code}: [0-9]{1,9} (proposal|proposals) waiting in triage$', '^[0-9]{1,9} new (proposal|proposals) (is|are) waiting for review on {code}\.$'),
+              ('EVIDENCE_INTEGRITY_ALARM', 1, '^{code}: an exhibit failed its integrity check$', '^An exhibit on {code} no longer matches the hash recorded when it was acquired\. Treat the case''s evidence as suspect until this is explained\.$'),
+              ('DETONATION_SIGNOFF_REQUESTED', 2, '^{code}: a detonation needs your sign-off$', '^A colleague asked to send a sample to a sandbox, and you are named to sign it off\. Sign in to approve or decline it\.$'),
+              ('DETONATION_SIGNOFF_REQUESTED', 2, '^A detonation needs your sign-off$', '^A colleague asked to send a sample to a sandbox, and you are named to sign it off\. Sign in to approve or decline it\.$'),
+              ('DETONATION_SIGNOFF_DECIDED', 2, '^Your detonation was (approved|declined)$', '^The sign-off on your detonation request was (approved|declined)\.$'),
+              ('DETONATION_NAMED', 2, '^{code}: you are named as a detonation''s authoriser$', '^A colleague recorded a detonation outside the product and named you as the person who agreed to it\.$'),
+              ('DETONATION_NAMED', 2, '^You are named as a detonation''s authoriser$', '^A colleague recorded a detonation outside the product and named you as the person who agreed to it\.$')
+               ) AS t(kind, priority, subject, summary)
+         WHERE t.kind = p_kind AND t.priority = p_priority
+           AND p_subject ~ pg_catalog.replace(t.subject, '{code}', v_code)
+           AND p_summary ~ pg_catalog.replace(t.summary, '{code}', v_code)) THEN
+      RAISE EXCEPTION 'notify.enqueue: a request raises only the notices the product writes, at their own priority and in its own words'
+        USING ERRCODE = '42501';
+    END IF;
+    IF p_case IS NOT NULL AND NOT (
+         p_case = ANY (coalesce(iam.rls_cases(), '{}'::uuid[]))
+         OR (p_kind IN ('DETONATION_SIGNOFF_REQUESTED', 'DETONATION_SIGNOFF_DECIDED', 'DETONATION_NAMED')
+             AND iam.rls_cases_in_reach() OPERATOR(pg_catalog.?) p_case::text)) THEN
+      RAISE EXCEPTION 'notify.enqueue: a request raises a notice only about a case it may act on'
         USING ERRCODE = '42501';
     END IF;
   END IF;
@@ -4578,7 +4823,7 @@ BEGIN
 
   RETURN QUERY SELECT 'WRITTEN'::text, v_id, v_at;
 END
-$$;
+$_$;
 
 --
 -- Name: FUNCTION enqueue(p_recipient uuid, p_case uuid, p_kind text, p_priority smallint, p_subject text, p_summary text, p_body text, p_classification core.tlp, p_compartments text[], p_object_type text, p_object_id uuid, p_actor uuid, p_event uuid, p_deliveries jsonb, p_open jsonb); Type: COMMENT; Schema: notify; Owner: -
@@ -4800,6 +5045,7 @@ CREATE TABLE collect.collection_account (
     session_ciphertext bytea,
     session_key_id text,
     session_sealed_at timestamp with time zone,
+    secret_stored boolean GENERATED ALWAYS AS ((COALESCE(octet_length(secret_ciphertext), 0) > 0)) STORED,
     CONSTRAINT collection_account_enrolled_has_secret CHECK (((session_enrolled_at IS NULL) OR (COALESCE(octet_length(secret_ciphertext), 0) > 0))),
     CONSTRAINT collection_account_enrolled_has_uid CHECK (((session_enrolled_at IS NULL) OR (platform_uid IS NOT NULL))),
     CONSTRAINT collection_account_machine_hold_known CHECK ((((machine_hold_until IS NULL) = (machine_hold_reason IS NULL)) AND ((machine_hold_reason IS NULL) OR (machine_hold_reason = ANY (ARRAY['RATE_LIMITED'::text, 'ABANDONED'::text]))))),
@@ -4861,6 +5107,12 @@ COMMENT ON COLUMN collect.collection_account.session_enrolled_at IS 'When the se
 --
 
 COMMENT ON COLUMN collect.collection_account.session_ciphertext IS 'The persona''s forum session cookies, sealed as its credential is (2026-10-02). Opened only inside a member read; NULL once signed out.';
+
+--
+-- Name: COLUMN collection_account.secret_stored; Type: COMMENT; Schema: collect; Owner: -
+--
+
+COMMENT ON COLUMN collect.collection_account.secret_stored IS 'Whether a credential is sealed for this persona, for the readers that may not see it (0180).';
 
 --
 -- Name: collection_authority; Type: TABLE; Schema: collect; Owner: -
@@ -7910,6 +8162,7 @@ CREATE TABLE lab.sample (
     screening_bytes_absent_at timestamp with time zone,
     parent_sample_id uuid,
     archive_path text,
+    data_key_destroyed boolean GENERATED ALWAYS AS ((octet_length(data_key_ciphertext) = 0)) STORED,
     CONSTRAINT sample_archive_path_shape CHECK (((archive_path IS NULL) OR (((length(archive_path) >= 1) AND (length(archive_path) <= 512)) AND (archive_path !~~ '/%'::text) AND (archive_path !~~ '%/'::text) AND (POSITION(('\'::text) IN (archive_path)) = 0)))),
     CONSTRAINT sample_assignment_complete CHECK (((assigned_to IS NULL) = (assigned_at IS NULL))),
     CONSTRAINT sample_bytes_absent_only_on_match CHECK (((screening_bytes_absent_at IS NULL) OR (screening_outcome = 'MATCH'::text))),
@@ -7950,6 +8203,12 @@ COMMENT ON COLUMN lab.sample.parent_sample_id IS 'The archive sample this one wa
 --
 
 COMMENT ON COLUMN lab.sample.archive_path IS 'The member''s path inside its parent archive, as the expansion child normalised it. Never used as a filesystem path.';
+
+--
+-- Name: COLUMN sample.data_key_destroyed; Type: COMMENT; Schema: lab; Owner: -
+--
+
+COMMENT ON COLUMN lab.sample.data_key_destroyed IS 'Whether the sample''s data key was destroyed with its bytes, for the readers that may not see it (0180).';
 
 --
 -- Name: sample_access; Type: TABLE; Schema: lab; Owner: -
@@ -8595,12 +8854,6 @@ CREATE TABLE public.alembic_version (
 --
 
 ALTER TABLE ONLY collect.egress_binding ALTER COLUMN seq SET DEFAULT nextval('collect.egress_binding_seq_seq'::regclass);
-
---
--- Name: sample_access id; Type: DEFAULT; Schema: lab; Owner: -
---
-
-ALTER TABLE ONLY lab.sample_access ALTER COLUMN id SET DEFAULT nextval('lab.sample_access_id_seq'::regclass);
 
 --
 -- Name: community_assignment community_assignment_pkey; Type: CONSTRAINT; Schema: analytics; Owner: -
@@ -12363,6 +12616,12 @@ CREATE TRIGGER sample_access_append_only BEFORE DELETE OR UPDATE ON lab.sample_a
 CREATE TRIGGER sample_access_no_truncate BEFORE TRUNCATE ON lab.sample_access FOR EACH STATEMENT EXECUTE FUNCTION lab.block_access_mutation();
 
 --
+-- Name: sample_access sample_access_numbered; Type: TRIGGER; Schema: lab; Owner: -
+--
+
+CREATE TRIGGER sample_access_numbered BEFORE INSERT ON lab.sample_access FOR EACH ROW EXECUTE FUNCTION lab.sample_access_numbered();
+
+--
 -- Name: sample sample_match_is_permanent; Type: TRIGGER; Schema: lab; Owner: -
 --
 
@@ -14993,7 +15252,7 @@ ALTER TABLE audit.event ENABLE ROW LEVEL SECURITY;
 -- Name: event rls_append; Type: POLICY; Schema: audit; Owner: -
 --
 
-CREATE POLICY rls_append ON audit.event FOR INSERT WITH CHECK (true);
+CREATE POLICY rls_append ON audit.event FOR INSERT WITH CHECK (((action <> ALL (ARRAY['HYPOTHESIS_STANCE'::text, 'HYPOTHESIS_STANCE_CLEARED'::text, 'HYPOTHESIS_STATUS'::text, 'EDGE_REVIEWED'::text, 'INGEST_RECORD_TRIAGED'::text, 'INGEST_RECORD_ATTACHED'::text, 'INGEST_CATEGORY_CORRECTED'::text, 'PASSWORD_RESET'::text, 'TOTP_REENROLLED'::text, 'USER_REACTIVATED'::text, 'USER_UNLOCKED'::text, 'ROLE_GRANTED'::text, 'USER_CREATED'::text, 'SCREENING_RESCAN'::text, 'BREAK_GLASS_INVOKED'::text])) OR (case_id = ANY (( SELECT iam.rls_cases() AS rls_cases)::uuid[])) OR ((case_id IS NULL) AND (object_type = 'ingest'::text) AND ( SELECT iam.rls_holds_global('ingest.manage'::text) AS rls_holds_global))));
 
 --
 -- Name: event rls_read; Type: POLICY; Schema: audit; Owner: -

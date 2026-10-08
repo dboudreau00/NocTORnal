@@ -50,11 +50,12 @@ blindly.
 ## Inline mode, development only
 
 NOCTORNAL_COLLECTOR_INLINE=1 runs the claimed act inside the API process
-the moment it is queued, through the same runner, on the request's own
-connection. That is the development and Windows shape, where there is no
-collector process and the API holds the persona key in .env.local. It is
-refused at boot under NOCTORNAL_ENV=production (config.py) and ignored
-there at run time.
+the moment it is queued, through the same runner, on a system connection as
+the collector does (0179: the personas and sources an act writes are
+read-only to the request role). That is the development and Windows shape,
+where there is no collector process and the API holds the persona key in
+.env.local. It is refused at boot under NOCTORNAL_ENV=production
+(config.py) and ignored there at run time.
 """
 from __future__ import annotations
 
@@ -690,16 +691,19 @@ def run_inline(conn: psycopg.Connection, act: dict, *, adapters=None,
                transport_factory=None, sleep=time.sleep
                ) -> tuple[dict, dict | None]:
     """Development's inline mode: claim the act just queued and run it here,
-    on the request connection. An act already claimed (a double click whose
-    first act is running) is waited for instead."""
+    on a system connection, as the collector runs it in production (0179,
+    Beta 1.1: the personas and sources an act writes are read-only to the
+    request role; the act holds the caller's ceiling itself). An act already
+    claimed (a double click whose first act is running) is waited for
+    instead."""
     with system_connection(SystemPurpose.PERSONA_ACTS, reuse=conn) as sc:
         claimed = _claim(sc, act["id"], instance_name("inline"))
-    if claimed is None:
-        return wait(conn, act["id"], user_id=act["requested_by"],
-                    seconds=wait_seconds()), None
-    return _run_claimed(conn, conn, claimed, adapters=adapters,
-                        transport_factory=transport_factory, sleep=sleep,
-                        collector=False)
+        if claimed is not None:
+            return _run_claimed(conn, sc, claimed, adapters=adapters,
+                                transport_factory=transport_factory, sleep=sleep,
+                                collector=False)
+    return wait(conn, act["id"], user_id=act["requested_by"],
+                seconds=wait_seconds()), None
 
 
 def sweep(conn: psycopg.Connection) -> tuple[int, int]:

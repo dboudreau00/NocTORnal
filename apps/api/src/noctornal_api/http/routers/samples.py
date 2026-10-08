@@ -790,14 +790,16 @@ class RetireListBody(BaseModel):
 def retire_screening_list(
     list_id: UUID, body: RetireListBody,
     user: CurrentUser = Depends(_MANAGE_SCREENING),
-    conn: psycopg.Connection = Depends(get_conn),
+    # The lists are read-only to the request role (0179, Beta 1.1), as
+    # their import is: written on the SCREENING connection.
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.SCREENING)),
 ) -> dict:
     """Stop comparing against a list. Nothing is deleted here: a sample
     that matched stays matched, and the entries, if their purge is asked
     for, are deleted by the worker in batches."""
     from noctornal_api.screening import ScreeningError, ScreeningService
     try:
-        return ScreeningService(conn).retire_list(
+        return ScreeningService(sconn).retire_list(
             list_id, actor_id=user.user_id, reason=body.reason,
             purge_entries=body.purge_entries)
     except ScreeningError as exc:
@@ -808,13 +810,14 @@ def retire_screening_list(
 def purge_screening_list(
     list_id: UUID,
     user: CurrentUser = Depends(_MANAGE_SCREENING),
-    conn: psycopg.Connection = Depends(get_conn),
+    # As the retirement above (0179, Beta 1.1).
+    sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.SCREENING)),
 ) -> dict:
     """Ask for a retired list's entries to be deleted, later than its
     retirement: a licence may require it when it ends."""
     from noctornal_api.screening import ScreeningError, ScreeningService
     try:
-        return ScreeningService(conn).request_purge(list_id,
+        return ScreeningService(sconn).request_purge(list_id,
                                                     actor_id=user.user_id)
     except ScreeningError as exc:
         raise _screening_problem(exc) from None

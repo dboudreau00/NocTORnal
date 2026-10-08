@@ -1565,19 +1565,12 @@ class EvidenceService:
         # 2026-09-25). The sample origin spends the ticket BEFORE anybody is
         # bound, and an unbound connection sees no exhibit under row-level
         # security, so an EXISTS on core.evidence here refused every valid
-        # ticket.
+        # ticket. As the definer since 0180: the request role reads no
+        # ticket's hash and writes no ticket.
         row = self._c.execute(
-            """UPDATE lab.download_ticket
-                  SET redeemed_at = now()
-                WHERE token_hash = %s
-                  AND evidence_id = %s
-                  AND purpose = %s
-                  AND redeemed_at IS NULL
-                  AND expires_at > now()
-                  AND (SELECT f.case_id FROM iam.element_facts('evidence', %s) f)
-                      = %s
-            RETURNING id, user_id, session_id, token_hash, issued_at""",
-            (digest, evidence_id, TICKET_PRODUCTION, evidence_id, case_id),
+            """SELECT id, user_id, session_id, token_hash, issued_at
+                 FROM lab.spend_production_ticket(%s, %s, %s, %s)""",
+            (digest, evidence_id, TICKET_PRODUCTION, case_id),
         ).fetchone()
         if row is None:
             reason, holder, named = self._production_refusal(
@@ -1652,13 +1645,11 @@ class EvidenceService:
         """Why a presentation matched nothing, for the audit row only: the
         reason, the holder, and the (exhibit, case) the row is filed under,
         which is the ticket's own exhibit when it names one."""
-        # The exhibit's case as a fact (S1): unbound here, see above.
+        # The exhibit's case as a fact (S1): unbound here, see above. The
+        # ticket through its definer (0180), keyed on the presented hash.
         row = self._c.execute(
-            """SELECT t.user_id, t.evidence_id, t.redeemed_at,
-                      t.expires_at <= now(),
-                      (SELECT f.case_id FROM iam.element_facts('evidence', t.evidence_id) f)
-                 FROM lab.download_ticket t
-                WHERE t.token_hash = %s""",
+            """SELECT user_id, evidence_id, redeemed_at, expired, evidence_case
+                 FROM lab.ticket_by_hash(%s)""",
             (digest,)).fetchone()
         if row is None:
             return "unknown_ticket", None, (evidence_id, None)

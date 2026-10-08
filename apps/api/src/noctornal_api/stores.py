@@ -464,11 +464,13 @@ class PgSessionStore(SessionStore):
         )
 
     def get_by_token_hash(self, token_hash: bytes) -> SessionRecord | None:
+        # Through the definer (rls-6, 0177): the request role cannot read a
+        # session's token hash, binding, address or client, and this runs
+        # before the connection is bound.
         row = self._c.execute(
-            """SELECT id, user_id, token_hash, issued_at, expires_at,
-                      last_seen_at, mfa_satisfied_at, revoked_at, revoke_reason,
-                      ip, user_agent
-                 FROM iam.session WHERE token_hash = %s""",
+            """SELECT id, user_id, issued_at, expires_at, last_seen_at,
+                      mfa_satisfied_at, revoked_at, revoke_reason, ip, user_agent
+                 FROM iam.session_by_token(%s)""",
             (token_hash,),
         ).fetchone()
         if row is None:
@@ -477,13 +479,13 @@ class PgSessionStore(SessionStore):
         # the value carries a netmask, an Address otherwise. `.ip` on an
         # Interface is the Address; on an Address there is no such
         # attribute, so fall back to the object itself.
-        ip = row[9]
+        ip = row[8]
         return SessionRecord(
-            id=row[0], user_id=row[1], token_hash=bytes(row[2]),
-            issued_at=row[3], expires_at=row[4], last_seen_at=row[5],
-            mfa_satisfied_at=row[6], revoked_at=row[7], revoke_reason=row[8],
+            id=row[0], user_id=row[1], token_hash=bytes(token_hash),
+            issued_at=row[2], expires_at=row[3], last_seen_at=row[4],
+            mfa_satisfied_at=row[5], revoked_at=row[6], revoke_reason=row[7],
             ip=str(getattr(ip, "ip", ip)) if ip is not None else None,
-            user_agent=row[10],
+            user_agent=row[9],
         )
 
     def slide(self, session_id: UUID, at: datetime,
