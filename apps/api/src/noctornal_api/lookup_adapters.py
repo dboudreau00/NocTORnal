@@ -42,6 +42,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from noctornal_api.security.access import TLP_NAMES
 from noctornal_ontology import normalise
 
 if TYPE_CHECKING:  # annotations only: this module imports no network code
@@ -60,7 +61,7 @@ ERROR_SUMMARY_MAX = 200
 _MISP_TLP = {"tlp:clear": "CLEAR", "tlp:white": "CLEAR", "tlp:green": "GREEN",
              "tlp:amber": "AMBER", "tlp:amber+strict": "AMBER_STRICT",
              "tlp:red": "RED"}
-_TLP_ORDER = ("CLEAR", "GREEN", "AMBER", "AMBER_STRICT", "RED")
+_TLP_ORDER = TLP_NAMES
 
 
 class AdapterError(Exception):

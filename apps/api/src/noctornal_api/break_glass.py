@@ -292,7 +292,7 @@ class BreakGlassService:
             self._alert(grant, officers)
         except Exception:  # noqa: BLE001 - the grant stands; the failure is logged
             import logging
-            logging.getLogger(__name__).exception(
+            logging.getLogger("noctornal.break_glass").exception(
                 "break-glass grant %s was recorded but its alert failed", grant.id)
         return grant
 

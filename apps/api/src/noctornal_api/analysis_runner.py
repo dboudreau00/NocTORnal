@@ -136,10 +136,9 @@ class RunnerChoice:
 
 
 def _production(env: Mapping[str, str]) -> bool:
-    # The mode's one spelling is config's (ENV_VAR, PRODUCTION); read the
-    # same way egress._production reads it.
-    from noctornal_api.config import ENV_VAR, PRODUCTION
-    return env.get(ENV_VAR, "").strip().lower() == PRODUCTION
+    # The mode has one reader, config's.
+    from noctornal_api.config import is_production
+    return is_production(env)
 
 
 def setting_problem(env: Mapping[str, str] | None = None) -> str | None:

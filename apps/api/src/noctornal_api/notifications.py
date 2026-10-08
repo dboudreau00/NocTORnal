@@ -81,7 +81,7 @@ from noctornal_api.security.access import (
     tlp_from_name,
 )
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("noctornal.notifications")
 
 IN_APP = "IN_APP"
 SMTP = "SMTP"

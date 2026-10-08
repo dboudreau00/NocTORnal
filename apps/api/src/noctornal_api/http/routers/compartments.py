@@ -36,9 +36,8 @@ Writing the registry, and setting what a user holds, is `user.manage`
 
 The user-side write is here rather than in `routers/admin.py` so that
 the registry and the two things gated on it ship as one surface; the
-refusal mapping mirrors admin's (`409` for a rule, `404` for a user that
-is not there) and is deliberately the same shape, so a client that knows
-one knows both.
+refusal mapping is admin's own (`_refuse`: `409` for a rule, `404` for a
+user that is not there), so a client that knows one knows both.
 
 ## Rename and retire (sec-compartment-retirement, 2026-09-23)
 
@@ -75,6 +74,7 @@ from noctornal_api.http.deps import (
 )
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
+from noctornal_api.http.routers.admin import _refuse
 from noctornal_api.iam_admin import AdminError, IamAdminService
 
 router = APIRouter(prefix="/compartments", tags=["compartments"])
@@ -90,16 +90,6 @@ class UserCompartmentsBody(BaseModel):
     delta, so a stale panel that re-submits what it last saw cannot
     silently add or remove a read-in it did not know about."""
     compartments: list[str]
-
-
-def _refuse(exc: AdminError) -> Problem:
-    """409 for a rule, 404 for a user that is not there -- the same split
-    `routers/admin.py` makes, for the same reason: naming a user id that
-    does not exist is not a conflict about state."""
-    detail = safe_detail(exc)
-    if "no such user" in str(exc):
-        return Problem(404, "Not found", detail)
-    return Problem(409, "Conflict", detail)
 
 
 #: What an unprivileged caller is told about a compartment it holds. The

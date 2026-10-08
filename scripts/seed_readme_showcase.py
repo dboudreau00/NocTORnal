@@ -1175,9 +1175,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="the SECURITY_OFFICER who reviews break-glass")
     args = parser.parse_args(argv)
 
-    from noctornal_api.config import ENV_VAR, PRODUCTION
+    from noctornal_api.config import ENV_VAR, PRODUCTION, is_production
 
-    if os.environ.get(ENV_VAR, "").strip().lower() == PRODUCTION:
+    if is_production():
         # It creates accounts and a break-glass grant. Development only is a
         # rule here, not a hint in a docstring.
         print(f"refused: {ENV_VAR}={PRODUCTION}. This writes fictional "

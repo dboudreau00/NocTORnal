@@ -72,10 +72,11 @@ from uuid import UUID
 import psycopg
 from psycopg.types.json import Json, Jsonb
 
+from noctornal_api.config import is_production
 from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.wording import count_of
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("noctornal.persona_acts")
 
 INLINE_ENV = "NOCTORNAL_COLLECTOR_INLINE"
 WAIT_ENV = "NOCTORNAL_ACT_WAIT_SECONDS"
@@ -165,7 +166,7 @@ def _truthy(value: str) -> bool:
 
 
 def _production() -> bool:
-    return os.environ.get("NOCTORNAL_ENV", "").strip().lower() == "production"
+    return is_production()
 
 
 def inline_requested(env=None) -> bool:

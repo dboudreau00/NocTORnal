@@ -1813,7 +1813,7 @@ class IngestService:
             except Exception:  # noqa: BLE001 - see the docstring
                 import logging
 
-                logging.getLogger(__name__).warning(
+                logging.getLogger("noctornal.ingest").warning(
                     "could not raise FEED_SELECTOR_HIT for case %s", case_id,
                     exc_info=True)
 

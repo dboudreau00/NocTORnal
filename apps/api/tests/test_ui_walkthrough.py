@@ -275,7 +275,8 @@ def test_the_demo_command_is_the_one_bootstrap_and_the_installer_give():
     assert '"demo-network"' in boot
     for flag in ("--owner-email", "--code", "--classification"):
         assert f'"{flag}"' in boot, flag
-    assert '_TLP_NAMES = ("CLEAR",' in boot
+    assert "_TLP_NAMES = TLP_NAMES" in boot, "the levels are access.TLP_NAMES, spelt nowhere else"
+    assert "choices=_TLP_NAMES" in boot
     assert ("'.venv/bin/python scripts/bootstrap.py demo-network "
             "--owner-email '") in block
     assert "' --code OP-LATTICEWORK-26 --classification CLEAR'" in block

@@ -316,6 +316,22 @@ def _in_thread(fn):
     return thread, box
 
 
+def _blocked_on_a_lock(watcher, other, timeout: float = 20.0) -> bool:
+    """Whether `other`'s backend is waiting on a lock, asked of
+    `pg_stat_activity` until it is or `timeout` passes. These tests used to
+    sleep a second and assume the wait had begun, which is a guess on a
+    loaded host and a second wasted on every other."""
+    pid = other.info.backend_pid
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        row = watcher.execute("SELECT wait_event_type FROM pg_stat_activity "
+                              "WHERE pid = %s", (pid,)).fetchone()
+        if row is not None and row[0] == "Lock":
+            return True
+        time.sleep(0.02)
+    return False
+
+
 def test_a_hold_placed_while_the_purge_runs_wins(conn, owner):
     from noctornal_api.db import connect
 
@@ -330,8 +346,8 @@ def test_a_hold_placed_while_the_purge_runs_wins(conn, owner):
         other.execute('UPDATE core."case" SET legal_hold = true, '
                       "legal_hold_reason = 'court order' WHERE id = %s", (case,))
         thread, box = _in_thread(lambda: _purge(purger, owner))
-        time.sleep(1.0)
-        assert thread.is_alive(), "the purge waits on the citing case's lock"
+        assert _blocked_on_a_lock(conn, purger), "the purge waits on the citing case's lock"
+        assert thread.is_alive()
         other.commit()
         thread.join(timeout=30)
         assert "error" not in box, box.get("error")
@@ -363,8 +379,9 @@ def test_a_citation_of_another_version_made_during_the_purge_waits_and_wins(conn
                          VALUES (%s, %s, 'DIRECT_OBSERVATION', %s, %s)""",
                       (case, node, owner, v2))
         thread, box = _in_thread(lambda: _purge(purger, owner))
-        time.sleep(1.0)
-        assert thread.is_alive(), "the purge waits for the citation's key-share lock"
+        assert _blocked_on_a_lock(conn, purger), (
+            "the purge waits for the citation's key-share lock")
+        assert thread.is_alive()
         other.commit()
         thread.join(timeout=30)
         assert "error" not in box, box.get("error")
@@ -519,14 +536,15 @@ def test_a_hold_that_waited_on_the_purge_does_not_report_a_destroyed_document(co
         other.autocommit = False
         other.execute('UPDATE core."case" SET title = title WHERE id = %s', (case,))
         purging, purged_box = _in_thread(lambda: _purge(purger, owner))
-        time.sleep(1.0)
-        assert purging.is_alive(), "the purge waits on the citing case"
+        assert _blocked_on_a_lock(conn, purger), "the purge waits on the citing case"
+        assert purging.is_alive()
         holding, held_box = _in_thread(
             lambda: RetentionService(holder).set_document_legal_hold(
                 doc, actor_id=owner, on=True, reason="preservation order 9",
                 clearance="RED"))
-        time.sleep(1.0)
-        assert holding.is_alive(), "the hold waits on the purge's version locks"
+        assert _blocked_on_a_lock(conn, holder), (
+            "the hold waits on the purge's version locks")
+        assert holding.is_alive()
         other.commit()
         purging.join(timeout=30)
         holding.join(timeout=30)

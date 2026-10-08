@@ -32,6 +32,7 @@ from noctornal_api.http.deps import (
 )
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
+from noctornal_api.security.access import TLP_NAMES
 from noctornal_api.security.egress_seal import ExitEndpoint
 
 router = APIRouter(prefix="/admin/egress", tags=["admin"])
@@ -42,7 +43,7 @@ _WRITE = [Depends(rate_limit("admin.egress"))]
 
 
 class PolicyBody(BaseModel):
-    ceiling: Literal["CLEAR", "GREEN", "AMBER", "AMBER_STRICT", "RED"] | None = None
+    ceiling: Literal[*TLP_NAMES] | None = None
     allowed_ports: list[int] | None = Field(default=None, max_length=16)
     any_public_host: bool | None = None
     allowed_host_suffixes: list[str] | None = Field(default=None, max_length=64)
@@ -60,7 +61,7 @@ class CreateProfileBody(BaseModel):
     region: str | None = Field(default=None, max_length=80)
     # Required, with no default: the label a profile may carry is a
     # decision, and a default here would be one nobody took.
-    ceiling: Literal["CLEAR", "GREEN", "AMBER", "AMBER_STRICT", "RED"]
+    ceiling: Literal[*TLP_NAMES]
     policy: PolicyBody = Field(default_factory=PolicyBody)
 
 

@@ -472,6 +472,31 @@ def _backs_counts(ev: str) -> str:
                    AND {_live_edge('bg')}) AS backs_edges"""
 
 
+def _backs_nothing(alias: str) -> str:
+    """A boolean: the exhibit aliased `alias` backs nothing the reader would
+    see drawn. `_backs_counts`' rule, asked as an existence test: a purged
+    exhibit backs nothing, and an exhibit backs an element a live claim or a
+    link attaches it to while the element is drawn.
+
+    This is what the case-wide "backs nothing" figure and filter ask of every
+    exhibit, so it stops at the first live attachment instead of counting
+    them all (docs/17, the register grows with the case: counting for every
+    exhibit took 1.4 s warm and 5.7 s cold at 15,300 exhibits, this 0.12 s
+    and 0.42 s). What each exhibit backs, as numbers, is counted for the
+    page's own rows only."""
+    return f"""({alias}.purged_at IS NOT NULL OR NOT (
+          EXISTS (SELECT 1 FROM core.assertion ba JOIN core.node bn ON bn.id = ba.node_id
+                   WHERE ba.evidence_id = {alias}.id AND ba.retracted_at IS NULL
+                     AND {_live_node('bn')})
+          OR EXISTS (SELECT 1 FROM core.evidence_link bl JOIN core.node bn ON bn.id = bl.node_id
+                      WHERE bl.evidence_id = {alias}.id AND {_live_node('bn')})
+          OR EXISTS (SELECT 1 FROM core.assertion ba JOIN core.edge bg ON bg.id = ba.edge_id
+                      WHERE ba.evidence_id = {alias}.id AND ba.retracted_at IS NULL
+                        AND {_live_edge('bg')})
+          OR EXISTS (SELECT 1 FROM core.evidence_link bl JOIN core.edge bg ON bg.id = bl.edge_id
+                      WHERE bl.evidence_id = {alias}.id AND {_live_edge('bg')})))"""
+
+
 def _visible_exhibit(alias: str) -> str:
     return f"""{alias}.case_id = %(case)s
                AND {alias}.classification <= %(clr)s::core.tlp
@@ -735,29 +760,39 @@ def exhibit_register(conn: psycopg.Connection, *, case_id: UUID, clearance: str,
     so a test can call it without a request."""
     binds = {"case": case_id, "clr": clearance, "comp": list(compartments),
              "q": _like(q) if q else None, "id": evidence_id,
-             "nothing": backs_nothing, "off": offset, "lim": limit}
-    reg = f"""SELECT e.*, {_backs_counts('e.id')}
-                FROM core.evidence e WHERE {_visible_exhibit('e')}"""
+             "off": offset, "lim": limit}
+    visible = _visible_exhibit("e")
+    # The case-wide figure is an existence test per exhibit; what each
+    # exhibit backs, as numbers, is counted below for the page's rows only.
     totals = conn.execute(
-        f"""SELECT count(*),
-                   count(*) FILTER (WHERE r.backs_nodes + r.backs_edges = 0)
-              FROM ({reg}) r""", binds).fetchone()
-    where = """(%(q)s::text IS NULL OR r.title ILIKE %(q)s
-                 OR coalesce(r.description, '') ILIKE %(q)s)
-               AND (%(id)s::uuid IS NULL OR r.id = %(id)s)
-               AND (NOT %(nothing)s OR r.backs_nodes + r.backs_edges = 0)"""
-    matching = conn.execute(
-        f"SELECT count(*) FROM ({reg}) r WHERE {where}", binds).fetchone()[0]
+        f"""SELECT count(*), count(*) FILTER (WHERE {_backs_nothing('e')})
+              FROM core.evidence e WHERE {visible}""", binds).fetchone()
+    where = """(%(q)s::text IS NULL OR e.title ILIKE %(q)s
+                 OR coalesce(e.description, '') ILIKE %(q)s)
+               AND (%(id)s::uuid IS NULL OR e.id = %(id)s)"""
+    if backs_nothing:
+        where += f" AND {_backs_nothing('e')}"
+    if q or evidence_id is not None:
+        matching = conn.execute(
+            f"SELECT count(*) FROM core.evidence e WHERE {visible} AND {where}",
+            binds).fetchone()[0]
+    else:
+        # No text and no id: every exhibit matches, or every unbacked one,
+        # which the totals have just counted.
+        matching = totals[1] if backs_nothing else totals[0]
     rows = conn.execute(
         f"""SELECT r.id, r.title, r.media_type, r.byte_size, r.sha256,
                    r.classification, r.acquisition_method, r.acquired_at,
                    r.acquired_by, au.display_name, r.created_at,
                    r.description, r.source_url, r.is_worm_locked,
                    r.retention_until, r.legal_hold, r.is_hostile_markup,
-                   r.purged_at, r.backs_nodes, r.backs_edges,
+                   r.purged_at, bk.backs_nodes, bk.backs_edges,
                    acq.detail, chk.occurred_at, chk.hash_verified,
                    cu.display_name, lk.lock_ends_at
-              FROM ({reg}) r
+              FROM (SELECT e.* FROM core.evidence e WHERE {visible} AND {where}
+                     ORDER BY e.acquired_at DESC, e.id
+                    OFFSET %(off)s LIMIT %(lim)s) r
+              CROSS JOIN LATERAL (SELECT {_backs_counts('r.id')}) bk
               LEFT JOIN iam.app_user au ON au.id = r.acquired_by
               LEFT JOIN LATERAL (
                    SELECT c.detail FROM core.evidence_custody c
@@ -770,9 +805,7 @@ def exhibit_register(conn: psycopg.Connection, *, case_id: UUID, clearance: str,
                     WHERE c.evidence_id = r.id AND c.action = 'HASH_VERIFIED'
                     ORDER BY c.occurred_at DESC, c.id DESC LIMIT 1) chk ON true
               LEFT JOIN iam.app_user cu ON cu.id = chk.actor_id
-             WHERE {where}
-             ORDER BY r.acquired_at DESC, r.id
-             OFFSET %(off)s LIMIT %(lim)s""", binds).fetchall()
+             ORDER BY r.acquired_at DESC, r.id""", binds).fetchall()
     at = now or datetime.now(timezone.utc)
     short_before, target = case_lock_bounds(conn, case_id, at)
     items = []

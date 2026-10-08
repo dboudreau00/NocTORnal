@@ -25,15 +25,15 @@ import pytest
 
 import capev2_stub
 from lab_static_fixtures import MemoryStore, make_user
+from rolled_back import rolled_back
 from screening_fixtures import (
     MemoryPreservation,
-    assert_scrubbed,
     declare,
     import_list,
     listed,
     payload,
-    scrub,
     service,
+    stand_alone,
 )
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
@@ -49,12 +49,13 @@ def authorities(monkeypatch):
 
 @pytest.fixture
 def conn():
-    from noctornal_api.db import connect
-    c = connect()
-    yield c
-    scrub(c, PREFIX)
-    assert_scrubbed(c, PREFIX)
-    c.close()
+    """One transaction, rolled back: the rows this suite makes are never
+    committed, and what other suites left (an active list, a sample no pass
+    reached) is hidden inside it, so no test here skips for the state of the
+    database (docs/17, test isolation)."""
+    with rolled_back() as c:
+        stand_alone(c)
+        yield c
 
 
 def _row(conn, name):
@@ -67,16 +68,7 @@ def _screening(conn):
     return _prohibited_content_screening(conn)
 
 
-def _other_lists(conn) -> bool:
-    return conn.execute("""SELECT EXISTS (SELECT 1 FROM lab.screening_list l
-                             JOIN iam.app_user u ON u.id = l.imported_by
-                            WHERE l.retired_at IS NULL
-                              AND u.email NOT LIKE 'scrr-%')""").fetchone()[0]
-
-
 def test_no_list_passes_with_the_c3_caveat(conn):
-    if _other_lists(conn):
-        pytest.skip("another list is active on this database")
     check = _screening(conn)
     assert check.ok and "docs/16 C3" in check.caveat
 
@@ -120,8 +112,7 @@ def test_a_pass_names_the_exact_hash_limit(conn):
     officer = make_user(conn, PREFIX, roles=("SECURITY_OFFICER",))
     import_list(conn, officer, listed(payload("ok")), name="Readiness list")
     check = _screening(conn)
-    if not check.ok:
-        pytest.skip("this database holds samples the pass has not reached")
+    assert check.ok, check.evidence
     assert EXACT_HASH_SENTENCE in check.evidence and "Readiness list" in check.evidence
     assert "Archive members are screened only where the Lab expands" in check.evidence
 
@@ -136,8 +127,7 @@ def test_the_policy_row_carries_the_screening_clause(conn):
 def test_the_preservation_bucket_is_probed_under_destroy_while_a_list_is_active(conn, monkeypatch):
     from noctornal_api.readiness import _preservation_bucket_object_lock
     monkeypatch.setenv("NOCTORNAL_REJECTED_SAMPLE_DISPOSITION", "destroy")
-    if not _other_lists(conn):
-        assert "not probed" in _preservation_bucket_object_lock(conn).evidence
+    assert "not probed" in _preservation_bucket_object_lock(conn).evidence
     officer = make_user(conn, PREFIX, roles=("SECURITY_OFFICER",))
     import_list(conn, officer, listed(payload("probe")))
     assert "not probed" not in _preservation_bucket_object_lock(conn).evidence
@@ -246,15 +236,13 @@ def test_a_bytes_not_found_caveat_clears_on_a_review_after_the_absence(conn, mon
     assert [service(conn, empty, held).preserve_screened(s.id)
             for _look in range(2)] == ["pending", "bytes_not_found"]
     check = _screening(conn)
-    if not check.ok:
-        pytest.skip("this database holds samples the pass has not reached")
+    assert check.ok, check.evidence
     assert "neither store" in check.caveat
     result = conn.execute("SELECT id FROM lab.screening_result WHERE sample_id = %s "
                           "AND outcome = 'MATCH'", (s.id,)).fetchone()[0]
     screening.ScreeningService(conn).review(result, actor_id=officer,
                                             action="ACKNOWLEDGED")
-    if screening.state(conn).bytes_not_found:
-        pytest.skip("another unanswered absence is held on this database")
+    assert screening.state(conn).bytes_not_found == 0
     assert "neither store" not in _screening(conn).caveat
 
 

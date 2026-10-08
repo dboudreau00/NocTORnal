@@ -33,6 +33,7 @@ from noctornal_api.http.deps import (
 )
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import rate_limit
+from noctornal_api.security.access import TLP_NAMES
 
 router = APIRouter(prefix="/cases/{case_id}/lookups", tags=["lookups"])
 
@@ -155,7 +156,7 @@ def authorisers(
     row = conn.execute('SELECT classification, compartments FROM core."case" WHERE id = %s',
                        (case_id,)).fetchone()
     wanted = classification or row[0]
-    order = ("CLEAR", "GREEN", "AMBER", "AMBER_STRICT", "RED")
+    order = TLP_NAMES
     if order.index(wanted) > order.index(clearance.name):
         wanted = clearance.name
     if order.index(wanted) < order.index(row[0]):

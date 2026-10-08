@@ -77,12 +77,13 @@ from noctornal_api import embedders as E
 from noctornal_api.cases import CONTENT_READ_ONLY_STATES
 from noctornal_api.egress import Destination, can_egress
 from noctornal_api.ingest import HIGH_RISK_CATEGORIES
+from noctornal_api.security.access import TLP_NAMES
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("noctornal.embeddings")
 
 KINDS = ("document", "evidence", "assertion")
 SLOTS = (1, 2, 3)
-LEVELS = ("CLEAR", "GREEN", "AMBER", "AMBER_STRICT", "RED")
+LEVELS = TLP_NAMES
 BATCH_BUILTIN = 64
 CLEAR_CHUNK = 20_000
 FAILED_BATCHES_END_PASS = 3

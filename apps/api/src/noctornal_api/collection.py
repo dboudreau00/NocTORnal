@@ -2752,7 +2752,7 @@ class CollectionService:
             except Exception:  # noqa: BLE001 - must not mask the real failure
                 import logging
 
-                logging.getLogger(__name__).warning(
+                logging.getLogger("noctornal.collection").warning(
                     "advisory unlock failed for source %s; if the connection "
                     "is still usable the poll lock is stranded until this "
                     "process exits", source_id, exc_info=True)
@@ -2941,7 +2941,7 @@ class CollectionService:
             except Exception:  # noqa: BLE001 - must not mask the real failure
                 import logging
 
-                logging.getLogger(__name__).warning(
+                logging.getLogger("noctornal.collection").warning(
                     "could not finish run %s after a failure", run_id,
                     exc_info=True)
             raise
@@ -3052,7 +3052,7 @@ class CollectionService:
         except Exception as exc:  # noqa: BLE001 - never changes the run
             import logging
 
-            logging.getLogger(__name__).warning(
+            logging.getLogger("noctornal.collection").warning(
                 "adapter %s settle raised %s", _attr(adapter, "key"),
                 type(exc).__name__)
         return result
@@ -3431,7 +3431,7 @@ class CollectionService:
         except Exception:  # noqa: BLE001 - a refused put is a named gap
             import logging
 
-            logging.getLogger(__name__).warning(
+            logging.getLogger("noctornal.collection").warning(
                 "raw markup put refused for one document", exc_info=True)
             return None, "refused"
         self._c.execute(
@@ -3455,7 +3455,7 @@ class CollectionService:
         except Exception:  # noqa: BLE001 - best effort, logged
             import logging
 
-            logging.getLogger(__name__).warning(
+            logging.getLogger("noctornal.collection").warning(
                 "could not delete unreferenced raw object %s", key)
 
     def _mark_deleted(self, source_id: UUID, ids: list[str]) -> int:
@@ -4888,7 +4888,7 @@ class PersonaGate:
         except Exception:  # noqa: BLE001 - must not mask the real failure
             import logging
 
-            logging.getLogger(__name__).warning(
+            logging.getLogger("noctornal.collection").warning(
                 "persona unlock failed for %s", self.persona_id, exc_info=True)
 
 

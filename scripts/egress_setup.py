@@ -66,6 +66,7 @@ from noctornal_api import egress, egress_ledger  # noqa: E402
 from noctornal_api.config import published_credentials  # noqa: E402
 from noctornal_api.egress_admin import EgressAdminError, EgressAdminService  # noqa: E402
 from noctornal_api.security import egress_seal  # noqa: E402
+from noctornal_api.security.access import TLP_NAMES  # noqa: E402
 
 VIA = "scripts/egress_setup.py"
 PROD_DIR = Path(__file__).resolve().parent.parent / "infra" / "production"
@@ -397,13 +398,11 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--kind", required=True, choices=("RESIDENTIAL", "DATACENTRE",
                                                            "TOR", "VPN"))
     create.add_argument("--region")
-    create.add_argument("--ceiling", required=True,
-                        choices=("CLEAR", "GREEN", "AMBER", "AMBER_STRICT", "RED"))
+    create.add_argument("--ceiling", required=True, choices=TLP_NAMES)
     policy_options(create)
     change = sub.add_parser("profile-policy")
     change.add_argument("--profile", required=True, type=UUID)
-    change.add_argument("--ceiling", choices=("CLEAR", "GREEN", "AMBER", "AMBER_STRICT",
-                                              "RED"))
+    change.add_argument("--ceiling", choices=TLP_NAMES)
     policy_options(change)
     exit_ = sub.add_parser("profile-exit")
     exit_.add_argument("--profile", required=True, type=UUID)

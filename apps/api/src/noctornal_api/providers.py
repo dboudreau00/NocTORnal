@@ -55,6 +55,7 @@ from noctornal_api.db import SystemPurpose, system_connection
 from noctornal_api.egress import RouteUnavailable
 from noctornal_api.egress_policy import Refusal, RoutePolicy, Rule
 from noctornal_api.security import envelope
+from noctornal_api.security.access import TLP_NAMES
 from noctornal_api.wording import count_of
 
 log = logging.getLogger("noctornal.providers")
@@ -70,7 +71,7 @@ _KEY = re.compile(r"^[a-z][a-z0-9_]{1,32}$")
 #: The ceiling each exposure takes by default and at most (0098's CHECKs).
 DEFAULT_CEILING = {"NONE": "GREEN", "VENDOR": "GREEN", "PUBLIC": "CLEAR"}
 MAX_CEILING = {"NONE": "AMBER", "VENDOR": "GREEN", "PUBLIC": "CLEAR"}
-_TLP_ORDER = ("CLEAR", "GREEN", "AMBER", "AMBER_STRICT", "RED")
+_TLP_ORDER = TLP_NAMES
 
 CONSEQUENCES = {
     "NONE": ("Your own instance. The query stays on your network: its route admits it "
@@ -452,7 +453,7 @@ def _check_private_cidr(value, level: str, base_url: str):
         raise ProviderError(f"The base URL and the network do not fit together: "
                             f"{exc}.") from None
     from noctornal_api import config
-    production = os.environ.get(config.ENV_VAR, "").strip().lower() == "production"
+    production = config.is_production()
     try:
         internal = egress_policy.internal_networks(os.environ, production=production)
     except ValueError:

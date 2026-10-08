@@ -49,6 +49,7 @@ from collections.abc import Mapping
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from noctornal_api.config import is_production
 from noctornal_api.security import envelope
 
 KEK_ENV = "NOCTORNAL_PERSONA_KEK"
@@ -110,7 +111,7 @@ def _truthy(value: str) -> bool:
 
 
 def _production(env: Mapping[str, str]) -> bool:
-    return env.get("NOCTORNAL_ENV", "").strip().lower() == "production"
+    return is_production(env)
 
 
 def is_collector(env: Mapping[str, str] | None = None) -> bool:
