@@ -223,6 +223,9 @@ def test_a_claimed_email_without_credentials_is_refused_and_writes_nothing(conn)
     failed = _audit(conn, "AUTH_FAILED", before)
     assert len(failed) == 1 and failed[0][1]["via"] == "scripts/egress_setup.py"
     assert not _audit(conn, "EGRESS_ROUTE_CREATED", before)
+    # A refusal is stored as one (docs/17, "refusals are recorded as SUCCESS").
+    assert conn.execute("SELECT outcome FROM audit.event WHERE action = 'AUTH_FAILED' "
+                        "AND seq > %s", (before,)).fetchall() == [("DENIED",)]
 
 
 @needs_db
@@ -265,9 +268,13 @@ def test_a_recovery_code_is_not_accepted_as_the_second_factor(conn):
 
 @needs_db
 def test_the_operator_must_hold_egress_manage(conn):
-    _uid, email, code, _store = _operator(conn, "SECURITY_OFFICER")
+    uid, email, code, _store = _operator(conn, "SECURITY_OFFICER")
+    before = _seq(conn)
     with pytest.raises(setup.SetupError, match="does not hold egress.manage"):
         _run(["dev-smtp"], answers=[email], secrets=[PASSWORD, code])
+    assert conn.execute("SELECT outcome FROM audit.event WHERE action = 'AUTHZ_DENIED' "
+                        "AND actor_id = %s AND seq > %s", (uid, before)
+                        ).fetchall() == [("DENIED",)]
 
 
 @needs_db

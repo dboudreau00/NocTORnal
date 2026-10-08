@@ -429,7 +429,7 @@ def adopt_cookie(request: Request,
                     "bearer_session_id": str(user.session_id),
                     "cookie_session_id": str(holder.session.id),
                     "cookie_user_id": str(holder.session.user_id)},
-                   request)
+                   request, outcome="DENIED")
             raise Problem(409, "Conflict",
                           "this browser already holds a session for a "
                           "different account; sign out of it before "
@@ -560,7 +560,7 @@ def issue_recovery_codes(
     )
     if not fresh:
         _audit(conn, "RECOVERY_CODES_DENIED", user.user_id,
-               {"reason": "step_up_required"}, request)
+               {"reason": "step_up_required"}, request, outcome="DENIED")
         raise Problem(403, "Forbidden",
                       "re-authenticate with your second factor before "
                       "issuing recovery codes")
@@ -639,12 +639,12 @@ def _change_own_password(body: PasswordChangeBody, request: Request,
         email, body.current_password, body.totp_code)
     if result.outcome is AuthOutcome.SECOND_FACTOR_UNAVAILABLE:
         _audit(conn, "PASSWORD_CHANGE_FAILED", user.user_id,
-               {"reason": result.audit_reason}, request)
+               {"reason": result.audit_reason}, request, outcome="DENIED")
         raise Problem(503, "Service unavailable", SECOND_FACTOR_UNAVAILABLE)
     if not result.ok or result.user_id != user.user_id:
         consume_on_failure(request, "auth.login_failed")
         _audit(conn, "PASSWORD_CHANGE_FAILED", user.user_id,
-               {"reason": result.audit_reason}, request)
+               {"reason": result.audit_reason}, request, outcome="DENIED")
         raise Problem(403, "Forbidden",
                       "the current password or the code is not right. Five "
                       "failures lock the account for 15 minutes.")

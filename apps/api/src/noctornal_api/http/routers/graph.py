@@ -35,7 +35,6 @@ from psycopg.types.json import Json
 from pydantic import BaseModel, Field
 
 from noctornal_api.graph import (
-    HIDDEN_TIES_REFUSAL,
     KEEP,
     REVIEW_STATES,
     AssertionInput,
@@ -44,6 +43,7 @@ from noctornal_api.graph import (
     GraphWriteService,
     TieConfidenceConflict,
     TieReviewUnchanged,
+    hidden_ties_refusal,
 )
 from noctornal_api.http.deps import (
     CurrentUser,
@@ -1330,10 +1330,10 @@ def _refuse_live_merge_target(conn: psycopg.Connection, user: CurrentUser,
     Looked for on the GRAPH_GUARD system connection, because a guard that
     permits on zero must see every merge, and a merge of an entity the
     caller cannot see is hidden from their own (0132). That one is refused
-    in the words of the hidden-ties refusal, which already owns up to
-    material above the caller on purpose (`_refuse_if_ties_above_clearance`)
-    and names nothing, with its status; a merge the caller can see is
-    named."""
+    in the words of the hidden-ties refusal (`hidden_ties_refusal`, which
+    follows the case's `withheld_disclosure` as the other guard does,
+    `_refuse_if_ties_above_clearance`), with its status, so the two cannot be
+    told apart under any setting; a merge the caller can see is named."""
     from noctornal_api.db import SystemPurpose, system_connection
 
     with system_connection(SystemPurpose.GRAPH_GUARD, reuse=conn) as guard:
@@ -1353,7 +1353,7 @@ def _refuse_live_merge_target(conn: psycopg.Connection, user: CurrentUser,
                 f"Retiring it would retire the ties that merge moved here, and "
                 f"reversing the merge later could not bring them back. Reverse "
                 f"the merge first, or retire the merged entities separately.")
-    raise GraphWriteError(HIDDEN_TIES_REFUSAL)
+    raise GraphWriteError(hidden_ties_refusal(conn, case_id))
 
 
 def _node_visible_any_state(conn: psycopg.Connection, user: CurrentUser,

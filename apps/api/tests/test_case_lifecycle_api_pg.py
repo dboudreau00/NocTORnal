@@ -40,6 +40,8 @@ Env-gated on DATABASE_URL.
 from __future__ import annotations
 
 import os
+import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 
@@ -762,6 +764,194 @@ def test_a_liaison_grant_must_end(conn, client):
                            "expires_at": future})
     assert ok.status_code == 200, ok.text
     assert _assignment_count(conn, case_id, liaison_id) == 1
+
+
+# --- a liaison holds one case at a time -------------------------------------
+#
+# docs/05: the external liaison reads a single case. One account could be
+# assigned LIAISON on any number of them until 2026-10-08 (docs/17, "LIAISON
+# is not single-case"; decision 185 had made the grant carry an end and left
+# this open).
+
+def _grant_liaison(client, token, case_id, *, user_id=None, email=None, days=7):
+    body = {"role_key": "LIAISON",
+            "expires_at": (datetime.now(timezone.utc)
+                           + timedelta(days=days)).isoformat()}
+    if user_id is not None:
+        body["user_id"] = str(user_id)
+    if email is not None:
+        body["email"] = email
+    return client.post(f"/api/v1/cases/{case_id}/users", headers=_auth(token),
+                       json=body)
+
+
+def _service_case(conn, owner_id):
+    from noctornal_api.cases import CaseService
+    return CaseService(conn).create(
+        code=f"OP-CLC-{uuid4().hex[:6]}", title="Operation Clockwork",
+        legal_basis="production order 2026-0042", retention_until=date(2028, 1, 1),
+        review_due=date(2027, 1, 1), owner_user_id=owner_id, created_by=owner_id)
+
+
+def test_a_liaison_holds_one_case_at_a_time(conn, client):
+    owner_a, case_a = _open_case(conn, client)
+    owner_b, case_b = _open_case(conn, client)
+    liaison_id, _, _ = _make_user(conn, clearance="AMBER")
+
+    assert _grant_liaison(client, owner_a, case_a,
+                          user_id=liaison_id).status_code == 200
+
+    refused = _grant_liaison(client, owner_b, case_b, user_id=liaison_id)
+    assert refused.status_code == 400, refused.text
+    assert refused.headers["content-type"].startswith("application/problem+json")
+    detail = refused.json()["detail"]
+    assert "another case" in detail and "liaison" in detail
+    # The other case is named to nobody: its lead is not on this one.
+    code_a = conn.execute('SELECT code FROM core."case" WHERE id = %s',
+                          (case_a,)).fetchone()[0]
+    assert code_a not in detail and case_a not in detail
+    assert _assignment_count(conn, case_b, liaison_id) == 0
+    assert _assignment_count(conn, case_a, liaison_id) == 1
+
+    # The same case is not a second one: the end date can still be moved.
+    moved = _grant_liaison(client, owner_a, case_a, user_id=liaison_id, days=30)
+    assert moved.status_code == 200, moved.text
+    # And only the LIAISON role is single-case: another role on the second
+    # case is an ordinary grant.
+    other = client.post(f"/api/v1/cases/{case_b}/users", headers=_auth(owner_b),
+                        json={"user_id": str(liaison_id), "role_key": "READ_ONLY"})
+    assert other.status_code == 200, other.text
+
+
+def test_an_ended_or_revoked_liaison_grant_holds_nobody(conn, client):
+    """Live is the gate's own test: no end, or an end still to come."""
+    owner_a, case_a = _open_case(conn, client)
+    owner_b, case_b = _open_case(conn, client)
+    ended_id, _, _ = _make_user(conn, clearance="AMBER")
+    revoked_id, _, _ = _make_user(conn, clearance="AMBER")
+
+    # A raw row, because the API will not make a grant that is already over.
+    _assign(conn, case_a, ended_id, "LIAISON", ended_id,
+            expires_at=datetime.now(timezone.utc) - timedelta(days=1))
+    assert _grant_liaison(client, owner_b, case_b,
+                          user_id=ended_id).status_code == 200
+
+    assert _grant_liaison(client, owner_a, case_a,
+                          user_id=revoked_id).status_code == 200
+    gone = client.delete(f"/api/v1/cases/{case_a}/users/{revoked_id}",
+                         headers=_auth(owner_a))
+    assert gone.status_code == 200, gone.text
+    assert _grant_liaison(client, owner_b, case_b,
+                          user_id=revoked_id).status_code == 200
+
+
+def test_a_liaison_named_by_address_is_refused_without_saying_why(conn, client):
+    """The address is guessable, so by it the refusal must not tell any
+    `case.grant` holder that a colleague is a live liaison on some other case.
+    It is recorded, as every refused share by address is, and as a refusal."""
+    owner_a, case_a = _open_case(conn, client)
+    owner_b, case_b = _open_case(conn, client)
+    liaison_id, email, _ = _make_user(conn, clearance="AMBER")
+    assert _grant_liaison(client, owner_a, case_a,
+                          user_id=liaison_id).status_code == 200
+
+    refused = _grant_liaison(client, owner_b, case_b, email=email)
+    assert refused.status_code == 400, refused.text
+    detail = refused.json()["detail"].lower()
+    assert "liaison" not in detail and "another case" not in detail
+    assert _assignment_count(conn, case_b, liaison_id) == 0
+    rows = conn.execute(
+        """SELECT outcome, detail->>'reason', detail->>'email' FROM audit.event
+            WHERE action = 'CASE_SHARE_REFUSED' AND case_id = %s ORDER BY seq""",
+        (case_b,)).fetchall()
+    assert rows == [("DENIED", "role_held_on_another_case", email)]
+
+
+def test_the_service_refuses_a_second_live_liaison_whoever_calls_it(conn):
+    from noctornal_api.cases import CaseService, RoleHeldOnAnotherCase
+    owner_a, _, _ = _make_user(conn, clearance="AMBER")
+    owner_b, _, _ = _make_user(conn, clearance="AMBER")
+    liaison_id, _, _ = _make_user(conn, clearance="AMBER")
+    case_a, case_b = _service_case(conn, owner_a), _service_case(conn, owner_b)
+    end = datetime.now(timezone.utc) + timedelta(days=7)
+    svc = CaseService(conn)
+
+    # A grant from before decision 185 has no end, and is live while it stands.
+    _assign(conn, case_a, liaison_id, "LIAISON", owner_a, expires_at=None)
+    with pytest.raises(RoleHeldOnAnotherCase):
+        svc.assign_user(case_b, liaison_id, "LIAISON", granted_by=owner_b,
+                        expires_at=end)
+    with pytest.raises(RoleHeldOnAnotherCase):
+        svc.assign_user_checked(case_b, liaison_id, "LIAISON", granted_by=owner_b,
+                                expires_at=end)
+    assert _assignment_count(conn, case_b, liaison_id) == 0
+    # The refusal rolled its transaction back whole: the connection is usable
+    # and the first grant is as it was.
+    assert _assignment_count(conn, case_a, liaison_id) == 1
+
+    svc.revoke_user(case_a, liaison_id, revoked_by=owner_a)
+    svc.assign_user(case_b, liaison_id, "LIAISON", granted_by=owner_b,
+                    expires_at=end)
+    assert _assignment_count(conn, case_b, liaison_id) == 1
+
+
+def _wait_for_an_advisory_wait(conn, seconds: float = 20.0) -> None:
+    """Until some session of this database is waiting on an advisory lock."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        waiting = conn.execute(
+            """SELECT count(*) FROM pg_locks
+                WHERE locktype = 'advisory' AND NOT granted
+                  AND database = (SELECT oid FROM pg_database
+                                   WHERE datname = current_database())"""
+        ).fetchone()[0]
+        if waiting:
+            return
+        time.sleep(0.05)
+    raise AssertionError("the second grant never waited for the account's lock")
+
+
+def test_two_leads_granting_one_liaison_at_once_cannot_both_succeed(conn):
+    """The check and the write are one transaction under a lock per account
+    and role. The first grant is held open; the second must wait for it, and
+    then see it. With no lock both read an account that holds nothing and the
+    second is granted (the audit chain's own lock makes the second wait either
+    way, so it is the outcome that tells the two apart)."""
+    from noctornal_api.cases import CaseService, RoleHeldOnAnotherCase
+    from noctornal_api.db import connect
+    owner_a, _, _ = _make_user(conn, clearance="AMBER")
+    owner_b, _, _ = _make_user(conn, clearance="AMBER")
+    liaison_id, _, _ = _make_user(conn, clearance="AMBER")
+    case_a, case_b = _service_case(conn, owner_a), _service_case(conn, owner_b)
+    end = datetime.now(timezone.utc) + timedelta(days=7)
+    first, second = connect(), connect()
+    result: dict = {}
+
+    def late() -> None:
+        try:
+            CaseService(second).assign_user(case_b, liaison_id, "LIAISON",
+                                            granted_by=owner_b, expires_at=end)
+            result["second"] = "granted"
+        except RoleHeldOnAnotherCase:
+            result["second"] = "refused"
+        except Exception as exc:  # noqa: BLE001 - reported by the assert below
+            result["second"] = repr(exc)
+
+    worker = threading.Thread(target=late)
+    try:
+        with first.transaction():
+            CaseService(first).assign_user(case_a, liaison_id, "LIAISON",
+                                           granted_by=owner_a, expires_at=end)
+            worker.start()
+            _wait_for_an_advisory_wait(conn)
+            assert "second" not in result, "the second grant did not wait"
+        worker.join(timeout=30)
+    finally:
+        first.close()
+        second.close()
+    assert result == {"second": "refused"}
+    assert _assignment_count(conn, case_a, liaison_id) == 1
+    assert _assignment_count(conn, case_b, liaison_id) == 0
 
 
 def test_an_expiry_with_no_offset_is_refused_and_not_guessed(conn, client):

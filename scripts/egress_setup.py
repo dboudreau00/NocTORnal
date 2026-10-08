@@ -99,9 +99,12 @@ def _via() -> dict:
 
 
 def _auth_failed(conn, user_id, reason: str, email: str) -> None:
+    # A refusal, stored as one (outcome DENIED), as the console's sign-in
+    # stores its own (docs/17, "refusals are recorded as SUCCESS").
     conn.execute(
-        """INSERT INTO audit.event (actor_id, actor_kind, action, object_type, detail)
-           VALUES (%s, %s, 'AUTH_FAILED', 'auth', %s)""",
+        """INSERT INTO audit.event
+               (actor_id, actor_kind, action, object_type, outcome, detail)
+           VALUES (%s, %s, 'AUTH_FAILED', 'auth', 'DENIED', %s)""",
         (user_id, "USER" if user_id else "SYSTEM",
          Json({"reason": reason, "email": email, **_via()})))
 
@@ -142,8 +145,9 @@ def sign_in(conn, *, need: str, ask=input, secret=getpass.getpass) -> tuple[UUID
         (result.user_id, need)).fetchone()[0]
     if not held:
         conn.execute(
-            """INSERT INTO audit.event (actor_id, actor_kind, action, object_type, detail)
-               VALUES (%s, 'USER', 'AUTHZ_DENIED', 'auth', %s)""",
+            """INSERT INTO audit.event
+                   (actor_id, actor_kind, action, object_type, outcome, detail)
+               VALUES (%s, 'USER', 'AUTHZ_DENIED', 'auth', 'DENIED', %s)""",
             (result.user_id, Json({"permission": need, "scope": "global", **_via()})))
         raise SetupError(f"This account does not hold {need}.")
     return result.user_id, _via()

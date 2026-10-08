@@ -379,12 +379,14 @@ def test_a_hand_off_cannot_replace_another_accounts_cookie_session(conn, client)
     assert me.json()["user_id"] == str(victim_id)
 
     row = conn.execute(
-        """SELECT actor_id, detail FROM audit.event
+        """SELECT actor_id, detail, outcome FROM audit.event
             WHERE action = 'AUTH_COOKIE_ADOPT_REFUSED' AND actor_id = %s
             ORDER BY seq DESC LIMIT 1""", (attacker_id,)).fetchone()
     assert row, "the refusal left no audit row"
     assert row[1]["cookie_user_id"] == str(victim_id)
     assert row[1]["bearer_session_id"] == str(attacker_record.id)
+    # A refusal is stored as one (docs/17, "refusals are recorded as SUCCESS").
+    assert row[2] == "DENIED"
 
     # Refused, not revoked.
     still = client.get("/api/v1/auth/me",

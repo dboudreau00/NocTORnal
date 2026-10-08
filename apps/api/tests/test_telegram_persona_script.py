@@ -149,10 +149,12 @@ def test_the_script_refuses_an_operator_who_does_not_sign_in(conn, monkeypatch, 
     done, out, err = _run(monkeypatch, capsys, op, ["enrol", "--persona", str(pid)],
                           password="not-the-password", factory=tf.FakeFactory(_fx()))
     assert done == 1 and err.strip() == "The sign-in did not verify." and out == ""
-    detail = conn.execute(
-        """SELECT detail FROM audit.event WHERE action = 'AUTH_FAILED'
-              AND detail->>'email' = %s""", (op.email,)).fetchone()[0]
+    detail, outcome = conn.execute(
+        """SELECT detail, outcome FROM audit.event WHERE action = 'AUTH_FAILED'
+              AND detail->>'email' = %s""", (op.email,)).fetchone()
     assert detail["via"] == "scripts/telegram_persona.py"
+    # A refusal is stored as one (docs/17, "refusals are recorded as SUCCESS").
+    assert outcome == "DENIED"
     assert _row(conn, pid)[2] in (None, 0)
 
 
@@ -202,6 +204,9 @@ def test_the_operator_must_hold_collection_account_manage(conn, monkeypatch, cap
     op = Operator(conn, roles=("ANALYST",))
     done, _out, err = _run(monkeypatch, capsys, op, ["enrol", "--persona", str(_fresh(conn))])
     assert done == 1 and "collection_account.manage" in err
+    assert conn.execute(
+        """SELECT outcome FROM audit.event WHERE action = 'AUTHZ_DENIED'
+              AND actor_id = %s""", (op.id,)).fetchall() == [("DENIED",)]
 
 
 # --- enrol -------------------------------------------------------------------------
