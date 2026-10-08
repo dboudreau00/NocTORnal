@@ -269,7 +269,6 @@ def test_the_socket_pushes_nothing_about_an_element_above_the_subscriber(owner, 
         with client.websocket_connect("/api/v1/live") as ws:
             ws.send_json({"token": token, "case_id": str(case_id)})
             assert ws.receive_json()["type"] == "ready"
-            time.sleep(1.0)      # the hub's LISTEN registers after `ready`
             # Restricted activity: a RED entity, a compartmented one, and a
             # tie between an AMBER entity and a RED one.
             a = s.node(owner, case_id, lead, "amber anchor", "AMBER")
@@ -301,7 +300,6 @@ def test_a_subscriber_cleared_for_the_restricted_element_is_told(owner, world, l
         with client.websocket_connect("/api/v1/live") as ws:
             ws.send_json({"token": token, "case_id": str(case_id)})
             assert ws.receive_json()["type"] == "ready"
-            time.sleep(1.0)      # the hub's LISTEN registers after `ready`
             s.node(owner, case_id, lead, "red for the cleared", "RED")
             assert _until_change(ws) == {"type": "change", "kind": "node", "op": "INSERT"}
 
@@ -605,7 +603,6 @@ def test_the_socket_wakes_a_reader_for_a_proposal_they_may_read_and_not_above(ow
         with client.websocket_connect("/api/v1/live") as ws:
             ws.send_json({"token": token, "case_id": str(case_id)})
             assert ws.receive_json()["type"] == "ready"
-            time.sleep(1.0)      # the hub's LISTEN registers after `ready`
             _propose(owner, case_id, "RED")
             _propose(owner, case_id, "AMBER", document_id=_document(
                 owner, keys=(COMPARTMENTS[0],)))

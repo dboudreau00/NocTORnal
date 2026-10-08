@@ -470,7 +470,7 @@ means break-glass refuses every request because nobody can review one.
 GET /api/v1/admin/readiness
 ```
 
-Forty-five checks, each with the evidence behind it and, when it fails, the
+Forty-six checks, each with the evidence behind it and, when it fails, the
 action that fixes it. It needs `user.manage`, which is a step-up
 permission, so re-enter your second factor first.
 
@@ -504,7 +504,7 @@ register is the one that answers for the deployment.
 
 ### What stays red, and what a red check refuses
 
-Four of the forty-five are **blocking** (`readiness.BLOCKING_CHECKS`):
+Four of the forty-six are **blocking** (`readiness.BLOCKING_CHECKS`):
 `prohibited_content_policy`, `sample_origin_configured`,
 `retention_rules_confirmed` and `security_officer_present`. "Blocking" is
 not a synonym for important, everything in the register is important. It
@@ -548,6 +548,17 @@ that instance's other databases, without reading a value. In production it
 fails when the ACL does not confine the limiter (see
 [The limiter's Redis](#the-limiters-redis)); it is green on this compose
 file's Redis, which nothing else uses.
+
+`proxy_hops_declared` reads `NOCTORNAL_TRUSTED_PROXY_HOPS`, the number of
+proxies in front of the API, which is what the rate limiter, the sign-in audit
+and session binding take the client's address from. It is green at 1, which is
+this compose file's one proxy and what `secrets.env.example` sets, and in
+production it is red when the count is unset or 0: the client's address is
+then whatever the server reports as the peer. This compose file starts uvicorn
+with `--forwarded-allow-ips` for Caddy, so there it is the client's own; a
+deployment started any other way would see the proxy for every client in all
+three. It is not blocking, and a count above the real one is not caught by any
+check, because it lets a client choose its own address.
 
 **1. `prohibited_content_policy`**, `docs/16` L1. Sample ingest is refused
 until `NOCTORNAL_PROHIBITED_CONTENT_POLICY` and
@@ -1541,9 +1552,45 @@ it there. A client that cannot speak TLS 1.3 cannot reach the console. Under
 certificate" once at start: it tries to add its local CA to the container's
 own trust store, which is read-only and which nothing in the container uses.
 
-**Images are pinned by digest**, in `compose.yml` and in the Dockerfile's
-`FROM`, because a tag is whatever its registry says it is at pull time. To
-move one deliberately:
+Caddy compresses the console (`/ui`, 2.3 MiB of static text that goes out as
+about 0.7 MiB) and nothing else: an API answer is what the caller may read with
+what they sent in it, which is what a compression side channel needs. It takes
+the `Server` header off every answer on both hostnames, the application's
+`uvicorn` and its own `Caddy`.
+
+### Upload sizes
+
+The five routes that take a multipart file (an exhibit, a sample, an e-mail
+exhibit, a YARA rule set version and a hash list) are the ones a request with
+a junk credential could make the API write to disk: the body is read into a
+temporary file before the route looks at who sent it, and telling a live
+session from a junk one takes the database. Three settings bound that, and a
+deployment that changes one changes the others:
+
+| Setting | Where | Default | What it bounds |
+|---|---|---|---|
+| `NOCTORNAL_MAX_EVIDENCE_BYTES`, `NOCTORNAL_MAX_SAMPLE_BYTES` | `secrets.env` | 256 MiB each | the largest body the application accepts, and its refusal names the cap |
+| `request_body` `max_size` | `Caddyfile`, the `@uploads` block | `256MiB` | the largest body the proxy passes to those five routes, refused with a 413 that names this setting |
+| `tmpfs` for `/tmp` | `compose.yml`, services `api` and `sample-origin` | `1g` and `64m` | everything those bodies can occupy together, however many requests arrive |
+
+The API's 1 GiB is four workers each holding one upload at the default cap of
+256 MiB. The sample origin refuses every route but the two downloads before it
+reads a body, and those take 2 KiB, so its 64 MiB holds the CA bundle and
+nothing a request can grow. A full `/tmp` fails the upload that found it full
+and nobody else's; it is memory, and Docker frees it with the container.
+
+To accept larger bodies, raise all three before you restart: the caps in
+`secrets.env`, the Caddyfile limit to at least the larger of the two, and
+`/tmp` on the `api` service to one such body per worker. Write the Caddyfile
+limit in `MiB`: Caddy reads `256MB` as 256,000,000 bytes, which is under the
+application's 256 MiB, and a body between the two would be refused by the proxy
+while the application would take it. A body over the proxy's limit is answered
+with a `problem+json` 413 that names the Caddyfile setting, and one over the
+application's cap with the application's own.
+
+**Images are pinned by digest**, in `compose.yml`, in the development compose
+file (`infra/docker-compose.yml`) and in the Dockerfile's `FROM`, because a tag
+is whatever its registry says it is at pull time. To move one deliberately:
 
 ```sh
 docker buildx imagetools inspect caddy:2-alpine        # the digest line is the pin
@@ -1584,7 +1631,10 @@ both names resolve to the same digest, which is how that is checked.
   directory is open work.
 * **No read-only root filesystem, and no memory or process limits, on the
   application services** (the analysis worker has both). The CA bundle and the Lab's child processes write to
-  `/tmp`, and the limits need a sizing for your host.
+  `/tmp`, and the limits need a sizing for your host. `/tmp` itself is a
+  size-limited tmpfs on the API and the sample origin (Upload sizes, above), so
+  what an upload can write there is bounded, and nothing else on the root
+  filesystem is.
 * **Two MinIO service-account secrets are still arguments** of
   `mc admin user svcacct add`, once, the first time each account is created
   (the `SAMPLE_` and `PRESERVE_` keys; the root credential and the database role
@@ -1599,27 +1649,28 @@ both names resolve to the same digest, which is how that is checked.
   that class, and needs the compose file's `context` pointed at the export,
   which this file does not do.
 * **Images and tools that are not digest pinned.** The development stack
-  (`infra/docker-compose.yml`) and the CI workflow's service containers pull by
-  tag, on purpose: they track what a developer's machine and the suite use, and
-  a digest there would only go stale. What each tag resolved to on 2026-10-03,
-  for a reader who wants to compare or to pin one:
+  (`infra/docker-compose.yml`) pins all five of its images by digest, as
+  `compose.yml` does (2026-10-08), and so does the CI step that starts the ACL
+  Redis. The CI workflow's other containers still pull by tag
+  (`pgvector/pgvector:pg16` and `redis:7-alpine` as service containers, and
+  the MinIO, `mc` and Mailpit images in its `docker run` steps), its two
+  actions (`actions/checkout@v4`, `actions/setup-python@v5`) are pinned by tag
+  and not by commit, and the workflow has no `permissions:` block. The installers
+  `pip install` an unpinned `pip`, and the Dockerfile installs whatever `gnupg`
+  Debian ships that day (`docs/17` F34 depends on its version). What each tag
+  resolved to on 2026-10-03, which is the digest the files named below pin:
 
-  | Image (tag) | Pulled by | Digest on 2026-10-03 |
+  | Image (tag) | Pinned in | Digest |
   |---|---|---|
-  | `pgvector/pgvector:pg16` | development stack, CI | `sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b` |
-  | `redis:7-alpine` | development stack, CI | `sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499` |
-  | `ghcr.io/dboudreau00/minio:RELEASE.2025-04-22T22-12-26Z` | development stack | `sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e` |
-  | `ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z` | development stack | `sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727` |
+  | `pgvector/pgvector:pg16` | development stack, `compose.yml` | `sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b` |
+  | `redis:7-alpine` | development stack, `compose.yml` | `sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499` |
+  | `ghcr.io/dboudreau00/minio:RELEASE.2025-04-22T22-12-26Z` | development stack, `compose.yml` | `sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e` |
+  | `ghcr.io/dboudreau00/mc:RELEASE.2025-08-13T08-35-41Z` | development stack, `compose.yml` | `sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727` |
   | `axllent/mailpit:v1.31.0` | development stack | `sha256:c96991d9bef73594c246d89ca81411d4e916f03e76a7d2d72fa2ab5dd3c9ce24` |
 
-  The first four are the digests `compose.yml` pins for production, and a test
-  holds this table to that file, so moving a production pin without updating
-  the table fails the suite. Mailpit is a development mail sink and is not in
-  the production stack. The CI workflow's two actions (`actions/checkout@v4`,
-  `actions/setup-python@v5`) are pinned by tag and the workflow has no
-  `permissions:` block, the installers `pip install` an unpinned `pip`, and the
-  Dockerfile installs whatever `gnupg` Debian ships that day (`docs/17` F34
-  depends on its version).
+  A test holds this table to both files, so moving a pin in the development
+  file or in `compose.yml` without the table fails the suite. Mailpit is a
+  development mail sink and is not in the production stack.
 
 ---
 

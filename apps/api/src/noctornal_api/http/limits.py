@@ -80,12 +80,23 @@ def rate_limiting_disabled() -> bool:
     return setting in _OFF
 
 
-def _trusted_proxy_hops() -> int:
-    raw = os.environ.get("NOCTORNAL_TRUSTED_PROXY_HOPS", "0")
+#: The proxies the operator runs in front of the API (see the module note on
+#: X-Forwarded-For above).
+HOPS_ENV = "NOCTORNAL_TRUSTED_PROXY_HOPS"
+
+
+def trusted_proxy_hops() -> int:
+    """How many proxies sit in front of this process, as the operator said.
+
+    ONE reader for the count: `client_ip` takes the address from it, and the
+    readiness register (`proxy_hops_declared`) reports on it, so the two
+    cannot read the variable differently. Public since 2026-10-08, when the
+    register needed the same answer. Unset, negative or not a number is 0."""
+    raw = os.environ.get(HOPS_ENV, "0")
     try:
         return max(0, int(raw))
     except ValueError:
-        log.warning("NOCTORNAL_TRUSTED_PROXY_HOPS=%r is not a number; treating as 0", raw)
+        log.warning("%s=%r is not a number; treating as 0", HOPS_ENV, raw)
         return 0
 
 
@@ -102,7 +113,7 @@ def client_ip(request: Request) -> str | None:
     built around, silently reading the attacker's value. Found by
     adversarial review.
     """
-    hops = _trusted_proxy_hops()
+    hops = trusted_proxy_hops()
     if hops:
         lines = request.headers.getlist("x-forwarded-for")
         forwarded = ", ".join(line for line in lines if line)

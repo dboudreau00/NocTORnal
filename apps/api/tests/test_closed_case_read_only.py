@@ -99,7 +99,10 @@ CONTENT = {
     ("POST", "/cases/{case_id}/curation/sets/{set_id}/members"),
     ("DELETE", "/cases/{case_id}/curation/sets/{set_id}/members/{node_id}"),
     ("POST", "/samples"),
-    ("POST", "/ingest/batches/{batch_id}/parse"),
+    # `POST /ingest/batches/{batch_id}/parse` is no longer here: it takes no
+    # case (2026-10-08, docs/17 "`parse` with a case id") and parses into the
+    # unattached queue. A record reaches a case by `POST /ingest/records/
+    # {record_id}/attach`, which gates on `ingest.replay`, a content verb.
     ("POST", "/ingest/dead-letters/{dead_letter_id}/replay"),
     # Lab work on a sample already attached to a case: its case is in no
     # path and the verbs are global, so each calls the gate by hand (c7/c21,
