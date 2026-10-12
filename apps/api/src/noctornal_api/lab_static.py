@@ -340,7 +340,7 @@ def pe_step(data: bytes) -> dict:
         rich = pe.parse_rich_header()
         clear = rich.get("clear_data") if rich else None
         steps["rich_header_hash"] = (
-            {"status": "done", "value": hashlib.md5(clear).hexdigest()}
+            {"status": "done", "value": hashlib.md5(clear, usedforsecurity=False).hexdigest()}
             if clear else _na("no_rich"))
     except (Exception, MemoryError, RecursionError) as exc:
         steps["rich_header_hash"] = _failure(exc)

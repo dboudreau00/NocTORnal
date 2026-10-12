@@ -1058,8 +1058,8 @@ def triage(data: bytes) -> Triage:
                      "reason": "not an archive of a kind this build expands"})
     return Triage(
         sha256=hashlib.sha256(data).digest(),
-        sha1=hashlib.sha1(data).digest(),
-        md5=hashlib.md5(data).digest(),
+        sha1=hashlib.sha1(data, usedforsecurity=False).digest(),
+        md5=hashlib.md5(data, usedforsecurity=False).digest(),
         byte_size=len(data),
         file_type=file_type,
         entropy=round(shannon_entropy(data), 4),

@@ -93,7 +93,7 @@ texttable==1.7.0
 typing-extensions==4.16.0
 typing-inspection==0.4.4
 tzdata==2026.3
-urllib3==2.7.0
+urllib3==2.8.0
 uvicorn==0.52.4
 websockets==17.1
 yara-x==1.20.0

@@ -198,11 +198,17 @@ def test_missing_credentials_are_407_route_auth_required_with_the_challenge(prox
     assert b'Proxy-Authenticate: Basic realm="noctornal-egress"\r\n' in head
 
 
+# Fixed, not uuid4(): parametrize ids are built at collection time, and a random
+# id differs per pytest-xdist worker ("Different tests were collected between
+# gw0 and gw1"), which makes `pytest -n` unusable for the whole suite.
+_FIXED_RUN_UUID = "2552e395-6e1c-4811-a868-21eaad804ff1"
+
+
 @pytest.mark.parametrize("username, token", [
     (ROUTE, "x" * 43),                          # wrong token
     ("integration:webhook", "x" * 43),          # the logical id, colon and all
-    ("integration.webhook~run." + str(uuid4()), None),  # a persona context on an integration
-    ("persona.not-a-uuid~run." + str(uuid4()), None),
+    ("integration.webhook~run." + _FIXED_RUN_UUID, None),  # a persona context on an integration
+    ("persona.not-a-uuid~run." + _FIXED_RUN_UUID, None),
 ])
 def test_wrong_or_malformed_credentials_are_407_route_auth_failed(proxy, rows,
                                                                     username, token):

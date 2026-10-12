@@ -1105,7 +1105,8 @@ class GraphWriteService:
                          field_name: str) -> tuple[bool, object]:
         """(known, value) of one field as the element's live claims support
         it. See `_restore_after_retraction`. `column` is a literal."""
-        assert column in ("node_id", "edge_id")
+        if column not in ("node_id", "edge_id"):  # not `assert`: stripped under python -O, and this guards SQL text
+            raise ValueError("refused identifier outside the allow-list")
         live, has_live, first_prior = self._c.execute(
             f"""WITH c AS (
                   SELECT a.claim_value -> %(f)s AS v, a.prior_value,

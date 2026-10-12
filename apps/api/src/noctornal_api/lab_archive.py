@@ -1064,7 +1064,8 @@ def _expand(conn, storage, c, data: bytes, analysis,
             continue
         verdict = screening.screen_digests(
             conn, sha256=hashlib.sha256(m.data).digest(),
-            sha1=hashlib.sha1(m.data).digest(), md5=hashlib.md5(m.data).digest())
+            sha1=hashlib.sha1(m.data, usedforsecurity=False).digest(),
+            md5=hashlib.md5(m.data, usedforsecurity=False).digest())
         twin = conn.execute(
             "SELECT id, screening_outcome FROM lab.sample WHERE sha256 = %s",
             (hashlib.sha256(m.data).digest(),)).fetchone()

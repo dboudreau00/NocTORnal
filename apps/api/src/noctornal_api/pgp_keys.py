@@ -962,7 +962,7 @@ def wkd_hash(local: str) -> str:
     """z-base-32 of SHA-1 over the local part, A to Z lower-cased only
     (the WKD draft: other characters are left as they are)."""
     lowered = "".join(ch.lower() if "A" <= ch <= "Z" else ch for ch in local)
-    return _zbase32(hashlib.sha1(lowered.encode("utf-8")).digest())  # noqa: S324
+    return _zbase32(hashlib.sha1(lowered.encode("utf-8"), usedforsecurity=False).digest())
 
 
 def wkd_urls(domain: str, digest: str) -> dict[str, str]:

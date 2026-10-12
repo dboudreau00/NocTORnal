@@ -467,7 +467,8 @@ def _attached(column: str, ev: str) -> str:
     canvas drew that entity hollow, and the exhibit was missing from the
     "backs nothing" count and filter (ux07-evidence:no-forward-trace-from-
     exhibit, verifier, 2026-09-23)."""
-    assert column in ("node_id", "edge_id")
+    if column not in ("node_id", "edge_id"):  # not `assert`: stripped under python -O, and this guards SQL text
+        raise ValueError("refused identifier outside the allow-list")
     unpurged = f"""EXISTS (SELECT 1 FROM core.evidence bx
                             WHERE bx.id = {ev} AND bx.purged_at IS NULL)"""
     return f"""SELECT bl.{column} FROM core.evidence_link bl

@@ -604,7 +604,8 @@ def _assertions(conn, column: str, element_id: UUID,
     # cannot quietly hand the raised ceiling to the deployment-wide rows.
     # `doc_compartments` likewise (L1, 2026-09-24): the document leg is
     # also held to the reader's own compartments.
-    assert column in ("node_id", "edge_id")
+    if column not in ("node_id", "edge_id"):  # not `assert`: stripped under python -O, and this guards SQL text
+        raise ValueError("refused identifier outside the allow-list")
     # Each join carries its permission as a bound boolean AND the READER's
     # ceiling, so a claim citing an exhibit or a document the reader may
     # not see returns the ids it always returned and no name. The document

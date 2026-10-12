@@ -463,7 +463,8 @@ class CompartmentLifecycle:
         """Lock the registry row, then every bound table in `mode`, with a
         short timeout (module docstring, "Why the tables are locked").
         `mode` is one of two literals, never caller input."""
-        assert mode in ("SHARE", "SHARE ROW EXCLUSIVE")
+        if mode not in ("SHARE", "SHARE ROW EXCLUSIVE"):  # not `assert`: stripped under python -O, and this guards SQL text
+            raise ValueError("refused identifier outside the allow-list")
         self._c.execute("SELECT set_config('lock_timeout', %s, true)",
                         (LOCK_TIMEOUT,))
         row = self._c.execute(

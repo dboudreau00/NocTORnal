@@ -13,6 +13,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least privilege for the GITHUB_TOKEN: no job here pushes, comments or logs in
+# to a registry, so read-only contents is all any of them needs. Without this
+# block the token takes the repository/organisation default, which on older
+# settings is read-write on everything.
+permissions:
+  contents: read
+
 env:
   PYTHON_VERSION: "3.13"
   # Mirrors infra/docker-compose.yml. These only ever address services

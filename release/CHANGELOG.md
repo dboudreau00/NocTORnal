@@ -1,5 +1,47 @@
 # Changelog
 
+## Beta 1.2: 2026-10-11
+
+The second revision of the beta, version 0.9.2. It applies the findings of an
+outside code review of the Beta 1.1 source that had a fix in the software. It
+changes nothing an analyst or an operator sees: there is no migration (Alembic
+stays at 0182), no setting, no route and no new service. It has not been
+audited, and it is still not lawful to operate against real material until
+docs/16 L1 to L5 are settled outside this codebase. Legal review is required
+before any active case load.
+
+- **`urllib3` 2.7.0 to 2.8.0.** 2.7.0 carries PYSEC-2026-4175, 4176 and 4177: a
+  TLS setting for an HTTPS proxy that may be ignored or overridden, an endless
+  loop on chunked deflate streaming, and a chunk-size line read into memory
+  without a bound. The object store client and the readiness probe use it.
+  `constraints.txt` pins 2.8.0, and `test_the_installed_stack_is_the_pinned_stack`
+  holds an environment to it.
+- **Ten guards on SQL text are explicit refusals.** The checks that decide which
+  table, column, alias or lock mode reaches an f-string query (the claim and
+  evidence backing queries, the element lookups in the graph routes, the
+  compartment lifecycle's lock) were `assert` statements, which Python removes
+  under `-O`. Each is now an `if` that raises `ValueError`. Every caller passes
+  a literal, so no request behaves differently.
+- **Five identification digests declare it.** The MD5 and SHA-1 that look up a
+  sample in the malware feeds, name a PE rich header and build a WKD address
+  pass `usedforsecurity=False`, so an OpenSSL build in FIPS mode does not refuse
+  them.
+- **CI's token is read-only** (`permissions: contents: read`), and a test's
+  parametrize ids no longer differ per worker, so the suite runs under
+  `pytest -n`.
+
+8365 tests (`def test_` functions). The whole suite, run on a database built from nothing with every migration and with both runtime database roles present, passed 12778 and skipped 0.
+
+### Upgrading from Beta 1.1
+
+Nothing is migrated, backed up or reconfigured that Beta 1.1 did not already
+need. On a production stack `docker compose ... up -d --build` rebuilds the
+application image (tag `noctornal-api:0.9.2`) on the new pin and restarts the
+services. A development install runs
+`python -m pip install -c constraints.txt -e packages/ontology -e apps/api`
+again, so its environment is the pinned one. A deployment still on Beta 1 takes
+"Upgrading from Beta 1" under Beta 1.1 first.
+
 ## Beta 1.1: 2026-10-08
 
 The first revision of the beta, version 0.9.1. It closes the known residuals of
