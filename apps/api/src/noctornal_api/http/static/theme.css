@@ -1,33 +1,49 @@
-/* NocTORnal theme: "Mulberry Nocturne", second cut.
+/* NocTORnal theme: "Charcoal".
    The console's entire visual identity, in one file. app.css holds
    structure and behaviour; nothing in it may name a colour that is not a
    token defined here. Swap this file and the console reskins without a
    single structural edit. That is the contract, and
-   test_theme_contract.py now actually enforces it. (The previous version
-   of this comment claimed test_ui_invariants held app.css to the rule. It
-   did not. Nine raw rgba() literals had accumulated in app.css and twelve
-   hard-coded hexes in app.js behind `||` fallbacks, so a theme swap left
-   parts of the old palette behind. The claim is now backed by a test.)
+   test_theme_contract.py enforces it: raw rgba() literals in app.css and
+   hard-coded hexes in app.js fail it, so a theme swap cannot leave part of
+   the old palette behind.
 
    ## Why these colours
 
-   Every dark console looks the same because every dark console is
-   BLUE-shifted: GitHub's #0D1117, Discord's slate, VS Code's neutral
-   graphite: cold grounds with a blue or purple accent. This one is
-   WINE-shifted: black-plum surfaces a few degrees into red, porcelain
-   text warmed to match, an oxidised-verdigris accent. Nocturnal, not
-   "dark mode".
+   Charcoal is the default since 2026-10-12. It replaced "Mulberry
+   Nocturne", whose surfaces were black-plum and whose text was porcelain
+   warmed to match. This one is NEUTRAL: five steps of near-black grey with
+   no hue to speak of, off-white ink that does not lean warm or cold, and
+   the verdigris accent (oxidised copper) on top. A neutral ground lets
+   every colour that is left carry meaning, which is the point of the
+   console (docs/06): a node hue, a vouch, an accusation and a TLP amber all
+   read as themselves against it.
+
+   The palette is the charcoal token set supplied for this theme. Its
+   ground.0 to ground.4 are the five surfaces below, in order (the canvas
+   takes the darkest); ink.hi and ink.mid are the first two text tiers;
+   accent, warn, vouch and accuse are --accent, --alert, --sign-positive and
+   --sign-negative; and node.* are the type hues. Three values are NOT the
+   supplied ones, each for a measured reason that test_theme_contract holds:
+   - ink.low (#76777B) is 4.01:1 on --surface-0 and 4.19:1 on --void, under
+     the 4.5:1 a text tier needs, so --text-tertiary is #808185 (4.61 and
+     4.82). ink.faint (#55565A, "disabled") has no text tier for the same
+     reason, and is used for --chart-grid, which is a scale mark.
+   - The person hue stays the console's violet. The supplied #9B7BD4 sat 7.9
+     (CIE76) from the persona blue under simulated deuteranopia, and the
+     difference between a persona and an assessed person is the attribution
+     claim itself.
+   - The finance hue stays the console's cooler gold. The supplied #D8B25A
+     collapses into the orange of a GROUP node under deuteranopia (7.6
+     apart, both discs).
 
    ## Elevation is LIGHT, not paint
 
-   The first cut built depth from a ladder of five opaque greys, which is
-   why it read flat: an opaque step looks like a different object, not a
-   nearer one. This cut keeps the ladder for the few surfaces that must be
-   opaque (anything a canvas paints, anything scrolled content passes
-   under) and expresses everything else as a translucent white WASH over
-   the ground, with a 1px white hairline. That is what makes a panel read
-   as lit rather than filled, and it is the single largest visual change
-   here.
+   Depth is not built from a ladder of opaque greys, because an opaque step
+   looks like a different object, not a nearer one. The ladder is kept for
+   the few surfaces that must be opaque (anything a canvas paints, anything
+   scrolled content passes under) and everything else is a translucent white
+   WASH over the ground with a 1px white hairline. That is what makes a
+   panel read as lit rather than filled.
 
    ## What this file may NOT change
 
@@ -42,12 +58,11 @@
    - The seven node-type hues must stay mutually distinct AND distinct
      from the positive and negative sign colours on the canvas (not from
      --sign-neutral: `context` sits near it by design, see below, and a
-     disc does not read as a line). Measured with CIEDE2000 against
-     --void, the closest pair is 15.8 (was 12.0). Note this was NOT free:
-     the reference palette this cut is based on scored 10.5, worse than
-     what it replaced, because it pushed `context` toward a saturated
-     blue. `context` is deliberately near-neutral so that it reads as
-     "not an actor" rather than as a dim actor.
+     disc does not read as a line). test_theme_contract holds every pair
+     to CIE76 20 or more; the closest pair is persona and infra at 27.3,
+     and the closest to a sign colour is 27.1. `context` is
+     deliberately near-neutral so that it reads as "not an actor" rather
+     than as a dim actor.
    - Confidence is opacity, never hue.
 
    The alpha variants (--*-soft, --*-wash) exist because the CSP forbids
@@ -61,72 +76,62 @@
      content passes underneath (sticky table headers). A translucent value
      here would let rows ghost through a header. Everything else in the
      app should reach for a --wash-* instead. */
-  --void: #140C13;        /* the canvas ground: darkest surface in the app */
-  --surface-0: #1A1017;   /* app ground */
-  --surface-1: #21151F;   /* rail, app bar, inspector ground */
-  --surface-2: #2D2030;   /* raised: inputs, buttons, sticky headers */
-  --surface-3: #3A2A3C;   /* hover / selected row */
+  --void: #111214;        /* the canvas ground: darkest surface in the app */
+  --surface-0: #161719;   /* app ground */
+  --surface-1: #1C1D20;   /* rail, app bar, inspector ground */
+  --surface-2: #26272B;   /* raised: inputs, buttons, sticky headers */
+  --surface-3: #313237;   /* hover / selected row */
 
   /* ── the canvas ground ─────────────────────────────────────────────
-     The sociogram was the one surface that opted OUT of the elevation
-     system below. It painted a flat --void and nothing else, so the
-     thing an analyst looks at longest read as a black rectangle cut
-     into a lit room, while every panel around it was glass over plum.
-
-     These two put it back in the family: the same key-light gesture
-     `body` uses, plus a graph-paper grid that gives pan and zoom
-     something to move against.
+     The sociogram is not a flat rectangle cut into a lit room. It takes
+     the same key-light gesture `body` uses, plus a graph-paper grid that
+     gives pan and zoom something to move against.
 
      TWO CEILINGS, both measured and both held by test_theme_contract
      (test_the_canvas_ground_keeps_every_mark_above_its_floor):
 
      1. The key light alone stays at or below --surface-0, so the canvas
         is still the darkest surface in the app (docs/06) at its
-        brightest point, not only on average. At 0.025 the top of the
-        canvas was brighter than the app ground; 0.02 is the largest
+        brightest point, not only on average. Painted at 0.025 the top of
+        the canvas is brighter than the app ground; 0.02 is the largest
         two-place value under it.
 
-     2. The binding MARK is --sign-neutral, the colour of every neutral
-        tie: at 4.92:1 on bare --void it has the least headroom of
-        anything drawn here. (This comment used to name `context`, and
-        quoted --sign-neutral's figures for it. `context` is 6.17:1 on
-        --void and was never the limit, so tuning it would have moved
-        nothing: cr02 ceiling-comment-wrong-token, 2026-09-22.) The
-        worst case is a tie crossing a grid line under the brightest
-        part of the light, where both alphas composite once. At these
-        values that ground is about rgb(28,20,27) and --sign-neutral
-        holds 4.6:1.
+     2. Every mark keeps its contrast floor where a grid line crosses the
+        brightest part of the light, where both alphas composite once, a
+        ground of about rgb(25,26,28). The marks with the least headroom
+        there are --sign-negative (a dispute tie) at 4.91:1 against a
+        4.5:1 floor, the dimmest node hue at 5.13:1 and --sign-neutral at
+        5.18:1; on bare --void --sign-neutral is 5.57:1.
 
      "Composite once" is a property of the painter, not of the tokens.
      Stroked as 1px lines, Chromium composited every grid crossing twice
-     at DPR 1 and --sign-neutral fell to 4.48:1 there. paintGrid fills one
-     path of rectangles, which covers the union once.
+     at DPR 1. paintGrid fills one path of rectangles, which covers the
+     union once.
 
      Canvas TEXT is not measured against this ground at all. Every label
      is drawn on a --void plate, so its floor is taken against --void:
-     --text-tertiary (edge types, the shelf caption) is 4.68:1 there, and
-     it may not be dimmed further. It used to be drawn at 0.85 alpha
-     straight onto the ground, which put it at 3.5:1.
+     --text-tertiary (edge types, the shelf caption) is 4.82:1 there, and
+     it may not be dimmed further.
 
      The -out token exists for the reason the --*-wash ones do. A canvas
      gradient needs both stops as colours and the painter may not invent
      the second one, so the theme supplies it. */
-  --canvas-grid: rgba(241, 233, 234, 0.016);
-  --canvas-keylight: rgba(241, 233, 234, 0.02);
-  --canvas-keylight-out: rgba(241, 233, 234, 0);
+  --canvas-grid: rgba(240, 242, 244, 0.016);
+  --canvas-keylight: rgba(240, 242, 244, 0.02);
+  --canvas-keylight-out: rgba(240, 242, 244, 0);
 
   /* The node BODY's alpha per confidence step. Ring and core take the
      --conf-* steps themselves; the body is the largest area of a node, so
      it is where confidence is read, and these keep HIGH against LOW at
-     2:1 or better for every node hue on --void (the old opaque disc was
-     2.19:1; the restyle's 0.40 multiplier had cut it to 1.39:1). They are
-     steps, not a multiplier: app.js may not scale a --conf-* value by a
-     literal (test_theme_contract). */
-  --canvas-node-body-high: 0.66;
+     2:1 or better for every node hue on --void (2.05:1 for the person
+     violet, the closest). They are steps, not a multiplier: app.js may not
+     scale a --conf-* value by a literal (test_theme_contract). HIGH is
+     0.68 here: on this canvas 0.66 measured 1.98:1. */
+  --canvas-node-body-high: 0.68;
   --canvas-node-body-moderate: 0.44;
   --canvas-node-body-low: 0.3;
   /* Node labels, --text-secondary at this alpha on their --void plate:
-     5.8:1. Quieter than the node, never below 4.5:1. */
+     5.5:1. Quieter than the node, never below 4.5:1. */
   --canvas-label-alpha: 0.8;
 
   /* ── glass ─────────────────────────────────────────────────────────
@@ -141,34 +146,34 @@
   /* The boundary of anything you can TYPE IN or PRESS. Deliberately much
      brighter than --hairline, which is decorative: WCAG 1.4.11 asks for
      3:1 on the edge that identifies a control, and --hairline measures
-     1.48:1 against the card a field sits on. This measures 3.30:1. It
-     cannot be solved with a fill -- the ground is near-black, so a
-     recessed field reaches only 1.18:1 no matter how dark it goes. */
+     1.36:1 against the card a field sits on. This measures 3.07:1 on a
+     card over --surface-1. It cannot be solved with a fill -- the ground
+     is near-black, so a recessed field reaches only 1.35:1 no matter how
+     dark it goes. */
   --field-edge: rgba(255, 255, 255, 0.34);
 
   /* ── text ──────────────────────────────────────────────────────────
-     Porcelain, warmed to sit on plum rather than blue-grey. Three tiers
-     and no more: a fourth "faint" tier was drafted and cut because no
-     value for it cleared 3:1 on the raised surfaces where it would have
-     been used (best case 3.16 on the ground, 2.26 on --surface-3). A tier
-     that cannot carry text is not a text tier.
-     Ratios on --surface-0: 15.56 / 8.21 / 4.52. Tertiary clears AA body
-     text for the first time (it was 3.79 and used for real labels).
+     Neutral off-white, three tiers and no more: a fourth "faint" tier was
+     drafted and cut because no value for it cleared 3:1 on the raised
+     surfaces where it would have been used. A tier that cannot carry text
+     is not a text tier.
+     Ratios on --surface-0: 15.30 / 7.69 / 4.61. Tertiary clears AA body
+     text on the ground and on --void (4.82).
      On --surface-1, and on the washes nested on it, tertiary does NOT:
-     4.28 on the rail and inspector ground, 3.98 on a card, 3.51 on an
+     4.33 on the rail and inspector ground, 4.00 on a card, 3.51 on an
      assertion inside a card. Small text there takes --text-secondary
      (ux18-a11y:tertiary-contrast-inspector, 2026-09-23; measured by
-     test_ui_signin_and_cases). Nor on the raised surfaces: 3.75 on a
-     sheet's --surface-2, 4.07 on the sign-in card's wash, 4.23 on a card
-     over the ground, and 3.92 on a chip on that card; help on the sheets
+     test_ui_signin_and_cases). Nor on the raised surfaces: 3.83 on a
+     sheet's --surface-2, 4.12 on the sign-in card's wash, 4.29 on a card
+     over the ground, and 3.79 on a chip on that card; help on the sheets
      and the sign-in card, and the case list's quiet text, take secondary
      too. */
-  --text-primary: #F1E9EA;
-  --text-secondary: #B9A8AE;
-  --text-tertiary: #8A7885;
+  --text-primary: #EDEDEB;
+  --text-secondary: #A9AAA8;
+  --text-tertiary: #808185;
 
   /* ── accent ────────────────────────────────────────────────────────
-     Verdigris: oxidised copper against dark wine. Used sparingly: focus,
+     Verdigris: oxidised copper against charcoal. Used sparingly: focus,
      selection, the active rail tab, the trend line, the playhead, and
      identity, which is the TOR in the NocTORnal wordmark and nothing
      else (the one use that is not a state; cr02
@@ -183,15 +188,14 @@
   --accent-edge: rgba(79, 193, 175, 0.35);
 
   /* ── semantic ──────────────────────────────────────────────────────
-     Signal only, never decoration. Hues are LOAD-BEARING. Every one of
-     these is brighter than the first cut, which is a contrast fix rather
-     than a style choice: on --surface-0 they went 5.42 -> 7.19 (positive),
-     4.23 -> 5.23 (negative) and 3.70 -> 5.23 (danger). The old danger
-     sat below 4.5:1 while being the colour that says "this destroys
-     something". */
+     Signal only, never decoration. Hues are LOAD-BEARING. On the app
+     ground (--surface-0) they measure 6.94 (positive), 5.05 (negative) and
+     4.82 (danger), all over the 4.5:1 they need as text. The danger red is
+     the colour that says "this destroys something", so it may not fall
+     under that line. */
   --sign-positive: #4FB477;
   --sign-negative: #D8636B;
-  --sign-neutral: #8A7C90;
+  --sign-neutral: #8A8C91;
   --alert: #E0A458;
   --alert-soft: rgba(224, 164, 88, 0.12);
   --alert-edge: rgba(224, 164, 88, 0.30);
@@ -208,53 +212,50 @@
   /* The frosted app bar. Its own token because it is --surface-1 at 82%
      and a theme that changed --surface-1 without changing this would
      leave a bar in the previous theme's colour. */
-  --appbar-bg: rgba(33, 21, 31, 0.82);
+  --appbar-bg: rgba(28, 29, 32, 0.82);
   --accent-wash-strong: rgba(79, 193, 175, 0.20);
   /* Faintest divider in the system: rows inside an already-bordered card,
      where --hairline would draw a grid. */
   --hairline-soft: rgba(255, 255, 255, 0.055);
   /* OPAQUE, and not a hairline. The <canvas> baselines under the timeline
-     density strip and the metric histogram were drawn in --hairline, which
-     measures 1.36:1 against the chart ground -- and measured 1.37:1 in the
-     previous palette too, so this is a long-standing invisible gridline
-     rather than something this reskin broke. A scale mark has to be
-     visible to be a scale mark. */
-  --chart-grid: #5E4A60;
+     density strip and the metric histogram were once drawn in --hairline,
+     which measures about 1.4:1 against the chart ground. A scale mark has
+     to be visible to be a scale mark: this (the supplied ink.faint)
+     measures 2.30:1 against --surface-1. */
+  --chart-grid: #55565A;
 
   /* ── node type hues ────────────────────────────────────────────────
-     Identification colours an analyst has already learned. Brightened for
-     contrast on --void (minimum 5.66:1) but held apart perceptually:
-     `context` is pulled to near-neutral and `artefact-finance` cooled
-     toward true gold, which is what lifts the closest pair from 10.5 to
-     15.8 CIEDE2000.
-     `actor-person` is bluer and more saturated than the #9B7BD4 it
-     replaces (2026-09-23). Under simulated deuteranopia that purple sat
-     7.9 (CIE76) from the Persona blue, and the difference between a
-     persona and an assessed person is the attribution claim itself (ux04
-     persona-person-hue-cvd). It is 19.3 apart now, and the canvas draws a
-     person with a second inner ring as well, so hue is never the only
-     cue. test_theme_contract holds every pair that still collapses under
-     deuteranopia or protanopia to a difference of SHAPE. */
+     Identification colours an analyst has already learned, held apart
+     perceptually: every pair is CIE76 20 or more apart, and each is 20 or
+     more from the positive and negative sign colours (the lowest, on
+     --void, is 5.52:1). `context` is near-neutral and `artefact-finance`
+     cooler toward true gold, which keeps the orange and the gold apart.
+     `actor-person` is bluer and more saturated than the supplied violet
+     (see the top of this file). It is 19.3 apart from the persona blue
+     under deuteranopia, and the canvas draws a person with a second inner
+     ring as well, so hue is never the only cue. test_theme_contract holds
+     every pair that still collapses under deuteranopia or protanopia to a
+     difference of SHAPE. */
   --actor-persona: #6E93C8;
   --actor-person: #9679E7;
   --actor-group: #E08A4B;
   --artefact-infra: #52B3C9;
   --artefact-finance: #CFBF6A;
   --artefact-malware: #D97BA8;
-  --context: #95909B;
+  --context: #9A9BA0;
 
   /* Confidence encodes as opacity, not hue. The floor is 0.58, not
-     0.45: at 0.45 the lowest step composited to 3.84:1 against the card
-     it sits on, and any element that ALSO carried a dim colour landed at
-     1.83:1. The three steps stay obviously distinct (13.7 / 8.0 / 5.3
+     0.45: at 0.45 the lowest step composited under 4.5:1 against the card
+     it sits on, and any element that ALSO carried a dim colour landed far
+     lower. The three steps stay obviously distinct (13.3 / 7.9 / 5.4
      against a card) while the quietest one stays readable. */
   --conf-high: 1;
   --conf-moderate: 0.74;
   --conf-low: 0.58;
 
-  /* Overlay scrim, warmed to match the ground; a blue scrim over plum
-     reads as a rendering bug. */
-  --scrim: rgba(12, 6, 11, 0.72);
+  /* Overlay scrim, matched to the ground: a scrim with a hue over a
+     neutral ground reads as a rendering bug. */
+  --scrim: rgba(8, 9, 10, 0.72);
 
   /* ── shape ─────────────────────────────────────────────────────────
      A real scale, because the first cut had six ad-hoc radii between 3px
@@ -335,15 +336,15 @@
 ::-webkit-scrollbar-thumb:hover { background-color: rgba(255, 255, 255, 0.26); }
 ::-webkit-scrollbar-corner { background: transparent; }
 
-/* A faint key-light from the top of the workspace: enough that the plum
-   reads as a lit room rather than a flat fill, never enough to change
-   any contrast measurement below it (<=2 lightness steps).
+/* A faint key-light from the top of the workspace: enough that the
+   charcoal reads as a lit room rather than a flat fill, never enough to
+   change any contrast measurement below it (<=2 lightness steps).
    Fixed attachment so scrolling content does not drag the light. */
 body {
   background:
     radial-gradient(120% 90% at 50% -10%,
-      rgba(241, 233, 234, 0.035), rgba(241, 233, 234, 0) 58%),
-    linear-gradient(180deg, #1F141C 0%, var(--surface-0) 42%),
+      rgba(240, 242, 244, 0.035), rgba(240, 242, 244, 0) 58%),
+    linear-gradient(180deg, #202124 0%, var(--surface-0) 42%),
     var(--surface-0);
   background-attachment: fixed;
 }

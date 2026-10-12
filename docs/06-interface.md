@@ -11,8 +11,8 @@ Dark, but not the default "near-black plus one acid accent" that every
 security dashboard ships with. Two decisions push it somewhere specific:
 
 **The canvas is the darkest surface, not the panels.** Inverted from the
-usual pattern. The graph sits on a deep plum-black void; the chrome around
-it is lit glass over plum that recedes rather than glows. Edges and nodes
+usual pattern. The graph sits on a deep charcoal void; the chrome around
+it is lit glass over charcoal that recedes rather than glows. Edges and nodes
 are the brightest things on screen because they are the content. The
 ground is not flat: the key light the rest of the room is lit by falls
 across the top of it, and a faint graph-paper grid in world space gives pan
@@ -32,23 +32,23 @@ identity: the TOR in the NocTORnal wordmark.
 
 ## Tokens
 
-theme.css is the source of truth ("Mulberry Nocturne"); this table quotes
+theme.css is the source of truth ("Charcoal"); this table quotes
 it, and test_theme_contract holds the confidence steps and the canvas
 tokens here to the theme's values.
 
 ```
-/* Surfaces: black-plum, wine-shifted rather than blue-shifted */
---void            #140C13   /* the canvas ground, the deepest point */
---surface-0       #1A1017   /* app background */
---surface-1       #21151F   /* rail, app bar, inspector ground */
---surface-2       #2D2030   /* raised: inputs, buttons, sticky headers */
---surface-3       #3A2A3C   /* hover, selected row */
+/* Surfaces: neutral charcoal, five steps with no hue to speak of */
+--void            #111214   /* the canvas ground, the deepest point */
+--surface-0       #161719   /* app background */
+--surface-1       #1C1D20   /* rail, app bar, inspector ground */
+--surface-2       #26272B   /* raised: inputs, buttons, sticky headers */
+--surface-3       #313237   /* hover, selected row */
 --hairline        rgba(255, 255, 255, 0.10)   /* 1px dividers */
 
-/* Text: porcelain, warmed to sit on plum */
---text-primary    #F1E9EA
---text-secondary  #B9A8AE
---text-tertiary   #8A7885   /* metadata, timestamps, edge types */
+/* Text: neutral off-white, three tiers */
+--text-primary    #EDEDEB
+--text-secondary  #A9AAA8
+--text-tertiary   #808185   /* metadata, timestamps, edge types */
 
 /* Single chrome accent: verdigris. Focus, selection, the active rail
    tab, the trend line, the playhead, and identity (the TOR in the
@@ -60,7 +60,7 @@ tokens here to the theme's values.
 /* Semantic: signal only, never decoration */
 --sign-positive   #4FB477   /* vouch, trust */
 --sign-negative   #D8636B   /* rip report, dispute, ban */
---sign-neutral    #8A7C90   /* the dimmest mark on the canvas */
+--sign-neutral    #8A8C91   /* the neutral tie, the dimmest line on the canvas */
 --alert           #E0A458   /* watch hit, review needed */
 --danger          #E0574F   /* destructive, break-glass */
 
@@ -78,17 +78,17 @@ tokens here to the theme's values.
 --artefact-infra  #52B3C9
 --artefact-finance #CFBF6A
 --artefact-malware #D97BA8
---context         #95909B   /* near-neutral: "not an actor" */
+--context         #9A9BA0   /* near-neutral: "not an actor" */
 
 /* The canvas ground. The key light is painted once per canvas size;
    the grid is one filled path, so a crossing composites once. */
---canvas-grid     rgba(241, 233, 234, 0.016)
---canvas-keylight rgba(241, 233, 234, 0.02)
---canvas-keylight-out rgba(241, 233, 234, 0)
+--canvas-grid     rgba(240, 242, 244, 0.016)
+--canvas-keylight rgba(240, 242, 244, 0.02)
+--canvas-keylight-out rgba(240, 242, 244, 0)
 
 /* Node body alpha, one step per confidence grade. The ring and the
    core take the --conf-* steps below. */
---canvas-node-body-high     0.66
+--canvas-node-body-high     0.68
 --canvas-node-body-moderate 0.44
 --canvas-node-body-low      0.3
 /* Canvas labels: --text-secondary at this alpha on a --void plate */

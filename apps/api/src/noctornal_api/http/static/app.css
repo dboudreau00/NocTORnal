@@ -1,6 +1,6 @@
 /* NocTORnal analyst console — docs/06-interface.md.
    Three rules drive everything here:
-   1. The CANVAS is the darkest surface; chrome is a lighter plum that recedes.
+   1. The CANVAS is the darkest surface; chrome is a lighter charcoal that recedes.
    2. Colour carries MEANING only (node type, edge sign, confidence, TLP).
       Buttons, panels, borders and tabs stay strictly neutral.
    3. Elevation is LIGHT, not paint: a raised surface is a translucent
