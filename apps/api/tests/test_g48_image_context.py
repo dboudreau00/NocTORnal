@@ -672,6 +672,18 @@ def test_the_readme_and_the_template_say_the_two_declarations_stop_the_api():
     assert "refuse to start while\n# either is the placeholder" in example.replace("\r\n", "\n")
 
 
+def test_the_readme_takes_the_stack_down_before_the_network_upgrade_brings_it_up():
+    """2026-10-12, upgrading a Beta 1.2 stack in place: a plain `up -d --build` recreated the
+    network under the containers that stayed running, `migrate` could not resolve `postgres` and
+    exited 1, and the stack was left half started. The upgrade for the new address range takes
+    the stack down first and says why."""
+    text = _text(README)
+    head = "### From Beta 1.2 or earlier: the internal network's address range"
+    section = text.split(head, 1)[1].split("\n### ", 1)[0]
+    assert section.index("compose.yml down") < section.index("compose.yml up -d --build")
+    assert "Do not skip the `down`" in section and "failed to resolve host" in section
+
+
 def test_every_svcacct_add_discards_its_stdout_and_keeps_stderr():
     logical = re.sub(r"\\\n\s*", " ", _script("minio-init", "entrypoint")).splitlines()
     # The `info` guard before `||` has its own `>/dev/null 2>&1`; the add is what follows it.

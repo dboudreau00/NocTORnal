@@ -1425,6 +1425,12 @@ reconfigured, no env file changes, and the evidence and the case file are not
 touched. Until it is done, a reboot can still leave Caddy and the egress proxy
 down, as described above.
 
+Do not skip the `down`. A plain `up -d --build` makes Compose recreate the
+network under the containers that stay running, the containers it then starts
+cannot resolve the database's name, `migrate` exits 1 (`failed to resolve host
+'postgres'`) and the stack is left half started. `down`, then `up -d --build`,
+puts that right, and the data volumes are kept.
+
 ### From a release before 2026-10-02: the owner's credential and Redis
 
 [release/secrets-upgrade/README.md](../../release/secrets-upgrade/README.md)
