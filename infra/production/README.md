@@ -47,7 +47,7 @@ not, and the collection route refuses to poll until it is done.
 ( umask 077
   cp infra/production/secrets.env.example infra/production/secrets.env
   cp infra/production/caddy.env.example   infra/production/caddy.env )
-sudo ./release/install.sh --production-secrets
+sudo bash release/install.sh --production-secrets
 ```
 
 The parentheses are deliberate. The `umask` is there so the two files are
@@ -1179,7 +1179,7 @@ release carrying migrations applies them before the API starts:
 
 ```sh
 git pull
-sudo ./release/install.sh --production-secrets
+sudo bash release/install.sh --production-secrets
 docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
 ```
 
@@ -1423,7 +1423,7 @@ root's, mode 600:
 
 ```sh
 git pull
-sudo ./release/install.sh --production-secrets      # release\install.ps1 -ProductionSecrets on Windows
+sudo bash release/install.sh --production-secrets      # release\install.ps1 -ProductionSecrets on Windows
 docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
 ```
 

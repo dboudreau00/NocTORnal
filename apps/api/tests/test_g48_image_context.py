@@ -856,7 +856,7 @@ def _run_readme_blocks(tmp_path: Path, operator_umask: str):
         # for real and test_production_secrets_script.py holds that. Here it is a stand-in.
         "installer() { ( umask 077; for f in postgres-init migrate; do [ -f infra/production/$f.env ]"
         " || cp infra/production/$f.env.example infra/production/$f.env; done ); }",
-        "sudo() { if [ \"$1\" = ./release/install.sh ]; then installer; else \"$@\"; fi; }",
+        "sudo() { if [ \"$1\" = bash ] && [ \"$2\" = release/install.sh ]; then installer; else \"$@\"; fi; }",
         "python() { :; }; docker() { echo stub-dump; }; age() { cat; }",
         # openssl creates the key 0600 whatever the umask and the certificate
         # under the umask: that is the difference this test needs to keep.

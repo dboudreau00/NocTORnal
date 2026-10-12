@@ -139,7 +139,7 @@ def test_anything_else_naming_this_redis_refuses_the_start(tmp_path, url):
     code, out, err, acl = _start(tmp_path, url)
     assert code == 1 and out == "" and acl == "", (code, out, err)
     assert "refusing to start" in err
-    assert "sudo ./release/install.sh" in err and "--production-secrets" in err
+    assert "sudo bash release/install.sh" in err and "--production-secrets" in err
     assert "release/secrets-upgrade/README.md" in err
     assert _PW not in err and "stale" not in err, "the refusal printed a value"
 

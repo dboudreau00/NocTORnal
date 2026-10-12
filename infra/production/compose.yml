@@ -22,7 +22,7 @@
 #     in postgres-init.env (postgres alone) and its DSN in migrate.env (the
 #     migrate job alone), and every other service holds both blank (the
 #     x-no-owner-credential block below). An older secrets.env is moved by
-#     `sudo ./release/install.sh --production-secrets`
+#     `sudo bash release/install.sh --production-secrets`
 #     (release/secrets-upgrade/README.md).
 #   * Redis runs `noeviction`, as dev does since the Alpha 6 pre-release
 #     check (2026-09-23), and is reachable only from the compose network.
@@ -312,7 +312,7 @@ services:
       # as this; nothing at runtime does. POSTGRES_PASSWORD comes from
       # postgres-init.env and must be the password migrate.env's
       # NOCTORNAL_MIGRATION_DATABASE_URL carries: two declarations of one
-      # secret, which `sudo ./release/install.sh --production-secrets`
+      # secret, which `sudo bash release/install.sh --production-secrets`
       # compares (release/secrets-upgrade/README.md).
       POSTGRES_USER: noctornal
       POSTGRES_INITDB_ARGS: "--data-checksums"
@@ -470,7 +470,7 @@ services:
             if [ -z "$$host" ] || [ "$$host" = redis ]; then
               echo 'REDIS_URL does not sign in to this Redis as noctornal_limiter with REDIS_PASSWORD: refusing to start.' >&2
               echo 'This Redis disables its default user, so the limiter would be refused and every' >&2
-              echo 'limit that fails closed would refuse everyone. Run sudo ./release/install.sh' >&2
+              echo 'limit that fails closed would refuse everyone. Run sudo bash release/install.sh' >&2
               echo '--production-secrets (release/install.ps1 -ProductionSecrets on Windows), which' >&2
               echo 'rewrites REDIS_URL and keeps a backup (release/secrets-upgrade/README.md).' >&2
               exit 1
@@ -480,7 +480,7 @@ services:
             echo "limiter's Redis, says what that Redis needs and how to leave this one out)." >&2
             ;;
           *)
-            echo 'REDIS_URL is empty or not a URL: refusing to start. Run sudo ./release/install.sh' >&2
+            echo 'REDIS_URL is empty or not a URL: refusing to start. Run sudo bash release/install.sh' >&2
             echo '--production-secrets (release/install.ps1 -ProductionSecrets on Windows), which' >&2
             echo 'writes one that signs in to this Redis (release/secrets-upgrade/README.md).' >&2
             exit 1

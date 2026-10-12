@@ -28,7 +28,7 @@ below removes the lines either way.
 
 ```sh
 git pull
-sudo ./release/install.sh --production-secrets
+sudo bash release/install.sh --production-secrets
 ```
 
 With `sudo`, because the files are root's, mode 600: run as anybody else it

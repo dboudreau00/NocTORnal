@@ -31,13 +31,14 @@
 # then a display name. The demo case is then loaded only with --demo.
 #
 # The production deployment (infra/production, read its README.md first):
-#   sudo ./release/install.sh --production-secrets
+#   sudo bash release/install.sh --production-secrets
 #       brings infra/production's secrets files to this release's layout,
 #       moving the schema owner's credential out of secrets.env and writing
 #       the Redis password and REDIS_URL, with a backup of every file it
 #       changes. Installs and starts nothing. With sudo because the files
 #       are root's, mode 600. Add --dir DIR for another directory. What it
-#       does and the way back: release/secrets-upgrade/README.md.
+#       does and the way back: release/secrets-upgrade/README.md. It is run
+#       with bash because a zip carries no execute bit.
 #
 set -euo pipefail
 
