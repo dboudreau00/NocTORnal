@@ -529,7 +529,8 @@ def _gate_endpoints(conn: psycopg.Connection, user: CurrentUser,
 # --- assertions on an existing element ----------------------------------
 
 def _element_case(conn: psycopg.Connection, table: str, element_id: UUID) -> UUID | None:
-    assert table in ("node", "edge")     # literal, never client input
+    if table not in ("node", "edge"):  # not `assert`: stripped under python -O, and this guards SQL text
+        raise ValueError("refused identifier outside the allow-list")
     row = conn.execute(
         f"SELECT case_id FROM core.{table} WHERE id = %s", (element_id,)
     ).fetchone()
@@ -554,7 +555,8 @@ def _element_labels(conn: psycopg.Connection, table: str,
     and noted a RED node's assertion id could therefore destroy that node
     for everyone, while not being cleared to see it.
     """
-    assert table in ("node", "edge")
+    if table not in ("node", "edge"):  # not `assert`: stripped under python -O, and this guards SQL text
+        raise ValueError("refused identifier outside the allow-list")
     # The element's case and labels as facts (`deps.element_labels`,
     # S1 2026-09-25), so the gate below still answers an element above the
     # caller's labels with its AUTHZ_DENIED row, not a silent unrecorded 404
@@ -863,7 +865,8 @@ def _gate_for_change(
     in which case the service's own `deleted_at IS NULL` clause makes it a
     400 rather than the 409 raised here. That is the right trade.
     """
-    assert table in _BEFORE_COLUMNS      # literal, never client input
+    if table not in _BEFORE_COLUMNS:  # not `assert`: stripped under python -O, and this guards SQL text
+        raise ValueError("refused identifier outside the allow-list")
     # The element's case and labels as facts (`deps.element_labels`,
     # S1 2026-09-25), so the gate below still answers an element above the
     # caller's labels with its AUTHZ_DENIED row, not a silent unrecorded 404
@@ -968,7 +971,8 @@ def _valid_to_given(body: BaseModel):
 def _previous_valid_to(conn: psycopg.Connection, table: str,
                        element_id: UUID) -> str | None:
     """The end date a correction is about to replace, for its audit row."""
-    assert table in ("node", "edge")      # literal, never client input
+    if table not in ("node", "edge"):  # not `assert`: stripped under python -O, and this guards SQL text
+        raise ValueError("refused identifier outside the allow-list")
     row = conn.execute(f"SELECT valid_to FROM core.{table} WHERE id = %s",
                        (element_id,)).fetchone()
     return row[0].isoformat() if row and row[0] is not None else None

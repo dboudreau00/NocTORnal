@@ -120,7 +120,8 @@ def evidence_backing_sql(column: str, element: str) -> str:
     which case it is bound TWICE, once per branch). Both are literals from
     this codebase and never client input.
     """
-    assert column in _ELEMENT_COLUMNS
+    if column not in _ELEMENT_COLUMNS:  # not `assert`: stripped under python -O, and this guards SQL text
+        raise ValueError("refused identifier outside the allow-list")
     return f"""SELECT bl.evidence_id, 'LINK'::text AS kind,
                       NULL::uuid AS assertion_id, NULL::text AS basis,
                       bl.created_at AS at, bl.created_by AS by_user,
@@ -143,7 +144,8 @@ def evidenced_sql(column: str, alias: str) -> str:
     Takes TWO bind parameters, in order: the reader's clearance and the
     reader's compartments. See the block comment above for the rule.
     """
-    assert alias in ("n", "e")
+    if alias not in ("n", "e"):  # not `assert`: stripped under python -O, and this guards SQL text
+        raise ValueError("refused identifier outside the allow-list")
     return f"""EXISTS (SELECT 1
                          FROM ({evidence_backing_sql(column, alias + '.id')}) bk
                          JOIN core.evidence bx ON bx.id = bk.evidence_id
