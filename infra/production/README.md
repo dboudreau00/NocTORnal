@@ -79,9 +79,13 @@ must agree across files:
   not exist yet. initdb fixes the owner's password for good, so on a host
   where it cannot tell, the command asks you to choose it instead.
 
-It prints the name of everything it changed and never a value, and exits
-non-zero while something is left for you, saying what. Run it again after
-you have done that; it changes only what still needs changing.
+It prints the name of everything it changed and never a value. It exits
+non-zero when it refused, or when a choice is left that only you can make (the
+schema owner's password, on a host where Docker cannot say whether the
+database volume exists), and says what. A placeholder still in a file is
+listed as a `note:` line and does not change the exit status; every one of
+them needs a real value before `up`. Run it again once you have filled them
+in: it changes only what still needs changing, and the notes are gone.
 
 Four files so far, because four different readers must hold four different
 things (the two egress files are in [Egress](#egress-the-only-way-out)):
@@ -109,6 +113,16 @@ placeholder. Moving an existing deployment to this layout is
 what breaks when it is wrong. Work through it top to bottom. The API
 refuses to start on a placeholder it can recognise, and several other
 values fail quietly rather than loudly.
+
+**The two legal declarations stop the API.**
+`NOCTORNAL_PROHIBITED_CONTENT_POLICY` and `NOCTORNAL_DESIGNATED_PERSON` ship as
+placeholders, and a production API, the sample origin and the collector refuse
+to start while either one is: the message names both. That is deliberate. A
+template copied as it stands would declare a policy nobody wrote, so there is
+no way past it but a value. Put in a reference an auditor can follow to the
+prohibited-content policy your counsel wrote (`docs/16` L1), and the name of
+the person material is escalated to. The software records both and cannot
+verify either.
 
 `caddy.env` holds the three values the TLS terminator needs (the two
 hostnames and the TLS mode) and nothing else. Caddy is the one process the

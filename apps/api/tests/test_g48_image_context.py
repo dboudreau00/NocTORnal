@@ -661,6 +661,17 @@ def test_every_compose_command_in_the_readme_is_run_with_sudo():
     assert not bare, bare
 
 
+def test_the_readme_and_the_template_say_the_two_declarations_stop_the_api():
+    """A template copied as it stands refused to start the production API, the sample
+    origin and the collector (config._DECLARATIONS), while the template said only that
+    sample ingest was refused."""
+    step1 = _text(README).split("## 1. Write the secrets files", 1)[1].split("## 2.", 1)[0]
+    assert "NOCTORNAL_PROHIBITED_CONTENT_POLICY" in step1 and "NOCTORNAL_DESIGNATED_PERSON" in step1
+    assert "refuse\nto start while either one is" in step1
+    example = (PRODUCTION / "secrets.env.example").read_text(encoding="utf-8")
+    assert "refuse to start while\n# either is the placeholder" in example.replace("\r\n", "\n")
+
+
 def test_every_svcacct_add_discards_its_stdout_and_keeps_stderr():
     logical = re.sub(r"\\\n\s*", " ", _script("minio-init", "entrypoint")).splitlines()
     # The `info` guard before `||` has its own `>/dev/null 2>&1`; the add is what follows it.
