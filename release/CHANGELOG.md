@@ -1,5 +1,90 @@
 # Changelog
 
+## Beta 1.3: 2026-10-12
+
+The third revision of the beta, version 0.9.3. It comes from installing the
+production stack on a clean Ubuntu 24.04 machine as an ordinary user, following
+`infra/production/README.md` step by step, and then rebooting that machine. Two
+things were defects in the software and are fixed; the rest were the
+instructions, which can now be followed as written. There is no migration
+(Alembic stays at 0182) and no setting changes. It has not been audited, and it
+is still not lawful to operate against real material until docs/16 L1 to L5 are
+settled outside this codebase. Legal review is required before any active case
+load.
+
+- **The production stack comes back by itself after a host reboot.** Caddy and
+  the egress proxy hold fixed addresses on the internal network (`.10` and
+  `.11`), inside the range Docker deals the other containers' addresses from. A
+  reboot starts every service at once and in no order, so two containers without
+  a fixed address could be dealt those two first. Caddy and the proxy then
+  failed with `Address already in use` and stayed down: the console did not
+  answer, and `up -d` alone could not bring it back, because the two containers
+  that had taken the addresses were still running. The network now deals only
+  from its upper half (`ip_range 172.31.243.128/25`, the gateway kept at `.1`),
+  and a test holds the fixed addresses outside that range. This was so in Beta
+  1.1 and Beta 1.2 on the production stack; the development stack is not
+  affected.
+- **A declared policy is no longer listed as a blocking failure on the
+  production stack.** The four blocking readiness checks also run on the
+  caller's own database connection: the console's access badge (`GET
+  /admin/access`) asks them, and so do the routes that refuse a manual
+  collection poll or an attended persona act while one fails. On the production
+  stack that connection is the request role. `prohibited_content_policy` reads
+  the screening state, and the screening state counted samples from a column
+  sealed against that role since 0180 (Beta 1.1). The role was refused, the
+  check was counted as failed, the badge listed the policy as blocking with the
+  declaration set, and a poll was refused with a 409 naming it. The register
+  itself (Administration, Readiness) was right throughout, because it runs that
+  check on a system connection. The screening state now reads the generated
+  column the other readers use, a pure test keeps the sealed column out of its
+  SQL, and two tests read it as the request role, which development and the test
+  suite did not do: there the request connection is the owner.
+- **The production README can be followed as written, by an ordinary user with
+  `sudo`.** It said `sudo ./release/install.sh --production-secrets`, which
+  answers `command not found` to anyone who unzipped the release, because a zip
+  carries no execute bit; every instruction, refusal message and template now
+  says `sudo bash release/install.sh`. The env files are root's and mode 600,
+  which `docker compose` cannot read as another user, so every compose command
+  carries `sudo`. The first `docker compose run` made `infra/production/tls` as
+  root, which left step 3 unable to write the certificate into it; step 1 now
+  makes the directory first. A production API, the sample origin and the
+  collector refuse to start while the two legal declarations are the template's
+  placeholders, which the README and the template now say (they said only that
+  sample ingest was refused). The secrets step's closing lines name the egress
+  files, the collector key and the certificate it does not write, its exit
+  status is described as it is, and `create-user` on the production stack prints
+  the console's address and no `.venv` command.
+
+FIGURES_PENDING
+
+On a clean Ubuntu 24.04 machine the one-command install had the console
+answering 78 seconds after the install command, with a sign-in accepted at 81
+seconds. The production stack, set up from the production README as an ordinary
+user, was healthy 57 seconds after `up -d --build` began (the image takes 51
+seconds to build first), and after a reboot of the machine the console answered
+28 seconds after boot, twice in a row, with nobody typing.
+
+### Upgrading from Beta 1.2
+
+Nothing is migrated, backed up or reconfigured that Beta 1.2 did not already
+need, and no setting is new. The production network gains an address range, and
+Docker cannot change a network while containers are using it, so take the stack
+down and up once; `down` keeps the data volumes:
+
+```
+git pull
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml down
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
+```
+
+The console is down for about twenty seconds. Do not skip the `down`: a plain
+`up -d --build` recreates the network under the containers that stay running,
+the new containers cannot resolve the database's name, `migrate` exits 1 and the
+stack is left half started; `down`, then `up -d --build`, puts it right. A
+deployment on Beta 1.1 takes the same steps, and one still on Beta 1 takes
+"Upgrading from Beta 1" under Beta 1.1 first. A development install needs
+nothing beyond the new files and a restart.
+
 ## Beta 1.2: 2026-10-11
 
 The second revision of the beta, version 0.9.2. It applies the findings of an
