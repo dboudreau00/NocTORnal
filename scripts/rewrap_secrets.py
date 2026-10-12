@@ -36,7 +36,7 @@ split (under a TOTP ring id) onto the persona ring and re-seals each one
 under a retired persona key under the active one. It needs BOTH rings, so
 it runs in the collector:
 
-    docker compose -f infra/production/compose.yml run --rm collector \\
+    sudo docker compose -f infra/production/compose.yml run --rm collector \\
         python scripts/rewrap_secrets.py --persona --apply
 
 The upgrade note: until it has run, the vault refuses every persona

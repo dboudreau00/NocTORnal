@@ -16,7 +16,10 @@ on this for casework. It is short and it is the honest part.
 You need:
 
 * A Linux host with Docker Engine and the Compose v2 plugin (2.24 or later,
-  for the optional egress env files), and root on it.
+  for the optional egress env files), and root on it. Run the commands below as
+  an ordinary user with `sudo`. The `docker compose` ones carry it because step 1
+  makes the env files root's and mode 600, and `docker compose` reads them as
+  whoever runs it; from a root shell, leave `sudo` off.
 * **Two** DNS names pointing at that host: one for the console, one for
   sample downloads. They must be genuinely separate names. Invariant 10
   puts hostile bytes on an origin that holds no analyst session, and the
@@ -25,8 +28,10 @@ You need:
 * Ports 80 and 443 reachable from wherever your analysts are. Nothing else
   is published: Postgres, Redis, MinIO and both application processes are
   reachable only from the compose network.
-* A checkout of this repository on the host. Every command below is run
-  from the repository root. Nothing but the repository belongs in it: that
+* A checkout of this repository on the host, or a release zip unzipped there
+  (a zip carries no execute bit, so the scripts below are run with `bash`).
+  Every command below is run from the repository root. Nothing but the
+  repository belongs in it: that
   directory is the build context of the one image every service runs, so a
   stray file there is copied into every container by the next
   `up -d --build`. In particular a database dump never goes there (see
@@ -193,10 +198,14 @@ Without them the API refuses to start, naming the client and fingerprint
 keys, the egress proxy restarts in a loop, and cron, the collector, lab-cron
 and embed-pass, which wait for the proxy, never start: `up` itself exits 1
 with `dependency failed to start`. The keys are made by the application
-image, so build it first:
+image, so build it first. Make the certificate directory first too, as
+yourself: the first `docker compose run` mounts it, and Docker creates a
+missing mount source as root, which would leave step 3 unable to write the
+certificate into it:
 
 ```sh
-docker compose -p noctornal-prod -f infra/production/compose.yml build
+mkdir -p -m 755 infra/production/tls
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml build
 ```
 
 ---
@@ -230,9 +239,9 @@ script, which creates `noctornal_app` and `noctornal_worker` with no password
 and grants them what the migrations grant:
 
 ```sh
-docker compose -p noctornal-prod -f infra/production/compose.yml run --rm --no-deps migrate \
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml run --rm --no-deps migrate \
   sh -c 'DATABASE_URL="$NOCTORNAL_MIGRATION_DATABASE_URL" python scripts/runtime_roles.py ensure --production'
-docker compose -p noctornal-prod -f infra/production/compose.yml exec postgres psql -U noctornal -d noctornal
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml exec postgres psql -U noctornal -d noctornal
 #   at the psql prompt:   \password noctornal_app     and      \password noctornal_worker
 ```
 
@@ -328,7 +337,7 @@ not depend on this: the Dockerfile makes everything it copies readable, so a
 checkout made under `077` cannot produce an image the application cannot read.
 
 ```sh
-docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
 ```
 
 `--build` matters. Compose reuses an existing local image tag, so after any
@@ -346,8 +355,8 @@ that as a bug in whatever endpoint happened to run first.
 Watch it come up:
 
 ```sh
-docker compose -p noctornal-prod -f infra/production/compose.yml ps
-docker compose -p noctornal-prod -f infra/production/compose.yml logs -f migrate api
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml ps
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml logs -f migrate api
 ```
 
 `migrate` and `minio-init` are one-shot and are expected to sit in `exited
@@ -473,7 +482,7 @@ To make the first account from the server instead (and this is the only way
 when no token is set), run it from a container:
 
 ```sh
-docker compose -p noctornal-prod -f infra/production/compose.yml \
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml \
   run --rm --no-deps api python scripts/bootstrap.py create-user \
   --email you@example.org --name "Your Name" \
   --roles SYS_ADMIN,SECURITY_OFFICER,CASE_OWNER,ANALYST
@@ -705,7 +714,7 @@ container. To leave it out, add `--scale redis=0` to every `up`; services
 that wait on a service scaled to nothing do not wait for it:
 
 ```sh
-docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build --scale redis=0
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build --scale redis=0
 ```
 
 An `up` without the flag starts it again, idle, and nothing else changes.
@@ -753,7 +762,7 @@ service receives. They are in three files beside it:
 | `postgres-init.env` | postgres alone | `NOCTORNAL_EGRESS_DB_PASSWORD`, for `db/init/20-egress-role.sh`, beside the owner's and the system role's passwords (step 1) |
 
 ```sh
-docker compose -p noctornal-prod -f infra/production/compose.yml \
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml \
   run --rm --no-deps -T api python scripts/egress_setup.py keygen     # prints every key, once
 ( umask 077                               # a subshell: the umask must not outlive these two lines
   cp infra/production/egress-proxy.env.example infra/production/egress-proxy.env
@@ -763,7 +772,7 @@ sudo chmod 600       infra/production/egress-proxy.env infra/production/egress-c
 # postgres-init.env exists since step 1 (root's, mode 600): set
 # NOCTORNAL_EGRESS_DB_PASSWORD in it with sudoedit, and do not copy its
 # template over it, which would put a placeholder where the owner's password is.
-docker compose -p noctornal-prod -f infra/production/compose.yml \
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml \
   run --rm --no-deps -T --user 0 -v "$PWD/infra/production:/prod:ro" api \
   python scripts/egress_setup.py preflight --dir /prod \
   --compose-version "$(docker compose version --short)"    # checks all three before you start
@@ -813,7 +822,7 @@ network really has no route out:
 
 ```sh
 docker network inspect noctornal-prod_noctornal --format '{{.Internal}}'   # true
-docker compose -p noctornal-prod -f infra/production/compose.yml exec api \
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml exec api \
   python -c "import socket; socket.create_connection(('1.1.1.1', 443), 5)"
 # must FAIL (network unreachable or a timeout); this command connects to
 # 1.1.1.1 and nothing else, and only when you run it.
@@ -1004,7 +1013,7 @@ service's `mem_limit` with them.
 Confirm it after every change to Docker or to this file:
 
 ```sh
-docker compose -p noctornal-prod -f infra/production/compose.yml exec analysis-worker \
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml exec analysis-worker \
   python -m noctornal_api.analysis_worker --check        # exit 0: it answers
 docker inspect noctornal-prod-analysis-worker-1 --format \
   '{{.HostConfig.NetworkMode}} {{.HostConfig.ReadonlyRootfs}} {{.HostConfig.CapDrop}} {{.HostConfig.CapAdd}} {{.Config.User}} {{.HostConfig.Init}}'
@@ -1013,17 +1022,17 @@ docker inspect noctornal-prod-analysis-worker-1 --format \
 docker inspect noctornal-prod-analysis-worker-1 --format \
   '{{.HostConfig.IpcMode}} {{.HostConfig.Sysctls}} {{.HostConfig.PidsLimit}}'
 # none map[fs.mqueue.queues_max:0 kernel.msgmni:0 kernel.sem:0 0 0 0 kernel.shmmax:0] 128
-docker compose -p noctornal-prod -f infra/production/compose.yml exec -u 10100:10100 analysis-worker \
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml exec -u 10100:10100 analysis-worker \
   python -c "open('/tmp/x', 'w')"
 # must FAIL with "Permission denied": a child's user can write nothing there
-docker compose -p noctornal-prod -f infra/production/compose.yml exec analysis-worker \
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml exec analysis-worker \
   python -c "import socket; socket.create_connection(('192.0.2.1', 443), 3)"
 # must FAIL with "Network is unreachable": 192.0.2.1 is a documentation
 # address nothing routes, so this sends nothing anywhere
-docker compose -p noctornal-prod -f infra/production/compose.yml exec -u 10100:10100 analysis-worker \
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml exec -u 10100:10100 analysis-worker \
   python -c "import os; os.unlink('/run/noctornal-analysis/worker.sock')"
 # must FAIL with "Permission denied": a child's user cannot touch the socket
-docker compose -p noctornal-prod -f infra/production/compose.yml exec analysis-worker env
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml exec analysis-worker env
 # only PATH, HOME, HOSTNAME, the python image's own variables and
 # NOCTORNAL_ANALYSIS_*
 ```
@@ -1098,7 +1107,7 @@ not silent. Enrolling a Telegram persona needs the key too, so it runs in the
 collector:
 
 ```sh
-docker compose -f infra/production/compose.yml run --rm collector \
+sudo docker compose -f infra/production/compose.yml run --rm collector \
     python scripts/telegram_persona.py enrol --persona <persona id>
 ```
 
@@ -1115,9 +1124,9 @@ docker compose -f infra/production/compose.yml run --rm collector \
    once, in the collector, which holds both keys:
 
 ```sh
-docker compose -f infra/production/compose.yml run --rm collector \
+sudo docker compose -f infra/production/compose.yml run --rm collector \
     python scripts/rewrap_secrets.py --persona            # report
-docker compose -f infra/production/compose.yml run --rm collector \
+sudo docker compose -f infra/production/compose.yml run --rm collector \
     python scripts/rewrap_secrets.py --persona --apply    # move
 ```
 
@@ -1158,8 +1167,8 @@ hand and claims no other, within the 180 second `stop_grace_period`.
 **Logs.** Everything logs to stdout.
 
 ```sh
-docker compose -p noctornal-prod -f infra/production/compose.yml logs -f api
-docker compose -p noctornal-prod -f infra/production/compose.yml logs -f cron
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml logs -f api
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml logs -f cron
 ```
 
 Docker keeps each container's log in a json-file, and `compose.yml` bounds
@@ -1180,7 +1189,7 @@ release carrying migrations applies them before the API starts:
 ```sh
 git pull
 sudo bash release/install.sh --production-secrets
-docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
 ```
 
 The middle step changes nothing when there is nothing to change. From a
@@ -1248,7 +1257,7 @@ So a backup is the most sensitive file on this host, and three rules hold:
 
   # The database: custom format, encrypted in the pipe, never plaintext on disk.
   # BACKUP_RECIPIENT is the age public key (age1...) of whoever will restore.
-  docker compose -p noctornal-prod -f infra/production/compose.yml exec -T postgres \
+  sudo docker compose -p noctornal-prod -f infra/production/compose.yml exec -T postgres \
     sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -Fc -h 127.0.0.1 -U noctornal noctornal' \
     | age -r "$BACKUP_RECIPIENT" \
     > /srv/noctornal-backup/noctornal-$(date -u +%Y%m%dT%H%M%SZ).dump.age
@@ -1257,7 +1266,7 @@ So a backup is the most sensitive file on this host, and three rules hold:
   # without the capture it was derived from has lost half of what makes it
   # an exhibit. /srv/noctornal-backup is yours to choose, and must be the
   # 0700 directory made above, outside this checkout.
-  docker compose -p noctornal-prod -f infra/production/compose.yml \
+  sudo docker compose -p noctornal-prod -f infra/production/compose.yml \
     run --rm --no-deps -v /srv/noctornal-backup:/backup \
     --entrypoint /bin/sh minio-init -c '
       set -e
@@ -1290,7 +1299,7 @@ first. Then restore as the schema owner into an empty database, and verify:
 # directory made above, outside the checkout, so the plaintext file stays private
 age -d -i "$BACKUP_IDENTITY" /srv/noctornal-backup/noctornal-STAMP.dump.age \
   > /srv/noctornal-backup/restore.dump
-docker compose -p noctornal-prod -f infra/production/compose.yml exec -T postgres \
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml exec -T postgres \
   sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" pg_restore -h 127.0.0.1 -U noctornal -d RESTORED_DATABASE' \
   < /srv/noctornal-backup/restore.dump
 ```
@@ -1369,7 +1378,7 @@ apart from them if you want the split to mean anything for a stolen backup.
 **Stopping.**
 
 ```sh
-docker compose -p noctornal-prod -f infra/production/compose.yml down
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml down
 ```
 
 Never add `-v` to that unless you mean it. It destroys `prod-pgdata` (the
@@ -1424,7 +1433,7 @@ root's, mode 600:
 ```sh
 git pull
 sudo bash release/install.sh --production-secrets      # release\install.ps1 -ProductionSecrets on Windows
-docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
 ```
 
 It moves the two lines out of `secrets.env` into `postgres-init.env` and
@@ -1485,7 +1494,7 @@ their clock, the ones a hold keeps and the ones a sweep would destroy, and the
 dead letters and unattached ingest records a sweep would destroy:
 
 ```sh
-docker compose -p noctornal-prod -f infra/production/compose.yml \
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml \
   run --rm --no-deps cron /bin/sh -c '
     cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt
     export SSL_CERT_FILE=/tmp/ca-bundle.crt
@@ -1496,7 +1505,7 @@ docker compose -p noctornal-prod -f infra/production/compose.yml \
 **Then destroy.** The same command with `--apply`, an authority and an account:
 
 ```sh
-docker compose -p noctornal-prod -f infra/production/compose.yml \
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml \
   run --rm --no-deps -e NOCTORNAL_RETENTION_SWEEP_AUTHORITY='RETSCHED-2026-014' \
   cron /bin/sh -c '
     cat /etc/ssl/certs/ca-certificates.crt /certs/public.crt > /tmp/ca-bundle.crt
@@ -1658,7 +1667,7 @@ both names resolve to the same digest, which is how that is checked.
   add `user:` to the caddy service:
 
   ```sh
-  docker compose -p noctornal-prod -f infra/production/compose.yml stop caddy
+  sudo docker compose -p noctornal-prod -f infra/production/compose.yml stop caddy
   docker run --rm -v noctornal-prod_caddy-data:/data -v noctornal-prod_caddy-config:/config \
     --entrypoint chown caddy:2-alpine -R 10002:10002 /data /config
   # then, under `caddy:` in compose.yml:   user: "10002:10002"

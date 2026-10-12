@@ -68,7 +68,7 @@ bundled `redis` service then starts with no client; `--scale redis=0` on
 ## 2. Start
 
 ```sh
-docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
 ```
 
 Compose recreates `redis` (its environment changed), and the limiter

@@ -1,6 +1,6 @@
 # The production deployment. ONE HOST, docker compose, nothing else.
 #
-#   docker compose -p noctornal-prod -f infra/production/compose.yml up -d
+#   sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d
 #
 # Read infra/production/README.md first: this file cannot start without
 # infra/production/secrets.env and caddy.env beside it, and a correctly configured stack
