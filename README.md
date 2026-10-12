@@ -525,10 +525,11 @@ same pane.
 
 Build at a target classification. The redaction is *structural*, so
 nothing above that level is read at any point and it cannot be defeated by
-a name in a rationale field. The document counts what it withheld, calls
-every figure in it a lower bound, and flags each entity and tie that no
-exhibit in it backs. Release is a separate action, through the egress
-gate, and is recorded either way.
+a name in a rationale field. The document says what it withheld as far as
+the case's disclosure setting allows (the kinds of material by default,
+the counts if the case chooses), calls every figure in it a lower bound,
+and flags each entity and tie that no exhibit in it backs. Release is a
+separate action, through the egress gate, and is recorded either way.
 
 ### Add entity and add link
 ![Add entity](docs/images/15-add-node.png)

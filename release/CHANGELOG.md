@@ -6,11 +6,12 @@ The third revision of the beta, version 0.9.3. It comes from installing the
 production stack on a clean Ubuntu 24.04 machine as an ordinary user, following
 `infra/production/README.md` step by step, and then rebooting that machine. Two
 things were defects in the software and are fixed; the rest were the
-instructions, which can now be followed as written. There is no migration
-(Alembic stays at 0182) and no setting changes. It has not been audited, and it
-is still not lawful to operate against real material until docs/16 L1 to L5 are
-settled outside this codebase. Legal review is required before any active case
-load.
+instructions, which can now be followed as written. The console also has a new
+default theme, Charcoal, which changes how it looks and nothing it does. There
+is no migration (Alembic stays at 0182) and no setting changes. It has not been
+audited, and it is still not lawful to operate against real material until
+docs/16 L1 to L5 are settled outside this codebase. Legal review is required
+before any active case load.
 
 - **The production stack comes back by itself after a host reboot.** Caddy and
   the egress proxy hold fixed addresses on the internal network (`.10` and
@@ -54,6 +55,17 @@ load.
   files, the collector key and the certificate it does not write, its exit
   status is described as it is, and `create-user` on the production stack prints
   the console's address and no `.venv` command.
+- **The console's default theme is Charcoal.** It replaces the wine-toned
+  "Mulberry Nocturne" with five neutral grounds, off-white text in three tiers
+  and a teal accent, taken from a supplied palette. Every colour still lives in
+  `theme.css`, and the theme contract's rules hold for the new values: the text
+  tiers, the three tie signs, the node hues under colour-blindness simulation,
+  and every mark on the canvas's worst ground. The supplied palette was adjusted
+  in three places to meet them: its lowest text tier is lifted to clear 4.5:1 on
+  the ground, and the person violet and the finance gold stay the console's own,
+  because the supplied ones fall inside the colour-blindness floor against the
+  persona and group hues. Nothing the console shows or does changes, and the
+  README's sixteen screenshots are re-shot in the new theme.
 
 8377 tests (`def test_` functions). The whole suite, run on a database built from nothing with every migration and with both runtime database roles present, passed 12791 and skipped 0.
 
