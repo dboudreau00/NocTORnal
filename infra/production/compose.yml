@@ -90,14 +90,16 @@ name: noctornal-prod
 # NOCTORNAL_TRUSTED_PROXY_IP. A trusted address and a reserved address that
 # had drifted apart would not fail -- uvicorn would simply stop believing
 # Caddy, and every request would meter and audit as coming from the proxy.
-# If you change this, change the subnet under `networks:` to contain it.
+# If you change this, change the subnet under `networks:` to contain it, and
+# keep it outside that network's `ip_range` (the dynamic half, below).
 x-caddy-ip: &caddy_ip "172.31.243.10"
 
 # The egress proxy's fixed address on the internal network (S2). api
 # and cron are told it in NOCTORNAL_EGRESS_PROXY_URL, and the proxy listens
 # on it and nowhere else (NOCTORNAL_EGRESS_LISTEN). A YAML alias cannot be
 # spliced into a string, so those two values repeat it; a test holds them
-# equal to this declaration.
+# equal to this declaration. Like Caddy's, it stays outside the network's
+# `ip_range`.
 x-egress-ip: &egress_ip "172.31.243.11"
 
 # --------------------------------------------------------------------------
@@ -1729,6 +1731,18 @@ services:
 # one on this address space", not a subtle one -- pick another /24 here and
 # in x-caddy-ip if that happens.
 #
+# `noctornal` deals an address to a container that has no fixed one from its
+# upper half only (`ip_range`); Caddy and the egress proxy hold fixed ones in
+# the lower half (x-caddy-ip, x-egress-ip). Without the range Docker dealt
+# from the bottom of the /24, the tenth container without a fixed address
+# reached .10 and .11, and a host reboot, which starts every service at once
+# in no order, could give them to two of those before Caddy and the proxy
+# asked: those two then failed with "Address already in use" and stayed down,
+# and the console did not come back (Beta 1.2 and earlier, found on a fresh
+# box on 2026-10-12). `gateway` keeps the gateway at .1, where it was; Docker
+# moves it to the start of the range when none is given. A test holds the
+# fixed addresses outside the range (test_egress_topology.py).
+#
 # S2 (2026-09-24): `noctornal` is INTERNAL, so nothing on it reaches
 # the internet except through the egress proxy. `edge` is the one plain
 # bridge with a route out, joined by caddy and the proxy alone; its subnet
@@ -1746,6 +1760,8 @@ networks:
     ipam:
       config:
         - subnet: 172.31.243.0/24
+          ip_range: 172.31.243.128/25
+          gateway: 172.31.243.1
   edge:
     driver: bridge
     ipam:

@@ -260,6 +260,39 @@ def test_the_internal_subnets_equal_the_policys_default(doc):
         assert tuple(value.split(",")) == egress_policy.DEFAULT_INTERNAL_NETWORKS
 
 
+def test_the_fixed_addresses_sit_outside_the_networks_dynamic_range(doc):
+    """2026-10-12, on a fresh box: after a host reboot Caddy and the egress proxy
+    failed with "Address already in use" and stayed down, and the console did not
+    come back. Docker deals an address to every container without a fixed one from
+    the bottom of the subnet, ten of them reach .10 and .11, and a reboot starts
+    everything at once in no order, so two of those took the addresses Caddy and
+    the proxy own. The network now deals only from its upper half (`ip_range`),
+    keeps the gateway at .1, and every fixed address lies outside the range."""
+    conf = doc["networks"]["noctornal"]["ipam"]["config"][0]
+    subnet = ipaddress.ip_network(conf["subnet"])
+    dealt_from = ipaddress.ip_network(conf["ip_range"])
+    gateway = ipaddress.ip_address(conf["gateway"])
+    assert dealt_from.subnet_of(subnet) and dealt_from != subnet
+    assert gateway in subnet and gateway not in dealt_from
+    fixed, dealt = {}, []
+    for name, service in doc["services"].items():
+        joined = _nets(service)
+        if "noctornal" not in joined:
+            continue
+        settings = joined["noctornal"] or {}
+        if "ipv4_address" in settings:
+            fixed[name] = ipaddress.ip_address(settings["ipv4_address"])
+        else:
+            dealt.append(name)
+    assert set(fixed) == {"caddy", "egress-proxy"}, fixed
+    for name, address in fixed.items():
+        assert address in subnet and address not in dealt_from and address != gateway, name
+    assert str(fixed["caddy"]) == doc["x-caddy-ip"]
+    assert str(fixed["egress-proxy"]) == doc["x-egress-ip"]
+    # room for every container that is dealt one, and for a few more
+    assert len(dealt) + 16 <= dealt_from.num_addresses - 2, len(dealt)
+
+
 def test_application_services_sit_on_the_internal_network_only(doc):
     for name in APP_ONLY:
         assert set(_nets(doc["services"][name])) == {"noctornal"}, name
@@ -357,8 +390,9 @@ def test_the_readme_names_every_place_that_carries_a_movable_subnet():
         code = _strip_comment(line.strip())
         if re.search(r"172\.31\.24[34]\.", code):
             keys.add(code.lstrip("- ").split(":", 1)[0])
-    assert keys == {"x-caddy-ip", "x-egress-ip", "subnet", "NOCTORNAL_EGRESS_PROXY_URL",
-                    "NOCTORNAL_EGRESS_LISTEN", "NOCTORNAL_EGRESS_INTERNAL_CIDRS"}, keys
+    assert keys == {"x-caddy-ip", "x-egress-ip", "subnet", "ip_range", "gateway",
+                    "NOCTORNAL_EGRESS_PROXY_URL", "NOCTORNAL_EGRESS_LISTEN",
+                    "NOCTORNAL_EGRESS_INTERNAL_CIDRS"}, keys
     for key in keys:
         assert key in section, key
     assert "EXITS_NETWORK" in section and "MODELS_NETWORK" in section

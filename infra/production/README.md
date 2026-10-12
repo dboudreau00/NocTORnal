@@ -371,7 +371,10 @@ networks, `172.31.244.0/24` to `172.31.246.0/24`).
 Pick a free /24 and change every place in `compose.yml` that names the old
 one, all of them in the same edit:
 
-* the subnet in the `networks:` block at the bottom;
+* the `subnet` in the `networks:` block at the bottom and, for `noctornal`, the
+  `ip_range` and `gateway` beside it: the range is the upper half of the /24
+  (`.128/25`), the gateway is `.1`, and the two fixed addresses below must
+  stay outside the range (see [After a host reboot](#after-a-host-reboot));
 * for `noctornal`, the `x-caddy-ip` and `x-egress-ip` addresses at the top
   (the first is the address uvicorn is told to trust for `X-Forwarded-For`),
   `NOCTORNAL_EGRESS_PROXY_URL` on api, cron, collector, lab-cron and
@@ -392,6 +395,24 @@ on the `ports`, `networks` and `ipam` keys it replaces (Compose 2.24 or later).
 by editing this file: the code holds both (`egress_routes.EXITS_NETWORK` and
 `MODELS_NETWORK`), so a sidecar or a model server on a moved network is
 refused. Free those two on the host instead.
+
+### After a host reboot
+
+Nothing to do. Every service restarts with Docker (`restart: unless-stopped`),
+Docker is enabled at boot by the packages from docs.docker.com, and the console
+answers about half a minute after the host is up. Caddy (`172.31.243.10`) and
+the egress proxy (`172.31.243.11`) hold fixed addresses on the internal
+network; every other container is dealt one from the upper half of its subnet
+only (`ip_range`), so however the services start, none of them can take those
+two.
+
+A deployment started before Beta 1.3 had no such range. A reboot starts every
+service at once, two containers without a fixed address could be dealt the
+addresses Caddy and the proxy own, and those two then failed with `Address
+already in use` and stayed down: the console did not answer, and `up -d` alone
+could not bring it back, because the two that had taken the addresses were still
+running. `down`, then `up -d`, does (the data volumes are kept), and
+[Upgrading](#upgrading) puts the range in place.
 
 ---
 
@@ -1362,6 +1383,24 @@ the property evidence is supposed to have.
 ---
 
 ## Upgrading
+
+### From Beta 1.2 or earlier: the internal network's address range
+
+Beta 1.3 gives the `noctornal` network an `ip_range` (see
+[After a host reboot](#after-a-host-reboot)), and Docker cannot change the
+address configuration of a network while containers are using it. Take the
+stack down and up once; `down` keeps the data volumes:
+
+```sh
+git pull
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml down
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
+```
+
+The console is down for about twenty seconds. Nothing is migrated or
+reconfigured, no env file changes, and the evidence and the case file are not
+touched. Until it is done, a reboot can still leave Caddy and the egress proxy
+down, as described above.
 
 ### From a release before 2026-10-02: the owner's credential and Redis
 
