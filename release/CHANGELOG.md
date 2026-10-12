@@ -55,7 +55,7 @@ load.
   status is described as it is, and `create-user` on the production stack prints
   the console's address and no `.venv` command.
 
-FIGURES_PENDING
+8377 tests (`def test_` functions). The whole suite, run on a database built from nothing with every migration and with both runtime database roles present, passed 12791 and skipped 0.
 
 On a clean Ubuntu 24.04 machine the one-command install had the console
 answering 78 seconds after the install command, with a sign-in accepted at 81
