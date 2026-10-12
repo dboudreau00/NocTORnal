@@ -297,6 +297,34 @@ def test_create_user_points_at_the_console_and_the_readme_recipe(
         "you@example.org", "OP-SHOWCASE-26", "CLEAR")
 
 
+def test_create_user_on_the_production_stack_points_at_the_production_console(capsys, monkeypatch):
+    """2026-10-12, README step 5 on a fresh box: create-user, run in the production container, told the
+    operator to sign in at http://127.0.0.1:8000/ui/ (not published there) and offered a .venv command
+    the image does not have. In production it names the public origin and nothing else."""
+    monkeypatch.setenv("NOCTORNAL_ENV", "production")
+    monkeypatch.setenv("NOCTORNAL_PUBLIC_ORIGIN", "https://console.noctornal.test/")
+    out = _next_block(capsys, ["CASE_OWNER", "SYS_ADMIN"], windows=False)
+    assert "https://console.noctornal.test/ui/" in out
+    assert "127.0.0.1" not in out and ".venv" not in out and "demo-network" not in out
+    monkeypatch.delenv("NOCTORNAL_PUBLIC_ORIGIN")
+    out = _next_block(capsys, ["CASE_OWNER"], windows=False)
+    assert "https://<your console hostname>/ui/" in out and "127.0.0.1" not in out
+
+
+def test_the_missing_qr_hint_in_production_does_not_send_the_operator_to_a_venv(capsys, monkeypatch):
+    """The development hint is `.venv/bin/python -m pip install ... qrcode`; the production image is
+    not a virtual environment, so the hint there is the URI or the secret, by hand."""
+    monkeypatch.delenv("NOCTORNAL_ENV", raising=False)
+    monkeypatch.setitem(sys.modules, "qrcode", None)       # `import qrcode` raises ImportError
+    _bootstrap()._print_qr("otpauth://totp/NocTORnal:you%40example.org?secret=ABC")
+    dev = capsys.readouterr().out
+    assert ".venv" in dev and "pip install" in dev
+    monkeypatch.setenv("NOCTORNAL_ENV", "production")
+    _bootstrap()._print_qr("otpauth://totp/NocTORnal:you%40example.org?secret=ABC")
+    out = capsys.readouterr().out
+    assert ".venv" not in out and "pip install" not in out and "by hand" in out
+
+
 def test_the_suggested_command_is_the_readme_recipes_first_line():
     readme = _read(README)
     first_run = readme[readme.index("## First run"):]

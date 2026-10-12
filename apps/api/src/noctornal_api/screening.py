@@ -499,6 +499,9 @@ def state(conn: psycopg.Connection, *, with_last_pass: bool = True
                "authority_reference": r[7],
                "imported_at": r[8].isoformat()} for r in lists]
     max_seq = max((a["seq"] for a in active), default=None)
+    # `NOT s.data_key_destroyed`, not `octet_length(s.data_key_ciphertext) > 0`: the sealed column is
+    # refused to the request role (0180), and this runs on that role's connection too, in the blocking
+    # readiness probes (`blocking_failures`, `blocking_state`). The generated column says the same thing.
     # `absent` counts only the absences no review has answered: the worker
     # stops retrying the move after two looks, and only the officer's
     # recorded review, made after the absence was recorded, ends the
@@ -510,7 +513,7 @@ def state(conn: psycopg.Connection, *, with_last_pass: bool = True
                                           OR s.screening_list_seq < %(max)s)),
                   count(*) FILTER (WHERE s.screening_outcome = 'MATCH'
                                      AND s.preserved_key IS NULL
-                                     AND octet_length(s.data_key_ciphertext) > 0
+                                     AND NOT s.data_key_destroyed
                                      AND s.screening_bytes_absent_at IS NULL),
                   count(*) FILTER (WHERE s.screening_outcome = 'MATCH'
                                      AND s.screening_bytes_absent_at IS NOT NULL

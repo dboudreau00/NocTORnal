@@ -390,7 +390,7 @@ def test_an_operators_own_comment_is_left_as_written(prod):
 # ---------------------------------------------------------------------------
 
 _AS_OWNER = ("run this as the user who owns the secrets files, with sudo on Linux "
-             "(sudo ./release/install.sh --production-secrets) or as that user on "
+             "(sudo bash release/install.sh --production-secrets) or as that user on "
              "Windows.")
 
 
@@ -556,7 +556,7 @@ def test_install_sh_on_a_file_it_cannot_read_says_sudo_and_no_traceback(prod):
         (prod / "secrets.env").chmod(0o600)
     out = run.stdout + run.stderr
     assert run.returncode == 1, out
-    assert "cannot read secrets.env" in out and "sudo ./release/install.sh" in out
+    assert "cannot read secrets.env" in out and "sudo bash release/install.sh" in out
     assert "Traceback" not in out
 
 

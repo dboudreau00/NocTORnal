@@ -106,7 +106,7 @@ STALE_COMMENTS = {
 #: What to do about a file this cannot read or write: the files are root's,
 #: mode 600, once the README's lock-down step has run.
 AS_OWNER = ("run this as the user who owns the secrets files, with sudo on "
-            "Linux (sudo ./release/install.sh --production-secrets) or as that "
+            "Linux (sudo bash release/install.sh --production-secrets) or as that "
             "user on Windows")
 
 

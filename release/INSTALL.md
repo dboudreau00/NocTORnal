@@ -353,7 +353,7 @@ procedure. The installers do one job there, on the host's own `python3`
 (3.8 or later, no virtual environment), and start nothing:
 
 ```bash
-sudo ./release/install.sh --production-secrets
+sudo bash release/install.sh --production-secrets
 ```
 
 ```powershell

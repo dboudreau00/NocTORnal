@@ -6,7 +6,7 @@ with the deployment's own Telegram account (docs/17 F31, 2026-10-02).
     python scripts/telegram_live_check.py --persona <uuid> --self-check
 
 In production it runs in the collector service, as telegram_persona.py does
-(`docker compose -f infra/production/compose.yml run --rm collector python
+(`sudo docker compose -f infra/production/compose.yml run --rm collector python
 scripts/telegram_live_check.py ...`): the enrolment, the poll and the
 logout open the persona's credential and session with the persona key,
 which only the collector holds (the persona vault split, decision 174), and

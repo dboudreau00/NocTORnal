@@ -978,7 +978,7 @@ MIGRATION_DSN_ENV = "NOCTORNAL_MIGRATION_DATABASE_URL"
 #: The installers' upgrade step, named in every sentence that needs it.
 #: With sudo since the 2026-10-02 review of F52: the files it rewrites are
 #: root's, mode 600, so run as anybody else it can read none of them.
-SECRETS_STEP = ("sudo ./release/install.sh --production-secrets (release/install.ps1 "
+SECRETS_STEP = ("sudo bash release/install.sh --production-secrets (release/install.ps1 "
                 "-ProductionSecrets on Windows)")
 #: The upgrade note every refusal of the old layout points at (2026-10-02).
 SECRETS_UPGRADE_NOTE = "release/secrets-upgrade/README.md"

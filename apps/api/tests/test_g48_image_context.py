@@ -640,6 +640,50 @@ def test_the_readme_has_the_egress_files_written_before_the_first_up_in_the_imag
     assert not re.search(r"(?m)^python3? scripts/egress_setup\.py", "\n".join(_readme_sh_blocks()))
 
 
+def test_the_readme_makes_the_certificate_directory_before_the_first_compose_run():
+    """2026-10-12, on a fresh box: the first `docker compose run` (the egress keys, in step
+    1) mounts infra/production/tls, Docker creates a missing mount source as root, and step
+    3's openssl then answered "Permission denied" to the operator. Step 1 makes the
+    directory, as the operator and mode 755, before anything runs."""
+    text = _text(README)
+    made = text.index("mkdir -p -m 755 infra/production/tls")
+    first = min(m.start() for m in re.finditer(r"compose\.yml\s*\\?\s*(?:run|up)\b", text))
+    assert made < first
+
+
+def test_every_compose_command_in_the_readme_is_run_with_sudo():
+    """2026-10-12: step 1 makes the env files root's and mode 600, and `docker compose` reads
+    them as whoever runs it, so the README's commands, written without sudo, answered
+    "permission denied" to an operator in the docker group. The first gate ran every step
+    as root and never saw it."""
+    bare = [line.strip()[:90] for block in _readme_sh_blocks() for line in block.splitlines()
+            if line.lstrip().startswith("docker compose ")]
+    assert not bare, bare
+
+
+def test_the_readme_and_the_template_say_the_two_declarations_stop_the_api():
+    """A template copied as it stands refused to start the production API, the sample
+    origin and the collector (config._DECLARATIONS), while the template said only that
+    sample ingest was refused."""
+    step1 = _text(README).split("## 1. Write the secrets files", 1)[1].split("## 2.", 1)[0]
+    assert "NOCTORNAL_PROHIBITED_CONTENT_POLICY" in step1 and "NOCTORNAL_DESIGNATED_PERSON" in step1
+    assert "refuse\nto start while either one is" in step1
+    example = (PRODUCTION / "secrets.env.example").read_text(encoding="utf-8")
+    assert "refuse to start while\n# either is the placeholder" in example.replace("\r\n", "\n")
+
+
+def test_the_readme_takes_the_stack_down_before_the_network_upgrade_brings_it_up():
+    """2026-10-12, upgrading a Beta 1.2 stack in place: a plain `up -d --build` recreated the
+    network under the containers that stayed running, `migrate` could not resolve `postgres` and
+    exited 1, and the stack was left half started. The upgrade for the new address range takes
+    the stack down first and says why."""
+    text = _text(README)
+    head = "### From Beta 1.2 or earlier: the internal network's address range"
+    section = text.split(head, 1)[1].split("\n### ", 1)[0]
+    assert section.index("compose.yml down") < section.index("compose.yml up -d --build")
+    assert "Do not skip the `down`" in section and "failed to resolve host" in section
+
+
 def test_every_svcacct_add_discards_its_stdout_and_keeps_stderr():
     logical = re.sub(r"\\\n\s*", " ", _script("minio-init", "entrypoint")).splitlines()
     # The `info` guard before `||` has its own `>/dev/null 2>&1`; the add is what follows it.
@@ -856,7 +900,7 @@ def _run_readme_blocks(tmp_path: Path, operator_umask: str):
         # for real and test_production_secrets_script.py holds that. Here it is a stand-in.
         "installer() { ( umask 077; for f in postgres-init migrate; do [ -f infra/production/$f.env ]"
         " || cp infra/production/$f.env.example infra/production/$f.env; done ); }",
-        "sudo() { if [ \"$1\" = ./release/install.sh ]; then installer; else \"$@\"; fi; }",
+        "sudo() { if [ \"$1\" = bash ] && [ \"$2\" = release/install.sh ]; then installer; else \"$@\"; fi; }",
         "python() { :; }; docker() { echo stub-dump; }; age() { cat; }",
         # openssl creates the key 0600 whatever the umask and the certificate
         # under the umask: that is the difference this test needs to keep.

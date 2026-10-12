@@ -390,7 +390,9 @@ library only:
     }
     if ($status -eq 0) {
         Write-Good "the production secrets files are in this release's layout"
-        Write-Detail 'next: docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build'
+        Write-Detail 'next: fill any placeholder listed above, then make sure the egress files, the collector'
+        Write-Detail 'key and the MinIO certificate exist (infra/production/README.md, steps 1 to 3), then start it:'
+        Write-Detail 'sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build'
     } else {
         Write-Note 'not finished: the lines above say what is left, or why it stopped and what it changed'
     }

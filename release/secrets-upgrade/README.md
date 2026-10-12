@@ -28,7 +28,7 @@ below removes the lines either way.
 
 ```sh
 git pull
-sudo ./release/install.sh --production-secrets
+sudo bash release/install.sh --production-secrets
 ```
 
 With `sudo`, because the files are root's, mode 600: run as anybody else it
@@ -68,7 +68,7 @@ bundled `redis` service then starts with no client; `--scale redis=0` on
 ## 2. Start
 
 ```sh
-docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
 ```
 
 Compose recreates `redis` (its environment changed), and the limiter

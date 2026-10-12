@@ -1,12 +1,12 @@
 # What is left
 
-**State (2026-10-08):** branch `main`, Alembic head `0182`,
-8365 tests counted as `def test_` functions across the two pytest roots,
-version 0.9.2 single-sourced from `pyproject.toml`. Those four counters are
+**State (2026-10-12):** branch `main`, Alembic head `0182`,
+8377 tests counted as `def test_` functions across the two pytest roots,
+version 0.9.3 single-sourced from `pyproject.toml`. Those four counters are
 generated: `scripts/refresh_counters.py` writes them and `test_doc_invariants`
 holds them to the tree with no tolerance. Per-release totals of COLLECTED
 items, which parametrisation makes larger, are in `release/CHANGELOG.md`.
-Beta 1.2 (2026-10-11) is released. **Every roadmap item is built.** The
+Beta 1.3 (2026-10-12) is released. **Every roadmap item is built.** The
 end-to-end check of the Telegram adapter is `scripts/telegram_live_check.py`,
 which an operator runs with the deployment's own Telegram account (docs/17
 F31). What stands between the product and a deployment is not software: it is
@@ -115,6 +115,15 @@ section, and there was no Alpha 8 release.
   critical), all fixed or stated: 77 fixed, one fixed for credentials and
   stated for the rest, and four stated and not fixed. docs/17, "The
   2026-10-03 review at Beta 1.1", lists each by area with its status.
+
+**Beta 1.3 (2026-10-12).**
+
+- **What installing the production stack on a clean machine found**, with no
+  migration: the internal network deals addresses from a reserved range, so the
+  stack restarts by itself after a host reboot; the screening state reads the
+  generated column, so a declared policy is not listed as a blocking failure on
+  the request role; the production README, the secrets step and `create-user`
+  can be followed as written by an ordinary user with `sudo`.
 
 **Beta 1.2 (2026-10-11).**
 

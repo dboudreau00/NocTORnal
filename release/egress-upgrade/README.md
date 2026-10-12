@@ -10,8 +10,8 @@ in this order.
 
 Every `python scripts/egress_setup.py ...` below needs the application's
 own libraries, which a host `python3` does not have, so it runs in the new
-image. Build that first (`git pull`, then `docker compose -p noctornal-prod
--f infra/production/compose.yml build`) and put `docker compose -p
+image. Build that first (`git pull`, then `sudo docker compose -p noctornal-prod
+-f infra/production/compose.yml build`) and put `sudo docker compose -p
 noctornal-prod -f infra/production/compose.yml run --rm --no-deps api` in
 front of each command (`-T` as well for `keygen` and `role-sql`, whose
 output you copy). Preflight reads the files from the host and asks the
@@ -21,7 +21,7 @@ host's Compose for its version, so it takes the longer form in
 ## 0. Check Docker Compose
 
 ```sh
-docker compose version --short
+sudo docker compose version --short
 ```
 
 It must be **2.24 or later**. The production compose file lists the new env
@@ -63,7 +63,7 @@ needs the role created by hand, as a superuser:
 
 ```sh
 python scripts/egress_setup.py role-sql
-docker compose -p noctornal-prod -f infra/production/compose.yml exec postgres \
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml exec postgres \
   psql -U noctornal -d noctornal
 ```
 
@@ -77,7 +77,7 @@ apply them.
 
 ```sh
 python scripts/egress_setup.py preflight
-docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
+sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build
 ```
 
 Preflight checks that all three files exist, that every key is well formed,

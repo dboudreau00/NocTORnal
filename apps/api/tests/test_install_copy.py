@@ -286,6 +286,38 @@ def test_help_prints_the_header_and_no_code(path: Path, usage: str):
     assert "set -" not in header and "PORT=" not in header, header
 
 
+def test_nothing_tells_an_operator_to_run_the_secrets_step_through_the_executable_path():
+    """2026-10-12, on a fresh box: `sudo ./release/install.sh --production-secrets`, as the
+    production README said, answered "command not found" to an operator who had unzipped the
+    release, because a zip carries no execute bit (release/INSTALL.md says so). `bash
+    release/install.sh` works from a zip and from a checkout, so every instruction names it.
+    The changelog and the clean-machine record are history and keep what they said."""
+    history = {"CHANGELOG.md", "CLEAN-VM-INSTALL.md"}
+    text_suffixes = {".md", ".py", ".sh", ".ps1", ".yml", ".example", ".txt"}
+    hits = []
+    for base in (ROOT / "infra" / "production", ROOT / "apps" / "api" / "src", SCRIPTS, ROOT / "release"):
+        for path in base.rglob("*"):
+            if (not path.is_file() or path.name in history or path.suffix not in text_suffixes
+                    or {"__pycache__", ".venv"} & set(path.parts)):
+                continue
+            if "sudo ./release/install.sh" in path.read_text(encoding="utf-8", errors="ignore"):
+                hits.append(path.relative_to(ROOT).as_posix())
+    assert not hits, hits
+
+
+@pytest.mark.parametrize("path", [INSTALL_SH, INSTALL_PS1], ids=lambda p: p.name)
+def test_the_production_secrets_step_points_past_the_files_it_does_not_write(path):
+    """2026-10-12: the step ended with `next: docker compose ... up -d --build`, skipping the
+    egress files, the collector key and the MinIO certificate, which `up` needs and which
+    this step does not write. The README's steps 1 to 3 are named, and the start command
+    carries sudo, because the env files are root's."""
+    text = _read(path)
+    block = text[text.index("next: "):][:700]
+    for needle in ("egress files", "collector", "MinIO certificate", "steps 1 to 3",
+                   "sudo docker compose -p noctornal-prod"):
+        assert needle in block, (path.name, needle)
+
+
 # ---------------------------------------------------------------------------
 # install.sh: the messages a new Linux user acts on
 # ---------------------------------------------------------------------------

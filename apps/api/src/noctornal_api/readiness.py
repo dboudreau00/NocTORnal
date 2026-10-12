@@ -1348,7 +1348,7 @@ def _redis_limiter_isolated(conn: psycopg.Connection) -> Check:
                 f"keys under {shown} and the commands "
                 f"ratelimit_redis.LIMITER_ACL_COMMANDS lists, and sign REDIS_URL "
                 f"in as that user. infra/production/compose.yml writes that ACL "
-                f"for the user {LIMITER_ACL_USER}, and sudo ./release/install.sh "
+                f"for the user {LIMITER_ACL_USER}, and sudo bash release/install.sh "
                 f"--production-secrets (release/install.ps1 -ProductionSecrets) "
                 f"writes REDIS_URL to match (docs/16 C8, "
                 f"release/secrets-upgrade/README.md)")

@@ -31,13 +31,14 @@
 # then a display name. The demo case is then loaded only with --demo.
 #
 # The production deployment (infra/production, read its README.md first):
-#   sudo ./release/install.sh --production-secrets
+#   sudo bash release/install.sh --production-secrets
 #       brings infra/production's secrets files to this release's layout,
 #       moving the schema owner's credential out of secrets.env and writing
 #       the Redis password and REDIS_URL, with a backup of every file it
 #       changes. Installs and starts nothing. With sudo because the files
 #       are root's, mode 600. Add --dir DIR for another directory. What it
-#       does and the way back: release/secrets-upgrade/README.md.
+#       does and the way back: release/secrets-upgrade/README.md. It is run
+#       with bash because a zip carries no execute bit.
 #
 set -euo pipefail
 
@@ -257,7 +258,9 @@ standard library only. Debian/Ubuntu:  sudo apt update && sudo apt install pytho
   set -e
   if [[ $status -eq 0 ]]; then
     good "the production secrets files are in this release's layout"
-    detail 'next: docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build'
+    detail 'next: fill any placeholder listed above, then make sure the egress files, the collector'
+    detail 'key and the MinIO certificate exist (infra/production/README.md, steps 1 to 3), then start it:'
+    detail 'sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build'
   else
     note 'not finished: the lines above say what is left, or why it stopped and what it changed'
   fi

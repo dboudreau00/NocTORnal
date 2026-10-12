@@ -78,6 +78,7 @@ try:
     from psycopg.types.json import Json
 
     from noctornal_api.cases import CaseError, CaseService
+    from noctornal_api.config import is_production
     from noctornal_api.db import SystemPurpose, connect_system
     from noctornal_api.graph import AssertionInput, GraphWriteError, GraphWriteService
     from noctornal_api.security import totp
@@ -248,6 +249,13 @@ def _print_qr(uri: str) -> None:
     try:
         import qrcode
     except ImportError:
+        if is_production():
+            # The production image is not a virtual environment: there is no .venv to install into
+            # (README step 5 runs this in a container; 2026-10-12).
+            print("  No QR code: the optional `qrcode` package is not in this image.")
+            print("  Enter the URI or the base32 secret into your authenticator by hand.")
+            print("  Either works.")
+            return
         # The project's interpreter and the pins, as the import hint above
         # gives them: a bare `pip` is the system one PEP 668 refuses, and
         # an unpinned install takes whatever release is newest (c3,
@@ -406,6 +414,15 @@ def cmd_create_user(args: argparse.Namespace) -> None:
 CONSOLE_URL = "http://127.0.0.1:8000/ui/"
 
 
+def _production_console_url() -> str:
+    """The console's address on the production stack: the public origin the API is configured with
+    (NOCTORNAL_PUBLIC_ORIGIN, the address analysts type), which is Caddy's hostname over TLS. Port 8000
+    is not published there. A placeholder names the hostname when the origin is not in this
+    environment."""
+    origin = os.environ.get("NOCTORNAL_PUBLIC_ORIGIN", "").strip().rstrip("/")
+    return f"{origin}/ui/" if origin else "https://<your console hostname>/ui/"
+
+
 def _print_next(email: str, roles: list[str], *,
                 windows: bool | None = None) -> None:
     """What to do after `create-user`, in the words install.sh and
@@ -423,6 +440,13 @@ def _print_next(email: str, roles: list[str], *,
     print(RULE)
     print("Next")
     print(RULE)
+    if is_production():
+        # README step 5 runs create-user in the production stack's container (2026-10-12): the console is
+        # Caddy's hostname, 127.0.0.1:8000 is not published, and there is no .venv to run a recipe from.
+        print(f"  Sign in to the console at {_production_console_url()} with this")
+        print("  address, the password and a code from your authenticator.")
+        print(RULE)
+        return
     print(f"  Sign in to the console at {CONSOLE_URL} (or on the port the API")
     print("  was started with) with this address, the password and a code from")
     print("  your authenticator.")

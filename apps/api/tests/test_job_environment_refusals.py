@@ -116,7 +116,7 @@ def test_the_owner_credential_is_refused_by_name_never_by_value(name, value, hom
     env = {**_production(), name: value}
     (line,) = config.refuse_unsafe_job_environment("embed_pass", env)
     assert line.startswith(f"embed_pass: refusing to run: {name} is set on a runtime process")
-    assert home in line and "sudo ./release/install.sh --production-secrets" in line
+    assert home in line and "sudo bash release/install.sh --production-secrets" in line
     assert config.SECRETS_UPGRADE_NOTE in line
     assert OWNER_PASSWORD not in line
 
