@@ -305,6 +305,19 @@ def test_nothing_tells_an_operator_to_run_the_secrets_step_through_the_executabl
     assert not hits, hits
 
 
+@pytest.mark.parametrize("path", [INSTALL_SH, INSTALL_PS1], ids=lambda p: p.name)
+def test_the_production_secrets_step_points_past_the_files_it_does_not_write(path):
+    """2026-10-12: the step ended with `next: docker compose ... up -d --build`, skipping the
+    egress files, the collector key and the MinIO certificate, which `up` needs and which
+    this step does not write. The README's steps 1 to 3 are named, and the start command
+    carries sudo, because the env files are root's."""
+    text = _read(path)
+    block = text[text.index("next: "):][:700]
+    for needle in ("egress files", "collector", "MinIO certificate", "steps 1 to 3",
+                   "sudo docker compose -p noctornal-prod"):
+        assert needle in block, (path.name, needle)
+
+
 # ---------------------------------------------------------------------------
 # install.sh: the messages a new Linux user acts on
 # ---------------------------------------------------------------------------

@@ -258,7 +258,9 @@ standard library only. Debian/Ubuntu:  sudo apt update && sudo apt install pytho
   set -e
   if [[ $status -eq 0 ]]; then
     good "the production secrets files are in this release's layout"
-    detail 'next: docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build'
+    detail 'next: fill any placeholder listed above, then make sure the egress files, the collector'
+    detail 'key and the MinIO certificate exist (infra/production/README.md, steps 1 to 3), then start it:'
+    detail 'sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build'
   else
     note 'not finished: the lines above say what is left, or why it stopped and what it changed'
   fi
