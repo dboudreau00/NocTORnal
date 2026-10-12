@@ -755,8 +755,11 @@ noctornal/
 
 **Beta. Unaudited. Not certified for evidential use. Not lawful to operate against real material until the five blocking items above are settled.** It is fit for other people to try on synthetic or published, non-personal data.
 
-This is Beta 1.1, release 0.9.1, tag `v0.9.1-beta`: Beta 1 with the known
-residuals that had a fix in the software closed. The request role is narrower
+This is Beta 1.2, release 0.9.2, tag `v0.9.2-beta`: Beta 1.1 with the findings
+of an outside code review applied and no migration. `urllib3` is at 2.8.0, which
+closes three advisories on 2.7.0, the checks that guard SQL identifiers no
+longer rest on `assert`, and CI runs with a read-only token. Beta 1.1 was Beta 1
+with the known residuals that had a fix in the software closed. The request role is narrower
 (Alembic 0174 to 0182), a request connection carries a statement timeout, the
 ego network and the path search answer for an entity anywhere in a case, a legal
 hold is placed from the console, and the sweep that destroys what no case
@@ -764,9 +767,9 @@ governs covers dead letters and ingest records attached to no case. The whole
 suite's figures, on a database built from nothing with every migration and both
 runtime database roles present, are in
 [`release/CHANGELOG.md`](release/CHANGELOG.md), which also has the steps for
-upgrading from Beta 1. On a clean Ubuntu 24.04 machine the console answered 6
-minutes 1 second after the install command, and the first sign-in came at 6
-minutes 45 seconds. An adversarial review on 2026-10-03 kept 82 findings, 16
+upgrading from Beta 1 and from Beta 1.1. On a clean Ubuntu 24.04 machine at Beta
+1.1 the console answered 6 minutes 1 second after the install command, and the
+first sign-in came at 6 minutes 45 seconds. An adversarial review on 2026-10-03 kept 82 findings, 16
 of them high. At Beta 1.1, 78 are fixed, one is fixed apart from who holds which
 role on which case, and three are stated and not fixed in `docs/17`. Before
 Beta 1 an independent re-verification re-ran each against the merged code, and
@@ -778,7 +781,7 @@ reads, selectors, search and the audit log hold at 100,000 entities and
 about 5,000 entities a case, and the ego network and the path search stop at
 5,000. That load was measured from a Windows host with Postgres in WSL2.
 
-Beyond what the tour shows, Beta 1.1 has entity merge under the two-person
+Beyond what the tour shows, Beta 1.2 has entity merge under the two-person
 policy; PGP verification and vendor keys; collection from feeds, forums and
 Telegram under a two-person authority (the operator's end-to-end Telegram
 check is `docs/17` F31); ingest; similarity search; Jira, the delivery

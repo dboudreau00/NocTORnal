@@ -6,7 +6,7 @@ version 0.9.1 single-sourced from `pyproject.toml`. Those four counters are
 generated: `scripts/refresh_counters.py` writes them and `test_doc_invariants`
 holds them to the tree with no tolerance. Per-release totals of COLLECTED
 items, which parametrisation makes larger, are in `release/CHANGELOG.md`.
-Beta 1.1 (2026-10-08) is released. **Every roadmap item is built.** The
+Beta 1.2 (2026-10-11) is released. **Every roadmap item is built.** The
 end-to-end check of the Telegram adapter is `scripts/telegram_live_check.py`,
 which an operator runs with the deployment's own Telegram account (docs/17
 F31). What stands between the product and a deployment is not software: it is
@@ -115,6 +115,13 @@ section, and there was no Alpha 8 release.
   critical), all fixed or stated: 77 fixed, one fixed for credentials and
   stated for the rest, and four stated and not fixed. docs/17, "The
   2026-10-03 review at Beta 1.1", lists each by area with its status.
+
+**Beta 1.2 (2026-10-11).**
+
+- **An outside code review's findings applied**, with no migration: `urllib3`
+  2.8.0, ten SQL identifier guards that raise where they asserted, five
+  identification digests marked as not a security use, a read-only CI token,
+  and a stable parametrize id in the egress proxy tests.
 
 **Beta 1.1 (2026-10-08).**
 
