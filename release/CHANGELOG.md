@@ -63,7 +63,7 @@ required before any active case load.
   fact and the action. They are the API's own text, so anything that matches on
   them must follow; the tests that did are updated.
 
-8377 tests (`def test_` functions). The whole suite, run on a database built from nothing with every migration and with both runtime database roles present, passed 12791 and skipped 0.
+8377 tests (`def test_` functions). The whole suite, run on a database built from nothing with every migration and with both runtime database roles present, passed 12792 and skipped 0.
 
 ### Upgrading from Beta 1.3
 
