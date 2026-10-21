@@ -400,6 +400,15 @@ they fit. Everything visible at once is a hairball.
   tooltip for anyone who must quote them. A rail caption is the name the
   palette answers to, and a refusal names the roles that would allow the
   action and who can give one, never a permission code.
+- **Copy.** A pane opens on its work, not on a paragraph about it. A field
+  carries a label and, where its format or its consequence is not obvious,
+  one short hint. An empty state is one line that says what to do. A warning
+  stays when it protects someone (legal exposure, destruction, material
+  leaving the platform), in one sentence. What a method does, why a number
+  is what it is, and what a setting covers belong in the analyst manual
+  (`release/MANUAL.md`), or open behind a "More" line when the analyst needs
+  them at the point of use. Text a service wrote is cut to its first
+  sentence in the pane; the API response keeps all of it.
 
 ## Quality floor
 
