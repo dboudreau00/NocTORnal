@@ -217,7 +217,7 @@ console.log(JSON.stringify(out));
 
 _CARD_FNS = ("andList", "typeName", "ageText", "actorButton", "graphButton", "pairsWithin",
              "pairKey", "leftOutParts", "reviewScopeText", "regeCutText", "regeImageTable",
-             "renderRege")
+             "renderRege", "moreDetails", "splitLead")
 
 
 def _card() -> str:

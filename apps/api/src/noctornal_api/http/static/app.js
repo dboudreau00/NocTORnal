@@ -19672,7 +19672,7 @@ function renderConcor() {
     if (said.rest) about.appendChild(el('p', 'muted small', said.rest));
   }
   if (c.method) about.appendChild(el('p', 'muted small', c.method));
-  if (about.childNodes.length) card.appendChild(moreDetails('How the positions were found', about));
+  if (about.children.length) card.appendChild(moreDetails('How the positions were found', about));
   box.appendChild(card);
 }
 
@@ -19897,7 +19897,7 @@ function renderRege() {
   }
   for (const t of g.limits || []) about.appendChild(el('p', 'muted small', t));
   if (g.method) about.appendChild(el('p', 'muted small', g.method));
-  if (about.childNodes.length) card.appendChild(moreDetails('What these roles can and cannot say', about));
+  if (about.children.length) card.appendChild(moreDetails('What these roles can and cannot say', about));
   box.appendChild(card);
 }
 

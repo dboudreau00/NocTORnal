@@ -198,7 +198,7 @@ def test_the_roles_payload_goes_through_safeLabelsDeep():
 
 _CARD_FNS = ("andList", "typeName", "pctOf", "ageText", "concorFitText",
              "concorImageTable", "actorButton", "graphButton", "pairsWithin",
-             "pairKey", "renderConcor")
+             "pairKey", "renderConcor", "moreDetails", "splitLead")
 
 
 def _card() -> str:

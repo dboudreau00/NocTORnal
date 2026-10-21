@@ -2264,7 +2264,7 @@
               <p class="help">Read only once the ceiling and an authority are in place.</p>
               <p id="src-add-forum-help" class="help" hidden
                  data-hint-xenforo="https://board.example.test/threads/name.123/"
-                 data-hint-mybb="https://board.example.test/showthread.php?tid=12">A public XenForo or MyBB thread or board, read without signing in. MyBB boards need their time zone and date formats.</p>
+                 data-hint-mybb="https://board.example.test/showthread.php?tid=12">A public XenForo or MyBB thread or board, read without signing in: the forum sees NocTORnal-collector in its access logs, from the egress profile, never from this server. MyBB boards need their time zone and date formats, or no posting time is stored.</p>
               <p id="src-add-error" class="form-error" role="alert" hidden></p>
               <p id="src-add-ok" class="form-ok" role="status" hidden></p>
             </details>
@@ -2417,7 +2417,7 @@
                  a persona to do, run by the collector, the one process that
                  holds the persona key. -->
             <h2 class="h-sm">Persona acts</h2>
-            <p class="help">Persona actions you asked for, with their outcome.</p>
+            <p class="help">Persona actions you asked for, with their outcome. An act the collector has not started in time (fifteen minutes, unless your operator set another limit) is not run.</p>
             <div id="src-acts"></div>
             <p id="src-acts-empty" class="empty" hidden>You have asked for no persona act.</p>
 
