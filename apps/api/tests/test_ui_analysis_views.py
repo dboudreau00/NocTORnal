@@ -260,9 +260,8 @@ def test_the_help_says_conversations_are_projected_in_the_comms_pane():
     body = body[:body.index("</details>")]
     assert "<summary>Project venues to entities</summary>" in body
     text = re.sub(r"\s+", " ", body)
-    assert ("Conversations are not projected here: the Comms pane's co-participation "
-            "view does that, with its protections for third parties.") in text
-    assert "These ties are derived, not observed." in text
+    assert "Conversations are projected in Comms, not here." in text
+    assert "The ties are derived, not observed." in text
     assert "conversation" not in _const("AN_ONE_MODE").lower()
 
 

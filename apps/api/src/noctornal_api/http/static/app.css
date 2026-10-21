@@ -416,6 +416,12 @@ select.select:disabled { color: var(--text-tertiary); cursor: default; }
 }
 .creds-uri summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; }
 .creds-uri[open] summary { margin-bottom: var(--s-2); }
+/* A note read once and not on every visit: its summary stays in view and the rest opens on request. */
+.more { margin: var(--s-1) 0; }
+.more > summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; }
+.more > summary:hover { color: var(--text-primary); }
+.more[open] > summary { margin-bottom: var(--s-2); }
+.more > :not(summary) { margin-top: 0; }
 .creds-check { display: flex; flex-wrap: wrap; gap: var(--s-2); align-items: center; }
 .creds-check input { width: 9ch; }
 .codes-grid {

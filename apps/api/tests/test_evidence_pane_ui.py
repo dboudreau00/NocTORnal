@@ -225,14 +225,11 @@ def test_the_fixed_flag_is_gone_and_the_policy_line_names_the_period():
     code = _code()
     assert "'WORM LOCKED'" not in code
     policy = re.sub(r"/\*.*?\*/", "", _fn("renderEvidencePolicy"), flags=re.S)
-    assert "p.lock_days" in policy and "from the moment" in policy
     assert "from acquisition" not in policy, (
         "the lock runs from lodging, and 'acquired' is the stated time")
-    # x-lock-extension (2026-09-24): the lock runs to the case's date, as
-    # far as the deployment's horizon, and an extension lengthens it.
-    assert "until the case\\'s retention date" in policy
-    assert "p.lock_horizon_days" in policy and "Extending the date lengthens" in policy
-    assert "nobody can shorten one" in policy
+    # x-lock-extension (2026-09-24): the lock runs to the case's date. How the period is counted, the horizon and
+    # that nobody can shorten one are in the manual; the line says the one thing that is always true.
+    assert "locked until the case\\'s retention date" in policy
     assert "does not follow the case" not in policy
 
 
@@ -359,7 +356,7 @@ console.log(JSON.stringify([
 ]));
 """)
     none, ok, bad = got
-    assert "No verification on the custody record since the exhibit was lodged" in none[1]
+    assert "Not verified since it was uploaded." in none[1]
     assert ok == ["help ev-last", "Last verified T(a,s) by Demo Analyst: the digest matched."]
     assert bad[0] == "help ev-last fail" and "HASH MISMATCH" in bad[1]
 
@@ -373,9 +370,6 @@ def test_verify_says_it_is_logged_and_refreshes_an_open_log():
     verify = _fn("verifyExhibit")
     assert "if (!custodyBox.hidden) loadCustody(ev, custodyBox);" in verify
     assert "lastCheckText(" in verify
-    said = " ".join(_html().split())
-    assert ("Every verification and export is written to the exhibit's "
-            "custody record in your name.") in said
 
 
 # ---------------------------------------------------------------------------
@@ -773,8 +767,7 @@ console.log(JSON.stringify([retentionLockQuestion('OP-NIGHTJAR-26', '2208-12-31'
     assert "window.confirm(" in body[ask - 80:ask], "asked as a confirmation"
     assert ask < body.index("api('/cases/'"), "asked before anything is saved"
     help_text = re.sub(r"\s+", " ", _html())
-    assert ("Extending it also lengthens the storage lock on the case's exhibits, "
-            "which nobody can shorten afterwards, so check the year.") in help_text
+    assert "extending it lengthens the exhibits' storage lock permanently" in help_text
 
 
 # ---------------------------------------------------------------------------

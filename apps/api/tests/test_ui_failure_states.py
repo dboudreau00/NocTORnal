@@ -739,8 +739,7 @@ console.log(JSON.stringify([$('ret-case-clocks').textContent, $('ret-case-clocks
     text, hidden = got
     assert hidden is False
     assert "only be shorter" not in text and "shorter" not in text
-    assert "does not follow the case's date" in text
-    assert "before the case or after it" in text
+    assert "follow the clock of their own category" in text
     assert not any(d in text for d in DASHES), text
 
 

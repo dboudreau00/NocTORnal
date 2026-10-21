@@ -104,7 +104,8 @@ def test_the_banner_headline_says_everything_the_failures_refuse(tmp_path):
         _check("e", False, False),
         _check("f", True, True),
     ])
-    got = _run(["countOf", "agree", "closeClause", "renderBlockingBanner"], """
+    got = _run(["countOf", "agree", "closeClause", "moreDetails", "readinessDetail",
+                "renderBlockingBanner"], """
 const painted = [];
 function paintAdminBlocking(names) { painted.push(names); }
 function readinessGoTo(t) { return t ? el('button', 'go', 'Go ' + t) : null; }
@@ -131,7 +132,8 @@ console.log(JSON.stringify({head: text(box.children[0]), hidden: box.hidden,
 
 @needs_node
 def test_one_failing_blocker_says_how_it_is_settled_in_the_singular(tmp_path):
-    got = _run(["countOf", "agree", "closeClause", "renderBlockingBanner"], """
+    got = _run(["countOf", "agree", "closeClause", "moreDetails", "readinessDetail",
+                "renderBlockingBanner"], """
 function paintAdminBlocking() {}
 function readinessGoTo() { return null; }
 renderBlockingBanner({checks: [%s], blocking_failures: ['c']});
@@ -190,7 +192,7 @@ function refusalText(err, fallback) { return fallback; }
 
 @needs_node
 def test_attention_is_amber_unless_the_check_blocks(tmp_path):
-    got = _run(["readinessRow"], """
+    got = _run(["moreDetails", "readinessDetail", "readinessRow"], """
 function readinessGoTo() { return null; }
 const rows = [
   readinessRow({check: 'smtp', ok: false, blocking: false, evidence: 'e', action: 'a'}),
@@ -323,7 +325,7 @@ function refusalText(err, fallback) { return fallback; }
 
 @needs_node
 def test_a_caveat_row_keeps_its_pass_and_says_the_caveat_with_a_way_there(tmp_path):
-    got = _run(["readinessRow"], """
+    got = _run(["moreDetails", "readinessDetail", "readinessRow"], """
 function readinessGoTo(t) { return t ? el('button', 'go', 'Go ' + t) : null; }
 const rows = [
   readinessRow({check: 'security_officer_present', ok: true, blocking: true,
@@ -339,10 +341,10 @@ console.log(JSON.stringify(rows.map((r) => ({cls: r.className,
     assert "rdy-row-caveat" in officer["cls"] and "row-incomplete" not in officer["cls"]
     assert officer["chips"] == ["chip good:PASS", "chip warn:CAVEAT",
                                 "chip subtle:BLOCKING"], officer["chips"]
-    assert officer["body"] == ["why:ev", "help warn:refused to them",
+    assert officer["body"] == ["help warn:refused to them", "more:Detailsev",
                                "go:Go admin/accounts"], officer["body"]
     assert "rdy-row-caveat" not in kek["cls"]
-    assert kek["chips"] == ["chip good:PASS"] and kek["body"] == ["why:ev"], kek
+    assert kek["chips"] == ["chip good:PASS"] and kek["body"] == ["more:Detailsev"], kek
 
 
 @needs_node

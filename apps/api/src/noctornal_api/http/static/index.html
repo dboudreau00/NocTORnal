@@ -56,11 +56,7 @@
            they come from, and who to ask when there are none. The first
            administrator is also handed a set at their first sign-in, on
            the first-run card. -->
-      <span id="login-totp-help" class="help">Six digits from your
-        authenticator app, or a recovery code (xxxxx-xxxxx-xxxxx) if the
-        app cannot produce one that works. You issue your own recovery
-        codes from Account (your name, top right) while signed in. With
-        neither, an administrator can re-enrol your authenticator.</span>
+      <span id="login-totp-help" class="help">Six digits from your authenticator app, or a recovery code. Codes come from Account; without one, ask an administrator.</span>
     </div>
 
     <p id="login-error" class="form-error" role="alert" hidden></p>
@@ -70,11 +66,7 @@
          a distinct answer would say which factor was right. This line is
          always true, so it says what that answer cannot. The numbers are
          held to security/auth.py by test_ui_signin_and_cases. -->
-    <p id="login-policy" class="help">Five failed attempts lock an account
-      for 15 minutes, and a locked account gets the same answer even with
-      the right password. An administrator can unlock it sooner
-      (Administration, the account's card, Unlock). If your code keeps
-      failing, check that your phone sets its clock automatically.</p>
+    <p id="login-policy" class="help">Five failed attempts lock the account for 15 minutes.</p>
   </form>
 
   <!-- A new password, after an administrator's reset (gap-password-reset,
@@ -85,9 +77,7 @@
   <form id="newpw-form" class="card login-card" hidden novalidate>
     <img class="login-mark" src="logo.svg" alt="" width="44" height="44">
     <h1 id="newpw-title" class="h-lg" tabindex="-1">Choose a new password</h1>
-    <p class="muted">An administrator issued the password you signed in
-      with, so it has to be replaced before it opens a session. It is not
-      used again after this.</p>
+    <p class="muted">An administrator set your password. Choose your own to continue.</p>
     <label class="field">
       <span class="label">Work email</span>
       <input id="newpw-email" type="email" autocomplete="username" readonly
@@ -103,17 +93,13 @@
       <input id="newpw-again" type="password" autocomplete="new-password"
              minlength="12" required>
     </label>
-    <p id="newpw-help" class="help">At least 12 characters. Length is the
-      only rule: a long phrase is better than a short mix of symbols.</p>
+    <p id="newpw-help" class="help">At least 12 characters.</p>
     <div class="field">
       <label class="label" for="newpw-code">A fresh authenticator code</label>
       <input id="newpw-code" type="text" name="totp_code" class="mono"
              autocomplete="one-time-code" maxlength="24" required
              aria-describedby="newpw-code-help">
-      <span id="newpw-code-help" class="help">An authenticator code works
-        once, so wait for your app to show the next one. A recovery code is
-        used up only when the new password is set, so the one you just used
-        still works.</span>
+      <span id="newpw-code-help" class="help">A code works once, so wait for the next one.</span>
     </div>
     <p id="newpw-error" class="form-error" role="alert" hidden></p>
     <div class="setup-actions">
@@ -129,8 +115,7 @@
   <form id="setup-form" class="card login-card" hidden novalidate>
     <img class="login-mark" src="logo.svg" alt="" width="44" height="44">
     <h1 class="h-lg">First-run setup</h1>
-    <p class="muted">No accounts exist yet. Create the administrator. This
-      door closes permanently once the first account exists.</p>
+    <p class="muted">Create the first administrator account.</p>
     <label class="field">
       <span class="label">Work email</span>
       <input id="setup-email" type="email" autocomplete="off" required
@@ -146,20 +131,12 @@
       <span class="label">Setup token</span>
       <input id="setup-token" type="password" autocomplete="off"
              spellcheck="false" maxlength="512">
-      <span class="help">The value of NOCTORNAL_SETUP_TOKEN on the server.
-        This deployment will not create its first account without it.</span>
+      <span class="help">Required. Set as NOCTORNAL_SETUP_TOKEN on the server.</span>
     </label>
     <!-- firstrun-oneclick-wipe (2026-09-22): the operator learned that a
          password would be GENERATED only after it was on screen. Said
          before the button, so the app and a safe place are ready. -->
-    <div id="setup-warn" class="setup-warn">
-      <p><strong>Next, this page shows a generated password and an
-        authenticator secret, once.</strong> Have an authenticator app
-        ready (Aegis, 1Password, Google or Microsoft Authenticator) and
-        somewhere safe to keep the password.</p>
-      <p class="help">You then sign in with them on the same page, and
-        they stay on screen until that works.</p>
-    </div>
+    <div id="setup-warn" class="setup-warn">Next you will see a password and an authenticator secret, once. Have an authenticator app ready and save both.</div>
     <p id="setup-error" class="form-error" role="alert" hidden></p>
     <button id="setup-submit" type="submit" class="btn primary">
       Create administrator</button>
@@ -173,8 +150,7 @@
   <div id="setup-done" class="card login-card setup-card" hidden>
     <h1 id="setup-done-title" class="h-md" tabindex="-1">Save these, then
       sign in</h1>
-    <p class="muted">Shown once and not recoverable. Scan the code into
-      your authenticator app and keep the password somewhere safe.</p>
+    <p class="muted">Shown once. Scan the code into your authenticator app and save the password.</p>
     <div id="setup-creds" class="stack"></div>
     <p id="setup-hidden-note" class="help" hidden>Hidden from the screen.
       They are still held by this page until you sign in below.</p>
@@ -185,9 +161,7 @@
 
     <form id="setup-verify" class="stack setup-verify" novalidate>
       <h2 class="h-sm">Now sign in with them</h2>
-      <p class="help">Paste the password from where you saved it and type
-        the code your app shows. A mistyped secret is caught here, while
-        it can still be fixed.</p>
+      <p class="help">Paste the password you saved and type the code from your app.</p>
       <label class="field">
         <span class="label">Work email</span>
         <input id="setup-verify-email" type="email" autocomplete="username"
@@ -218,11 +192,7 @@
         Skip, and sign in later&hellip;</button>
       <div id="setup-skip-confirm" class="setup-skip-confirm" role="alert"
            hidden>
-        <p><strong>Discard the password and authenticator secret?</strong>
-          They cannot be shown again. If you have not saved both, this
-          administrator cannot sign in, first-run setup will not come back,
-          and the only way in is a shell on the server
-          (<code>python scripts/bootstrap.py</code>).</p>
+        <p><strong>Discard the password and authenticator secret?</strong> They cannot be shown again, and without them this administrator cannot sign in.</p>
         <div class="setup-actions">
           <button id="setup-skip-keep" type="button" class="btn small">
             Keep them on screen</button>
@@ -239,10 +209,7 @@
        2026-09-22). -->
   <div id="setup-codes" class="card login-card setup-card" hidden>
     <h1 class="h-md">Signed in. Keep your recovery codes</h1>
-    <p class="muted">Each code signs you in once in place of an
-      authenticator code: for a lost phone or a clock that has drifted.
-      They are shown now and never again. You can replace the set at any
-      time from Account (your name, top right).</p>
+    <p class="muted">Each code works once, in place of an authenticator code. They are shown only now.</p>
     <div id="setup-codes-list"></div>
     <button id="setup-enter" type="button" class="btn primary">
       Continue to the console</button>
@@ -301,9 +268,7 @@
         <input id="reauth-again" type="password" autocomplete="new-password"
                minlength="12">
       </label>
-      <p id="reauth-new-help" class="help">At least 12 characters. Length is
-        the only rule: a long phrase is better than a short mix of
-        symbols.</p>
+      <p id="reauth-new-help" class="help">At least 12 characters.</p>
     </div>
     <div class="field">
       <label id="reauth-totp-label" class="label" for="reauth-totp">Authenticator
@@ -341,9 +306,7 @@
     <section class="stack" aria-labelledby="account-codes-title">
       <h3 id="account-codes-title" class="h-xs">Recovery codes</h3>
       <p id="account-codes-count"></p>
-      <p class="help">A recovery code signs you in once in place of an
-        authenticator code. Generating a set replaces any earlier one, and
-        it needs a sign-in from the last 15 minutes.</p>
+      <p class="help">Generating a new set replaces the old one.</p>
       <div id="account-codes-confirm" class="setup-skip-confirm" hidden>
         <p id="account-codes-confirm-text"></p>
         <div class="setup-actions">
@@ -389,9 +352,7 @@
             <input id="account-pw-code" type="text" class="mono"
                    autocomplete="one-time-code" maxlength="24" required>
           </label>
-          <p id="account-pw-help" class="help">At least 12 characters. Length
-            is the only rule: a long phrase is better than a short mix of
-            symbols. Your other sessions are signed out; this one stays.</p>
+          <p id="account-pw-help" class="help">At least 12 characters. Your other sessions are signed out.</p>
           <p id="account-pw-msg" class="msg" role="status" hidden></p>
           <div class="setup-actions">
             <button id="account-pw-submit" type="submit" class="btn">
@@ -600,10 +561,7 @@
             <label class="label" for="case-legal">Lawful basis
               <span class="req">required</span></label>
             <input id="case-legal" required aria-describedby="case-legal-help">
-            <span id="case-legal-help" class="help">A case cannot exist without a
-              lawful basis for processing. Name the authority, statute or
-              instruction that permits this collection. It is recorded on the case
-              and shown on every export.</span>
+            <span id="case-legal-help" class="help">The authority, statute or instruction that permits this case.</span>
           </div>
           <label class="field">
             <span class="label">Authority reference</span>
@@ -1123,33 +1081,19 @@
                    read-time filter, notifications.readable_predicate, checks
                    clearance, compartments AND a live case assignment, and
                    this line named clearance alone. -->
-              <p class="help">Everything here is filtered by your CURRENT
-                clearance, compartments and case assignments, not the ones
-                you held when it was written. A notification about material
-                you can no longer read, or about a case you were taken off,
-                disappears rather than lingering. <strong>Email carries a
-                summary and a link, never the detail below</strong>; anything
-                above TLP:AMBER does not leave the platform at all
-                (invariant&nbsp;8).</p>
+              <p class="help">Only notices you can still read are shown.</p>
               <!-- "Needs action" replaced "Unread only" (ux08-triage:
                    urgent-read-vs-ack-invisible, 2026-09-23): reading an
                    urgent alarm does not stop it escalating, and the unread
                    filter hid it the moment it was glanced at. -->
               <label class="field inline">
-                <input id="inbox-needs-action" type="checkbox" />
+                <input id="inbox-needs-action" type="checkbox" title="Unread, or urgent and not yet acknowledged" />
                 <span class="label">Needs action only</span>
               </label>
-              <p class="help">Needs action is anything unread, and any
-                urgent notification not yet acknowledged. Urgent ones nobody
-                has acknowledged stay at the top and say when they escalate:
-                reading one does not stop that, Acknowledge does.</p>
               <p id="inbox-msg" class="msg" role="status" hidden></p>
               <p id="inbox-read-all-msg" class="msg" role="status" hidden></p>
               <!-- F8 G3. Shown to an account holding integration.manage. -->
-              <p id="inbox-ledger-pointer" class="help" hidden>The delivery
-                ledger is in Administration, Integrations.
-                <button id="inbox-ledger-go" type="button" class="btn ghost">Open
-                  the ledger</button></p>
+              <p id="inbox-ledger-pointer" class="help" hidden>Delivery ledger <button id="inbox-ledger-go" type="button" class="btn ghost">Open the ledger</button></p>
             </div>
 
             <p id="inbox-empty" class="empty" hidden>Nothing waiting.</p>
@@ -1157,13 +1101,7 @@
 
             <details class="card">
               <summary>Delivery preferences</summary>
-              <p class="help">Quiet hours defer, they never drop: a
-                deferred notification is still queued with a due time. Priority&nbsp;1
-                (an evidence integrity alarm, a break-glass) ignores them, which
-                is the only reason silencing a channel overnight is safe. The
-                hours are read in the zone shown beside them, UTC unless you
-                choose another. Under each channel is what its minimum
-                priority delivers and what it leaves out.</p>
+              <p class="help">Quiet hours delay delivery; urgent notices ignore them. Email carries a summary and a link, never the detail.</p>
               <div id="inbox-prefs" class="stack"></div>
               <p id="inbox-prefs-empty" class="empty" hidden>No delivery
                 channel can be set here: in-app notifications are always
@@ -1179,15 +1117,7 @@
 
           <details id="capture-box" class="card capture">
             <summary>Capture text</summary>
-            <p class="help">Paste a thread, a chat export or a listing.
-              Selectors are extracted with their offsets and raised as
-              proposals: <strong>nothing enters the graph here</strong>.
-              The document is stored as the record of what was looked at,
-              even if nothing is found, and never below the case's own
-              classification. Text captured before under the same
-              compartments is not stored twice: it keeps the label it was
-              first stored at, and what it raises here carries the stricter
-              of that label and this capture's.</p>
+            <p class="help">Paste text to raise suggestions. Nothing enters the graph until you accept it.</p>
             <!-- Where a capture here is listed, or why this case takes none
                  (final review c15 and L1, 2026-09-24): filled by
                  syncCaptureForm in app.js, which toggles the warn class. -->
@@ -1243,17 +1173,7 @@
                fired from anywhere on the pane, a rail tab or the ? sheet
                included, and A wrote at once. They now act only inside the
                list, A asks first, and the ? sheet can turn them off. -->
-          <p class="help">
-            <kbd class="kbd">J</kbd>/<kbd class="kbd">K</kbd> move &middot; <kbd class="kbd">A</kbd> accept
-            &middot; <kbd class="kbd">R</kbd> reject &middot; <kbd class="kbd">D</kbd> defer.
-            The keys work while the list below has the focus (Tab to it, or
-            click a suggestion), never in a field, on a button or with Ctrl,
-            Alt or Cmd held. A asks before it accepts, and the line above
-            the queue then says what was accepted and offers an Undo when
-            your role can retire it; R and D ask for a reason first. Each
-            question names the suggestion it acts on. They can be turned
-            off in the keyboard sheet (<kbd class="kbd">?</kbd>).
-          </p>
+          <p class="help"><kbd class="kbd">J</kbd>/<kbd class="kbd">K</kbd> move &middot; <kbd class="kbd">A</kbd> accept &middot; <kbd class="kbd">R</kbd> reject &middot; <kbd class="kbd">D</kbd> defer. The keys work when the list has focus.</p>
 
           <p id="triage-last" class="msg" role="status" hidden></p>
           <div id="triage-list" class="triage-list" role="group" tabindex="0"
@@ -1273,15 +1193,7 @@
                and there was no way to obtain one, so Merge was unreachable
                from the browser whenever the control was switched on. -->
           <h3 class="h3">Dual control: approvals</h3>
-          <p class="help">
-            A second signature on the operations a case has put behind one.
-            <strong>You cannot decide your own request</strong>, and an
-            approval is spent when it is used: it authorises one execution
-            of the exact parameters it was raised over, not the operation
-            in general. Rejected and withdrawn requests stay listed,
-            because a request that vanished would hide the fact that
-            somebody once asked.
-          </p>
+          <p class="help">A second signature for operations this case has put behind one. <strong>You cannot decide your own request.</strong></p>
           <!-- The case's merge switch, where the approvals it
                produces are listed (F9b, 2026-09-24). Turning it on is one
                signature; turning it off takes a second Lead investigator on
@@ -1380,16 +1292,7 @@
                     <option value="250">250 entities</option>
                   </select>
                 </label>
-                <p class="help">A forum or a wallet is not a person. Projecting
-                  it replaces it with ties between the entities it links:
-                  entities who post on the same forum or channel, or control
-                  the same wallet, are tied, and money moving between wallets
-                  becomes a tie from the payer's controller to the payee's. A
-                  venue counts for less the more entities share it, and a
-                  venue larger than the limit is left out and named. These
-                  ties are derived, not observed. Conversations are not
-                  projected here: the Comms pane's co-participation view does
-                  that, with its protections for third parties.</p>
+                <p class="help">Ties entities that share a forum, channel or wallet. The ties are derived, not observed. Conversations are projected in Comms, not here.</p>
               </div>
             </details>
             <span id="an-status" class="muted small"></span>
@@ -1398,10 +1301,7 @@
           <p id="an-projection" class="muted small"></p>
           <div id="an-flags"></div>
 
-          <p id="an-empty" class="empty">
-            Run the analysis to compute brokerage, structural holes,
-            communities and the key-player set over the current projection.
-          </p>
+          <p id="an-empty" class="empty">Run the analysis to see brokers, communities and key players.</p>
 
           <div id="an-results" hidden>
             <!-- The teaching panel: docs/03 asks the UI to explain the
@@ -1412,14 +1312,6 @@
                  calls an entity (ux19-copy one-concept-many-names,
                  2026-09-23). -->
             <h3 class="h3">Entities by brokerage</h3>
-            <p class="muted small">
-              Rank and percentile sit beside every value: a betweenness of
-              0.0341 means nothing on its own, "3rd of 214" does. Constraint
-              runs the same way as the rest: rank 1 and the highest
-              percentile are the LEAST constrained entity, the one spanning a
-              structural hole. Select a column heading to sort by it, and a
-              name to show that entity on the graph.
-            </p>
             <div class="pane-head">
               <label class="field inline">
                 <span class="label">Cluster</span>
@@ -1452,23 +1344,7 @@
             </div>
 
             <h3 id="an-hist-head" class="h3" tabindex="-1">Trend: one entity across past runs</h3>
-            <p class="help">
-              A rising betweenness is a claim about a PERSON, so it is worth
-              being exact about what this shows: every completed run in this
-              case that <strong>recorded</strong> the metric, at your
-              visibility, placed at the moment it measured (its as-of time,
-              or when it ran if it measured the graph as it stood), oldest on
-              the left. Only runs under the projection shown above are joined
-              into a line: a run at another confidence floor, with inferred
-              ties in or out, or with other decay measured something else, so
-              those appear only when you include other projections, as
-              separate rings. <strong>A run in which this entity had no
-              defined value does not appear here at all</strong> (an isolate
-              has no constraint to measure), and that cannot be told apart
-              from no run having happened, so the line spans such a period
-              rather than breaking, and a long straight segment is not
-              evidence that nothing changed.
-            </p>
+            <p class="help">A run with no value for this entity does not appear here at all, so a straight line can span a gap.</p>
             <div class="pane-head">
               <label class="field inline">
                 <span class="label">Metric</span>
@@ -1539,7 +1415,7 @@
             <!-- REGE (2026-10-02): regular roles, their own run stored for
                  each number of roles and way of counting ties, read after
                  the table is drawn. -->
-            <h3 class="h3">Regular roles: the same kinds of ties to the same kinds of others</h3>
+            <h3 class="h3">Regular roles</h3>
             <div class="pane-head">
               <label class="field inline">
                 <span class="label">Roles</span>
@@ -1615,20 +1491,12 @@
               <textarea id="ev-desc" rows="2" maxlength="4000"
                         placeholder="what it is and what is in it"></textarea>
             </label>
-            <p id="ev-acquired-help" class="help ev-full">When the material was
-              obtained, in UTC. Leave it blank only for material obtained just
-              now: a blank field records the moment the server receives it.
-              Legal process needs the authority reference it was obtained
-              under.</p>
+            <p id="ev-acquired-help" class="help ev-full">In UTC. Leave blank to use the time of upload.</p>
             <button type="submit" class="btn primary">Upload exhibit</button>
             <p id="ev-error" class="form-error" role="alert" hidden></p>
             <p id="ev-result" class="form-ok" role="status" hidden></p>
           </form>
           <p id="ev-cap" class="help" hidden></p>
-          <p class="help">Uploads are write-once. The digest on each exhibit is
-            computed by the server on receipt and is what a later verification
-            is checked against. Every verification and export is written to
-            the exhibit's custody record in your name.</p>
           <!-- The register's own controls (ux07-evidence:evidence-list-
                silently-capped and no-forward-trace-from-exhibit): a count
                that says how many there are, a filter, and the exhibits
@@ -1692,14 +1560,7 @@
             </fieldset>
             <button type="submit" class="btn primary">Search</button>
           </form>
-          <p id="search-help" class="help search-help">Any fragment of three
-            or more characters finds entity names, exhibit titles and the
-            selectors attributed to an entity (wallets, Jabber and Tox ids,
-            emails, handles). A value pasted with its type in front, as in
-            ICQ: 123456789, is searched as that type. Attribute values,
-            exhibit text and collected documents match on word starts.
-            Assertions are the live claims, found by their rationale, the
-            exhibit they cite, or a grading such as C3.</p>
+          <p id="search-help" class="help search-help">Search entities, selectors, exhibits, claims and documents. Enter three or more characters, and add a type to narrow it, as in ICQ: 123456789.</p>
           <!-- What the similarity modes do, filled in by
                paintSearchModes with where the model is (F6.3). -->
           <p id="search-similar-help" class="help search-help" hidden></p>
@@ -1731,9 +1592,7 @@
                2026-09-23). A block of its own under the columns. -->
           <div class="search-deception">
             <h3 class="h-sm">Deception records</h3>
-            <p class="help">Web captures, messages and calls whose hosts,
-              addresses or URLs contain the query. A defanged value, as in
-              hxxps://portal[.]example, finds the live one.</p>
+            <p class="help">Matches hosts, addresses and URLs in captures, messages and calls.</p>
             <div id="search-deception" class="hit-list"></div>
           </div>
         </section>
@@ -1749,11 +1608,7 @@
                know why two observations did or did not correlate. -->
           <form id="comms-bind-form" class="card stack narrow" novalidate>
             <h2 class="h-sm">Record a channel</h2>
-            <p class="hint">
-              An identifier in a signature block is a <strong>claim</strong>.
-              Confirmation needs a signature over the identifier. Record it
-              under Verification, not here.
-            </p>
+            <p class="hint">Record an identifier as a claim. Confirm it under Verification.</p>
             <label class="field">
               <span class="label">Platform</span>
               <select id="comms-platform" required></select>
@@ -1806,12 +1661,7 @@
           <!-- Contact block parser -->
           <form id="comms-block-form" class="card stack" novalidate>
             <h2 class="h-sm">Parse a contact block</h2>
-            <p class="hint">
-              Third-party identifiers (the forum's escrow, a guarantor, a
-              partner shop) are flagged rather than attributed to the
-              publisher. Lines whose type is ambiguous are kept
-              <strong>unresolved with a reason</strong> rather than guessed.
-            </p>
+            <p class="hint">Third-party identifiers are flagged, not attributed to the publisher.</p>
             <label class="field">
               <span class="label">Where it was published</span>
               <input id="comms-block-source" type="text" required
@@ -1841,11 +1691,7 @@
                Feeds pane already uses key-*. -->
           <section id="comms-pgpkey" class="stack">
             <h2 class="h-sm">Vendor keys</h2>
-            <p class="help">
-              A key recorded here says where it was obtained and who compared
-              its fingerprint with the one the actor published. Nothing is
-              confirmed when it is added.
-            </p>
+            <p class="help">Record where the key came from. Nothing is confirmed when it is added.</p>
             <form id="comms-pgpkey-form" class="card stack" novalidate>
               <fieldset class="pgp-choice">
                 <legend class="label">Where the key comes from</legend>
@@ -1929,12 +1775,7 @@
                checked-and-rejected one. -->
           <form id="comms-pgp-form" class="card stack" novalidate>
             <h2 class="h-sm">Verify a signature</h2>
-            <p class="help">
-              A message signed by a key whose fingerprint appears in the
-              contact block is <strong>cryptographic evidence of
-              control</strong>, not a claim. Everything else on this pane
-              produces claims.
-            </p>
+            <p class="help">A valid signature from a key named in a contact block is evidence of control.</p>
             <!-- F10: the claim a check confirms, when one was chosen
                  from the queue below. -->
             <p id="comms-pgp-binding" class="hint pgp-binding" hidden>
@@ -1975,11 +1816,7 @@
                 <span class="label">Or the signed file itself</span>
                 <input id="comms-pgp-data-file" type="file">
               </label>
-              <p class="hint">
-                Upload the signed file itself when you have it. A pasted copy
-                loses Windows line endings, and a signature over the file's
-                exact bytes then fails.
-              </p>
+              <p class="hint">Upload the signed file if you have it: a pasted copy can break the signature.</p>
             </div>
             <label class="field">
               <span class="label">Key</span>
@@ -2026,10 +1863,7 @@
             Recorded checks load when you ask for them.</p>
 
           <h2 class="h-sm">Awaiting verification</h2>
-          <p class="help">
-            Bindings still at CLAIMED. A claim nobody checked is not a
-            rejected one.
-          </p>
+          <p class="help">Bindings still at CLAIMED.</p>
           <div class="pane-head">
             <button id="comms-unverified-refresh" type="button" class="btn">
               Refresh</button>
@@ -2042,13 +1876,7 @@
           <!-- Co-participation. An INFERRED tie, and invariant 4 says an
                inferred edge stays visually and structurally distinct. -->
           <h2 class="h-sm">Co-participation</h2>
-          <p class="help">
-            Ties inferred from being in the same room. These are
-            <strong>inferred</strong>, weighted by the room's size (two
-            people in a 500-member channel is not the same evidence as a
-            private exchange), and they are excluded from metrics unless a
-            projection opts in.
-          </p>
+          <p class="help">Inferred from shared rooms, weighted by room size.</p>
           <div class="pane-head">
             <button id="comms-copart-refresh" type="button" class="btn">
               Load</button>
@@ -2104,17 +1932,7 @@
                  anything" about the same case: two lists, one word. This
                  one is the collector's polls; the queue is partner feeds. -->
             <h3 class="h3">Watch hits: what this case's polls matched</h3>
-            <p class="help">
-              Unacknowledged first, then by score: a hit nobody has looked
-              at outranks a higher-scoring one somebody has already dealt
-              with. <strong>Suppressed hits are shown</strong>, with their
-              reason. A watch drowning in one recurring thread and a
-              watch that has gone quiet look identical if you hide them,
-              and they need opposite responses: suppress the first,
-              unsuppress what alert hygiene hid wrongly. Partner feed
-              records that contain a watched selector are not listed here:
-              they are scored to the top of the Ingest queue.
-            </p>
+            <p class="help">Hits on this case's watches, unacknowledged first.</p>
             <div class="pane-head">
               <label class="field inline check">
                 <input id="col-hits-unack" type="checkbox">
@@ -2132,15 +1950,7 @@
                  one until now, so this tab listed what watches had matched
                  and no way to make one. -->
             <h3 class="h3">Watches: what this case's polls look for</h3>
-            <p class="help">
-              A watch is a standing tasking against one source. Its keywords,
-              selectors and patterns are tried on every item the collector
-              reads from that source, and each match is a hit above. A watch
-              applies from the next poll of its source, to what that poll
-              reads: documents already collected are not matched again. A
-              selector also counts toward the score of a partner feed record
-              in the Ingest queue, once that record is scored again.
-            </p>
+            <p class="help">A watch checks every item a source returns for your keywords, selectors and patterns.</p>
             <div class="pane-head">
               <button id="col-watch-refresh" type="button" class="btn">
                 Load</button>
@@ -2205,42 +2015,15 @@
                 <button id="col-watch-btn" type="submit" class="btn primary">
                   Add watch</button>
               </form>
-              <p class="help">
-                Keywords and selectors match anywhere in an item's title or
-                text, whatever the case; a selector that equals an id the item
-                carries, such as its author, matches too. A pattern is a Python
-                regular expression, matched without regard to case in a
-                separate process that is stopped if it runs long. A watch needs
-                at least one of the three. Within the thinning time, further
-                matches on the same thread add no hit; 0 gives a hit for every
-                match.
-              </p>
-              <p class="help">
-                What a watch looks at is a note for the people reading the
-                list: the collector reads the source's own address and does not
-                visit this one. The exception is a Telegram chat, which is
-                named by its typed id, c:1234567890 for a channel or a
-                supergroup and g:1234567890 for a basic group, never by an
-                @name, because a name can be given to someone else.
-              </p>
-              <p id="col-watch-chat-help" class="help" hidden>
-                A chat watch goes on the Telegram source that reads that chat,
-                and choosing the source fills in the id. It fires only on a
-                message collected from that chat. With no keyword, selector or
-                pattern it fires on every message there.
-              </p>
+              <p class="help">Use at least one keyword, selector or pattern. Thinning time: 0 gives a hit for every match.</p>
+              <p class="help">Telegram chats use typed ids, such as c:1234567890, never @names.</p>
+              <p id="col-watch-chat-help" class="help" hidden>Choose the Telegram source that reads the chat. With no keyword, selector or pattern it fires on every message.</p>
               <p id="col-watch-error" class="form-error" role="alert" hidden></p>
               <p id="col-watch-ok" class="form-ok" role="status" hidden></p>
             </details>
 
             <h3 class="h3">Collected documents</h3>
-            <p class="help">
-              Every source, not just this case: a document hangs off a
-              SOURCE and has no case of its own, so the same forum post is
-              material in however many cases cite it. Bodies are excerpted:
-              a row marked <em>truncated</em> has more behind it.
-              Purged documents are absent entirely rather than shown empty.
-            </p>
+            <p class="help">Documents from every source, not only this case.</p>
             <div class="pane-head">
               <label class="field inline">
                 <span class="label">Triage</span>
@@ -2296,17 +2079,7 @@
                       title="Score every record in this case's queue again. Do this after a watch's selectors change: a record scores only against the selectors that existed when it was scored.">Rescore all</button>
               <span id="ing-counts" class="muted small"></span>
             </div>
-            <p class="help">
-              Near-duplicates are <strong>folded, not dropped</strong>:
-              a row says how many copies were folded into it and which
-              feeds sent them. A copy from the row's own feed is a resend,
-              not a second source, so it is not corroboration. Each row
-              shows every term of its score; a selector one of this case's
-              watches names is worth the most. Payloads are never listed
-              here: a record can hold a whole stealer log, and this is a
-              queue. Open shows a record's metadata and the shape of its
-              payload, never a value.
-            </p>
+            <p class="help">Duplicates are folded into one row: a resend, not a second source. Open shows metadata and shape, never values.</p>
             <p id="ing-flash" class="form-ok" role="status" hidden></p>
             <div id="ing-list"></div>
             <p id="ing-empty" class="empty" hidden>Nothing in the queue for this case.</p>
@@ -2315,14 +2088,7 @@
 
             <details id="ing-quarantine-box" class="card" hidden>
               <summary>Quarantine: material attached to no case</summary>
-              <p class="help">
-                A record with no case cannot be reached by a case
-                assignment, so nobody sees it through the ordinary gate. It
-                still expires: until it is attached to a case it runs on the
-                <em>category's</em> retention clock, not a case's. Attach to
-                case puts one under a case's authority; its expiry stays
-                the category's.
-              </p>
+              <p class="help">Records not attached to any case. Attach one to put it under a case's authority.</p>
               <div id="ing-quarantine-list"></div>
               <p id="ing-quarantine-empty" class="empty" hidden>Nothing unattached.</p>
             </details>
@@ -2332,26 +2098,14 @@
           <div id="feeds-dead" class="subpane" hidden>
             <!-- Was "Invariant 12: nothing is silently dropped..." (ux19-copy
                  developer-speak-in-copy, 2026-09-23). -->
-            <p class="help">
-              Every record that could not be taken in is kept here, never
-              dropped. A rising count on one key usually means a partner
-              changed their format without telling you, and nobody knows
-              until somebody looks here.
-            </p>
+            <p class="help">Records that could not be parsed are kept here, never dropped.</p>
             <!-- Said per path (README screenshot review, 2026-09-23). It
                  read "keys, types and lengths, never values" above rows
                  that showed a bare [redacted]: a fragment that parses goes
                  through ingest.redact_structure and keeps each value's type
                  and length, and one that does not goes through redact_text,
                  which masks it line by line with no types or lengths. -->
-            <p class="help warn">
-              Fragments are <strong>structurally redacted</strong>: keys and
-              shape survive, values never do. A fragment that parsed keeps
-              each value's type and length; one that would not parse is
-              masked line by line, keeping what reads as a key or a
-              delimiter and replacing every value, address and token. Rows
-              recorded before the redactor existed are withheld and marked.
-            </p>
+            <p class="help warn">Fragments are redacted: keys and shape are kept, values never.</p>
             <!-- Scoped, named and repairable (ux12-feeds:dead-letters-no-
                  feed-no-scope, 2026-09-23). The list was the deployment's
                  in every case, under a count that read as this case's
@@ -2383,29 +2137,18 @@
 
           <!-- COLLECTION SOURCES -->
           <div id="feeds-sources" class="subpane" hidden>
-            <p class="help">
-              Nothing loops on its own. A collector that runs itself on a
-              timer nobody watches is how a persona gets burnt at 3am, so
-              polling is a button.
-            </p>
+            <p class="help">Nothing polls on its own. Use Poll now.</p>
             <div class="pane-head">
               <button id="src-refresh" type="button" class="btn">Refresh</button>
               <span id="src-counts" class="muted small"></span>
             </div>
             <h2 class="h-sm">Unhealthy</h2>
-            <p class="help">
-              A parser that stopped matching fails silently. Consecutive
-              failures are the signal.
-            </p>
+            <p class="help">Consecutive failures often mean the site changed its markup.</p>
             <div id="src-unhealthy"></div>
             <p id="src-unhealthy-empty" class="empty" hidden>Every source is healthy.</p>
 
             <h2 class="h-sm">Never polled</h2>
-            <p class="help">
-              Not broken and not healthy either. A source somebody added and
-              nobody ever ran is the quiet way a collection plan turns out to
-              have been aspirational.
-            </p>
+            <p class="help">Added but never polled.</p>
             <div id="src-never"></div>
             <p id="src-never-empty" class="empty" hidden>Every source has been polled.</p>
 
@@ -2424,12 +2167,7 @@
             <!-- Sources (2026-09-24): what the collector leaves alone until
                  a person acts. Not polled, not rescheduled, not a failure. -->
             <h2 class="h-sm">Waiting on a person</h2>
-            <p class="help">
-              Sources the collector leaves alone until somebody acts: a
-              ceiling to declare, a persona to rest or replace, or an
-              authority to confirm. Nothing here is polled, and nothing here
-              counts as a failure.
-            </p>
+            <p class="help">Waiting on a person: a ceiling to declare, a persona to replace or an authority to confirm. Not polled.</p>
             <div id="src-held"></div>
             <p id="src-held-empty" class="empty" hidden>Nothing is waiting on a person.</p>
 
@@ -2523,22 +2261,10 @@
                 <button id="src-add-btn" type="submit" class="btn primary">
                   Add source</button>
               </form>
-              <p class="help">
-                A forum or Telegram source is not read until its
-                classification is within the declared ceiling and a security
-                officer has confirmed the authority that covers it.
-              </p>
+              <p class="help">Read only once the ceiling and an authority are in place.</p>
               <p id="src-add-forum-help" class="help" hidden
                  data-hint-xenforo="https://board.example.test/threads/name.123/"
-                 data-hint-mybb="https://board.example.test/showthread.php?tid=12">
-                A XenForo or MyBB source is a public thread or board, read
-                without signing in: the forum sees NocTORnal-collector in its
-                access logs, from the egress profile, never from this server.
-                Each poll reads the new pages and rechecks the last few for
-                edits and deletions. A MyBB board prints times in its own zone
-                with no offset: give the zone and the two formats its settings
-                show, or no posting time is stored.
-              </p>
+                 data-hint-mybb="https://board.example.test/showthread.php?tid=12">A public XenForo or MyBB thread or board, read without signing in. MyBB boards need their time zone and date formats.</p>
               <p id="src-add-error" class="form-error" role="alert" hidden></p>
               <p id="src-add-ok" class="form-ok" role="status" hidden></p>
             </details>
@@ -2550,12 +2276,7 @@
                  second person has confirmed it under the persona's
                  authority. -->
             <h2 class="h-sm">Telegram chats</h2>
-            <p class="help">
-              Each chat is read by one persona, through that persona's egress
-              profile, under an authority a second person confirmed. Nothing
-              is sent, nothing is marked read, and no watch term leaves this
-              server.
-            </p>
+            <p class="help">Each chat is read by one persona under a confirmed authority. Nothing is sent or marked read.</p>
             <p id="src-tg-off" class="help warn" hidden></p>
             <details id="src-tg-box" class="card" hidden>
               <summary>Add a chat</summary>
@@ -2599,12 +2320,7 @@
                 <button id="stg-btn" type="submit" class="btn primary">
                   Look it up and add</button>
               </form>
-              <p class="help">
-                Looking a chat up asks Telegram, as the persona, which chat the
-                name belongs to. An invite link is never followed: join a
-                private chat from the persona's own device, then add it by its
-                id.
-              </p>
+              <p class="help">Look a chat up by name, or add it by id. Invite links are never followed.</p>
               <p id="stg-error" class="form-error" role="alert" hidden></p>
               <p id="stg-ok" class="form-ok" role="status" hidden></p>
             </details>
@@ -2612,10 +2328,7 @@
             <p id="src-tg-empty" class="empty" hidden>No Telegram chats are configured.</p>
 
             <h2 class="h-sm">Personas</h2>
-            <p class="help">
-              BURNED is terminal. Re-using one a forum admin has already
-              flagged is how you burn the next one too.
-            </p>
+            <p class="help">BURNED is permanent.</p>
             <!-- Personas (2026-09-24): a persona is created here with NO
                  credential; an operator enrols it on the server. -->
             <p id="src-persona-none" class="help" hidden>No adapter in this
@@ -2671,11 +2384,7 @@
                     <input id="sp-tg-syslang" type="text" maxlength="16"
                            autocomplete="off" spellcheck="false" placeholder="en-GB">
                   </label>
-                  <p class="help">
-                    What Telegram is told this persona's device is. Choose
-                    something ordinary and keep it for the life of the
-                    persona.
-                  </p>
+                  <p class="help">The device this persona presents to Telegram. Keep it for the life of the persona.</p>
                 </fieldset>
                 <label class="field">
                   <span class="label">Language</span>
@@ -2697,11 +2406,7 @@
                 <button id="sp-btn" type="submit" class="btn primary">
                   Create persona</button>
               </form>
-              <p class="help">
-                Do not put the account's phone number or password here.
-                Credentials are enrolled on the server, never through this
-                console.
-              </p>
+              <p class="help">Do not enter the phone number or password here. Credentials are enrolled on the server.</p>
               <p id="sp-error" class="form-error" role="alert" hidden></p>
               <p id="sp-ok" class="form-ok" role="status" hidden></p>
             </details>
@@ -2712,13 +2417,7 @@
                  a persona to do, run by the collector, the one process that
                  holds the persona key. -->
             <h2 class="h-sm">Persona acts</h2>
-            <p class="help">
-              Looking a chat up, joining it, checking its membership and
-              polling a source a persona reads run in the collector. What you
-              asked for is listed here with its outcome. An act the collector
-              has not started in time (fifteen minutes, unless your operator
-              set another limit) is not run.
-            </p>
+            <p class="help">Persona actions you asked for, with their outcome.</p>
             <div id="src-acts"></div>
             <p id="src-acts-empty" class="empty" hidden>You have asked for no persona act.</p>
 
@@ -2795,17 +2494,7 @@
                 <button id="sa-btn" type="submit" class="btn primary">
                   Record authority</button>
               </form>
-              <p class="help">
-                The authority itself is a document outside this system. Record
-                its reference exactly as an auditor would look it up. A
-                security officer confirms it, and each source under it, before
-                any of them is read. Reading as a member needs its own
-                reference, because it is a different act from reading what is
-                public. An authority for a persona with no sources allows the
-                persona's own acts and no read. Adapter collection carries no
-                compartments: work that needs a compartment, or a label above
-                the declared ceiling, is collected by hand into its case.
-              </p>
+              <p class="help">The reference an auditor would look up. A security officer confirms it before any source is read.</p>
               <p id="sa-error" class="form-error" role="alert" hidden></p>
               <p id="sa-ok" class="form-ok" role="status" hidden></p>
             </details>
@@ -2821,12 +2510,7 @@
           <div id="feeds-keys" class="subpane" hidden>
             <!-- Was "(invariant 11) ... there is a CHECK constraint saying
                  so" (ux19-copy developer-speak-in-copy, 2026-09-23). -->
-            <p class="help">
-              Keys are <strong>write-only</strong>: a key can submit records
-              and read nothing back. A leaked key means junk data in a
-              quarantine bucket, never the case file, and the database
-              itself enforces that.
-            </p>
+            <p class="help">Keys can submit records but read nothing back.</p>
             <div class="pane-head">
               <label class="field inline check">
                 <input id="key-revoked" type="checkbox">
@@ -2887,13 +2571,7 @@
                 <button id="key-issue-btn" type="submit" class="btn primary">
                   Issue key</button>
               </form>
-              <p class="help">
-                A key is write-only: it can submit batches and read nothing.
-                Expiry is mandatory, at most a year. A stealer log, credential
-                dump or database leak feed must name a compartment you hold,
-                or every record it sends is refused at parse. Leave the
-                addresses empty to accept the key from anywhere.
-              </p>
+              <p class="help">Expiry is required (one year at most). Stealer, credential and leak feeds need a compartment you hold. Leave addresses empty to allow any.</p>
               <p id="key-issue-error" class="form-error" role="alert" hidden></p>
             </details>
             <div id="key-secret-out"></div>
@@ -2943,35 +2621,20 @@
               <span id="ach-counts" class="muted small"></span>
             </div>
 
-            <p id="ach-method" class="help"></p>
+            <details id="ach-method-box" class="more" hidden>
+              <summary>How the ranking works</summary>
+              <p id="ach-method" class="help"></p>
+            </details>
             <div id="ach-warnings"></div>
 
             <div id="ach-ranking"></div>
-            <p id="ach-empty" class="empty" hidden>
-              No hypotheses yet. ACH is worth the effort when you have at
-              least three, including one you expect to lose.
-            </p>
+            <p id="ach-empty" class="empty" hidden>No hypotheses yet. Add three or more, including one you expect to lose.</p>
 
             <h2 class="h-sm">The matrix</h2>
             <!-- Numbered by the order the hypotheses were written, not by
                  rank (ux11-ach:h-numbers-unstable-and-unlabelled,
                  2026-09-23): the help said "in the order ranked above",
                  so a save that moved the ranking renamed every column. -->
-            <p class="help">
-              A cell is how one piece of evidence stands against one
-              hypothesis. H1, H2 and so on number the hypotheses in the
-              order they were written, and a number stays with its
-              hypothesis whatever the ranking does. Each row names what its
-              evidence is about and what it claims, with the Admiralty
-              grade and the weight every cell in it counts at; the name
-              opens it in the graph. Evidence that says the same thing about
-              <em>every</em> hypothesis is kept in the record and excluded
-              from the ranking, because it discriminates nothing, and its
-              row is dimmed. A row with a blank cell that agrees with itself
-              so far is unfinished, not undiagnostic: its diagnosticity
-              reads <em>unfinished</em> until it is scored against the
-              rest, and the blanks it still needs are outlined.
-            </p>
             <div id="ach-matrix" class="scroll-x"></div>
 
             <!-- Scoring (2026-09-09). A cell exists only once an assertion
@@ -2981,14 +2644,7 @@
                  (routers/ach.py), never typed-in text. -->
             <details class="card" id="ach-score-card">
               <summary>Score an assertion</summary>
-              <p class="help">
-                Evidence in this matrix is an <em>assertion</em>, never free
-                text: each row inherits the Admiralty grading and the
-                retraction status of the claim it rests on. Select an entity
-                or a tie in the graph, load its live assertions here, and
-                score one against a hypothesis. Every further cell in that
-                row is then one click in the matrix above.
-              </p>
+              <p class="help">Select an entity or tie on the graph, load its assertions here, then score them against each hypothesis.</p>
               <div class="pane-head">
                 <button id="ach-evidence-load" type="button" class="btn">
                   Load assertions of the selected element</button>
@@ -3013,11 +2669,6 @@
 
             <details class="card" id="ach-add-card">
               <summary>Add a hypothesis</summary>
-              <p class="help">
-                Write the one you think is wrong too. A set of hypotheses that
-                are all variations of the same theory produces a confident
-                answer to a question nobody asked.
-              </p>
               <label class="field">
                 <span class="label">Statement</span>
                 <input id="ach-statement" type="text" spellcheck="false"
@@ -3041,14 +2692,7 @@
           <div id="ach-assumptions" class="subpane" hidden>
             <div class="card">
               <h2 class="h-sm">What this analysis takes for granted</h2>
-              <p class="help">An assumption is a claim the case rests on that
-                nobody has evidenced: that a handle belongs to one person,
-                that a timezone is local, that a leaked database is genuine.
-                Writing it down is what makes it reviewable: an OPEN assumption
-                is a question still owed an answer, and a REFUTED one that nobody
-                revisited is how an analysis quietly becomes wrong.
-                <strong>Open and confirmed assumptions appear in the report</strong>;
-                withdrawn and refuted ones do not.</p>
+              <p class="help">Things the case rests on that nobody has evidenced.</p>
               <form id="asm-create" class="row-form" novalidate>
                 <label class="field grow">
                   <span class="label">Assumption</span>
@@ -3069,9 +2713,7 @@
                 <span class="label">Include withdrawn</span>
               </label>
             </div>
-            <p id="asm-empty" class="empty" hidden>
-              Nothing recorded. Every analysis has assumptions; one with none
-              written down has not looked for them.</p>
+            <p id="asm-empty" class="empty" hidden>No assumptions recorded.</p>
             <div id="asm-list" class="stack"></div>
           </div>
         </section>
@@ -3113,34 +2755,16 @@
               Prepare</button>
           </div>
 
-          <p class="help">
-            Nothing above the target classification is read at any point:
-            the redaction is <strong>structural</strong>, so it cannot be
-            defeated by a name in a rationale field. A case at
-            AMBER_STRICT can produce a GREEN report, and the GREEN report
-            may leave where the case never could.
-          </p>
+          <p class="help">Nothing above the target classification is read.</p>
 
           <p id="rep-msg" class="msg" hidden></p>
-          <p id="rep-empty" class="empty">
-            Nothing prepared yet. Preparing materialises a projection and,
-            with hypotheses on, scores the ACH matrix, so it runs on a
-            button rather than on opening this pane.
-          </p>
+          <p id="rep-empty" class="empty">Nothing prepared yet. Choose a level and press Prepare.</p>
           <div id="rep-redaction"></div>
           <div id="rep-body"></div>
 
           <details id="rep-release-box" class="card" hidden>
             <summary>Ask whether it may leave, then save it</summary>
-            <p class="help warn">
-              This decides; it does not send. The platform will tell you
-              whether the document may go at this classification.
-              <strong>Sending it, and to whom, is still a human act with a
-              human's name on it.</strong> A refusal is audited as loudly
-              as a permission. The file you can save afterwards is the
-              document the gate cleared, and only if it matches the preview
-              above.
-            </p>
+            <p class="help warn">This checks whether the document may leave. It does not send it.</p>
             <!-- These are `routers/reports.RELEASE_DESTINATIONS`, the
                  `egress.Destination` values a released document can go to,
                  verbatim (in_app went 2026-10-03: the release refuses it,
@@ -3162,12 +2786,7 @@
                 <option value="webhook">webhook</option>
               </select>
             </label>
-            <p class="help">
-              Each of these crosses the boundary into a system with its own
-              access model, which this platform does not control and cannot
-              audit. Inside the platform, the prepared report above is
-              already where it needs to be.
-            </p>
+            <p class="help">These leave the platform. Their access controls are outside NocTORnal.</p>
             <label class="field">
               <span class="label">Destination ceiling (optional)</span>
               <select id="rep-ceiling" class="select">
@@ -3231,11 +2850,7 @@
                material to a vendor or the public waits for a named second
                person to sign it off here, in the product. -->
           <div id="gov-lookups" class="subpane" hidden>
-            <p class="help">A lookup sends one selector from this case to a
-              provider. Your own instance (NONE) is asked at once; a vendor or a
-              public service is asked only after the colleague the requester
-              names signs it off here. Every answer is kept as case material and
-              becomes proposals in Triage, never graph.</p>
+            <p class="help">Lookups waiting for sign-off. Answers become suggestions in Triage.</p>
             <p id="lk-msg" class="msg" role="status" hidden></p>
             <h2 class="h-sm">Waiting for your sign-off</h2>
             <div id="lk-signoff" class="stack"></div>
@@ -3274,12 +2889,7 @@
                hold cases, not a case surface. -->
           <div id="gov-audit" class="subpane" hidden>
             <h2 class="h-sm">Tamper evidence</h2>
-            <p class="help">
-              Every audit row hashes its predecessor and all of its own
-              payload columns. Re-computing that chain is the only way to
-              tell an intact log from an edited one. Until somebody asks,
-              the two look identical.
-            </p>
+            <p class="help">Re-computes the audit log's hash chain to check it is intact.</p>
             <div class="row audit-actions">
               <button id="btn-audit-verify" type="button" class="btn">
                 Verify the chain
@@ -3294,12 +2904,7 @@
                  The record actually produced to a court was the one nobody
                  verified. -->
             <h2 class="h-sm">Chain of custody</h2>
-            <p class="help">
-              The custody ledger is what goes to a court. It is one chain across
-              every exhibit, so naming an exhibit narrows what is <em>reported</em>
-              and not what is checked. Leave it blank for the answer to
-              &ldquo;is this exhibit&rsquo;s history complete&rdquo;.
-            </p>
+            <p class="help">Checks the custody ledger. Leave the exhibit blank to check every exhibit.</p>
             <label class="field">
               <span class="label">Exhibit id (optional)</span>
               <input id="custody-evidence-id" type="text" class="mono"
@@ -3321,13 +2926,7 @@
             <!-- Instruction, not design rationale (ux19-copy
                  developer-speak-in-copy, 2026-09-23): this said "A rule
                  nobody has confirmed is a number somebody typed". -->
-            <p class="help">
-              These periods govern data about people who are not under
-              investigation, in every case in the deployment and not only
-              this one. A rule marked unconfirmed still holds the period
-              this build shipped with: confirm it below with the period
-              your legal basis sets, or that period applies by default.
-            </p>
+            <p class="help">Periods for material about people who are not under investigation, in every case. Unconfirmed rules use the shipped default.</p>
             <div id="ret-rules"></div>
             <p id="ret-rules-notice" class="help warn" hidden></p>
 
@@ -3356,22 +2955,14 @@
                 Confirm rule</button>
             </form>
             <p id="ret-cat-state" class="help"></p>
-            <p class="help">
-              A confirmed period applies to material ingested from now on,
-              in every case. Nothing already on file is recomputed: records
-              keep the deadline they were stamped with when they arrived.
-            </p>
+            <p class="help">A confirmed period applies to material ingested from now on.</p>
             <p id="ret-confirm-msg" class="msg" hidden></p>
 
             <h2 class="h-sm">Due for destruction</h2>
             <!-- Was "An analyst who cannot see when their case's material
                  expires discovers a deadline by missing it." (ux19-copy
                  developer-speak-in-copy, 2026-09-23). -->
-            <p class="help">
-              This case's material that has reached, or is nearing, the end
-              of its retention period, soonest first. Check it here before
-              the deadline passes; a legal hold keeps anything it covers.
-            </p>
+            <p class="help">This case's material nearing the end of retention, soonest first. A legal hold keeps anything it covers.</p>
             <!-- Forward, and by name (ux15-report:due-list-no-forward-view-
                  no-names, 2026-09-23). The list asked only for what had
                  already expired, so an item first appeared here at the
@@ -3408,14 +2999,7 @@
                  counted. -->
             <details id="ret-purge-box" class="card">
               <summary>Run a purge for this case</summary>
-              <p class="help warn">
-                A dry run reports what <em>would</em> be destroyed and
-                destroys nothing. It is the default every time this pane
-                opens. A real run is offered only after a dry run of this
-                case under the same authority, and it asks you to confirm
-                what that dry run counted. If anything has changed since,
-                the server refuses and nothing is destroyed.
-              </p>
+              <p class="help warn">A dry run reports what would be destroyed and destroys nothing. A real run needs a dry run first.</p>
               <label class="field">
                 <span class="label">Authority for this run</span>
                 <input id="ret-authority" type="text" spellcheck="false"
@@ -3448,13 +3032,7 @@
 
           <!-- TOMBSTONES -->
           <div id="gov-tombstones" class="subpane" hidden>
-            <p class="help">
-              What was destroyed, how much, by whom and under whose
-              authority, and whether the object store actually let go of
-              the bytes. The tombstone is append-only and outlives the thing
-              it records: otherwise a destruction and a deletion of the
-              record of it look identical.
-            </p>
+            <p class="help">What was destroyed, by whom and under whose authority.</p>
             <div class="pane-head">
               <button id="tomb-refresh" type="button" class="btn">Refresh</button>
               <span id="tomb-counts" class="muted small"></span>
@@ -3473,13 +3051,7 @@
 
             <details id="glass-box" class="card">
               <summary>Invoke emergency access</summary>
-              <p class="help warn">
-                Loud by design. The grant raises your clearance for a few
-                hours and nothing else, each exhibit it opens above your own
-                clearance is counted, and a security officer
-                <strong>must</strong> review it afterwards. Say what the
-                emergency is: this is the text somebody defends later.
-              </p>
+              <p class="help warn">Raises your clearance for a few hours. Everything it opens is counted and reviewed by a security officer. State the emergency.</p>
               <div class="row glass-choices">
                 <label class="field">
                   <span class="label">Scope</span>
@@ -3514,10 +3086,6 @@
                  only through a case's Lifecycle pane (2026-09-22). -->
             <div id="glass-review" class="glass-review">
               <h2 class="h-sm">Awaiting review</h2>
-              <p class="help">
-                The review is the control that makes emergency access
-                acceptable at all. A grant nobody looked at is a role.
-              </p>
               <div class="pane-head">
                 <button id="glass-refresh" type="button" class="btn">Refresh</button>
                 <span id="glass-counts" class="muted small"></span>
@@ -3612,10 +3180,7 @@
                that phrase as an overclaim, and "nothing here can close L1"
                sat above a first blocking check that is L1's declaration. -->
           <div id="adm-readiness" class="subpane">
-            <p class="help">What this deployment can check about itself.
-              Passing does not make it lawful: the legal sign-offs (L1 to L5)
-              are decisions people make, and some checks below only record
-              that a declaration was made.</p>
+            <p class="help">Passing these checks does not make a deployment lawful: the legal sign-offs (L1 to L5) are decisions people make, and some checks only record that a declaration was made.</p>
             <div class="row audit-actions">
               <button id="btn-readiness" type="button" class="btn">Check readiness</button>
               <span id="rdy-summary" class="help"></span>
@@ -3716,11 +3281,7 @@
                no-compartment-readins-in-ui, 2026-09-23). A user's read-ins
                are set on their card under Accounts. -->
           <div id="adm-compartments" class="subpane adm-section" hidden>
-            <p class="help">A compartment is a need-to-know lock on a case:
-              only accounts read into every compartment a case carries can
-              open it, whatever their clearance. The key is what the lock
-              compares, exactly, so it is upper case with no spaces; the label
-              is what people read.</p>
+            <p class="help">A need-to-know lock on a case. Only accounts read into it can open the case.</p>
             <form id="adm-comp-form" class="card row-form" novalidate>
               <label class="field">
                 <span class="label">Key</span>
@@ -3734,9 +3295,7 @@
               </label>
               <button id="adm-comp-btn" type="submit" class="btn">Register</button>
             </form>
-            <p id="adm-comp-key-help" class="help">2 to 32 characters: A to Z,
-              0 to 9, underscore and hyphen. A registered key cannot be
-              renamed by registering it again.</p>
+            <p id="adm-comp-key-help" class="help">2 to 32 characters: A to Z, 0 to 9, underscore and hyphen.</p>
             <p id="adm-comp-msg" class="msg" role="status" hidden></p>
             <div id="adm-comp-list"></div>
             <p id="adm-comp-empty" class="empty" hidden>No compartments are registered.</p>
@@ -3764,12 +3323,7 @@
                administrator applies it. -->
           <div id="adm-dual" class="subpane adm-section" hidden>
             <div id="dual-body" class="stack">
-              <p class="help">Which acts take two different people, who can be
-                each of them, and the changes waiting. Changing any of it
-                takes two people too: an administrator proposes, a Security
-                officer countersigns, and the administrator applies it. Keep
-                case details out of a justification: a Security officer reads
-                it and holds no case access.</p>
+              <p class="help">Which acts need two different people. Keep case details out of justifications: security officers hold no case access.</p>
               <p id="dual-say" class="sr-only" role="status" aria-live="polite"></p>
               <p id="dual-refused" class="empty refused" hidden></p>
               <button id="dual-signin" type="button" class="btn" hidden>Sign in again</button>
@@ -3780,9 +3334,6 @@
               <h2 class="h-sm">Operations</h2>
               <div id="dual-ops"></div>
               <h2 class="h-sm">Two people by role</h2>
-              <p class="help">Each pair is two permissions no single role may
-                hold together, so whoever holds one half needs someone else
-                for the other.</p>
               <p id="dual-violations" class="msg bad" role="alert" hidden></p>
               <div id="dual-pairs"></div>
               <details id="dual-pair-add" class="card adm-create" hidden>
@@ -3807,9 +3358,6 @@
                     <span class="label">Justification for the countersigner</span>
                     <input id="dual-pair-just" type="text" autocomplete="off">
                   </label>
-                  <p class="help">A release that later grants both halves to
-                    one role will stop at upgrade until the pair is removed
-                    here.</p>
                   <div class="setup-actions">
                     <button id="dual-pair-btn" type="submit" class="btn primary">Propose</button>
                   </div>
@@ -3835,11 +3383,7 @@
                credentials are sealed for the proxy and never shown again,
                so no field here is ever filled from the server. -->
           <div id="adm-egress" class="subpane adm-section" hidden>
-            <p class="help">Where anything may leave this deployment. Every
-              change asks for a sign-in from the last 15 minutes and is
-              audited. A change that lets a profile reach further than
-              before stops the collection authorities recorded before it
-              from working until a second person confirms a new one.</p>
+            <p class="help">Where anything may leave this deployment. Changes need a recent sign-in and are audited. Widening a profile suspends earlier collection authorities until reconfirmed.</p>
             <p id="egr-say" class="sr-only" role="status" aria-live="polite"></p>
             <p id="egr-refused" class="empty refused" hidden></p>
             <button id="egr-signin" type="button" class="btn" hidden>Sign in again</button>
@@ -3901,9 +3445,7 @@
                 </label>
                 <label class="check"><input id="egr-prof-resolve" type="checkbox">
                   Resolve target names at the proxy</label>
-                <p class="help">Every target name this persona visits is then
-                  looked up by this platform's own resolver, which the exit is
-                  meant to hide.</p>
+                <p class="help">The platform's own resolver then sees every target name, which the exit is meant to hide.</p>
                 <div class="row-form">
                   <label class="field">
                     <span class="label">Idle seconds</span>
@@ -3935,9 +3477,7 @@
             <p id="egr-prof-hidden" class="help" hidden></p>
 
             <h2 class="h-sm">Integration routes</h2>
-            <p class="help">Each route names exactly where one integration may
-              connect, as host and port, or host and the private network its
-              address must be in. There is no wildcard.</p>
+            <p class="help">Each route names the one host and port an integration may use. No wildcards.</p>
             <details id="egr-route-box" class="card adm-create" hidden>
               <summary class="adm-create-sum">Add a route</summary>
               <form id="egr-route-form" class="stack" novalidate>
@@ -3964,18 +3504,14 @@
               </form>
             </details>
             <div id="egr-route-list"></div>
-            <p id="egr-route-empty" class="empty" hidden>No integration route yet.
-              Nothing an integration sends can leave through the egress proxy
-              until a route names its destination.</p>
+            <p id="egr-route-empty" class="empty" hidden>No integration routes yet. Nothing can be sent until a route allows it.</p>
             <details id="egr-route-retired" class="egr-retired" hidden>
               <summary id="egr-route-retired-sum"></summary>
               <div id="egr-route-retired-list"></div>
             </details>
 
             <h2 class="h-sm">Connection log</h2>
-            <p class="help">What the egress proxy let out and refused, newest
-              first. Rows you are not cleared to see are counted over the
-              whole log, not shown.</p>
+            <p class="help">What the egress proxy allowed and refused, newest first. Rows you are not cleared to see are counted over the whole log, not shown.</p>
             <div class="row-form egr-log-controls">
               <label class="field">
                 <span class="label">Route</span>
@@ -4007,10 +3543,7 @@
                administrator's own labels and only with collected-document
                access; sizes are in the embed-pass log, not here. -->
           <div id="adm-embeddings" class="subpane adm-section" hidden>
-            <p class="help">Similar wording runs on this host and sends nothing
-              anywhere. Similar meaning asks an operator's model server, and
-              only what its ceiling and its declarations allow ever leaves; each
-              batch is audited before it is sent. Every time here is UTC.</p>
+            <p class="help">Similar wording runs on this host. Similar meaning uses the model server, if one is configured. Times are UTC.</p>
             <p id="emb-say" class="sr-only" role="status" aria-live="polite"></p>
             <p id="emb-refused" class="empty refused" hidden></p>
             <div class="emb-cards">
@@ -4059,11 +3592,7 @@
                anything is draining; the Jira destination; the delivery
                ledger, moved here from the Inbox. -->
           <div id="adm-integrations" class="subpane adm-section" hidden>
-            <p class="help">Every channel that can carry a notification out of
-              the platform, the egress route each leaves by, and the ledger of
-              what tried to leave. A channel whose route is missing, or does
-              not allow its endpoint, is held: its deliveries wait and nothing
-              is attempted. Only an attempted send can fail.</p>
+            <p class="help">Every channel that can carry a notification out. A channel without an allowed route is held.</p>
             <p id="int-msg" class="msg" role="status" hidden></p>
             <div id="int-channels" class="int-channels"></div>
             <section id="int-outbox" class="card int-outbox" aria-labelledby="int-outbox-title">
@@ -4076,11 +3605,7 @@
             </section>
             <section id="int-retry" class="card" aria-labelledby="int-retry-title">
               <h2 id="int-retry-title" class="h-sm">Retry failed deliveries</h2>
-              <p class="help">Puts every failed delivery of one channel since a
-                time back in the outbox, at most 30 days back and a thousand
-                rows. The drain applies the recipient's access, the egress gate
-                and Jira's routing again, so a retry never sends more than the
-                first attempt could have.</p>
+              <p class="help">Retry the failed deliveries of one channel (up to 30 days and 1,000 rows).</p>
               <div class="row-form">
                 <label class="field">
                   <span class="label">Channel</span>
@@ -4198,10 +3723,7 @@
               <p id="jira-msg" class="msg" role="status" hidden></p>
               <details id="jira-links-box">
                 <summary>Issues NocTORnal raised</summary>
-                <p class="help">Jira issues outlive NocTORnal's retention. To find
-                  the issues raised about one case (a purge, a disclosure), give
-                  its id: the list never names a case. An unconfirmed create
-                  shows its ref label, which finds the issue in Jira by JQL.</p>
+                <p class="help">Find the Jira issues raised about a case by its id.</p>
                 <div class="row-form">
                   <label class="field grow">
                     <span class="label">Case id</span>
@@ -4217,12 +3739,7 @@
             </section>
             <section class="card" aria-labelledby="dlv-title">
               <h2 id="dlv-title" class="h-sm">Delivery ledger</h2>
-              <p class="help">Every attempt to send a notification out of the
-                platform, newest first: kinds, channels, destinations and why
-                each did or did not go. <strong>Never subjects or
-                summaries</strong>: the ledger spans every case and every
-                recipient. A webhook address is shown with its path withheld,
-                because a path commonly carries the hook's secret.</p>
+              <p class="help">Every attempt to send a notification out, newest first. Webhook paths are withheld.</p>
               <div class="row-form">
                 <label class="field">
                   <span class="label">Channel</span>
@@ -4270,10 +3787,7 @@
                the services a case selector may be sent to, their sealed keys,
                the route each leaves by, and their exposure. -->
           <div id="adm-providers" class="subpane adm-section" hidden>
-            <p class="help">Each provider is a service this deployment may send
-              selectors to. Nothing is sent while the host switch
-              NOCTORNAL_OUTBOUND_LOOKUPS is off, and nothing is sent to a
-              provider that is not enabled.</p>
+            <p class="help">Services this deployment may send selectors to. Nothing is sent unless lookups are on and the provider is enabled.</p>
             <p id="prv-switch" class="msg warn" hidden></p>
             <p id="prv-msg" class="msg" role="status" hidden></p>
             <div id="prv-list" class="stack"></div>
@@ -4333,9 +3847,7 @@
                   <span class="label">Why this exposure is right</span>
                   <textarea id="prv-basis" rows="2"></textarea>
                 </label>
-                <p class="help">A level below PUBLIC is a second administrator's
-                  act: the provider cannot be enabled until one approves it. So is
-                  moving it later to another host, port or private network.</p>
+                <p class="help">Lowering a provider's exposure needs a second administrator's approval.</p>
                 <div class="setup-actions">
                   <button id="prv-create-btn" type="submit" class="btn primary">Register</button>
                 </div>
@@ -4396,15 +3908,6 @@
               <button id="smp-refresh" type="button" class="btn">Refresh</button>
               <span id="smp-counts" class="muted small"></span>
             </div>
-            <p class="help">
-              Shows the samples attached to the case you have open. Tick
-              <strong>All cases I can see</strong> to include other cases
-              and unattached samples; each card names its case by code.
-              Either way the list is filtered by <strong>your own</strong>
-              clearance and compartments, not the case's: a sample can be
-              classified above the case it belongs to, so the case gate
-              alone would leak that it exists.
-            </p>
             <!-- F11 M. Search the samples you can see by a hash. The
                  value is sent in the request body, never in the address,
                  and the server neither logs nor keeps it. -->
@@ -4447,12 +3950,7 @@
           <div id="smp-submit-pane" class="subpane" hidden>
             <div class="card stack narrow">
               <h2 class="h-sm">Submit a sample</h2>
-              <p class="help warn">
-                It lands in <strong>QUARANTINE</strong>, encrypted at rest
-                under a per-sample key, stored under its SHA-256 and never
-                under its filename. Nothing reaches the analysis queue
-                before triage has run.
-              </p>
+              <p class="help warn">Samples are quarantined and encrypted. Nothing runs them.</p>
               <!-- The refusal, in the form, before anybody chooses a file
                    (ux13-lab:submit-form-ignores-refusal-and-scope,
                    2026-09-23). Submit stayed live while ingest was
@@ -4505,78 +4003,18 @@
           <!-- HANDLING -->
           <div id="smp-handling-pane" class="subpane" hidden>
             <div class="card stack">
-              <h2 class="h-sm">What this screen will and will not do</h2>
+              <h2 class="h-sm">Handling rules</h2>
               <ul class="rules">
-                <li><strong>Metadata renders. Bytes do not.</strong> There is
-                  no preview, no hex view and no icon taken from the file.
-                  Rendering attacker-supplied bytes in the same origin as the
-                  case file is a drive-by vector into your highest-trust
-                  system, seeded with hostile files by design.</li>
-                <li><strong>The filename is evidence, not a path.</strong> It
-                  is stored for the record and never used as a path
-                  component. The object key is always the SHA-256.</li>
-                <li><strong>Download is a separate origin, step-up gated.</strong>
-                  It is the one action here that puts working malware on a
-                  disk. It refuses unless the request arrived at the
-                  configured sample origin, and the check lives in the
-                  service so a second caller cannot skip it.</li>
-                <li><strong>The archive password is an interlock, not
-                  protection.</strong> <code>infected</code> is public and
-                  ZipCrypto is broken. It stops a double-click and stops a
-                  mail gateway eating the sample. Confidentiality comes from
-                  access control, transport and audit.</li>
-                <li><strong>A rejected sample is preserved, not
-                  destroyed.</strong> Unless this deployment chose otherwise,
-                  rejecting moves the encrypted bytes into a separate
-                  preservation store under a legal hold and keeps the data
-                  key. Getting them back needs a Security Officer's
-                  authorisation naming the person who retrieves them, and
-                  nobody can authorise themselves. Where a deployment
-                  destroys rejected samples instead, a legal hold on the
-                  sample or its case refuses the destruction: preservation
-                  and destruction can both be legal obligations, and
-                  software does not get to pick.</li>
-                <!-- F13 and F14. -->
-                <li><strong>Screening compares exact hashes.</strong>
-                  Screening compares exact hashes against the lists this
-                  deployment imported. No match does not mean the material
-                  is lawful to hold. A matched sample disappears from the Lab
-                  for everyone and is held for the Security Officer.</li>
-                <li><strong>A sandbox send is made by the worker.</strong>
-                  Where an operator configured a sandbox, a request to it is
-                  sent by the sandbox worker, as the encrypted archive and
-                  never the raw file, after a second person's sign-off when
-                  the sandbox is exposed or the sample's network route is
-                  live. The sandbox keeps what it is sent outside this
-                  product's labels, holds and retention.</li>
+                <li><strong>Metadata renders, bytes do not.</strong> No preview, hex view or icon.</li>
+                <li><strong>The filename is evidence, not a path.</strong> Objects are stored by SHA-256.</li>
+                <li><strong>Downloads come from a separate origin</strong> and need a recent sign-in.</li>
+                <li><strong>The archive password is not protection.</strong> It is <code>infected</code>; access control is the protection.</li>
+                <li><strong>A rejected sample is preserved</strong> under a legal hold unless this deployment destroys it.</li>
+                <li><strong>An archive is expanded after triage,</strong> and each member it stores becomes a sample of its own.</li>
+                <li><strong>Screening compares exact hashes.</strong> A match is held for the Security Officer. No match does not mean the material is lawful to hold.</li>
+                <li><strong>Every read is recorded</strong> in the sample's access ledger, in your name.</li>
+                <li><strong>Sandbox sends need a second person's sign-off</strong> when the sandbox is exposed.</li>
               </ul>
-              <h2 class="h-sm">Static triage, and the gaps it leaves</h2>
-              <p class="help">
-                After a sample is submitted, static triage computes its
-                imphash and Rich header, its ssdeep and TLSH fuzzy hashes,
-                and scans it with the YARA rule sets a Security Officer has
-                activated. It runs outside the upload, in child processes
-                that are limited in time, and on Linux in memory and file
-                writes too; the card says which limits applied. A child is
-                started without this deployment's secrets, but where it
-                could still read them from another process or reach the
-                database host, the readiness page says so. Every read of
-                the bytes is recorded in the access ledger. Findings are
-                recorded as the lab's, never
-                written into a case: a hash becomes a case entity only when
-                an analyst proposes it and the case accepts it.
-              </p>
-              <p class="help">
-                An archive is expanded after its static triage, within
-                limits on depth, member count, size and ratio, and each
-                member it stores becomes a sample of its own, screened and
-                triaged like any other. Nothing here runs a sample: it is
-                detonated only by the sandbox this deployment configured,
-                if any. What any check could not do is
-                written onto the sample as a gap with a reason, because a
-                missing imphash reads as &ldquo;this sample has no
-                imports&rdquo; and a recorded gap says nobody looked.
-              </p>
               <div id="smp-origin" class="help"></div>
             </div>
           </div>
@@ -4588,13 +4026,7 @@
               <button id="rul-refresh" type="button" class="btn">Refresh</button>
               <span id="rul-counts" class="muted small"></span>
             </div>
-            <p class="help">
-              A rule set says what the lab hunts, so it is labelled, and you
-              see only the sets your clearance and compartments reach. A lab
-              member uploads a version with its licence; a Security Officer
-              who did not sponsor it activates it. Matches are the lab's
-              findings about a sample, never facts about an actor.
-            </p>
+            <p class="help">Rule sets the lab scans with. A Security Officer who did not sponsor a set activates it.</p>
             <p id="rul-engine" class="help"></p>
             <div id="rul-forms"></div>
             <div id="rul-list" class="rows"></div>
@@ -4627,15 +4059,7 @@
                 Refresh</button>
               <span id="dcp-cap-counts" class="muted small"></span>
             </div>
-            <p class="help">
-              A screenshot on its own proves somebody had a screenshot. The
-              evidence is the whole fetch: requested URL, redirect chain,
-              final URL, TLS certificate, screenshot and DOM, all at one
-              timestamp. Every URL below is <strong>defanged and
-              non-clickable</strong>: a mis-click would fetch attacker
-              infrastructure from this machine and tell them the
-              investigation exists.
-            </p>
+            <p class="help">Record the whole fetch, not just a screenshot. URLs are defanged and not clickable.</p>
             <!-- ux14-deception:no-deception-ingest-ui (2026-09-23): the
                  console could list captures and never record one, so a
                  victim's report of a phishing page needed API tooling.
@@ -4761,14 +4185,7 @@
                 Refresh</button>
               <span id="dcp-eml-counts" class="muted small"></span>
             </div>
-            <p class="help">
-              The message body is <strong>never rendered</strong>. An HTML
-              email loads remote images, and doing that fires the actor's
-              tracking pixel from this organisation's IP at a timestamp
-              that tells them when the investigation reached them. Only
-              its extracted plain text is shown, with every URL in it
-              <strong>defanged</strong>.
-            </p>
+            <p class="help">Message bodies are never rendered. Only plain text is shown, with URLs defanged.</p>
             <!-- The .eml upload (ux14-deception:no-deception-ingest-ui,
                  2026-09-23). The file is kept as a hostile exhibit, write
                  once, and its headers are parsed from that exhibit. -->
@@ -4797,8 +4214,7 @@
                   <span class="label">Classification</span>
                   <select id="dcp-emlf-class" class="select"></select>
                 </label>
-                <p class="help">Kept as an exhibit exactly as uploaded, and never
-                  rendered. What the headers prove is read from that exhibit.</p>
+                <p class="help">Kept as uploaded and never rendered.</p>
                 <p id="dcp-emlf-msg" class="msg" hidden></p>
                 <button id="dcp-emlf-save" type="button" class="btn primary">Upload the message</button>
               </div>
@@ -4824,13 +4240,7 @@
                 Refresh</button>
               <span id="dcp-call-counts" class="muted small"></span>
             </div>
-            <p class="help">
-              Caller ID is the attack, not a detail. What the victim's
-              handset displayed is shown separately from what the network
-              recorded, and the presented number never becomes a
-              selector: putting it on an entity would attribute the crime
-              to whoever's number the attacker picked.
-            </p>
+            <p class="help">The number shown to the victim is kept apart from what the network recorded, and never becomes a selector.</p>
             <!-- Record a call (ux14-deception:no-deception-ingest-ui,
                  2026-09-23). What the victim saw and what the network
                  recorded are two separate groups here as on the row, so a
@@ -4992,9 +4402,7 @@
                  aria-labelledby="tab-add-node" tabindex="-1" hidden>
           <form id="node-form" class="card stack narrow" novalidate>
             <h2 class="h-sm">Add entity</h2>
-            <p class="help assertion-note">Nothing is a fact. Every element needs a
-              source. It is recorded as an assertion, graded by you, and stays
-              attached to this entity for the life of the case.</p>
+            <p class="help assertion-note">Record a claim with its source and grade.</p>
             <label class="field">
               <span class="label">Entity type</span>
               <select id="node-type" class="select" required></select>
@@ -5028,8 +4436,7 @@
                  app.js refuses the form until each is chosen. -->
             <fieldset class="assertion">
               <legend>Assertion</legend>
-              <p class="help">Grade the claim yourself: nothing is chosen for
-                you, so an ungraded claim cannot pass for a graded one.</p>
+              <p class="help">Grade the claim yourself. Nothing is preselected.</p>
               <button type="button" id="node-same-grading"
                       class="btn small same-grading" hidden></button>
               <div class="row">
@@ -5057,8 +4464,7 @@
                   <span id="node-rat-req" class="req" hidden>required for inference</span></label>
                 <textarea id="node-rationale" rows="3"
                           aria-describedby="node-rat-help"></textarea>
-                <span id="node-rat-help" class="help">An inference must state its
-                  reasoning. The server rejects one that does not.</span>
+                <span id="node-rat-help" class="help">An inference needs its reasoning.</span>
               </div>
               <!-- E1: the exhibit belongs HERE, at the moment the claim is
                    made. Making an analyst navigate elsewhere to attach one is
@@ -5067,9 +4473,7 @@
               <div class="field">
                 <label class="label" for="node-evidence">Supporting exhibit</label>
                 <select id="node-evidence" class="select"></select>
-                <span class="help">Optional, but a claim with an exhibit behind it
-                  is defensible and one without it is an opinion. Upload on the
-                  Evidence tab first to see it listed here.</span>
+                <span class="help">Optional. Upload on the Evidence tab first to list it here.</span>
               </div>
               <div class="row">
                 <label class="field">
@@ -5111,10 +4515,7 @@
                    shifts-day (2026-09-23): the days are stored and shown
                    as UTC calendar days, the same zone as every other time
                    in the console. -->
-              <span class="help">Dates are calendar days in UTC, shown back
-                exactly as entered. Leave blank if the claim has no known start or is
-                still current. This drives the timeline scrubber and the
-                trust-decay half-life; it is not when you recorded it.</span>
+              <span class="help">UTC days. Leave blank if there is no known start or end.</span>
             </fieldset>
 
             <p id="node-error" class="form-error" role="alert" hidden></p>
@@ -5132,14 +4533,7 @@
                  aria-labelledby="tab-add-edge" tabindex="-1" hidden>
           <form id="edge-form" class="card stack narrow" novalidate>
             <h2 class="h-sm">Add link</h2>
-            <p class="help">A link records one relationship between two
-              entities: who communicates with whom, who vouched for whom,
-              which person a persona is attributed to.</p>
-            <p class="help assertion-note">Nothing is a fact. Every element needs a
-              source. It is recorded as an assertion, and the confidence you
-              give it is the confidence the tie is drawn and filtered at.
-              Relationship types are offered only where the ontology permits
-              that pair.</p>
+            <p class="help">Record one relationship between two entities.</p>
             <!-- ux06 edge-endpoint-pickers (2026-09-22): each endpoint has a
                  filter box over a select grouped by type, and both open
                  unchosen instead of on the same entity. -->
@@ -5190,8 +4584,7 @@
 
             <fieldset class="assertion">
               <legend>Assertion</legend>
-              <p class="help">Grade the claim yourself: nothing is chosen for
-                you, so an ungraded claim cannot pass for a graded one.</p>
+              <p class="help">Grade the claim yourself. Nothing is preselected.</p>
               <button type="button" id="edge-same-grading"
                       class="btn small same-grading" hidden></button>
               <div class="row">
@@ -5219,8 +4612,7 @@
                   <span id="edge-rat-req" class="req" hidden>required for inference</span></label>
                 <textarea id="edge-rationale" rows="3"
                           aria-describedby="edge-rat-help"></textarea>
-                <span id="edge-rat-help" class="help">An inference must state its
-                  reasoning. The server rejects one that does not.</span>
+                <span id="edge-rat-help" class="help">An inference needs its reasoning.</span>
               </div>
               <!-- E1: the exhibit belongs HERE, at the moment the claim is
                    made. Making an analyst navigate elsewhere to attach one is
@@ -5229,9 +4621,7 @@
               <div class="field">
                 <label class="label" for="edge-evidence">Supporting exhibit</label>
                 <select id="edge-evidence" class="select"></select>
-                <span class="help">Optional, but a relationship with an exhibit behind it
-                  is defensible and one without it is an opinion. Upload on the
-                  Evidence tab first to see it listed here.</span>
+                <span class="help">Optional. Upload on the Evidence tab first to list it here.</span>
               </div>
               <div class="row">
                 <label class="field">
@@ -5265,10 +4655,7 @@
                   <input id="edge-valid-to" type="date">
                 </label>
               </div>
-              <span class="help">Dates are calendar days in UTC, shown back
-                exactly as entered. Leave blank if the relationship has no known start or is
-                still current. This drives the timeline scrubber and the
-                trust-decay half-life; it is not when you recorded it.</span>
+              <span class="help">UTC days. Leave blank if there is no known start or end.</span>
             </fieldset>
 
             <p id="edge-error" class="form-error" role="alert" hidden></p>
@@ -5426,11 +4813,7 @@
               <button id="claim-open" type="button" class="btn ghost small"
                       aria-expanded="false" aria-controls="claim-form">Add a claim about this tie…</button>
               <form id="claim-form" class="stack" novalidate hidden>
-                <p class="help">Another source for this tie, or the same tie at
-                  another grade, recorded as its own assertion. The tie takes
-                  the highest grade among its live claims, so a lower claim
-                  does not lower it by itself: add it here, then retract the
-                  higher claim with its reason.</p>
+                <p class="help">Add another source or grade for this tie. The tie takes its highest live grade.</p>
                 <div class="row">
                   <label class="field">
                     <span class="label">Basis</span>
@@ -5553,14 +4936,7 @@
                  of help on every selection pushed the evidence down. -->
             <!-- An instruction since 2026-09-23 (ux19-copy stale-phase3-claim):
                  it described where brokerage lives and stopped there. -->
-            <details class="insp-more">
-              <summary>What these measures cover</summary>
-            <p class="help">These are <strong>local</strong> measures: each one
-              describes the entity's own neighbourhood. Brokerage (betweenness,
-              Burt's constraint, key-player fragmentation) is global, so it is
-              not on this panel: run it on the Analysis pane to see who
-              bridges two clusters.</p>
-            </details>
+            <p class="help">Local measures for this entity. Run Analysis for brokerage.</p>
             <!-- This entity's brokerage from the run on the Analysis pane,
                  and the way there (ux10-analytics:explanations-in-developer-
                  language, 2026-09-23). Filled by renderInspectorAnalysis. -->
@@ -5595,11 +4971,7 @@
               <span class="label">Merge this entity into</span>
               <select id="merge-target" class="select"></select>
             </label>
-            <p class="help">The entity you are looking at becomes the
-              <strong>losing</strong> record: it keeps its history, its ties
-              move to the one you choose, and it leaves the live graph. Only
-              entities of the same type are listed: saying a persona
-              IS a person is an attribution, not a merge.</p>
+            <p class="help">This entity is folded into the one you choose. Same type only. It can be reversed.</p>
             <button id="merge-run" type="button" class="btn small">Merge</button>
             <p id="merge-error" class="form-error" role="alert" hidden></p>
             <div id="merge-history" class="insp-list"></div>
@@ -5693,9 +5065,7 @@
   <div class="palette share-sheet" role="dialog" aria-modal="true"
        aria-labelledby="share-title">
     <h2 id="share-title" class="h-sm">Who is on this case</h2>
-    <p class="help">Everyone assigned, and whether their access works. An
-      assignment row is only half of access: the account, its clearance and
-      its compartments have to reach the case too.</p>
+    <p class="help">People assigned to this case, and whether their access works.</p>
     <div id="share-roster" class="share-roster"></div>
     <p id="share-roster-msg" class="msg" hidden></p>
     <form id="share-form" class="share-form" novalidate>
@@ -5720,13 +5090,8 @@
             <input id="share-expires" type="datetime-local">
           </label>
         </div>
-        <p class="help">The grant is checked: a colleague whose clearance or
-          compartments do not reach this case is refused, not written and then
-          silently filtered out of every read.</p>
       </div>
-      <p id="share-readonly" class="help" hidden>You can see who is on this
-        case, but your role on it does not include adding or removing people
-        (case.grant). The case owner can.</p>
+      <p id="share-readonly" class="help" hidden>You can see who is on this case but cannot change it.</p>
       <p id="share-msg" class="msg" hidden></p>
       <div class="share-actions">
         <button id="share-close" type="button" class="btn">Close</button>
@@ -5774,20 +5139,12 @@
                  aria-describedby="case-edit-dates-help">
         </div>
       </div>
-      <p id="case-edit-dates-help" class="help">Retention can only be
-        extended here: evidence is selected for destruction by this date,
-        and destruction takes two people. Extending it also lengthens the
-        storage lock on the case's exhibits, which nobody can shorten
-        afterwards, so check the year. Review must fall on or before
-        retention.</p>
+      <p id="case-edit-dates-help" class="help">Retention can only be extended, and extending it lengthens the exhibits' storage lock permanently. Review must fall on or before retention.</p>
       <div class="field">
         <label class="label" for="case-edit-class">Classification</label>
         <select id="case-edit-class" class="select"
                 aria-describedby="case-edit-class-help"></select>
-        <span id="case-edit-class-help" class="help">Classification can only
-          be raised here, and no higher than your own clearance. Anyone on
-          the case cleared below the new level loses access, and is named
-          once it is saved.</span>
+        <span id="case-edit-class-help" class="help">Classification can only be raised, up to your clearance. Anyone cleared below the new level loses access.</span>
       </div>
       <p class="help">The lawful basis cannot be changed after creation.</p>
       <p id="case-edit-msg" class="msg" role="status" hidden></p>
@@ -5979,15 +5336,7 @@
       <span>Single-letter triage keys (J, K, A, R, D). They act only while
         the triage list has the focus.</span>
     </label>
-    <p class="help">
-      The triage keys act only while the triage list has the focus, never
-      in a field, on a button or with Ctrl, Alt or Cmd held. No key here
-      writes to the graph without asking first: A asks for a confirmation,
-      R and D for a reason. Accept promotes a <em>proposal</em>: the
-      element is created inferred, graded low and recorded as a machine's
-      suggestion that you accepted, and Undo retires it where your role
-      can. Machines propose, analysts dispose.
-    </p>
+    <p class="help">The triage keys act only when the list has focus. Accept asks for confirmation; reject and defer ask for a reason.</p>
     <button id="keys-close" type="button" class="btn">Close</button>
   </div>
 </div>

@@ -146,10 +146,8 @@ def test_the_bounds_in_the_markup_are_the_servers():
 
 def test_the_markup_says_what_the_section_is_for():
     said = re.sub(r"\s+", " ", _html())
-    assert "A watch is a standing tasking against one source." in said
-    assert "documents already collected are not matched again" in said
-    assert "the collector reads the source's own address and does not visit this one" in said
-    assert "never by an @name, because a name can be given to someone else" in said
+    assert "A watch checks every item a source returns for your keywords, selectors and patterns." in said
+    assert "Telegram chats use typed ids, such as c:1234567890, never @names." in said
     assert "Not loaded for this case yet." in said
 
 

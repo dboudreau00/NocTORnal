@@ -254,7 +254,7 @@ def test_an_untested_hypothesis_is_named_in_the_warnings():
     m = score([(H1, "tested"), (H2, "nobody looked")],
               [_item("a", {H1: CONSISTENT})])
     joined = " ".join(m.warnings)
-    assert "not competed" in joined
+    assert "no evidence assessed against it at all" in joined
     assert "excluded from the ranking" in joined
 
 
@@ -400,13 +400,13 @@ def test_a_warning_agrees_with_the_count_it_states():
     assert warning(one, "unfinished").startswith(
         "1 of 3 items is unfinished: "), one.warnings
     assert "so its diagnosticity is unknown" in warning(one, "unfinished")
-    assert "Finishing that row is" in warning(one, "unfinished")
+    assert "to tell whether it discriminates" in warning(one, "unfinished")
 
     two = score(HYPOTHESES, [sharp, half, _item("half too", {H2: CONSISTENT})])
     assert warning(two, "unfinished").startswith(
         "2 of 3 items are unfinished: "), two.warnings
     assert "so their diagnosticity is unknown" in warning(two, "unfinished")
-    assert "Finishing those rows is" in warning(two, "unfinished")
+    assert "to tell whether they discriminate" in warning(two, "unfinished")
 
     both = score(HYPOTHESES, [half, _item("half too", {H2: CONSISTENT})])
     assert warning(both, "unfinished").startswith(

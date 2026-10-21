@@ -186,12 +186,10 @@ def test_the_markup_says_what_each_region_is_for():
     sources = _sources_markup()
     assert "Nothing is waiting on a person." in sources
     assert "No sources are configured." in sources
-    assert ("A forum or Telegram source is not read until its classification is "
-            "within the declared ceiling") in re.sub(r"\s+", " ", sources)
+    assert "Read only once the ceiling and an authority are in place." in re.sub(r"\s+", " ", sources)
     personas = re.sub(r"\s+", " ", _personas_markup())
-    assert "Do not put the account's phone number or password here." in personas
-    assert "The authority itself is a document outside this system." in personas
-    assert "Adapter collection carries no compartments" in personas
+    assert "Do not enter the phone number or password here." in personas
+    assert "The reference an auditor would look up." in personas
     assert "No collection authority is recorded." in personas
 
 
@@ -230,7 +228,6 @@ def test_sources_are_read_before_the_authorities_and_the_forms_after_both():
     assert "paintPersonaForm(Boolean(personas))" in load
     assert "paintAuthorityForm(Boolean(authorities))" in load
     assert ".then((body) => { paintHeld(body); return body; })" in load
-    assert "'Collection authorities belong to the collector role.'" in load
 
 
 @needs_node

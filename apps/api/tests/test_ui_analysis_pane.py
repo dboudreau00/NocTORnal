@@ -360,7 +360,7 @@ def test_an_edit_under_the_same_projection_is_checked_not_guessed():
     assert "UTC" in moved["flags"]
     assert "Run the analysis again" in moved["status"]
     assert "has changed" not in got["undone"]["flags"], got["undone"]
-    assert "has not changed" in got["undone"]["status"]
+    assert "unchanged" in got["undone"]["status"]
 
 
 def test_a_moved_as_of_clears_the_results_it_no_longer_describes():
@@ -399,8 +399,8 @@ console.log(JSON.stringify(out));
     assert got["yes"].startswith("Showing the run of ") and " UTC (5 days ago)." in got["yes"]
     assert "+00:00" not in got["yes"]
     assert re.match(r"Showing the run of \d{4}-\d\d-\d\d \d\d:\d\d UTC ", got["yes"]), got["yes"]
-    assert "nothing it was computed from has changed" in got["yes"]
-    assert "the graph has changed since" in got["no"]
+    assert "The graph is unchanged since." in got["yes"]
+    assert "The graph has changed since." in got["no"]
     assert "Not checked" in got["unknown"]
 
 
@@ -412,7 +412,7 @@ def _leads(nodes: str, rule: str = "{ connected_count: 30, median_degree: 7 }") 
     return _PRELUDE + r"""
 function actorButton(n) { return el('button', 'an-entity', n.label); }
 state.analyticsLeadsAll = {};
-""" + _src("renderAnalyticsLeads") + r"""
+""" + _src("moreDetails") + _src("renderAnalyticsLeads") + r"""
 renderAnalyticsLeads({ node_count: 30, broker_rule: """ + rule + ", nodes: " + nodes + r""" });
 out.text = text($('an-leads'));
 """
@@ -431,8 +431,9 @@ def test_the_lead_card_says_why_in_each_actors_numbers_and_what_it_cut():
     assert "a0: 9th least constrained and 1st for brokerage, of 30 entities with ties" in t
     assert "k: degree 2 (median 7), 8th for brokerage of 30 entities with ties" in t
     assert "Showing 5 of 7." in t and "Show all 7" in t
-    # The reading is said once per kind, not once per actor.
-    assert t.count("Spans a structural hole: x.") == 1
+    # The group's title says what the signature says, so the server's reading is not printed under it.
+    assert t.count("Spans a structural hole") == 1
+    assert "Spans a structural hole: x." not in t
 
 
 def test_the_lead_card_says_so_when_nobody_qualifies():
@@ -751,14 +752,11 @@ console.log(JSON.stringify(out));
     found = got["found"]
     assert "would leave 61% of pairs of entities unable to reach each other" in found
     assert "falls into 4 pieces of 12, 9, 4 and 2 entities" in found
-    # F is defined where it is printed (explanations-in-developer-language).
-    assert "Fragmentation (F) is that share, as a fraction" in found
+    # F is named where it is printed, and defined on hover (explanations-in-developer-language).
+    assert "Fragmentation (F) goes from 0.000 to 0.610." in found
     assert "F=" not in found
-    # The card that names nobody has given no share to point back at, so
-    # it says which share F is (found reviewing the fix, 2026-09-23).
     assert "that share" not in got["nothing"]
-    assert ("Fragmentation (F) is the share of pairs of entities unable to reach "
-            "each other, as a fraction") in got["nothing"]
+    assert "Fragmentation (F) goes from" in got["nothing"]
     assert "Looking for a stored 3-entity removal set..." == got["reading"]
     assert "Finding the 3-entity removal set..." == got["finding"]
 

@@ -292,7 +292,7 @@ def test_what_the_new_entities_move_is_the_population_alone(estate, inferred):
     assert after["components"] == before["components"] + 5
     assert before["mode_warning"] is None
     assert "INFRA, WALLET" in after["mode_warning"]
-    assert "no ties in it" in after["mode_warning"]
+    assert "with no ties" in after["mode_warning"]
 
 
 def test_the_story_the_readme_tells_still_holds(estate):

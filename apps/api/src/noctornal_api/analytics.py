@@ -1122,10 +1122,9 @@ def _mode_warning(node_types: list[str], degrees: list[int],
         # because they have no ties, but they DO sit in the denominator of
         # density and of every percentile.
         return (
-            "This projection includes non-actor vertices ({}) with no ties in "
-            "it. They do not affect brokerage, but they are counted in the "
-            "node total, so density and every percentile are computed over a "
-            "larger population than the actors alone."
+            "This projection includes non-actor vertices ({}) with no ties, "
+            "so density and every percentile are computed over a larger "
+            "population than the actors alone."
         ).format(", ".join(isolated))
     return None
 

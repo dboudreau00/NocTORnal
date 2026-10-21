@@ -109,7 +109,7 @@ def test_the_handling_pane_says_what_runs_and_calls_nothing_unbuilt():
     flat = " ".join(pane.split())
     assert "not built" not in flat
     assert "each member it stores becomes a sample of its own" in flat
-    assert "detonated only by the sandbox this deployment configured" in flat
+    assert "Sandbox sends need a second person's sign-off" in flat
     assert "access ledger" in flat
 
 

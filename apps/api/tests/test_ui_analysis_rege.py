@@ -428,8 +428,7 @@ def test_the_copy_names_no_actor_says_hypothesis_and_obeys_the_copy_rules():
             assert bad not in s, s
     assert "a hypothesis about how they sit in" in _fn("renderRege")
     html = _html()
-    assert ('<h3 class="h3">Regular roles: the same kinds of ties to the same kinds of '
-            'others</h3>') in html
+    assert '<h3 class="h3">Regular roles</h3>' in html
     assert html.index('id="an-concor"') < html.index('id="an-rege"') \
         < html.index('id="an-balance"')
     assert "'Finding regular roles...'" in body and "'Looking for stored regular roles...'" \

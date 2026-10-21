@@ -91,12 +91,12 @@ def test_the_telegram_markup_carries_no_inline_style_or_handler(markup):
 
 def test_the_markup_says_what_the_section_is_for():
     text = re.sub(r"\s+", " ", _markup())
-    assert "Each chat is read by one persona, through that persona's egress profile" in text
-    assert "no watch term leaves this server" in text
+    assert "Each chat is read by one persona under a confirmed authority." in text
+    assert "Nothing is sent or marked read." in text
     assert "No Telegram chats are configured." in text
     assert "Read without joining (public chats only)" in text
     device = re.sub(r"\s+", " ", _device_markup())
-    assert "Choose something ordinary and keep it for the life of the persona." in device
+    assert "Keep it for the life of the persona." in device
 
 
 def test_the_forms_are_wired_at_boot_and_the_chats_load_after_the_personas():

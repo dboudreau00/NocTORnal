@@ -317,10 +317,8 @@ console.log(JSON.stringify([
     unfinished, partial, single = got
     assert unfinished == (
         "next test Score hal_quarry against H2, H3 and H4. Its row is "
-        "unfinished, so its diagnosticity is unknown rather than zero, and "
-        "finishing the row is the cheapest work available here. Score it now"), unfinished
+        "unfinished. Score it now"), unfinished
     assert partial == (
         "next test Score same builder against H3 and H4. It is the most "
-        "diagnostic item with a blank cell, and a blank cell is a gap, not a "
-        "neutral one. Score it now"), partial
+        "diagnostic item with a blank cell. Score it now"), partial
     assert "against H4. It is the most diagnostic" in single, single

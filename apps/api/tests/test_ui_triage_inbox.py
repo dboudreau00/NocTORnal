@@ -166,13 +166,14 @@ def test_the_keyboard_sheet_says_what_a_does_and_lists_d():
     assert "Nothing here writes to the graph without a confirmation step" not in text
     # A asks first since ux18-a11y:triage-letter-keys-global, and the Undo
     # this pass added still follows it; both are said where the keys are.
-    assert "A asks for a confirmation" in flat and "Undo retires it" in flat
+    assert "Accept, after a confirmation" in flat
+    assert "offers an Undo when your role can retire it" in flat
     sheet = text[text.index('<h3 class="h-xs">Triage</h3>'):]
     sheet = sheet[:sheet.index("</dl>")]
     for key in ("J", "K", "A", "R", "D"):
         assert f'<span class="kbd">{key}</span>' in sheet, key
     assert "offers an Undo" in " ".join(sheet.split())
-    assert "A asks before it accepts, and the line above the queue then says" in flat, (
+    assert "The keys work when the list has focus." in flat, (
         "the pane's own hint does not say it")
     docs = (SRC.parents[3] / "docs" / "06-interface.md").read_text(encoding="utf-8")
     assert "`D` discard" not in docs and "`D`\n  defer" in docs
@@ -374,7 +375,8 @@ def test_a_click_or_a_selection_inside_an_opened_capture_keeps_it_open(tmp_path)
     """The verifier of the first fix: the source view sits inside the card,
     whose click handler rebuilt the whole list, so a click or a drag-select
     in the opened capture closed it and dropped the selection."""
-    got = _run([_fn("renderTriage"), _fn("pickTriageCard"),
+    got = _run([_fn("splitLead"), _fn("moreDetails"),
+                _fn("renderTriage"), _fn("pickTriageCard"),
                 _fn("triageSourceLine"), _fn("fillTriageSource"),
                 _fn("triageSourceHeading"), _fn("triageSourceText")],
                _TRIAGE_PAGE + """
@@ -424,7 +426,8 @@ console.log(JSON.stringify(out));
 
 @needs_node
 def test_hiding_a_capture_forgets_it_and_a_late_answer_reopens_it(tmp_path):
-    got = _run([_fn("renderTriage"), _fn("pickTriageCard"),
+    got = _run([_fn("splitLead"), _fn("moreDetails"),
+                _fn("renderTriage"), _fn("pickTriageCard"),
                 _fn("triageSourceLine"), _fn("fillTriageSource"),
                 _fn("toggleTriageSource"), _fn("triageSourceHeading"),
                 _fn("triageSourceText")],
@@ -707,19 +710,22 @@ def test_mark_all_read_asks_first_and_names_the_urgent_ones():
 
 @needs_node
 def test_the_priority_says_what_it_delivers_and_what_it_drops(tmp_path):
-    got = _run([_fn("prefKindsText")], """
+    got = _run([_fn("prefKindsText"), _fn("prefAsksText")], """
 const kinds = {
   APPROVAL_REQUESTED: { priority: 2, description: 'Someone is asking for your second signature' },
   EVIDENCE_INTEGRITY_ALARM: { priority: 1, description: 'An exhibit failed its integrity check' },
   PROPOSAL_QUEUED: { priority: 3, description: 'New proposals are waiting in triage' },
 };
-console.log(JSON.stringify([prefKindsText(kinds, 1), prefKindsText(kinds, 3)]));
+console.log(JSON.stringify([prefKindsText(kinds, 1), prefKindsText(kinds, 3),
+                            prefAsksText(kinds, 1), prefAsksText(kinds, 3)]));
 """, tmp_path)
-    urgent, everything = got
+    urgent, everything, asks, no_asks = got
     assert urgent.startswith("Delivers: An exhibit failed its integrity check.")
     assert "Leaves out: Someone is asking for your second signature" in urgent
-    assert "Requests for your second signature will not arrive" in urgent
     assert everything.endswith("Leaves out nothing.")
+    # The one consequence worth reading before the list is opened is said apart from the list.
+    assert asks.startswith("Requests for your second signature will not arrive")
+    assert no_asks == ""
 
 
 @needs_node

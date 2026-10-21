@@ -231,7 +231,7 @@ def test_nothing_a_reader_sees_sends_them_to_lifecycle():
                 if line.startswith("#") and word.search(line)]
     assert (js, html, server, headings) == ([], [], [], []), (
         js, html, server, headings)
-    assert "### Records: retention, destruction, break-glass" in manual
+    assert "Records: retention, destruction, break-glass" in manual
 
 
 def test_the_pane_a_rail_tile_opens_is_headed_in_the_tiles_words():
@@ -243,7 +243,7 @@ def test_the_pane_a_rail_tile_opens_is_headed_in_the_tiles_words():
     assert '<h2 class="h-sm">Add link</h2>' in pane
     assert ">Create link</button>" in pane
     assert "Add relationship" not in html and "Create relationship" not in html
-    assert "A link records one relationship between two" in pane
+    assert "Record one relationship between two entities." in pane
 
 
 def test_the_analysis_pane_calls_an_entity_an_entity():
@@ -296,8 +296,7 @@ console.log(JSON.stringify([
   socialSplit([e('VOUCHED_FOR')]),
 ]));
 """, tmp_path)
-    assert got[0] == (" (2 social ties and 1 identity or other link, which the "
-                      "All social ties view leaves out)")
+    assert got[0] == " (2 social ties and 1 other link)"
     assert got[1] == ""
 
 
@@ -731,5 +730,5 @@ def test_the_timeline_button_says_what_it_does():
 
 def test_the_brokerage_help_is_an_instruction():
     text = " ".join(_visible(_html()).split())
-    assert "run it on the Analysis pane to see who bridges two clusters" in text
+    assert "Run Analysis for brokerage." in text
     assert "Phase 3" not in text

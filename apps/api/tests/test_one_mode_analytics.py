@@ -80,7 +80,7 @@ def test_the_mode_warning_keeps_the_isolated_branch_when_venues_are_projected():
                           families=("wallet",))
     out = run_suite(sub, p)
     assert out["mode_warning"] and "SELECTOR" in out["mode_warning"]
-    assert "no ties in it" in out["mode_warning"]
+    assert "with no ties" in out["mode_warning"]
 
 
 def test_the_mode_warning_names_the_projection_option_for_an_unprojected_wallet():

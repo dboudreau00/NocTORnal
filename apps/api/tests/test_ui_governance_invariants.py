@@ -161,10 +161,11 @@ def test_the_effect_text_says_what_a_case_grant_opens():
     OP-X only" was true of one route: the graph and the lists still hid
     RED on that case. They honour the grant now, and the text says so and
     says what it still does not raise."""
-    effect = _code(_fn("updateGlassEffect"))
-    assert "the graph, the entity and exhibit lists" in effect
-    assert "No other case changes" in effect
-    assert "stay within" in effect, "writes and reports are not raised"
+    effect = re.sub(r"'\s*\+\s*'", "", _code(_fn("updateGlassEffect")))
+    # What a grant opens, and what it does not raise, is in the manual; the form says who is told and that it adds
+    # no permission and no compartment.
+    assert "Every security officer is alerted at once" in effect
+    assert "It adds no permission and no compartment" in effect
     assert "Every access it makes possible is counted" not in effect
     gov = (SRC / "http" / "routers" / "governance.py").read_text(encoding="utf-8")
     assert "opens exhibits on that case; it does" not in gov
@@ -233,8 +234,9 @@ def test_every_glass_text_counts_what_the_server_counts():
     assert _js_string(m.group(1)).strip() == py.strip()
     for name in ("describeGrant", "updateGlassEffect"):
         body = _code(_fn(name))
-        assert "GLASS_COUNTED" in body, name
         assert "Each exhibit it opens" not in body, name
+    # What the server counts is one hover away on the effect line, from the one constant.
+    assert "GLASS_COUNTED" in _code(_fn("updateGlassEffect"))
 
 
 def test_the_roster_says_when_emergency_access_ends():
