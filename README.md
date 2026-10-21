@@ -719,7 +719,7 @@ noctornal/
 |---|---|
 | **[`release/START-HERE.md`](release/START-HERE.md)** | the one page to follow first: what you need, three install steps, the first sign-in |
 | **[`release/INSTALL.md`](release/INSTALL.md)** | installing in detail: what each step does, configuration, troubleshooting, verifying the install |
-| **[`release/MANUAL.md`](release/MANUAL.md)** | operating it: what each pane is for, what the numbers mean, every refusal and why |
+| **[`release/MANUAL.md`](release/MANUAL.md)** ([PDF](release/NocTORnal-Manual.pdf)) | operating it: what each pane is for, what the numbers mean, every refusal and why |
 | [`docs/18-legal-review-pack.md`](docs/18-legal-review-pack.md) | **the sign-off document**, with a row to answer each question in |
 | [`docs/16-legal-and-external.md`](docs/16-legal-and-external.md) | **the register**: every place the build stops because the next step is a legal question, and why holding this material is dangerous |
 | [`docs/17-flagged-for-review.md`](docs/17-flagged-for-review.md) | what may need to change: data not to be trusted, the Beta 1 review, known residuals, judgement calls |
@@ -756,8 +756,12 @@ noctornal/
 
 **Beta. Unaudited. Not certified for evidential use. Not lawful to operate against real material until the five blocking items above are settled.** It is fit for other people to try on synthetic or published, non-personal data.
 
-This is Beta 1.3, release 0.9.3, tag `v0.9.3-beta`: Beta 1.2 with what installing
-the production stack on a clean machine found fixed, and no migration. The stack
+This is Beta 1.4, release 0.9.4, tag `v0.9.4-beta`: Beta 1.3 with a quiet console
+and a manual you can read, and no migration. Every explanatory paragraph that
+used to open a pane is off the screen, and what it said is in the manual, now a
+book of five parts and thirteen appendices with a PDF beside it. A warning that
+protects somebody is still on screen, in a sentence. Beta 1.3 was Beta 1.2 with
+what installing the production stack on a clean machine found fixed: the stack
 restarts by itself after a host reboot, the console's readiness badge no longer
 lists a declared policy as failing, and the production README can be followed as
 written by an ordinary user with `sudo`. Beta 1.2 was Beta 1.1 with the findings
@@ -771,7 +775,7 @@ governs covers dead letters and ingest records attached to no case. The whole
 suite's figures, on a database built from nothing with every migration and both
 runtime database roles present, are in
 [`release/CHANGELOG.md`](release/CHANGELOG.md), which also has the steps for
-upgrading from Beta 1, from Beta 1.1 and from Beta 1.2. On a clean Ubuntu 24.04
+upgrading from Beta 1, from Beta 1.1, from Beta 1.2 and from Beta 1.3. On a clean Ubuntu 24.04
 machine at Beta 1.3 the console answered 78 seconds after the install command,
 and the first sign-in came at 81 seconds. An adversarial review on 2026-10-03 kept 82 findings, 16
 of them high. At Beta 1.1, 78 are fixed, one is fixed apart from who holds which
@@ -785,7 +789,7 @@ reads, selectors, search and the audit log hold at 100,000 entities and
 about 5,000 entities a case, and the ego network and the path search stop at
 5,000. That load was measured from a Windows host with Postgres in WSL2.
 
-Beyond what the tour shows, Beta 1.3 has entity merge under the two-person
+Beyond what the tour shows, Beta 1.4 has entity merge under the two-person
 policy; PGP verification and vendor keys; collection from feeds, forums and
 Telegram under a two-person authority (the operator's end-to-end Telegram
 check is `docs/17` F31); ingest; similarity search; Jira, the delivery
