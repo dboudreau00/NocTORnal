@@ -403,6 +403,23 @@ function el(tag, cls, text) {
 }
 function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
 
+/** A disclosure for what is read once and not on every visit: the summary stays in view, the content opens on request. */
+function moreDetails(label, content) {
+  const box = el('details', 'more');
+  box.appendChild(el('summary', null, label));
+  box.appendChild(content);
+  return box;
+}
+
+/** Splits a long note the server wrote into the first sentence, which stays in view, and the rest, which opens on
+ *  request. A note that fits the limit, or has no sentence break to cut at, stays whole. */
+function splitLead(text, limit) {
+  const t = String(text === null || text === undefined ? '' : text).replace(/\s+/g, ' ').trim();
+  if (t.length <= (limit === undefined ? 240 : limit)) return { lead: t, rest: '' };
+  const m = /^(.{20,}?[.!?])\s+(?=[A-Z0-9"'(])/.exec(t);
+  return m ? { lead: m[1], rest: t.slice(m[0].length) } : { lead: t, rest: '' };
+}
+
 /** Make an identifier click-to-copy.
  *
  *  Copying a selector, a hash or a TLS key to paste it into the next tool
@@ -1788,6 +1805,7 @@ onCaseSwitch(() => {
   clear($('ach-warnings'));
   $('ach-counts').textContent = '';
   $('ach-method').textContent = '';
+  $('ach-method-box').hidden = true;
   show($('ach-empty'), false);
   clearLoadFailure('ach-empty');
   /* A hypothesis or an assumption worded for one case is a claim about
@@ -1820,19 +1838,10 @@ onCaseSwitch(() => {
  * ARCHIVED or PURGED case, and `applyCaseReadOnly` below turns the
  * content controls off, so the strip describes what is enforced. */
 const CASE_STATE_TEXT = {
-  DRAFT: 'This case is a DRAFT. It has not been opened for work, so '
-    + 'anything added now predates the case formally starting. Move it to '
-    + 'ACTIVE before working it.',
-  DORMANT: 'This case is DORMANT. It was put to sleep; reactivate it before '
-    + 'adding material, so the record shows when work resumed.',
-  CLOSED: 'This case is CLOSED, so its content is read-only: its graph, '
-    + 'evidence, captures, proposals, comms, analysis, tags and samples '
-    + 'cannot be changed, and the controls that would change them are '
-    + 'off. Status, legal holds, retention, sharing and break-glass still '
-    + 'work. Reopen it if the work is genuinely resuming.',
-  ARCHIVED: 'This case is ARCHIVED. It is a record, not a workspace: its '
-    + 'content is read-only and it cannot be reopened. Legal holds, '
-    + 'retention and sharing still work.',
+  DRAFT: 'This case is a DRAFT. Move it to ACTIVE before working it.',
+  DORMANT: 'This case is DORMANT. Reactivate it before adding material.',
+  CLOSED: 'This case is CLOSED and read-only. Reopen it if the work is resuming.',
+  ARCHIVED: 'This case is ARCHIVED: read-only, and it cannot be reopened.',
   PURGED: 'This case is PURGED. Its material is marked for destruction and '
     + 'its content is read-only.',
 };
@@ -3541,8 +3550,7 @@ function renderScrubber(syncValue) {
   const undated = state.timeUndated || 0;
   $('tl-note').textContent = 'density: ' + countOf(state.timePoints.length,
     'dated element', 'dated elements') + ' over ' + countOf(days, 'day', 'days')
-    + (undated ? ', ' + undated + ' undated not drawn' : '')
-    + '. A gap is a gap in COVERAGE, not necessarily in activity.';
+    + (undated ? ', ' + undated + ' undated not drawn' : '') + '.';
   $('tl-note').title = 'Each bar counts the elements whose world time (valid '
     + 'from, or first seen) falls in it. Bar height grows with the square '
     + 'root of the count, so one busy stretch cannot flatten the rest. '
@@ -6716,8 +6724,7 @@ function socialSplit(edges) {
   const other = edges.length - ties;
   if (!other) return '';
   return ' (' + countOf(ties, 'social tie', 'social ties') + ' and '
-    + countOf(other, 'identity or other link', 'identity or other links')
-    + ', which the All social ties view leaves out)';
+    + countOf(other, 'other link', 'other links') + ')';
 }
 
 /* ── evidence ─────────────────────────────────────────────────────────── */
@@ -6837,29 +6844,10 @@ function reloadRegisterIfShown() {
 
 function renderEvidencePolicy() {
   const p = state.evidencePolicy;
-  /* Which lock, and for how long (ux07-evidence:worm-chip-outlives-lock,
-     2026-09-23): this said "locked for the retention period", and never
-     that the storage lock is a fixed period that does not follow the
-     case's retention date. It runs from LODGING, the server's receipt:
-     "from acquisition" contradicted the card, where "acquired" is the time
-     the uploader states (verifier, 2026-09-23). */
-  const days = p && Number.isFinite(p.lock_days)
-    ? countOf(p.lock_days, 'day', 'days') : 'a fixed period';
-  /* x-lock-extension (2026-09-24, and its verifier): the lock runs to the
-     case's retention date from lodging and is lengthened when the date is,
-     but never more than the deployment's horizon ahead in one step. This
-     said only that an extension lengthened it. */
-  const reach = p && Number.isFinite(p.lock_horizon_days)
-    ? countOf(p.lock_horizon_days, 'day', 'days') : 'a bounded period';
+  /* One line: the size cap and that an exhibit is written once and locked. How the lock is counted, and what
+     protects the bytes after it, is in the manual. */
   setMsg($('ev-cap'), !p ? '' :
-    'Exhibits up to ' + fmtBytes(p.max_bytes) + '. Every accepted byte is '
-    + 'written once and locked in storage until the case\'s retention date, '
-    + 'as far as ' + reach + ' ahead, and for at least ' + days
-    + ' from the moment it is lodged. Extending the date lengthens the lock, '
-    + 'and nobody can shorten one. Once it ends, the case\'s retention, any legal hold '
-    + 'and the dual-control purge protect the exhibit. The size cap is '
-    + (p.declared ? 'this deployment\'s declared policy.'
-                  : 'the default, which this deployment has not declared.'));
+    'Exhibits up to ' + fmtBytes(p.max_bytes) + '. Each is written once and locked until the case\'s retention date.');
 }
 
 /** What the count line says: how many exhibits there are, which of them
@@ -7091,8 +7079,7 @@ function lastCheckText(check) {
   if (!check) {
     /* "since it was lodged": the ACQUIRED row's read-back is the check
        this counts from, and "acquired" on the card is the stated time. */
-    return ['help ev-last', 'No verification on the custody record since '
-      + 'the exhibit was lodged. Verify re-reads the stored bytes.'];
+    return ['help ev-last', 'Not verified since it was uploaded.'];
   }
   const who = check.by_name ? visibleText(check.by_name) : 'an account';
   if (check.ok === false) {
@@ -14281,8 +14268,8 @@ const TOUR_STEPS = [
     title: 'Where help lives',
     spot: ['#tab-admin', '#btn-admin', '#btn-help'],
     blocks: () => [
-      ['p', 'The analyst manual, release/MANUAL.md in the install folder, '
-        + 'says what each pane is for and what its numbers mean.'],
+      ['p', 'The analyst manual, release/MANUAL.md in the install folder, also as a PDF '
+        + 'beside it, says what each pane is for and what its numbers mean.'],
       ['p', 'To see what this install can and cannot do right now, open '
         + 'Admin, then Readiness, and choose Check readiness. It says in '
         + 'plain words what is configured and what is not. If you are not '
@@ -14740,10 +14727,8 @@ function escalationLine(n, now) {
   const at = new Date(n.escalates_at).getTime();
   const when = fmtTime(n.escalates_at);
   return at > (now || Date.now())
-    ? 'Escalates at ' + when + ' unless acknowledged. Reading it does not '
-      + 'stop that.'
-    : 'Past its escalation time (' + when + '): it has been, or at the '
-      + 'next sweep will be, passed to someone else. Acknowledge it.';
+    ? 'Escalates at ' + when + ' unless acknowledged.'
+    : 'Past its escalation time (' + when + '): passed on, or about to be. Acknowledge it.';
 }
 
 function renderInbox() {
@@ -14848,12 +14833,15 @@ function prefKindsText(kinds, min) {
   let text = 'Delivers: ' + (inc.length ? inc.join('; ') : 'nothing') + '.';
   text += exc.length ? ' Leaves out: ' + exc.join('; ') + '.'
     : ' Leaves out nothing.';
-  const asks = (kinds || {}).APPROVAL_REQUESTED;
-  if (asks && asks.priority > min) {
-    text += ' Requests for your second signature will not arrive on this '
-      + 'channel, only in this inbox.';
-  }
   return text;
+}
+
+/** The one consequence of a minimum priority worth reading before the list is opened: a second-signature request
+ *  that will not arrive on the channel. */
+function prefAsksText(kinds, min) {
+  const asks = (kinds || {}).APPROVAL_REQUESTED;
+  return asks && asks.priority > min
+    ? 'Requests for your second signature will not arrive on this channel, only in this inbox.' : '';
 }
 
 /** The zone quiet hours are read in, said next to the times.
@@ -15005,9 +14993,15 @@ async function loadInboxPreferences() {
         + '. It takes: ' + (avail.kinds.length ? avail.kinds.join('; ') : 'nothing')
         + '. A case owner can keep a case out.'
       : prefKindsText(data.kinds, p.min_priority));
-    group.appendChild(kinds);
+    /* What a minimum priority delivers is a list of every kind there is, so it is read on request. */
+    group.appendChild(moreDetails('What this delivers', kinds));
+    const asksNote = el('p', 'help warn', prefAsksText(data.kinds, p.min_priority));
+    asksNote.hidden = !asksNote.textContent;
+    group.appendChild(asksNote);
     priority.addEventListener('change', () => {
       kinds.textContent = prefKindsText(data.kinds, Number(priority.value));
+      asksNote.textContent = prefAsksText(data.kinds, Number(priority.value));
+      asksNote.hidden = !asksNote.textContent;
     });
     const zoneNote = el('p', 'help', prefZoneNote(zone.value, zoneHere));
     group.appendChild(zoneNote);
@@ -16388,8 +16382,7 @@ function approvalConsequence(a) {
   const s = (a.subjects || {}).source;
   const who = s && s.label ? '"' + visibleText(s.label) + '"'
     : 'The first entity';
-  return who + ' leaves the live graph and its ties move to the surviving '
-    + 'entity. Reversible from the entity resolution panel.';
+  return who + ' leaves the live graph and its ties move to the surviving entity.';
 }
 
 function approvalRow(a) {
@@ -16935,7 +16928,9 @@ function renderTriage() {
         visibleText(p.accept_blocked) + ' Reject or defer it.'));
     }
 
-    card.appendChild(el('p', 'triage-why', visibleText(p.rationale)));
+    const why = splitLead(visibleText(p.rationale));
+    card.appendChild(el('p', 'triage-why', why.lead));
+    if (why.rest) card.appendChild(moreDetails('Why this was proposed', el('p', 'triage-why', why.rest)));
     card.appendChild(triageSourceLine(p));
 
     if (p.state === 'PROPOSED') {
@@ -17698,8 +17693,7 @@ function anQuery() {
  * reply carrying an older one is dropped, the way graphSeq works for the
  * canvas. The case token is checked beside it because it is the
  * codebase's one test for "this reply is for a case I have left". */
-const AN_EMPTY_TEXT = 'Run the analysis to compute brokerage, structural '
-  + 'holes, communities and the key-player set over the current projection.';
+const AN_EMPTY_TEXT = 'Run the analysis to see brokers, communities and key players.';
 const AN_HIST_EMPTY_TEXT = 'Pick an entity in the table above to chart it.';
 const AN_PROJECTION_CHANGED = 'The projection changed. Run the analysis '
   + 'again to recompute against it.';
@@ -17754,15 +17748,9 @@ function ageText(iso) {
  *  re-projecting the graph since 2026-09-23 (ux10-analytics:
  *  stored-run-currency-and-timestamp): true, false, or not checked. */
 function currencyText(current) {
-  if (current === true) {
-    return 'Checked against the graph now: nothing it was computed from has '
-      + 'changed.';
-  }
-  if (current === false) {
-    return 'Checked against the graph now: the graph has changed since. Run '
-      + 'the analysis again to recompute.';
-  }
-  return 'Not checked against the current graph. Run the analysis to confirm.';
+  if (current === true) return 'The graph is unchanged since.';
+  if (current === false) return 'The graph has changed since. Run the analysis again.';
+  return 'Not checked against the current graph.';
 }
 
 /** The status line for a run read back from storage: when, how long ago,
@@ -18064,12 +18052,9 @@ async function checkAnalysisCurrency() {
   }
   renderAnalyticsFlags(state.analytics);
   if (current === false) {
-    setMsg($('an-status'), 'The graph has changed since this run (checked '
-      + fmtTime(state.analyticsCurrency.checkedAt) + '). Run the analysis again '
-      + 'to recompute.');
+    setMsg($('an-status'), 'Run the analysis again to recompute.');
   } else if (current === true) {
-    setMsg($('an-status'), 'Checked ' + fmtTime(state.analyticsCurrency.checkedAt)
-      + ': the graph these numbers describe has not changed.');
+    setMsg($('an-status'), 'The graph is unchanged since this run.');
   }
 }
 
@@ -18576,8 +18561,7 @@ function renderAnalyticsFlags(a) {
   const cur = state.analyticsCurrency;
   if (cur && cur.current === false) {
     flags.push(['warn', 'The graph has changed since this run (checked '
-      + fmtTime(cur.checkedAt) + '). These numbers describe it as it was. '
-      + 'Run the analysis again to recompute.']);
+      + fmtTime(cur.checkedAt) + '). These numbers describe it as it was.']);
   } else if (cur && cur.current === null && cur.note) {
     flags.push(['note', 'Whether the graph has changed since this run is not '
       + 'known: ' + cur.note]);
@@ -18593,8 +18577,7 @@ function renderAnalyticsFlags(a) {
     flags.push([rc.proposed || rc.disputed || rc.rejected ? 'warn' : 'note',
       reviewCoverageText(rc)]);
   } else if (!rc) {
-    flags.push(['note', 'This run was stored before review and evidence '
-      + 'coverage were recorded, so what its ties rest on is not known here. '
+    flags.push(['note', 'Stored before review and evidence coverage were recorded. '
       + 'Run the analysis again to see it.']);
   }
   /* L3 (2026-09-24): the scope is always said, and what it left out. */
@@ -18650,9 +18633,6 @@ function renderAnalyticsLeads(a) {
     any = true;
     const group = el('div', 'an-lead-group');
     group.appendChild(el('p', 'an-lead-kind', title));
-    /* The reading is the same sentence for every actor of a kind, so it is
-       said once, and each actor gets the numbers that qualified them. */
-    group.appendChild(el('p', 'muted small', list[0].broker_signature));
     const all = !!(state.analyticsLeadsAll && state.analyticsLeadsAll[kind]);
     const shown = all ? list : list.slice(0, 5);
     for (const n of shown) {
@@ -18678,17 +18658,14 @@ function renderAnalyticsLeads(a) {
     card.appendChild(group);
   }
   if (!any) {
-    card.appendChild(el('p', 'muted small', 'Nobody here stands out as a '
-      + 'broker by either rule below. The table still ranks everyone; no '
-      + 'entity is both high in brokerage and low in ties or constraint '
-      + 'compared with the rest.'));
+    card.appendChild(el('p', 'muted small', 'Nobody here stands out as a broker.'));
   }
-  card.appendChild(el('p', 'muted small an-lead-rule',
-    'How these are chosen, among the ' + among + ': few ties means three or '
+  card.appendChild(moreDetails('How these are chosen', el('p', 'muted small an-lead-rule',
+    'Among the ' + among + ': few ties means three or '
     + 'fewer, or fewer than the median entity'
     + (median === null || median === undefined ? '' : ' (' + num(median) + ')')
     + ', with brokerage in the top fifth; a structural hole means the least '
-    + 'constrained quarter and the top quarter for brokerage.'));
+    + 'constrained quarter and the top quarter for brokerage.')));
   box.appendChild(card);
 }
 
@@ -19292,8 +19269,7 @@ function renderKeyPlayer() {
      together" reads as "nobody does". */
   if (!k || k.missing) {
     const card = el('div', 'card');
-    card.appendChild(el('p', 'muted small', 'Not computed for this view yet. '
-      + 'The removal set is its own run, stored for each size.'));
+    card.appendChild(el('p', 'muted small', 'Not computed for this view yet.'));
     const btn = el('button', 'btn small', 'Find the ' + size + '-entity removal set');
     btn.type = 'button';
     btn.addEventListener('click', () => { loadKeyPlayer(false); });
@@ -19327,12 +19303,14 @@ function renderKeyPlayer() {
      set has just given that share, so it says "that share"; the card
      that names nobody has not, so it says which share (found reviewing
      that fix, 2026-09-23). */
-  const method = (share) => 'Fragmentation (F) is ' + share + ', as a '
-    + 'fraction: 0 means everyone can reach everyone, 1 means nobody can '
-    + 'reach anybody. Here F goes from ' + num(r.fragmentation_before, 3)
-    + ' to ' + num(r.fragmentation_after, 3) + '. How the set was found: a '
-    + 'fast search (a greedy start, then swaps) that is usually, but not '
-    + 'always, the best set there is.';
+  const method = () => {
+    const line = el('p', 'muted small', 'Fragmentation (F) goes from ' + num(r.fragmentation_before, 3)
+      + ' to ' + num(r.fragmentation_after, 3) + '.');
+    line.title = 'F is the share of pairs of entities unable to reach each other, as a fraction: 0 means everyone '
+      + 'can reach everyone, 1 means nobody can reach anybody. The set comes from a fast search that is usually, '
+      + 'but not always, the best there is.';
+    return line;
+  };
   /* A set that cuts nobody off is not a finding, and this is the pane that
      names people for removal: on a network that holds together without
      any set the search found, "Removal set: a, b, c" put three names
@@ -19344,8 +19322,7 @@ function renderKeyPlayer() {
       + ' this search found would cut nobody off: what is left '
       + piecesText(r.fragments_after || []) + '. There is no removal set '
       + 'worth naming at this size; a larger one may find one.'));
-    card.appendChild(el('p', 'muted small',
-      method('the share of pairs of entities unable to reach each other')));
+    card.appendChild(method());
     box.appendChild(card);
     return;
   }
@@ -19385,14 +19362,10 @@ function renderKeyPlayer() {
   const cmp = el('p', 'muted small');
   cmp.textContent = 'The ' + r.n_remove + ' most central by betweenness ('
     + r.top_betweenness_set.map((x) => x.label).join(', ') + ') would cut off '
-    + 'only ' + pctOf(r.top_betweenness_fragmentation) + ' of pairs. ' +
-    (r.beats_top_betweenness
-      ? 'The optimised set is a genuinely different and better answer: '
-        + 'removing the most central entities individually is not the same as '
-        + 'removing the set that breaks the network.'
-      : 'On this graph the two coincide.');
+    + 'only ' + pctOf(r.top_betweenness_fragmentation) + ' of pairs.'
+    + (r.beats_top_betweenness ? '' : ' On this graph the two coincide.');
   card.appendChild(cmp);
-  card.appendChild(el('p', 'muted small', method('that share')));
+  card.appendChild(method());
   box.appendChild(card);
 }
 
@@ -19464,10 +19437,7 @@ function renderCohesion(a) {
       note: 'Entities whose removal alone disconnects the network.',
     }));
     card.appendChild(p);
-    card.appendChild(el('p', 'muted small',
-      'Removing any one of these disconnects the network. They are single '
-      + 'points of failure in the structure, and the cheap exact companion '
-      + 'to the key-player search.'));
+    card.appendChild(el('p', 'muted small', 'Removing any one of these disconnects the network.'));
   }
   if (bridges.length) {
     const p = el('p', null, 'Bridges: ' + bridges.map(
@@ -19554,8 +19524,7 @@ function renderConcor() {
   const r = state.analyticsConcor;
   if (!r || r.missing) {
     const card = el('div', 'card');
-    card.appendChild(el('p', 'muted small', 'Not computed for this view yet. '
-      + 'Positions are their own run, stored for each number of splits.'));
+    card.appendChild(el('p', 'muted small', 'Not computed for this view yet.'));
     const btn = el('button', 'btn small', 'Find positions');
     btn.type = 'button';
     btn.addEventListener('click', () => { loadConcor(false); });
@@ -19696,8 +19665,14 @@ function renderConcor() {
       + agree(Number(only.count), 'shapes', 'shape') + ' who is alike but '
       + agree(Number(only.count), 'holds', 'hold') + ' no position.'));
   }
-  if (c.reading) card.appendChild(el('p', 'muted small', c.reading));
-  if (c.method) card.appendChild(el('p', 'muted small', c.method));
+  const about = el('div');
+  if (c.reading) {
+    const said = splitLead(c.reading, 0);
+    card.appendChild(el('p', 'muted small', said.lead));
+    if (said.rest) about.appendChild(el('p', 'muted small', said.rest));
+  }
+  if (c.method) about.appendChild(el('p', 'muted small', c.method));
+  if (about.children.length) card.appendChild(moreDetails('How the positions were found', about));
   box.appendChild(card);
 }
 
@@ -19777,9 +19752,7 @@ function renderRege() {
   const r = state.analyticsRege;
   if (!r || r.missing) {
     const card = el('div', 'card');
-    card.appendChild(el('p', 'muted small', 'Not computed for this view yet. Regular '
-      + 'roles are their own run, stored for each number of roles and way of counting '
-      + 'ties.'));
+    card.appendChild(el('p', 'muted small', 'Not computed for this view yet.'));
     const btn = el('button', 'btn small', 'Find regular roles');
     btn.type = 'button';
     btn.addEventListener('click', () => { loadRege(false); });
@@ -19916,13 +19889,15 @@ function renderRege() {
       + agree(Number(only.count), 'shapes', 'shape') + ' who is alike but '
       + agree(Number(only.count), 'holds', 'hold') + ' no role.'));
   }
-  if (g.reading) card.appendChild(el('p', 'muted small', g.reading));
-  const limits = g.limits || [];
-  if (limits.length) {
-    card.appendChild(el('h4', 'h4', 'What these roles can and cannot say'));
-    for (const t of limits) card.appendChild(el('p', 'muted small', t));
+  const about = el('div');
+  if (g.reading) {
+    const said = splitLead(g.reading, 0);
+    card.appendChild(el('p', 'muted small', said.lead));
+    if (said.rest) about.appendChild(el('p', 'muted small', said.rest));
   }
-  if (g.method) card.appendChild(el('p', 'muted small', g.method));
+  for (const t of g.limits || []) about.appendChild(el('p', 'muted small', t));
+  if (g.method) about.appendChild(el('p', 'muted small', g.method));
+  if (about.children.length) card.appendChild(moreDetails('What these roles can and cannot say', about));
   box.appendChild(card);
 }
 
@@ -19962,7 +19937,7 @@ function renderBalance(a) {
       const item = el('div', 'an-lead');
       item.appendChild(el('p', 'an-lead-head',
         t.nodes.map((n) => n.label).join(' · ')));
-      item.appendChild(el('p', 'muted small', t.reading));
+      item.appendChild(el('p', 'muted small', String(t.reading).split(':')[0]));
       card.appendChild(item);
     }
     if (b.unbalanced_truncated) {
@@ -19973,10 +19948,7 @@ function renderBalance(a) {
   if ((b.contested_dyads || []).length) {
     card.appendChild(el('p', null, 'Contested pairs: ' + b.contested_dyads.map(
       (d) => d.source_label + ' and ' + d.target_label).join('; ')));
-    card.appendChild(el('p', 'muted small',
-      'These pairs carry BOTH a positive and a negative tie. That combination '
-      + 'is a lead in its own right: a vouch and an accusation between the '
-      + 'same two entities usually means a relationship that changed.'));
+    card.appendChild(el('p', 'muted small', 'These pairs carry both a positive and a negative tie.'));
   }
   box.appendChild(card);
 }
@@ -20862,8 +20834,7 @@ function ingestRow(r) {
   if (terms.length) {
     card.appendChild(el('p', 'why', terms.join(' · ')));
   } else if (r.priority_detail && Array.isArray(r.priority_detail.terms)) {
-    card.appendChild(el('p', 'why', 'Nothing scored: no selector on this '
-      + 'case’s watches is in it, and the category is not high-risk.'));
+    card.appendChild(el('p', 'why', 'Nothing scored: no watched selector in it.'));
   }
 
   const actions = el('div', 'row-actions');
@@ -21416,9 +21387,7 @@ async function loadDeadLetters() {
       $('dl-empty').textContent = feed
         ? 'Nothing from this feed has failed to parse.'
         : scoped
-          ? 'Nothing from this case’s feeds has failed to parse. Tick '
-            + 'All my feeds for the rest, including material attached to '
-            + 'no case.'
+          ? 'Nothing from this case’s feeds has failed to parse.'
           : 'Nothing has failed to parse in any feed you read.';
     }
     showDlFlash();
@@ -21439,9 +21408,7 @@ async function loadDeadLetters() {
       $('dl-empty').textContent = feed
         ? 'That feed fed none of the cases you read, so its dead letters '
           + 'are not listed.'
-        : 'You do not read this case’s ingest queue, so its feeds’ '
-          + 'dead letters are not listed here. Tick All my feeds for the '
-          + 'ones you read.';
+        : 'You do not read this case’s ingest queue, so its dead letters are not listed.';
       return;
     }
     /* A failed read left the last list standing, or "Nothing has failed
@@ -21599,8 +21566,7 @@ function deadLetterRow(d) {
       code: state.caseRec ? state.caseRec.code : '' }, DL.intoCase, codeOf);
     replay.addEventListener('click', () => rowForm(card, {
       kind: 'replay', submit: 'Replay',
-      help: 'The fragment above is redacted, so it shows the shape only: '
-        + 'take the values from the partner or from the batch’s raw '
+      help: 'The fragment is redacted: take the values from the partner or the batch’s raw '
         + 'object. The repair must be one JSON object.',
       fields: [
         { label: 'Repaired record', grow: true, multiline: true, rows: 6,
@@ -21729,7 +21695,7 @@ function personaActRow(a) {
 function loadPersonaActs() {
   return section('/collection/acts?limit=25', 'src-acts', 'src-acts-empty',
     (b) => b.acts, personaActRow,
-    'Persona acts belong to the collector role.', loadSources);
+    '', loadSources);
 }
 
 /** Whether Poll now would be refused for this analyst, and why, from the
@@ -21783,15 +21749,14 @@ async function loadSources() {
     section('/collection/personas', 'src-personas', 'src-personas-empty',
       (b) => { SRC.personas = b.personas || []; return b.personas; },
       personaRow,
-      'Personas belong to the collector role. Credentials never leave the '
-      + 'vault, and neither does the roster.', loadSources),
+      '', loadSources),
     section('/collection/runs?limit=25', 'src-runs', 'src-runs-empty',
       (b) => b.runs, runRow, 'Run history needs collection.read.',
       loadSources),
     sourcesRead,
     sourcesRead.then(() => section('/collection/authorities', 'src-auth',
       'src-auth-empty', (b) => b.authorities, authorityRow,
-      'Collection authorities belong to the collector role.', loadSources)),
+      '', loadSources)),
   ]);
   // The forms, once the listings they are built from have answered.
   paintSourceForms(sources);
@@ -21823,9 +21788,8 @@ function paintRunState(run) {
   box.classList.toggle('warn', blocked);
   show($('src-run-readiness'), Boolean(blocked && canAdmin));
   if (notTheirs) {
-    $('src-run-reason').textContent = 'Poll now is off for you: polling a '
-      + 'source belongs to the collector role, which your account does not '
-      + 'hold. The schedule below is for reading.';
+    $('src-run-reason').textContent = 'Poll now needs the collector role, which your account '
+      + 'does not hold.';
     return;
   }
   if (!blocked) return;
@@ -21853,7 +21817,6 @@ function unhealthyRow(s) {
   facts.appendChild(fact('consecutive failures', s.consecutive_failures, 'bad'));
   facts.appendChild(fact('last ok', s.last_ok_at ? fmtTime(s.last_ok_at) : 'never'));
   card.appendChild(facts);
-  if (s.note) card.appendChild(el('p', 'why', s.note));
   return card;
 }
 
@@ -22035,9 +21998,8 @@ function personaRow(p) {
     card.appendChild(telegramWindowAction(card, p));
   }
   if (p.machine_lock_code && !tg) {   // a Telegram row says it above
-    card.appendChild(el('p', 'why bad', 'Locked by its platform. Its platform '
-      + 'refused its credential, and it comes back only with a new credential '
-      + 'enrolled after the lock.'));
+    card.appendChild(el('p', 'why bad', 'Locked by its platform. A new credential must be '
+      + 'enrolled.'));
   }
   if (p.status === 'BURNED') {
     card.appendChild(el('p', 'why',
@@ -22663,8 +22625,7 @@ function paintAuthoritySources() {
   const eligible = authorityEligible(personaId);
   if (!eligible.length) {
     box.appendChild(el('p', 'muted small', personaId
-      ? 'No source is read as this persona yet. An authority with no sources '
-        + 'allows the persona’s own acts and no read.'
+      ? 'No source is read as this persona yet.'
       : 'No active source that needs an authority is read without a persona.'));
     return;
   }
@@ -23219,10 +23180,8 @@ function openTelegramJoin(card, c, reload) {
   }
   const wrap = el('div', 'row-inline');
   wrap.dataset.kind = 'join';
-  wrap.appendChild(el('p', 'help', 'Joining is an overt act. The chat’s '
-    + 'administrators can see this persona in the member list and in the recent '
-    + 'actions log, and some groups announce every new member. Leaving is '
-    + 'visible too.'));
+  wrap.appendChild(el('p', 'help', 'Joining is an overt act: the chat’s administrators can '
+    + 'see this persona, and some groups announce every new member.'));
   const form = el('form', 'row-form');
   form.noValidate = true;
   const ack = el('label', 'field inline check');
@@ -23338,9 +23297,7 @@ async function loadKeys() {
       renderList('key-list', 'key-empty', [], keyRow);
       listRefused('key-empty', refusalText(
         err,
-        'Key administration needs ingest.manage, because which feeds exist and what '
-        + 'they are cleared for is operational intelligence about the '
-        + 'deployment.'));
+        'Key administration needs ingest.manage.'));
       return;
     }
     /* The previous list is not this read's answer (ux17-failure:stale-
@@ -23518,9 +23475,7 @@ function keyRow(k) {
   if (k.revoked_reason) card.appendChild(el('p', 'why', k.revoked_reason));
   else if (stale || k.stale_days > 30) {
     card.appendChild(el('p', 'why',
-      'Unused for over thirty days, so it is either a dead '
-      + 'integration or somebody else’s. Revoke it if nobody can say '
-      + 'which.'));
+      'Unused for over thirty days. Revoke it if nobody can say whose it is.'));
   }
 
   if (!k.revoked_at) {
@@ -25380,8 +25335,7 @@ function renderBlockingBanner(body) {
   for (const c of failing) {
     const li = el('li', 'rdy-blocking-item');
     li.appendChild(el('span', 'rdy-blocking-name', c.check));
-    li.appendChild(el('p', 'why', c.evidence));
-    if (c.action) li.appendChild(el('p', 'help warn', c.action));
+    li.appendChild(moreDetails('Details', readinessDetail(c)));
     const go = readinessGoTo(c.ui_target);
     if (go) li.appendChild(go);
     items.appendChild(li);
@@ -25390,8 +25344,7 @@ function renderBlockingBanner(body) {
     const li = el('li', 'rdy-blocking-item');
     li.appendChild(el('span', 'rdy-blocking-name', name));
     li.appendChild(el('p', 'why',
-      'The server lists this as a blocking failure and sent no check row '
-      + 'for it. Read GET /admin/readiness directly.'));
+      'The server lists this as a blocking failure but sent no check row for it.'));
     items.appendChild(li);
   }
   box.appendChild(items);
@@ -25426,6 +25379,14 @@ function readinessGoTo(target) {
     subBtn.focus();
   });
   return go;
+}
+
+/** What a check found and what to do about it. Read on request: the row's name and verdict are the signal. */
+function readinessDetail(c) {
+  const box = el('div');
+  box.appendChild(el('p', 'why', c.evidence));
+  if (c.action) box.appendChild(el('p', 'help warn', c.action));
+  return box;
 }
 
 function readinessRow(c) {
@@ -25469,13 +25430,12 @@ function readinessRow(c) {
   /* A failing blocker's evidence and action are in the banner above, in
      full; printing them again here was the same four paragraphs twice. */
   if (c.blocking && !c.ok) {
-    card.appendChild(el('p', 'help',
-      'Failing: what it refuses and how to settle it are in the red box above.'));
+    card.appendChild(el('p', 'help', 'Failing: what it refuses and how to settle it are in '
+      + 'the red box above.'));
     return card;
   }
-  card.appendChild(el('p', 'why', c.evidence));
-  if (c.action) card.appendChild(el('p', 'help warn', c.action));
   if (caveat) card.appendChild(el('p', 'help warn', caveat));
+  card.appendChild(moreDetails('Details', readinessDetail(c)));
   const go = c.ok && !caveat ? null : readinessGoTo(c.ui_target);
   if (go) card.appendChild(go);
   return card;
@@ -25776,12 +25736,10 @@ function renderCaseClocks() {
   const rec = state.caseRec;
   if (!rec || !rec.retention_until) { show(box, false); return; }
   box.textContent = rec.code + ' is kept until ' + fmtDate(rec.retention_until)
-    + ' (' + untilWords(rec.retention_until) + '): that is when its exhibits '
-    + 'fall due. Its review is due on ' + fmtDate(rec.review_due) + ' ('
-    + untilWords(rec.review_due) + '). Ingest records keep the clock of '
-    + 'their own category, set when each was ingested. It does not follow '
-    + 'the case\'s date, so a record can fall due before the case or after '
-    + 'it: the list below gives each one\'s own deadline.';
+    + ' (' + untilWords(rec.retention_until) + '), when its exhibits fall due. '
+    + 'Its review is due on ' + fmtDate(rec.review_due) + ' ('
+    + untilWords(rec.review_due) + '). Ingest records follow the clock of '
+    + 'their own category.';
   show(box, true);
 }
 
@@ -25908,10 +25866,8 @@ function unruledRow(c) {
       + ' (' + untilWords(c.soonest_deadline) + ')'));
   }
   card.appendChild(facts);
-  card.appendChild(el('p', 'why', 'No rule has ever been set for this '
-    + 'category, so its records were stamped with the fallback period when '
-    + 'they arrived. Nobody chose it. Confirm a rule below to set one for '
-    + 'what arrives from now on.'));
+  card.appendChild(el('p', 'why', 'No rule has been set for this category. Its records '
+    + 'carry the fallback period. Confirm a rule below.'));
   return card;
 }
 
@@ -26451,8 +26407,7 @@ function describeGrant(g, clearance) {
     ? 'Clearance raised from ' + clearance + ' to ' + g.granted_classification
       + ' ' + where
     : 'A grant ' + where + ' that raises nothing';
-  return what + ', until ' + fmtTime(g.expires_at) + '. ' + GLASS_COUNTED
-    + ' A security officer will review it once it has ended.';
+  return what + ', until ' + fmtTime(g.expires_at) + '. A security officer will review it once it has ended.';
 }
 
 /** The header chip. Every live grant, whatever case is open, but it names
@@ -26664,10 +26619,9 @@ function renderGlassMine(body) {
   mine.appendChild(el('p', null, describeGrant(full, body.clearance)));
   const n = g.action_count || 0;
   mine.appendChild(el('p', 'help warn',
-    'It ends on its own: that is the design, not a limitation. '
-    + (n ? 'So far it has made ' + n + ' access' + (n === 1 ? '' : 'es')
+    n ? 'So far it has made ' + n + ' access' + (n === 1 ? '' : 'es')
       + ' possible that your own clearance would not have.'
-      : 'So far nothing you opened has needed it.')));
+      : 'So far nothing you opened has needed it.'));
 }
 
 /** Scope, level and duration, built from the open case and the caller's
@@ -26714,8 +26668,7 @@ function updateGlassEffect() {
   const whyLen = $('glass-why').value.trim().length;
   $('glass-count').textContent = whyLen >= GLASS_MIN_WHY
     ? whyLen + ' characters'
-    : whyLen + ' of the ' + GLASS_MIN_WHY + ' characters a security officer '
-      + 'needs in order to review this';
+    : whyLen + ' of ' + GLASS_MIN_WHY + ' characters';
   const level = $('glass-level').value;
   const scope = $('glass-scope').value;
   const hours = parseInt($('glass-hours').value, 10) || 2;
@@ -26724,41 +26677,22 @@ function updateGlassEffect() {
   const usable = [...$('glass-level').options].some((o) => o.value && !o.disabled);
   let text;
   if (!usable) {
-    text = 'Your clearance is already ' + clearance + ', so there is nothing '
-      + 'a grant could raise here. Invoking would still page every security '
-      + 'officer and wait for their review, so the console does not send one.';
+    text = 'Your clearance is already ' + clearance + ', so a grant would raise nothing.';
   } else if (!level) {
-    text = 'Choose the level the emergency needs. A grant raises your '
-      + 'clearance and nothing else: no permission your case role lacks, '
-      + 'and no compartment.';
+    text = 'Choose the level the emergency needs.';
   } else {
     const until = new Date(Date.now() + hours * 3600000);
-    const own = clearance || 'your own clearance';
-    /* What it opens, by scope, as the server's notice says it. "On OP-X
-       only" was true of one route, opening an exhibit by id: the graph,
-       the lists and search still filtered at the analyst's own level
-       (verifier follow-up to ux15, 2026-09-23). They honour a grant on
-       their case now; writes and reports still do not. */
-    const reach = scope === 'case' && code
-      ? 'On ' + code + ' the graph, the entity and exhibit lists, the '
-        + 'inspector, search, comms, analytics, tags and captures will '
-        + 'include material up to ' + level + '. No other case changes, and '
-        + 'what you create and any report you build stay within ' + own + '. '
-      : 'That covers what the console shows on each of them, what you may '
-        + 'create and the reports you build, and the Lab, collection and '
-        + 'ingest views as well. ';
     text = 'Raises your clearance' + (clearance ? ' from ' + clearance : '')
       + ' to ' + level + ' '
       + (scope === 'case' && code ? 'on ' + code + ' only'
         : 'on every case you are assigned to')
       + ', for ' + hours + ' hour' + (hours === 1 ? '' : 's') + ' (until about '
-      + fmtClock(until) + '). ' + reach + GLASS_COUNTED + ' '
-      + 'The moment you invoke, every security officer '
-      + 'is alerted, even in quiet hours, and one of them must review it '
-      + 'afterwards. It grants no permission your case role lacks and reads '
-      + 'you into no compartment.';
+      + fmtClock(until) + '). Every security officer is alerted at once, even '
+      + 'in quiet hours, and one of them must review it afterwards. It adds no '
+      + 'permission and no compartment.';
   }
   $('glass-effect').textContent = text;
+  $('glass-effect').title = GLASS_COUNTED;
   $('glass-invoke').disabled = !(usable && level && whyLen >= GLASS_MIN_WHY);
 }
 
@@ -26815,9 +26749,7 @@ async function loadGlassQueue(token) {
       $('glass-counts').textContent = '';
       listRefused('glass-empty', refusalText(
         err,
-        'The review belongs to the security officer, and only to them: a '
-        + 'team that can review its own emergencies is the one thing the '
-        + 'separation exists to prevent.'));
+        ''));
       return;
     }
     /* "Nothing awaiting review." must not stand for a queue nobody could
@@ -27150,6 +27082,7 @@ async function loadAch() {
   state.ach = body;
   rememberAchEvidence(body);
   $('ach-method').textContent = body.method || '';
+  $('ach-method-box').hidden = !body.method;
   renderAchWarnings(body);
   renderAchRanking(body);
   renderAchMatrix(body);
@@ -27252,11 +27185,8 @@ function renderAchRanking(body) {
        beside it says nobody knows yet. */
     line.appendChild(document.createTextNode(' Score ' + next.label
       + ' against ' + achAnd(next.missing) + '. ' + (next.is_incomplete
-        ? 'Its row is unfinished, so its diagnosticity is unknown rather '
-          + 'than zero, and finishing the row is the cheapest work '
-          + 'available here.'
-        : 'It is the most diagnostic item with a blank cell, and a blank '
-          + 'cell is a gap, not a neutral one.')));
+        ? 'Its row is unfinished.'
+        : 'It is the most diagnostic item with a blank cell.')));
     /* One click to the first blank cell (ux11-ach:refute-first-never-
        rendered, 2026-09-23): the line named the test and left the analyst
        to find the cell. `case-write`: it opens the stance chooser for a
@@ -27588,8 +27518,7 @@ function renderAchMatrix(body) {
     + Object.entries(body.stance_scale || {})
       .sort((a, b) => Number(a[0]) - Number(b[0]))
       .map(([k, v]) => k + ' = ' + v).join(' · ')
-    + '. Each cell counts at its row\'s source weight, shown beside the '
-    + 'grade: 1.00 for A1, 0.49 for C3, 0.04 for F6.';
+    + '.';
   box.appendChild(key);
 }
 
@@ -30295,8 +30224,7 @@ function dcpProposeBar(kind, row) {
   const box = el('details', 'propose-bar');
   box.appendChild(el('summary', null, 'Propose to the graph ('
     + countOf(cands.length, 'suggestion', 'suggestions') + ')'));
-  box.appendChild(el('p', 'help', 'Each goes to Triage as a suggestion. '
-    + 'Nothing reaches the graph until one of the case\'s analysts accepts it.'));
+  box.appendChild(el('p', 'help', 'Each goes to Triage as a suggestion.'));
   for (const c of cands) {
     const line = el('div', 'selector-row');
     line.appendChild(el('span', 'chip', DCP_NODE_WORDS[c.node_type] || c.node_type));
@@ -30966,20 +30894,13 @@ async function openDeceptionEmail(id, opener) {
        a "trust ends here" line on a chain with no hop below the boundary,
        where none is drawn, and on an assumed boundary, where it reads
        "Trust is assumed to end here". */
-    note.textContent = 'Read this from the top. Each MTA prepends its own '
-      + 'line, so hop 0 is the receiving organisation’s own server. '
+    note.textContent = 'Read from the top: hop 0 is the receiving organisation’s own server. '
       + (!anyClaimed
-        ? 'No hop here sits below the trust boundary, so no line of this '
-          + 'chain was written outside the receiving organisation.'
+        ? 'No hop here sits below the trust boundary.'
         : (confirmed
-          ? 'Every hop below the trust boundary (the line that says trust '
-            + 'ends there), further from the recipient, was written by '
-            + 'machines outside this organisation and can say anything the '
-            + 'sender wants.'
+          ? 'Hops below the trust boundary were written outside this organisation.'
           : 'Nobody named this organisation’s mail servers, so the trust '
-            + 'boundary is assumed to be hop 0 (the line that says so). '
-            + 'Treat every hop below it, further from the recipient, as '
-            + 'the sender’s to write.'));
+            + 'boundary is assumed to be hop 0.'));
     chain.appendChild(note);
     /* ux14-deception:received-chain-above-below (2026-09-23). The boundary
        hop carried a green "trust boundary" chip, which on the attacker's
@@ -31628,9 +31549,8 @@ async function loadWatchHits() {
     if (!hits.length) {
       $('col-hits-empty').textContent = unack
         ? 'Nothing unacknowledged on this case.'
-        : 'No poll has matched a watch on this case yet. Partner feed '
-          + 'records that contain a watched selector are in the Ingest '
-          + 'queue, not here.';
+        : 'No poll has matched a watch on this case yet. Feed records that match '
+          + 'are in the Ingest queue.';
     }
   } catch (err) {
     if (caseChanged(token)) return;
@@ -32292,7 +32212,7 @@ function labelRoleChecks() {
     const label = input.closest('label');
     label.querySelector('.adm-role-name').textContent = roleOptionText(input.value);
     label.querySelector('.adm-role-desc').textContent =
-      visibleText(roleDescs.get(input.value) || '');
+      visibleText(splitLead(roleDescs.get(input.value) || '', 0).lead);
     label.title = input.value;
   }
   summariseCreate();
@@ -33973,7 +33893,7 @@ function dualPairRow(pair, you) {
     head.appendChild(fixed);
   }
   card.appendChild(head);
-  if (pair.why) card.appendChild(el('p', 'help', visibleText(pair.why)));
+  if (pair.why) card.title = visibleText(pair.why);
   const facts = el('div', 'facts');
   facts.appendChild(fact(pair.permission_a, dualRoleNames(
     { roles: pair.a_roles, permission: pair.permission_a })));
@@ -35138,9 +35058,8 @@ function renderEgressStatus(overview) {
   if (p.mode === 'proxy') {
     text = 'Egress proxy at ' + p.address + ' (HTTP CONNECT and SOCKS5).';
   } else if (p.mode === 'development') {
-    text = 'Development: no egress proxy is configured. Connections are made '
-      + 'directly by this process under the same policy, so the network boundary '
-      + 'is not in force.';
+    text = 'Development: no egress proxy is configured, so the network boundary is not in '
+      + 'force.';
   } else if (p.mode === 'production_without_proxy') {
     text = 'Production without an egress proxy: nothing can leave.';
   } else {
@@ -35148,8 +35067,7 @@ function renderEgressStatus(overview) {
   }
   text += p.seal_key_id
     ? ' Sealing key ' + p.seal_key_id + '.'
-    : ' No sealing key is set for this process, so exits cannot be sealed here: '
-      + 'set NOCTORNAL_EGRESS_SEAL_PUBLIC (python scripts/egress_setup.py keygen).';
+    : ' No sealing key is set, so exits cannot be sealed here.';
   box.appendChild(el('p', 'egr-status-text', text));
   const go = el('button', 'btn ghost small', 'Go to Readiness');
   go.type = 'button';
@@ -37092,12 +37010,8 @@ function custodyPanel(rows) {
      opening a sample recorded nothing; opening one now writes a row, once
      per person per five minutes, and this names that limit. */
   cust.appendChild(el('p', 'help',
-    'Append-only, and it outlives the sample: a custody ledger you can '
-    + 'prune is not one. It records the submission, every opening of this '
-    + 'record (once per person per five minutes), every download and '
-    + 'retrieval, each assignment, analysis, detonation request and '
-    + 'rejection, any failed integrity check, and every time the product '
-    + 'read the bytes for automated analysis.'));
+    'Append-only, and it outlives the sample. It includes each time the product read the '
+      + 'bytes for automated analysis.'));
   if (!(rows || []).length) {
     cust.appendChild(el('p', 'muted', 'No entries.'));
     return cust;
@@ -37337,8 +37251,7 @@ function sampleWorkPanel(s, you, people) {
   box.appendChild(el('h3', 'h-xs', 'Lab work'));
   if (!you.analyse) {
     box.appendChild(el('p', 'help',
-      'Assigning a sample and recording its analysis are the malware '
-      + 'analyst\'s work. Your role can read what they record here.'));
+      'Assigning and analysing are the malware analyst\'s work.'));
     return box;
   }
   if (s.state === 'REJECTED') {
@@ -40510,8 +40423,8 @@ function sampleActions(s) {
      variable (ux13-lab:legal-banner-copy, 2026-09-23). The operator's
      version is under Admin, Readiness and on the Handling tab. */
   if (!origin) {
-    dl.appendChild(el('p', 'help', 'Downloads are off on this deployment '
-      + 'until an operator sets up a separate origin for sample downloads. '
+    dl.appendChild(el('p', 'help', 'Downloads are off until an operator sets up a separate '
+      + 'download origin. '
       + smpContact(smpPolicy)));
   }
   box.appendChild(dl);
@@ -40885,17 +40798,16 @@ function smpStatusLine(p) {
   const refused = !p.policy_declared;
   const noOrigin = !p.sample_origin_configured;
   if (refused && noOrigin) {
-    return 'Submissions are refused and downloads are off on this deployment '
-      + 'until an operator declares a prohibited-content policy and a '
-      + 'separate origin for sample downloads. ' + smpContact(p);
+    return 'Submissions are refused and downloads are off until an operator '
+      + 'declares a prohibited-content policy and a separate download origin. ' + smpContact(p);
   }
   if (refused) {
-    return 'Submissions are refused on this deployment until an operator '
-      + 'declares a prohibited-content policy. ' + smpContact(p);
+    return 'Submissions are refused until an operator declares a '
+      + 'prohibited-content policy. ' + smpContact(p);
   }
   if (noOrigin) {
-    return 'Downloads are off on this deployment until an operator sets up '
-      + 'a separate origin for sample downloads. ' + smpContact(p);
+    return 'Downloads are off until an operator sets up a separate download '
+      + 'origin. ' + smpContact(p);
   }
   return 'Submissions are accepted under policy ' + p.policy_reference
     + ', and downloads come from a separate origin.';
@@ -40956,8 +40868,7 @@ async function loadSamplePolicy() {
   paintSubmitGate();
 
   setMsg($('smp-cap'), Number.isFinite(smpPolicy.max_sample_bytes)
-    ? 'Samples up to ' + fmtBytes(smpPolicy.max_sample_bytes)
-      + '. Larger is a disk image or a mistake, and is refused before a byte is read.'
+    ? 'Samples up to ' + fmtBytes(smpPolicy.max_sample_bytes) + '.'
     : '');
   const originBox = $('smp-origin');
   clear(originBox);
@@ -40966,10 +40877,8 @@ async function loadSamplePolicy() {
     smpPolicy.sample_origin
       ? 'downloads are fetched from the separate sample origin '
         + smpPolicy.sample_origin + ', never from this one.'
-      : (smpPolicy.sample_origin_problem
-        || 'no separate sample origin is configured, so every download is '
-        + 'refused. The separation is enforced here, not only written '
-        + 'down.')));
+      : (splitLead(smpPolicy.sample_origin_problem, 0).lead
+        || 'no separate sample origin is configured, so every download is refused.')));
 }
 
 /** The submit form as this deployment and this analyst allow it.
@@ -40988,8 +40897,8 @@ function paintSubmitGate() {
   $('smp-submit').disabled = refused;
   $('smp-file').disabled = refused;
   setMsg($('smp-refusal'), refused
-    ? 'Submissions are refused on this deployment until an operator '
-      + 'declares a prohibited-content policy. ' + smpContact(p)
+    ? 'Submissions are refused until an operator declares a '
+      + 'prohibited-content policy. ' + smpContact(p)
     : '');
   if (!p) return;
   const ceiling = TLP.indexOf(p.your_clearance);

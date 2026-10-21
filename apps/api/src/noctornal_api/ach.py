@@ -264,14 +264,12 @@ def score(hypotheses: list[tuple[UUID, str]],
         # live hypothesis every row reads unfinished at 0 and none is a
         # next test, so the one warning below is still the whole story.
         return Matrix([], sorted(diagnosticity, key=lambda d: -d.score), None, None,
-                      ["No hypotheses. ACH needs at least two: a single "
-                       "hypothesis with evidence gathered for it is what ACH "
-                       "exists to correct."], retired=ruled_out)
+                      ["No hypotheses. ACH needs at least two."],
+                      retired=ruled_out)
     if len(hypotheses) == 1:
         warnings.append(
-            "Only one hypothesis. ACH cannot discriminate between one thing; "
-            "add the alternative you think is wrong. That is the whole "
-            "method.")
+            "Only one hypothesis. ACH needs at least two: add the "
+            "alternative you think is wrong.")
 
     scored = [_sums(hid, statement, evidence, flat)
               for hid, statement in hypotheses]
@@ -305,18 +303,15 @@ def score(hypotheses: list[tuple[UUID, str]],
             f"no evidence assessed against "
             f"{'it' if len(untested) == 1 else 'them'} at all, so "
             f"{'it is' if len(untested) == 1 else 'they are'} excluded from "
-            f"the ranking. An untested hypothesis has not survived; it has "
-            f"not competed. Score the existing evidence against "
-            f"{'it' if len(untested) == 1 else 'them'} before reading "
-            f"anything into this matrix.")
+            f"the ranking. Score the existing evidence against "
+            f"{'it' if len(untested) == 1 else 'them'} first.")
 
     if least is not None and len(tested) > 1:
         first, second = tested[0], tested[1]
         if abs(first.inconsistency - second.inconsistency) < 1e-9:
             warnings.append(
                 "The top two hypotheses are equally inconsistent, so this "
-                "matrix does not discriminate between them yet. Look for "
-                "evidence that would be inconsistent with exactly one.")
+                "matrix does not discriminate between them yet.")
 
     # "Says the same thing about everything" and "has not been entered
     # against everything" are DIFFERENT facts, and reporting the second as
@@ -338,18 +333,15 @@ def score(hypotheses: list[tuple[UUID, str]],
             f"{'says' if one else 'say'} the same thing about every "
             f"hypothesis and {'settles' if one else 'settle'} nothing. "
             f"{'It is' if one else 'They are'} kept in the record and "
-            f"left out of every score, since {'it' if one else 'they'} "
-            f"would add the same weight to each hypothesis.")
+            f"left out of every score.")
     if incomplete:
         one = len(incomplete) == 1
         warnings.append(
             f"{_of_items(len(incomplete), len(diagnosticity))} "
-            f"{'is' if one else 'are'} unfinished: scored against fewer than "
-            f"two hypotheses, or against only some of them and the same way "
-            f"each time so far, so {'its' if one else 'their'} "
-            f"diagnosticity is unknown rather than zero. Finishing "
-            f"{'that row' if one else 'those rows'} is the cheapest work "
-            f"available here.")
+            f"{'is' if one else 'are'} unfinished: not scored against enough "
+            f"hypotheses to tell whether {'it' if one else 'they'} "
+            f"discriminate{'s' if one else ''}, so {'its' if one else 'their'} "
+            f"diagnosticity is unknown rather than zero.")
 
     thin = [h for h in scored if h.assessed and h.unassessed > h.assessed]
     if thin:

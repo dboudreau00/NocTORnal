@@ -297,7 +297,6 @@ def test_a_category_in_use_with_no_rule_is_listed_with_its_fallback(conn, client
     assert body["fallback_days"] == UNRULED_RETAIN_DAYS
     notice = body["unruled_notice"]
     assert bare in notice and f"{UNRULED_RETAIN_DAYS}-day fallback" in notice
-    assert "nobody chose" in notice
     assert "(s)" not in notice and not any(d in notice for d in DASHES)
     # A ruled category in use is listed as ruled, with its own period.
     if "STEALER_LOG" in ruled:

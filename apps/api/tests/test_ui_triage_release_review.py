@@ -48,7 +48,8 @@ def test_the_cursor_follows_the_picked_card_across_a_live_reload(tmp_path):
     """The verifier's reproduction: pick the second card, a colleague's
     capture lands a higher-scored one above it, and the reload kept the
     index, so the keys moved to the newcomer."""
-    got = _run([_fn("renderTriage"), _fn("pickTriageCard"),
+    got = _run([_fn("splitLead"), _fn("moreDetails"),
+                _fn("renderTriage"), _fn("pickTriageCard"),
                 _fn("triageSourceLine"), _fn("triageKeyTarget"),
                 _fn("onTriageKey")], _TRIAGE_PAGE + """
 const acted = [];
@@ -159,6 +160,7 @@ def test_a_blocked_claim_says_why_and_offers_no_accept(tmp_path):
     got = _run([_fn("triageActions"), _fn("triageCanUndo"), _fn("caseCan"),
                 _const("TRIAGE_UNDO_PERMISSION"), _fn("acceptProposal"),
                 _const("CASE_STATES_SHUT"), _fn("caseReadOnly"),
+                _fn("splitLead"), _fn("moreDetails"),
                 _fn("renderTriage"), _fn("pickTriageCard"),
                 _fn("triageSourceLine")], _TRIAGE_PAGE.replace(
                     "function triageActions() { return el('div', 'triage-actions'); }\n",
@@ -272,10 +274,6 @@ def test_the_case_switch_and_every_load_fit_the_capture_form():
     html = _html()
     assert 'id="cap-scope" class="msg" ' in html, (
         "the note may not be a warning before anything is refused")
-    flat = " ".join(_visible(html).split())
-    assert "never below the case's own" in flat
-    assert "under the same compartments is not stored twice" in flat
-    assert "keeps the label it was first stored at" in flat
 
 
 @needs_node
@@ -386,5 +384,3 @@ console.log(JSON.stringify(out));
 def test_the_help_promises_the_undo_only_where_a_role_can_retire():
     flat = " ".join(_visible(_html()).split())
     assert "offers an Undo when your role can retire it" in flat
-    assert "Undo retires it where your role can" in flat
-    assert "Each question names the suggestion it acts on" in flat

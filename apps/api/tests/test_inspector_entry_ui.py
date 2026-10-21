@@ -94,12 +94,12 @@ def test_assertions_and_evidence_come_before_the_ties_and_the_numbers():
     assert order == sorted(order), "the rail reads why before how many"
 
 
-def test_the_metrics_help_is_folded():
+def test_the_metrics_help_is_one_short_line():
     html = _html()
     sec = html[html.index('<section id="insp-metrics-sec"'):]
     sec = sec[:sec.index("</section>")]
-    details = sec[sec.index('<details class="insp-more">'):sec.index("</details>")]
-    assert "<summary>" in details and "These are <strong>local</strong>" in details
+    assert '<details class="insp-more">' not in sec
+    assert '<p class="help">Local measures for this entity. Run Analysis for brokerage.</p>' in sec
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +352,7 @@ def test_the_interval_inputs_say_utc(prefix):
         label = block[block.rindex('<span class="label">'):]
         assert f"{word} (UTC day)" in label
     fieldset = html[html.index(f'id="{prefix}-valid-from"'):]
-    assert "Dates are calendar days in UTC" in fieldset[:fieldset.index("</fieldset>")]
+    assert "UTC days." in fieldset[:fieldset.index("</fieldset>")]
 
 
 # ---------------------------------------------------------------------------

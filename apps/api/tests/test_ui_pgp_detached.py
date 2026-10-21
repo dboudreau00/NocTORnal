@@ -106,7 +106,7 @@ def test_the_markup_has_both_forms_and_no_inline_style():
                     "comms-pgp-sig", "comms-pgp-sig-file", "comms-pgp-data",
                     "comms-pgp-data-file"):
         assert f'id="{element}"' in html, element
-    assert "Upload the signed file itself when you have it." in html
+    assert "Upload the signed file if you have it" in html
     start = html.index('id="comms-pgpkey"')
     end = html.index('id="comms-pgp-ledger-empty"')
     assert "style=" not in html[start:end]

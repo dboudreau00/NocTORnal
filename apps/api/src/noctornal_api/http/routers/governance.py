@@ -228,9 +228,7 @@ def rules(
         "unruled_notice": _unruled_notice(unruled),
         "notice": (
             f"{n} {'rule still holds' if n == 1 else 'rules still hold'} a "
-            f"placeholder period nobody has confirmed. Retention periods are "
-            f"jurisdictional, so the build cannot choose them: a named person "
-            f"has to." if unconfirmed else
+            f"placeholder period nobody has confirmed." if unconfirmed else
             "Every rule has been confirmed, with a rationale and a name."),
     }
 
@@ -294,10 +292,8 @@ def _unruled_notice(unruled: list[str]) -> str | None:
              else ", ".join(unruled[:-1]) + " and " + unruled[-1])
     return (f"{names} {agree(n, 'has', 'have')} live records on your cases "
             f"and no rule, so {agree(n, 'it runs', 'they run')} on the "
-            f"{UNRULED_RETAIN_DAYS}-day fallback, a period nobody chose. "
-            f"Confirm a rule for "
-            f"{agree(n, 'it', 'each')} below: it applies to material "
-            f"ingested from then on.")
+            f"{UNRULED_RETAIN_DAYS}-day fallback. "
+            f"Confirm a rule for {agree(n, 'it', 'each')} below.")
 
 
 class ConfirmRuleBody(BaseModel):

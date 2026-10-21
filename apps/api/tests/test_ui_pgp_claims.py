@@ -77,4 +77,4 @@ def test_the_comms_switch_reset_clears_the_chosen_claim():
 def test_the_queue_copy_no_longer_promises_a_fingerprint():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     assert "that have a fingerprint to check" not in html
-    assert "Bindings still at CLAIMED. A claim nobody checked is not a" in html
+    assert "Bindings still at CLAIMED." in html

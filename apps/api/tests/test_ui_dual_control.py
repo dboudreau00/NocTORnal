@@ -151,8 +151,7 @@ def test_the_merge_switch_sits_above_the_approvals_it_produces():
 
 def test_the_help_warns_that_a_security_officer_reads_the_justification():
     visible = " ".join(re.sub(r"<!--.*?-->", "", _dual_markup(), flags=re.S).split())
-    assert "Keep case details out of a justification" in visible
-    assert "will stop at upgrade until the pair is removed here" in visible
+    assert "Keep case details out of justifications" in visible
 
 
 # ---------------------------------------------------------------------------

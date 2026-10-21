@@ -1,5 +1,80 @@
 # Changelog
 
+## Beta 1.4: 2026-10-21
+
+The fourth revision of the beta, version 0.9.4. It makes the console quiet and the
+manual a book. Every pane used to open on a paragraph about itself, and the
+console as a whole read like a product explaining itself to a stranger. The
+explanations are off the screen now, and what they said is written up in a
+manual that has grown into five parts and thirteen appendices, with a PDF beside
+it. There is no migration (Alembic stays at 0182) and no setting changes. It has
+not been audited, and it is still not lawful to operate against real material
+until docs/16 L1 to L5 are settled outside this codebase. Legal review is
+required before any active case load.
+
+- **The console opens on its work.** A pane has its title, its controls and, where
+  a format or a consequence is not obvious, one short hint; an empty state is one
+  line that says what to do. About 60 percent of the prose a person reads in the
+  panes is gone from the screen (measured on the showcase case, every pane and
+  sub-tab, before and after, counting what is visible when a pane opens). Analysis no longer carries the paragraphs on
+  rank and percentile, on reading a trend, on what Fragmentation (F) is, or on how
+  a venue is projected; Feeds no longer explains the dedup, the redaction, the
+  watch semantics or the persona lifecycle above the lists they describe; the
+  Lab's Handling tab is a list of nine rules; the Records pane no longer argues for
+  break-glass above the form that invokes it; and the sign-in, the case dialogs and
+  the Add forms lost the sentences that explained the form to somebody who was
+  looking at it.
+- **Text a service wrote is cut to its first sentence where it is shown.** The
+  API still sends all of it. Role descriptions, a triage rationale, a retention
+  rule's why, the readiness checks' evidence and actions and the Lab's origin line
+  now show the first sentence, or one line, and the rest opens on request.
+- **What a person needs once, and not every visit, opens on request.** A new
+  disclosure, **More**, carries it: *How the ranking works* (ACH), *How these are
+  chosen* (the broker leads), *How the positions were found* and *What these roles
+  can and cannot say* (Roles, Regular roles), *Why this was proposed* (Triage),
+  *What this delivers* (the inbox's channel preferences), and **Details** on every
+  readiness check, which opens what it found and what to do about it.
+- **What protects somebody stays on screen, in a sentence.** The legal notice and
+  the reasons a download or an upload is refused, the destruction and legal-hold
+  warnings, the break-glass consequence line, the notices that keep a number from
+  being misread (a run the graph has changed since, an approximate run, a role
+  that is a hypothesis and not an attribution), the blocking banner with
+  everything it refuses, and the canvas key legend, which is a control legend
+  and not a description. A test that guarded a sentence for a reason, and found
+  it gone, put the sentence back (the trend's "does not appear here at all", the
+  Received chain's trust boundary, a duplicate being a resend and not a second
+  source, that rows you may not see in the egress log are counted and not shown,
+  and where a recovery code comes from). The rule is written down in
+  `docs/06-interface.md`, next to the rule for words.
+- **The manual is a book, and it is a PDF.** `release/MANUAL.md` is now Parts I to
+  V: getting started, the ideas you need (claims and grades, handles and people,
+  handling, views and time, retention, who may do what), one chapter per pane with
+  its controls and its refusals, the operator's chapters, and thirteen appendices.
+  The roles and permissions, the entity, relationship and selector types, the
+  notification kinds and the 46 readiness checks are generated from the
+  deployment's own tables and code, so they match the software. It has 40
+  screenshots (the README's sixteen and twenty-four taken for the manual) and a
+  worked first case. `release/NocTORnal-Manual.pdf` is the same book, 108
+  pages, with a contents page, bookmarks and captioned figures.
+  Every explanation the console lost is in it, where it belongs.
+- **The README's sixteen screenshots are re-shot** on the quiet console.
+- **A few server messages are shorter.** The ACH warnings, the retention page's two
+  notices and the analysis caveat for non-actor vertices with no ties say the
+  fact and the action. They are the API's own text, so anything that matches on
+  them must follow; the tests that did are updated.
+
+8377 tests (`def test_` functions). The whole suite, run on a database built from nothing with every migration and with both runtime database roles present, passed 12792 and skipped 0.
+
+### Upgrading from Beta 1.3
+
+Nothing is migrated, backed up or reconfigured, and no setting is new:
+
+```
+git pull
+```
+
+then restart the API (and, on the production stack, `sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build`). The PDF is in `release/`.
+
 ## Beta 1.3: 2026-10-12
 
 The third revision of the beta, version 0.9.3. It comes from installing the

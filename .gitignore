@@ -73,6 +73,8 @@ shots/
 # scripts/screenshot_ui.py cannot land here by accident.
 !docs/images/
 !docs/images/*.png
+!docs/images/manual/
+!docs/images/manual/*.png
 
 # The production operator's real secrets: every password, both database
 # DSNs and the TOTP key-encrypting key for a live deployment. `.env.*`

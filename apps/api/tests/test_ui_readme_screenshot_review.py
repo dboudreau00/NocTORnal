@@ -125,9 +125,8 @@ def test_the_received_chain_note_points_where_the_drawing_puts_the_claims():
     card = _code(_js()[_js().index("chain.appendChild(el('h3', 'h-xs', 'Received chain'))"):])
     card = card[:card.index("body.appendChild(chain);")]
     assert "for (const h of hops)" in card, "the hops are no longer drawn in order"
-    assert "Read this from the top" in card
+    assert "Read from the top" in card
     assert "below the trust boundary" in card
-    assert "further from the recipient" in card
     assert "above the boundary" not in card
     assert "everything above it" not in card.lower()
 
@@ -223,9 +222,7 @@ def test_the_inbox_help_names_every_half_of_the_read_time_filter():
     predicate = (SRC / "notifications.py").read_text(encoding="utf-8")
     assert "iam.case_assignment" in predicate and "compartments <@" in predicate
     text = " ".join(_visible(_html()).split())
-    assert ("filtered by your CURRENT clearance, compartments and case "
-            "assignments") in text
-    assert "a case you were taken off" in text
+    assert "Only notices you can still read are shown." in text
 
 
 # ---------------------------------------------------------------------------
@@ -240,9 +237,7 @@ def test_the_inspector_does_not_call_brokerage_unbuilt():
     assert "not computed here" not in text
     # An instruction since the ux19-copy stale-phase3-claim fix
     # (2026-09-23): it says where to run brokerage, not only where it is.
-    assert ("Brokerage (betweenness, Burt's constraint, key-player "
-            "fragmentation) is global, so it is not on this panel: run it on "
-            "the Analysis pane") in text
+    assert "Run Analysis for brokerage." in text
     assert '<span class="rail-cap">Analysis</span>' in _html()
 
 
@@ -262,8 +257,7 @@ def test_no_design_document_is_cited_to_the_analyst():
     # fire-on-browser-chords (2026-09-23).
     assert "list.contains(target)" in _fn("onTriageKey")
     assert "triageKeyTarget(target)" in _fn("onTriageKey")
-    assert ("The keys work while the list below has the focus"
-            ) in " ".join(visible.split())
+    assert "The keys work when the list has focus." in " ".join(visible.split())
 
 
 # ---------------------------------------------------------------------------
@@ -448,11 +442,6 @@ console.log(JSON.stringify([
 
 
 def test_the_matrix_help_matches_the_service_rule():
-    text = " ".join(_visible(_html()).split())
-    assert "Evidence that says the same thing about <em>every</em> hypothesis" in text
-    assert "unfinished, not undiagnostic" in text
-    # The help names what the cell shows, and the cell shows it.
-    assert "reads <em>unfinished</em> until it is scored against the rest" in text
     assert "e.is_incomplete ? 'unfinished'" in _code(_fn("renderAchMatrix"))
     from noctornal_api.ach import as_response, score
     method = as_response(score([], []))["method"]
@@ -534,8 +523,7 @@ def test_the_dead_letter_help_is_true_of_a_fragment_that_never_parsed():
     assert 'return f"[redacted {type(value).__name__}:{len(text)}]"' in ingest
     text = " ".join(_visible(_html()).split())
     assert "keys, types and lengths, never values" not in text
-    assert "A fragment that parsed keeps each value's type and length" in text
-    assert "one that would not parse is masked line by line" in text
+    assert "Fragments are redacted: keys and shape are kept, values never." in text
 
 
 def test_the_file_picker_button_is_themed():
@@ -759,10 +747,9 @@ def test_no_dash_reaches_the_reader_from_the_rewritten_functions():
 
 def test_no_dash_in_the_rewritten_help_lines():
     text = " ".join(_visible(_html()).split())
-    for anchor in ("Brokerage (betweenness", "The keys work while",
-                   "Fragments are <strong>structurally redacted</strong>",
-                   "filtered by your CURRENT clearance",
-                   "A cell is how one piece of evidence"):
+    for anchor in ("Run Analysis for brokerage", "The keys work when",
+                   "Fragments are redacted",
+                   "Only notices you can still read"):
         start = text.index(anchor)
         sentence = text[start:text.index("</p>", start)]
         assert not _DASHES.search(sentence) and "&mdash;" not in sentence, anchor

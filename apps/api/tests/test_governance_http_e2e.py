@@ -178,7 +178,7 @@ def test_placeholder_retention_rules_are_surfaced_not_hidden(conn, client):
         n = len(body["unconfirmed"])
         assert body["notice"].startswith(
             f"{n} rule still holds" if n == 1 else f"{n} rules still hold")
-        assert "jurisdictional" in body["notice"]
+        assert "placeholder period nobody has confirmed" in body["notice"]
         assert "docs/" not in body["notice"] and "(s)" not in body["notice"]
 
 
