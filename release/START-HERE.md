@@ -73,7 +73,7 @@ crews, marked TLP:CLEAR. **All of it is fictional.**
    source and a grade. Nothing in the system is stated as a fact.
 4. Use **Search** to find a handle such as `oriel`.
 5. Add an entity and a relationship of your own, and notice that it asks for a
-   source and a grade. [MANUAL.md](MANUAL.md) explains each pane.
+   source and a grade. [MANUAL.md](MANUAL.md), also as [a PDF](NocTORnal-Manual.pdf), explains each pane.
 
 ## What the beta is
 
