@@ -1,8 +1,7 @@
-"""The YARA compile and scan children (F12 D and F, 2026-09-24).
+"""The YARA compile and scan children.
 
-yara-x keeps the valid rules of a source whose add_source raised (probed
-2026-09-24), so a file with any error must contribute NO rule: pass one
-compiles each file alone, pass two builds only the files pass one
+yara-x keeps the valid rules of a source whose add_source raised, so a file with any error must
+contribute NO rule: pass one compiles each file alone, pass two builds only the files pass one
 accepted. Includes are refused. The report names where an error is and
 never quotes the rule text. The scan returns offsets and counts, never
 matched bytes, and a rule's console output never reaches the channel the

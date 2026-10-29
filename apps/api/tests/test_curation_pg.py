@@ -1,5 +1,5 @@
-"""Tags, node sets, and full-text search (docs/09 Phase 1).
-Env-gated on DATABASE_URL (and MINIO for evidence search)."""
+"""Tags, node sets, and full-text search (docs/09). Env-gated on DATABASE_URL (and MINIO for evidence
+search)."""
 from __future__ import annotations
 
 import os
@@ -22,13 +22,11 @@ def conn():
     sub = "(SELECT id FROM iam.app_user WHERE email LIKE 'cur-%@noctornal.test')"
     csub = f'(SELECT id FROM core."case" WHERE owner_user_id IN {sub})'
     esub = f"(SELECT id FROM core.evidence WHERE case_id IN {csub})"
-    # Custody rows stay and the chain trigger stays up. Until 2026-09-02
-    # this teardown deleted them with the trigger stood down, which only
-    # ever took the chain's tail and so never tripped `custody_verify.py`
-    # -- the teardown in `test_evidence_pg.py` has the full account. What
-    # a custody row points at stays with it: the exhibit, its case, and
-    # the humans on the custody row, the exhibit and the case. NULL-guarded
-    # because one NULL in a NOT IN list silently deletes nothing.
+    # Custody rows stay and the chain trigger stays up: standing it down would only ever take the chain's
+    # tail and so never trip `custody_verify.py` (the teardown in `test_evidence_pg.py` has the full
+    # account). What a custody row points at stays with it: the exhibit, its case, and the humans on the
+    # custody row, the exhibit and the case. NULL-guarded because one NULL in a NOT IN list silently
+    # deletes nothing.
     pinned_evidence = "(SELECT evidence_id FROM core.evidence_custody)"
     pinned_cases = "(SELECT case_id FROM core.evidence WHERE case_id IS NOT NULL)"
     pinned_users = (

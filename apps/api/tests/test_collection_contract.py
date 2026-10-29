@@ -1,8 +1,8 @@
-"""The frozen collection contract (2026-09-24).
+"""The frozen collection contract.
 
-The forum and Telegram adapters build on this contract and do not redefine
-it (docs/00 decision 69). Every name they may assume is pinned here, so a
-change to the contract fails where it is made. No database.
+The forum and Telegram adapters build on this contract and do not redefine it (docs/00 decision 69).
+Every name they may assume is pinned here, so a change to the contract fails where it is made. No
+database.
 """
 from __future__ import annotations
 

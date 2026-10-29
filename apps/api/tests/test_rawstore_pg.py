@@ -1,18 +1,15 @@
-"""Raw-before-parse, which was aspirational until now.
+"""Raw-before-parse.
 
-docs/12: "`accept()` writes the raw bytes and returns 202 before anything
-is parsed. When the parser is wrong -- and it will be -- you re-parse from
-the original rather than asking a partner to resend three months of feed."
+docs/12: "`accept()` writes the raw bytes and returns 202 before anything is parsed. When the parser is
+wrong -- and it will be -- you re-parse from the original rather than asking a partner to resend three
+months of feed."
 
-`IngestService` took a `storage` argument, every construction in the router
-passed `None`, and `accept()` skipped the write **silently**. The batch row
-recorded a `raw_key` pointing at nothing. Found while writing down the
-dead-letter redactor's claim that the verbatim bytes remain in the batch's
-raw object, and then checking whether that was true. It was not.
+`IngestService` takes a `storage` argument, and `accept()` must refuse to run without one rather than skip
+the write silently and record a `raw_key` pointing at nothing, since the dead-letter redactor's claim that
+the verbatim bytes remain in the batch's raw object depends on it.
 
-Env-gated on DATABASE_URL. Uses the in-memory store rather than MinIO: the
-behaviour under test is the refusal, the round trip and the digest check,
-none of which need a network service.
+Env-gated on DATABASE_URL. Uses the in-memory store rather than MinIO: the behaviour under test is the
+refusal, the round trip and the digest check, none of which need a network service.
 """
 from __future__ import annotations
 

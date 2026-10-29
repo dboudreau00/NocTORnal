@@ -1,12 +1,9 @@
-"""The two workers, scripts/sample_screen.py and scripts/sandbox_dispatch.py
-(F13 and F14, 2026-09-24).
+"""The two workers, scripts/sample_screen.py and scripts/sandbox_dispatch.py.
 
-Both refuse a bad production environment before opening a connection; the
-CLI import needs an active account holding sample.screening.manage and both
-recorded authorities, and records that the host operator ran it; a pass
-exits 1 while matched bytes wait to move or samples are behind; the
-dispatch exits 0 with no sandbox configured and 1 when the preflight
-refused.
+Both refuse a bad production environment before opening a connection; the CLI import needs an active
+account holding sample.screening.manage and both recorded authorities, and records that the host operator
+ran it; a pass exits 1 while matched bytes wait to move or samples are behind; the dispatch exits 0 with
+no sandbox configured and 1 when the preflight refused.
 
 Email prefix `scrw-`. Env-gated on DATABASE_URL.
 """

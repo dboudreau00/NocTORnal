@@ -426,14 +426,12 @@ def test_the_parse_is_audited(conn, svc):
 
 def test_two_vendors_quoting_a_stoplisted_escrow_are_not_impersonation(
         conn, svc):
-    """`block_fingerprint` excludes THIRD_PARTY entries so that two
-    unrelated vendors quoting the forum escrow do not look like one
-    copying the other -- but it was computed from the raw text parse,
-    BEFORE the stoplist pass had a chance to mark the escrow as somebody
-    else's. So defences 3 and 4 turned into a false accusation.
+    """`block_fingerprint` excludes THIRD_PARTY entries so that two unrelated vendors quoting the forum
+    escrow do not look like one copying the other. It must be computed AFTER the stoplist pass has
+    marked the escrow as somebody else's, not from the raw text parse, or defences 3 and 4 become a
+    false accusation.
 
-    The escrow line here carries no third-party LABEL, so only the
-    stoplist can catch it.
+    The escrow line here carries no third-party LABEL, so only the stoplist can catch it.
     """
     uid = _user(conn)
     case_id = _case(conn, uid)
@@ -450,7 +448,7 @@ def test_two_vendors_quoting_a_stoplisted_escrow_are_not_impersonation(
 
 
 def test_a_real_copy_is_still_caught_after_the_reordering(conn, svc):
-    """The fix must not blunt the detector it was protecting."""
+    """A real copy is still caught: the stoplist ordering must not blunt the detector."""
     uid = _user(conn)
     case_id = _case(conn, uid)
     # Reformatted and reordered, which is what a copier actually does --

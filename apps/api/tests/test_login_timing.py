@@ -1,23 +1,15 @@
-"""A missing account costs exactly one Argon2id verify, the same as a wrong
-password on a real one.
+"""A missing account costs exactly one Argon2id verify, the same as a wrong password on a real one.
 
-`AuthService.authenticate` has equalised this since the service was
-written: an unknown email verifies the submitted password against a fixed
-dummy hash so that existence never leaks through response time. Until
-2026-09-02 that property was described in two docstrings and asserted by
-no test -- the pure auth suite covered outcomes and lockout, so the
-equaliser could have been short-circuited out of the code (`user and
-verify(...)`) and every test would still have passed. A defence nobody
-tests is a defence that survives until the first refactor.
+`AuthService.authenticate` equalises this: an unknown email verifies the submitted password against a fixed
+dummy hash so that existence never leaks through response time. Without a test the equaliser could be
+short-circuited out of the code (`user and verify(...)`) and every outcome and lockout test would still
+pass.
 
-Wall-clock is deliberately NOT measured. Argon2id at 64 MiB varies by
-tens of milliseconds between runs on a shared CI runner, and a timing
-assertion loose enough not to flake would also be loose enough to miss a
-real regression. What can be pinned exactly is the WORK: the hasher is
-called once on every path, and the hash it is handed on the unknown-user
-path is a real Argon2id hash with the production parameters -- not an
-empty string, which `verify_password` rejects in microseconds and which
-would make the equaliser decorative.
+Wall-clock is deliberately not measured. Argon2id at 64 MiB varies by tens of milliseconds between runs on a
+shared CI runner, and a timing assertion loose enough not to flake would be loose enough to miss a real
+regression. What can be pinned exactly is the work: the hasher is called once on every path, and the hash it
+is handed on the unknown-user path is a real Argon2id hash with the production parameters, not an empty
+string, which `verify_password` rejects in microseconds and which would make the equaliser decorative.
 
 Pure: uses the in-memory store from conftest, no database.
 """

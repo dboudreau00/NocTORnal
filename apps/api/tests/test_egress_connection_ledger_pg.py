@@ -1,9 +1,7 @@
-"""collect.egress_connection: append-only, hash-chained, labelled at read
-time (S2, 2026-09-24).
+"""collect.egress_connection: append-only, hash-chained, labelled at read time.
 
-The tamper case runs inside a transaction that is rolled back, so no
-developer database and no CI run keeps a broken chain in a table nothing
-can clean. Env-gated on DATABASE_URL.
+The tamper case runs inside a transaction that is rolled back, so no developer database and no CI run
+keeps a broken chain in a table nothing can clean. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

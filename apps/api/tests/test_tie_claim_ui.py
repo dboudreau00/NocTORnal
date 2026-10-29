@@ -1,22 +1,17 @@
 """The tie inspector: adding a claim, and what Correct... says about lowering.
 
-Final review of 2026-09-23, group g09 (tie confidence):
+- Since migration 0064 a tie's confidence is the highest grade among its live claims, so a correction
+  cannot lower a tie past a claim that still stands. The server refuses it (409) and names the remedy,
+  "add the lower claim, then retract the higher one", so the console can add a claim to a tie, and
+  Correct... checks for lowering before it collects a reason and shows the 409. Retract then correct would
+  leave the tie resting on an ungraded correction with no exhibit.
+- The inspector header calls a tie's confidence "its strongest live claim" only when a live claim grades
+  it, and the Retract prompt counts only live support, not superseded rows, as the projection (and the
+  rule everywhere) does.
 
-- C14: since migration 0064 a tie's confidence is the highest grade among
-  its live claims, so a correction cannot lower a tie past a claim that
-  still stands. The server refuses it (409) and names the remedy, "add the
-  lower claim, then retract the higher one", and the console had no way to
-  add a claim to a tie at all. Correct... collected a reason first and
-  then showed the 409. The only route left, retract then correct, left the
-  tie resting on an ungraded correction with no exhibit.
-- U11 (console half): the inspector header called a tie's confidence "its
-  strongest live claim" when no live claim graded it, and the Retract
-  prompt counted superseded rows as live support, which the projection
-  (and now the rule everywhere) does not.
-
-`test_tie_confidence_pg.py` holds the server half of both. Pure, as
-`test_inspector_evidence_ui.py` is: the static checks run everywhere, and
-the ones marked `needs_node` EXECUTE the shipped functions under Node.
+`test_tie_confidence_pg.py` holds the server half of both. Pure, as `test_inspector_evidence_ui.py` is:
+the static checks run everywhere, and the ones marked `needs_node` EXECUTE the shipped functions under
+Node.
 """
 from __future__ import annotations
 
@@ -72,7 +67,7 @@ CONF_RANK = "const CONF_RANK = { LOW: 0, MODERATE: 1, HIGH: 2 };"
 
 
 # ---------------------------------------------------------------------------
-# C14: the form exists, is graded like the create forms, and posts a claim
+# The form exists, is graded like the create forms, and posts a claim
 # ---------------------------------------------------------------------------
 
 def test_the_tie_inspector_has_an_add_a_claim_form():
@@ -122,7 +117,7 @@ def test_a_claim_belongs_to_one_tie():
 
 
 def test_the_claim_form_offers_the_cases_exhibits():
-    # 'fix': the Correct form offers them too (gap-api-grade-required).
+    # 'fix': the Correct form offers them too.
     assert "['node', 'edge', 'claim', 'fix']" in _function("refreshEvidencePickers")
     assert "if (!btn) return;" in _function("renderSameGrading"), (
         "resetGrading('claim') must not trip on the absent same-grading offer")
@@ -164,16 +159,14 @@ console.log(JSON.stringify(out));
 
 
 # ---------------------------------------------------------------------------
-# C14: Correct... stops before sending when it would lower the tie
+# Correct... stops before sending when it would lower the tie
 # ---------------------------------------------------------------------------
 
 def test_correct_checks_for_lowering_before_anything_is_sent():
-    """Correct... is a graded form since gap-api-grade-required
-    (2026-09-23), not two prompts, so the reason is written alongside the
-    grade. What C14 asked still holds: a lowering re-grade is stopped
-    before anything is sent, the claim form it opens is the remedy, and
-    what the analyst wrote goes with it instead of being thrown away
-    (test_correction_form_ui.py has the rest of the form)."""
+    """Correct... is a graded form, not two prompts, so the reason is written alongside the grade. A
+    lowering re-grade is stopped before anything is sent, the claim form it opens is the remedy, and what
+    the analyst wrote goes with it instead of being thrown away (test_correction_form_ui.py has the rest
+    of the form)."""
     submit = _function("submitCorrection")
     check = submit.index("tieLoweringWords(")
     assert check < submit.index("await api("), (
@@ -264,8 +257,7 @@ def test_what_this_group_wrote_carries_no_em_or_en_dash():
     # with chr() so this file holds no dash of its own.
     em, en = chr(0x2014), chr(0x2013)
     assert "'Confidence " + em + " LOW" not in js
-    # The prompt is gone (gap-api-grade-required, 2026-09-23): the
-    # re-grade is a required select in the Correct form, no free text.
+    # The re-grade is a required select in the Correct form, no free text.
     assert re.search(r'<select id="fix-conf" class="select" required>', _html())
     markup = _claim_markup()
     assert em not in markup and en not in markup

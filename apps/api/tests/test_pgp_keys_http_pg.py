@@ -1,6 +1,5 @@
-"""The key registry over HTTP (F10b, comms, 2026-09-24): the gates, the
-closed-case rule, the body cap, the one 404, and the contact block's entry
-ids the console confirms against.
+"""The key registry over HTTP: the gates, the closed-case rule, the body cap, the one 404, and the contact
+block's entry ids the console confirms against.
 
 Rows are deleted at teardown (pgp_support.teardown).
 """
@@ -75,7 +74,7 @@ def test_an_import_then_a_confirmation_over_http(conn, client):
                       headers=auth(token),
                       json={"raw_text": f"PGP: {VENDOR_FPR}\n",
                             "source_ref": "https://forum/profile"}).json()
-    # The block returns each entry's id (F10b): the line is confirmed by id.
+    # The block returns each entry's id: the line is confirmed by id.
     entry = blk["entries"][0]["id"]
     got = client.get(f"/api/v1/cases/{case_id}/comms/contact-blocks/{blk['id']}",
                      headers=auth(token)).json()

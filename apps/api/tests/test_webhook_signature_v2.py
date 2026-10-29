@@ -1,5 +1,4 @@
-"""F28 (docs/17, 2026-10-02): a versioned, opt-in webhook signature with a
-timestamp.
+"""A versioned, opt-in webhook signature with a timestamp (docs/17).
 
 v1 is `X-NocTORnal-Signature: sha256=<hex>` over the exact body and carries no
 time, so a delivery captured and posted again is indistinguishable from the

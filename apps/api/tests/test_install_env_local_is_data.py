@@ -1,16 +1,14 @@
-"""`.env.local` is data, never a script, and is private from its first byte
-(infra-9, 2026-10-03).
+"""`.env.local` is data, never a script, and is private from its first byte.
 
-release/install.sh ran `set -a; . "$ENV_LOCAL"; set +a`, which EXECUTES the
-file: one that was handed over, restored from a backup or edited by hand ran as
-the installing user, and a legitimate value with a `$`, an `&`, a `;` or a
-space was mangled or run. scripts/launch.sh, scripts/_env.py and launch.ps1
-parse the same file line by line for exactly that reason. It also wrote the
-key store with the default umask and restricted it afterwards, and the
-PowerShell scripts never restricted it at all.
+release/install.sh must not run `set -a; . "$ENV_LOCAL"; set +a`, which EXECUTES the file: one that was
+handed over, restored from a backup or edited by hand would run as the installing user, and a legitimate
+value with a `$`, an `&`, a `;` or a space would be mangled or run. scripts/launch.sh, scripts/_env.py and
+launch.ps1 parse the same file line by line for exactly that reason. The key store is written private from
+its first byte, not with the default umask and restricted afterwards, and the PowerShell scripts restrict
+it too.
 
-The shell function is extracted from install.sh and run with bash; the
-PowerShell scripts are read as text (they are parsed, not run, here).
+The shell function is extracted from install.sh and run with bash; the PowerShell scripts are read as text
+(they are parsed, not run, here).
 """
 from __future__ import annotations
 
@@ -156,8 +154,8 @@ def test_the_alembic_message_and_the_install_notes_do_not_say_to_source_the_file
     refusal = _text(ROOT / "db" / "migrations" / "env.py")
     assert "set -a" not in "\n".join(ln for ln in refusal.splitlines() if not ln.lstrip().startswith("#"))
     assert "scripts/_env.py export" in refusal
-    # The README's "Verifying the install" said `set -a; . ./.env.local; set +a`
-    # while INSTALL.md read the file as data (Beta 1 clean machine, 2026-10-07).
+    # The README's "Verifying the install" reads the file as data, as INSTALL.md does, not with
+    # `set -a; . ./.env.local; set +a`.
     for doc in (ROOT / "README.md", ROOT / "release" / "INSTALL.md"):
         text = _text(doc)
         assert not re.search(r"(^|[;&|]\s*)(\.|source)\s+\S*\.env\.local", text, re.M), doc.name
@@ -253,24 +251,21 @@ def test_load_env_local_still_does_what_it_did(tmp_path, monkeypatch):
         "1", "two", "", "shell")
 
 
-# --- names that change how programs start (2026-10-03) ------
+# --- names that change how programs start ------
 #
-# Reading `.env.local` as data stops it running as shell syntax, but the
-# loaders still exported any identifier in it, and install.sh lets the file's
-# value win over the environment: `PYTHONPATH=./evil` with a sitecustomize.py,
-# `PATH=./evilbin`, `LD_PRELOAD=./evil.so` or `BASH_ENV=./evil.sh` in a
-# handed-over file ran code as the installing user in the next python or shell
-# it started. All four loaders now leave those names out, say so by name, and
-# agree on the list.
+# Reading `.env.local` as data stops it running as shell syntax, but a loader that exports any identifier in
+# it still lets `PYTHONPATH=./evil` with a sitecustomize.py, `PATH=./evilbin`, `LD_PRELOAD=./evil.so` or
+# `BASH_ENV=./evil.sh` in a handed-over file run code as the installing user in the next python or shell it
+# starts (install.sh lets the file's value win over the environment). All four loaders leave those names
+# out, say so by name, and agree on the list.
 
 DANGEROUS = (
     b"PATH=./evilbin\nPYTHONPATH=./evilpp-CANARY\nPythonStartup=./evil.py\nLD_PRELOAD=./evil.so\n"
     b"LD_LIBRARY_PATH=./evil\nDYLD_INSERT_LIBRARIES=./evil.dylib\nBASH_ENV=./evil.sh\nENV=./evil.sh\n"
     b"IFS=x\nPS4=$(touch PWNED-PS4)\nPROMPT_COMMAND=touch PWNED-PC\nSHELLOPTS=xtrace\nCOMSPEC=evil.exe\n"
     b"Path=./evilbin\nHOME=./evilhome\n"
-    # The tools the scripts start next (2026-10-07):
-    # DOCKER_CONFIG held a fake cli-plugins/docker-compose that `docker compose`
-    # ran as root. Mixed case on purpose: Windows names are case-insensitive.
+    # The tools the scripts start next: DOCKER_CONFIG could hold a fake cli-plugins/docker-compose that
+    # `docker compose` runs as root. Mixed case on purpose: Windows names are case-insensitive.
     b"DOCKER_CONFIG=./evil\nDOCKER_HOST=tcp://203.0.113.9:2375\nCOMPOSE_FILE=./evil.yml\n"
     b"Git_Ssh_Command=./evil.sh\nPIP_INDEX_URL=http://evil.example/simple\n"
     b"NODE_OPTIONS=--require ./evil.js\nPSModulePath=./evil\n"
@@ -365,12 +360,10 @@ def test_launch_sh_leaves_the_same_names_out(tmp_path):
 
 
 def test_launch_sh_does_not_evaluate_a_subscript_in_a_name(tmp_path):
-    """`${!name+x}` evaluates an array subscript, so a name like `x[$(cmd)]` ran
-    `cmd` as the launching user: the sibling of infra-9 that install.sh closed
-    with an identifier check and launch.sh did not (2026-10-07; `release/start.sh` execs
-    `launch.sh`). The real loop runs on the
-    hostile lines. `>file` is a command with no spaces, because the loop strips
-    them from a name."""
+    """`${!name+x}` evaluates an array subscript, so a name like `x[$(cmd)]` would run `cmd` as the
+    launching user. install.sh closes this with an identifier check and launch.sh must too
+    (`release/start.sh` execs `launch.sh`). The real loop runs on the hostile lines. `>file` is a command
+    with no spaces, because the loop strips them from a name."""
     bash = _bash()
     if bash is None:
         pytest.skip("no bash")
@@ -426,8 +419,8 @@ def test_all_five_loaders_leave_out_exactly_the_same_names():
 
 
 def test_the_install_notes_powershell_loader_leaves_out_the_same_names():
-    """release/INSTALL.md gives Windows testers a one-line loader of its own;
-    it set any name, PATH included, before this."""
+    """release/INSTALL.md gives Windows testers a one-line loader of its own; it must not set any name,
+    PATH included."""
     module = importlib.util.module_from_spec(importlib.util.spec_from_file_location("g48_env_doc", ENV_PY))
     module.__spec__.loader.exec_module(module)
     notes = _text(ROOT / "release" / "INSTALL.md")

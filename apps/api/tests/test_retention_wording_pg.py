@@ -1,12 +1,9 @@
-"""The two seeded retention rationales that cited design documents on
-screen are reworded, and only while nobody has touched them (L6,
-2026-09-24, migration 0073).
+"""The two seeded retention rationales that cited design documents on screen are reworded, and only while
+nobody has touched them (L6, migration 0073).
 
-0032 seeded STEALER_LOG's rationale naming "docs/12" and CHAT_EXPORT's
-naming "docs/16 L4", and the Retention pane prints a rationale verbatim to
-the people who confirm the rule, who have neither document. Each test
-fails on ab27a4a. The rules are deployment-wide, so every test that writes
-runs in a transaction that is rolled back.
+0032 seeded STEALER_LOG's rationale naming "docs/12" and CHAT_EXPORT's naming "docs/16 L4", and the
+Retention pane prints a rationale verbatim to the people who confirm the rule, who have neither document.
+The rules are deployment-wide, so every test that writes runs in a transaction that is rolled back.
 
 Env-gated on DATABASE_URL.
 """

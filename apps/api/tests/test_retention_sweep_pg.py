@@ -1,20 +1,16 @@
-"""The collected-document sweep, scripts/retention_sweep.py (docs/17 F30,
-2026-10-02; docs/00 decisions 171 to 173).
+"""The collected-document sweep, scripts/retention_sweep.py (docs/17 F30; docs/00 decisions 171 to 173).
 
-A group chat's third-party messages are collected documents with a retention
-clock, and until this sweep nothing destroyed them when it ran out: the
-governance purge is case-scoped and a document belongs to no case. These hold
-the sweep to the purge it reuses and to its own rules: every legal hold
-exactly as `purge_due` honours it (on the document, on a case citing any
-version of it, and the pin of an unretracted assertion), a dry run that
-touches nothing, a real run that destroys only the past-due, a second run
-that is a no-op, a refusal for a missing declaration or a missing account, a
-backlog cleared in one run, a store that refuses leaving the document due, and
-one audit row of counts.
+A group chat's third-party messages are collected documents with a retention clock, and the governance
+purge is case-scoped while a document belongs to no case, so the sweep destroys them when the clock runs
+out. These hold the sweep to the purge it reuses and to its own rules: every legal hold exactly as
+`purge_due` honours it (on the document, on a case citing any version of it, and the pin of an unretracted
+assertion), a dry run that touches nothing, a real run that destroys only the past-due, a second run that
+is a no-op, a refusal for a missing declaration or a missing account, a backlog cleared in one run, a
+store that refuses leaving the document due, and one audit row of counts.
 
-The documents of other suites that happen to be past their clock are the
-sweep's too (it is deployment-wide), so counts are read as differences from a
-baseline and every document is read by its own id.
+The documents of other suites that happen to be past their clock are the sweep's too (it is
+deployment-wide), so counts are read as differences from a baseline and every document is read by its own
+id.
 
 DATABASE_URL-gated.
 """
@@ -580,10 +576,9 @@ def test_the_audit_row_carries_counts_and_the_reference_and_no_content(conn, act
 # --- what the sweep does not reach ---------------------------------------------
 
 def test_the_sweep_destroys_a_due_dead_letter(conn, actor, store, capsys):
-    """F55 (owner, 2026-10-08): dead letters join the sweep, under the same
-    declaration and named account. Until then the family set was collected
-    documents (docs/00 decision 172) and a dead letter outlived its clock;
-    the full set of F55 tests is `test_retention_sweep_unattached_pg.py`."""
+    """Dead letters join the sweep (F55), under the same declaration and named account. The family set
+    was collected documents (docs/00 decision 172); the full set of F55 tests is
+    `test_retention_sweep_unattached_pg.py`."""
     uid, email = actor
     letter = conn.execute(
         """INSERT INTO ingest.dead_letter
@@ -662,7 +657,7 @@ def _verdict(conn):
 def test_the_row_passes_when_nothing_is_past_its_clock(conn):
     ok, evidence, action = _verdict(conn)
     assert ok and action == ""
-    # Dead letters and unattached ingest records join the row (F55).
+    # Dead letters and unattached ingest records join the row.
     assert evidence == ("No collected document, dead letter or unattached "
                         "ingest record is past its retention clock.")
 

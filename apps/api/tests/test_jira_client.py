@@ -1,11 +1,8 @@
-"""The Jira client (F7, 2026-09-24): every call goes
-through the pinned client on the route "jira" with no redirect followed,
-Jira's answers are classified, error text never reaches a stored detail,
-values from Jira are shape-checked before any use, and one test speaks to a
-loopback stub through the REAL pinned_http.fetch_response.
+"""The Jira client: every call goes through the pinned client on the route "jira" with no redirect followed,
+Jira's answers are classified, error text never reaches a stored detail, values from Jira are shape-checked
+before any use, and one test speaks to a loopback stub through the real pinned_http.fetch_response.
 
-Pure apart from that one loopback stub, which this file starts itself.
-Nothing reaches Atlassian.
+Pure apart from that one loopback stub, which this file starts itself. Nothing reaches Atlassian.
 """
 from __future__ import annotations
 
@@ -218,11 +215,11 @@ def test_a_metadata_address_is_refused_even_when_the_route_names_it(address):
     assert info.value.kind == "UNREACHABLE"
 
 
-# --- hostile answers: nesting (2026-09-25) -----------------------------------------
+# --- hostile answers: nesting ------------------------------------------------------
 #
-# About 400 KB of brackets, under MAX_RESPONSE_BYTES, made json.loads raise
-# RecursionError, which is not a ValueError: it escaped the client, the pass
-# and the drain. The depth scan refuses it before json.loads runs.
+# About 400 KB of brackets, under MAX_RESPONSE_BYTES, makes json.loads raise RecursionError, which is not a
+# ValueError and would escape the client, the pass and the drain. The depth scan refuses it before json.loads
+# runs.
 
 DEEP = b"[" * 200_000 + b"]" * 200_000
 

@@ -1,15 +1,13 @@
-"""Hosts the sender chose, served defanged (2026-09-23).
+"""Hosts the sender chose, served defanged.
 
-The email row and the Received chain drew the HELO name, each hop's `from`
-and `by`, and the Message-ID's domain verbatim. None of them is constrained
-to a hostname: `_RECEIVED_FROM` and `_domain_of` keep `/`, `?` and `#`, so
-EHLO `pay.evil.example/verify` and Message-ID `<a@pay.evil.example/verify>`
-reached the pane as working URLs, under help text promising every URL in it
-is defanged. This files such a message through the real service and reads
-the list row and the detail back.
+The email row and the Received chain draw the HELO name, each hop's `from` and `by`, and the
+Message-ID's domain. None of them is constrained to a hostname: `_RECEIVED_FROM` and `_domain_of` keep
+`/`, `?` and `#`, so EHLO `pay.evil.example/verify` and Message-ID `<a@pay.evil.example/verify>` would
+reach the pane as working URLs, under help text promising every URL in it is defanged. This files such
+a message through the real service and reads the list row and the detail back.
 
-Its own email prefix, `dch-`, so its teardown touches nothing of
-`test_deception_pg.py`'s. Env-gated on DATABASE_URL.
+Its own email prefix, `dch-`, so its teardown touches nothing of `test_deception_pg.py`'s. Env-gated on
+DATABASE_URL.
 """
 from __future__ import annotations
 

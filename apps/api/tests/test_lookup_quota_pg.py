@@ -1,10 +1,9 @@
-"""Provider quotas and the provider's own refusals (F15.3,
-2026-09-24): counted in Postgres from the append-only attempt rows
-under the provider's row lock, exact calendar windows, a queued share that
-leaves interactive work room, a cooldown on 429 and a lock on 401 or 403.
+"""Provider quotas and the provider's own refusals: counted in Postgres from the append-only attempt rows
+under the provider's row lock, exact calendar windows, a queued share that leaves interactive work room, a
+cooldown on 429 and a lock on 401 or 403.
 
-The fetcher and the routes are fakes; nothing reaches a provider. **The
-email prefix is `lkquota-`.** Env-gated on DATABASE_URL.
+The fetcher and the routes are fakes; nothing reaches a provider. The email prefix is `lkquota-`.
+Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

@@ -1,10 +1,8 @@
-"""The Lab pane's fixes from the review of 2026-09-22, held by reading the
-shipped console.
+"""The Lab pane's invariants, held by reading the shipped console.
 
-Beside test_ui_invariants.py and for the same reason: the console is plain
-JavaScript with no build step, so a property like "the filter goes to the
-server" is checkable by reading the file, and one nobody checks survives
-until the first refactor. Each test names the finding it holds.
+Beside test_ui_invariants.py and for the same reason: the console is plain JavaScript with no build step,
+so a property like "the filter goes to the server" is checkable by reading the file, and one nobody checks
+survives until the first refactor.
 
 Pure: no database, no browser.
 """
@@ -46,9 +44,8 @@ def _object(name: str) -> str:
 
 
 def test_the_state_filter_is_asked_of_the_server():
-    """ux13-lab:rejected-filter-always-empty. The queue fetched the working
-    set and filtered it here, so Rejected, In analysis and Reported could
-    never show a row, and a rejected sample vanished for good."""
+    """The state filter goes to the server: filtering the working set client-side would never show a
+    Rejected, In analysis or Reported row, and a rejected sample would vanish for good."""
     body = _fn("loadSamples")
     assert "params.set('state', wanted)" in body
     assert "s.state === wanted" not in body, (
@@ -77,9 +74,8 @@ def test_each_empty_state_says_what_it_was_filtered_by():
 
 
 def test_the_lab_in_a_case_lists_that_case_and_names_cases_by_code():
-    """ux13-lab:lab-not-case-scoped, ux19-copy:lab-shows-other-case-samples.
-    The Lab under OP-KESTREL-26 listed OP-NIGHTJAR-26's six samples, the
-    badge counted them, and each card said only "CASE e2c7d48f"."""
+    """The Lab in a case lists that case's samples and names cases by code: it must not list another case's
+    samples, count them in the badge, or say only "CASE e2c7d48f" on a card."""
     loader = _fn("loadSamples")
     assert "params.set('case_id', state.caseId)" in loader
     assert "smpAllCases" in loader, "there is no way to widen the scope"
@@ -97,18 +93,16 @@ def test_the_lab_in_a_case_lists_that_case_and_names_cases_by_code():
 
 
 def test_the_lab_resets_on_a_case_switch_and_drops_stale_reads():
-    """The 2026-09-22 case-switch registry: a pane that shows case-scoped
-    data registers its reset, and its reads drop a reply that lands after
-    a newer switch."""
+    """A pane that shows case-scoped data registers its reset with the case-switch registry, and its reads
+    drop a reply that lands after a newer switch."""
     lab = _lab()
     assert "onCaseSwitch(() => {" in lab
     reset = lab[lab.index("onCaseSwitch(() => {"):]
     reset = reset[:reset.index("});")]
     for cleared in ("smp-list", "samples-badge", "smpAllCases"):
         assert cleared in reset, f"a case switch leaves {cleared} standing"
-    # The card is closed through the one path that also parks it out of
-    # the list before the list is emptied (ux13-lab:detail-opens-offscreen,
-    # 2026-09-23): it can sit under its row, inside the list.
+    # The card is closed through the one path that also parks it out of the list before the list is emptied:
+    # it can sit under its row, inside the list.
     assert "smpCloseDetail(" in reset, "a case switch leaves smp-detail standing"
     assert reset.index("smpCloseDetail(") < reset.index("clear($('smp-list'))"), (
         "the list is emptied with the card still inside it")
@@ -120,10 +114,9 @@ def test_the_lab_resets_on_a_case_switch_and_drops_stale_reads():
 
 
 def test_rejecting_asks_first_and_names_the_sample():
-    """ux13-lab:reject-one-click-destroy. One click sent purge_bytes true
-    and destroyed the bytes and the key, from a card that did not name the
-    sample. Now nothing is sent until a confirmation that names the file,
-    the hash and the case, and states the disposition, is confirmed."""
+    """Rejecting asks first and names the sample. One click must not send purge_bytes true and destroy the
+    bytes and the key: nothing is sent until a confirmation that names the file, the hash and the case, and
+    states the disposition, is confirmed."""
     body = _fn("sampleActions")
     ask = body.index("'Reject this sample?'")
     send = body.index("'/reject'")
@@ -145,10 +138,8 @@ def test_rejecting_asks_first_and_names_the_sample():
 
 
 def test_the_access_ledger_names_who_and_what():
-    """ux13-lab:custody-ledger-hides-who-and-what. Rows showed only the
-    action and the time, a submission and a failed integrity check both
-    read VIEWED_META, and the help text promised looks were recorded when
-    none were."""
+    """The access ledger names who and what, not only the action and the time: a submission and a failed
+    integrity check do not both read VIEWED_META."""
     line = _fn("custodyLine")
     for event in ("'submitted'", "'viewed'", "'integrity_check_failed'"):
         assert event in line, f"{event} has no words of its own"
@@ -159,8 +150,8 @@ def test_the_access_ledger_names_who_and_what():
 
 
 def test_triage_gaps_are_named_by_the_check_that_never_ran():
-    """ux13-lab:triage-gap-names-dropped. The card read `g.what || g.kind`
-    and the service writes `step`, so every gap was headed "gap"."""
+    """The card reads the service's `step` field, so every gap is headed by the check that never ran rather
+    than "gap"."""
     js = _js()
     assert "g.what || g.kind || 'gap'" not in js
     assert "g.step" in _fn("gapStep")
@@ -175,9 +166,8 @@ def test_triage_gaps_are_named_by_the_check_that_never_ran():
 
 
 def test_the_detail_card_shows_provenance():
-    """ux13-lab:provenance-never-shown. The source note, the submitter and
-    the holder were collected and returned and never displayed, and the
-    card did not restate which file it was."""
+    """The source note, the submitter and the holder are displayed, and the card restates which file it
+    is."""
     prov = _fn("sampleProvenance")
     for read in ("s.source_note", "s.submitted_by_name", "s.assigned_to_name",
                  "quarantinedFilename(s.original_filename)", "stateChip(",
@@ -189,18 +179,17 @@ def test_the_detail_card_shows_provenance():
 
 
 def test_a_preserved_sample_says_how_it_comes_back():
-    """F2: the Lab shows a preserved sample as preserved and says retrieval
-    needs a Security Officer's authorisation. The retrieval rides the same
-    two legs as a download, so the one cross-origin fetch stays one."""
+    """The Lab shows a preserved sample as preserved and says retrieval needs a Security Officer's
+    authorisation. The retrieval rides the same two legs as a download, so the one cross-origin fetch stays
+    one."""
     panel = _fn("preservationPanel")
     assert "Security Officer" in panel
     assert "'/preserved/retrieval-ticket'" in panel
     assert "downloadSample(s, msg," in panel
     assert "preserved:" in _object("DISPOSITION_TEXT")
-    # The Lab's one cross-origin call is downloadSample's, and the
-    # retrieval reuses it. The console's only other one is an exhibit's
-    # production (x-hostile-export, 2026-09-24), which
-    # test_sample_origin_http_pg names and counts.
+    # The Lab's one cross-origin call is downloadSample's, and the retrieval reuses it. The console's only
+    # other one is an exhibit's production (x-hostile-export), which test_sample_origin_http_pg names and
+    # counts.
     assert "fetchFromSampleOrigin(" not in panel, (
         "the retrieval must reuse downloadSample's one call")
     assert "fetchFromSampleOrigin(" in _fn("downloadSample")

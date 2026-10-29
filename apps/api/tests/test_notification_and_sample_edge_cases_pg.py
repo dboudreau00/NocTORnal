@@ -1,36 +1,23 @@
-"""F19 — the Phase 5/8 adversarial pass, 2026-07-26.
+"""Phase 5 (notification) and Phase 8 (samples) hostile-lens regressions.
 
-Phases 5 (notification) and 8 (samples) went through six hostile lenses
-and a refutation round, which produced 27 surviving findings. The
-two Phase 8 criticals are covered by `test_samples_hardening_pg.py`; this
-file covers the rest, and every test here FAILS on the code as it stood
-that morning.
+The two Phase 8 criticals are covered by `test_samples_hardening_pg.py`; this file covers the rest.
 
-They fall into three clusters, and the first two share a root cause worth
-naming: **a rule enforced in one place and quietly absent in the second
-place that needed it.**
+They fall into three clusters, and the first two share a root cause worth naming: **a rule enforced in one
+place and quietly absent in the second place that needed it.**
 
-1. **Notification.** The centre filtered on clearance but not on case
-   assignment, so an analyst taken off a case kept reading its merges and
-   approvals forever. The outbox drain filtered on neither, so the same
-   material went out by EMAIL — the one path that actually crosses the
-   boundary. `approval_requested` wrote fresh case material to expired
-   assignments. And `effective_labels_for_notification`, which exists
-   precisely to compose an element's labels with its case's, was exported,
-   tested and called by nothing.
+1. **Notification.** The centre filters on clearance and on case assignment, so an analyst taken off a case
+   stops reading its merges and approvals. The outbox drain filters on both, so the same material does not
+   go out by EMAIL, the one path that actually crosses the boundary. `approval_requested` does not write
+   fresh case material to expired assignments. `effective_labels_for_notification` composes an element's
+   labels with its case's.
 
-2. **Egress.** `check_egress` dropped the compartments argument, so the
-   two call sites of the one shared gate disagreed about a third of its
-   inputs. Evidence egress was fed the exhibit's own compartments, and
-   nothing anywhere ever sets that column. And a report built below its
-   case's classification copied the case header in unfiltered while
-   deriving the document's mark from the graph body alone — so a RED case
-   emitted a TLP:CLEAR document carrying the operation's codename.
+2. **Egress.** `check_egress` takes the compartments argument, so the two call sites of the one shared
+   gate agree about all of its inputs. A report built below its case's classification withholds the case
+   header and derives the document's mark from the case as well as the graph body, so a RED case cannot
+   emit a TLP:CLEAR document carrying the operation's codename.
 
-3. **Sample lifecycle.** `reject()` destroyed bytes and the data key while
-   ignoring `legal_hold`, which docs/08 says overrides all deletion
-   everywhere. `submit()` wrote hostile bytes to a WORM bucket before the
-   row existed.
+3. **Sample lifecycle.** `reject()` honours `legal_hold`, which docs/08 says overrides all deletion
+   everywhere. `submit()` does not write hostile bytes to a WORM bucket before the row exists.
 
 Env-gated on DATABASE_URL, except the pure ones.
 """
@@ -54,18 +41,13 @@ EMAIL_LIKE = "f19-%@noctornal.test"
 def conn():
     """One connection, and a teardown that knows what it may not delete.
 
-    Four append-only ledgers in this repo raise on DELETE **and** carry
-    foreign keys to the thing they describe: `core.evidence_custody`,
-    `lab.sample_access`, `core.purge_tombstone` and `audit.event`. The
-    record of what happened to an exhibit deliberately outlives the
-    exhibit, so a test that ingests evidence can never delete that
-    evidence, its case, or the user named on the custody row.
+    Four append-only ledgers raise on DELETE **and** carry foreign keys to the thing they describe:
+    `core.evidence_custody`, `lab.sample_access`, `core.purge_tombstone` and `audit.event`. The record of
+    what happened to an exhibit deliberately outlives the exhibit, so a test that ingests evidence can never
+    delete that evidence, its case, or the user named on the custody row.
 
-    That is the design working, not a leak. The teardown therefore removes
-    what it may and leaves the rest, keyed on a reserved email pattern so
-    the residue is identifiable. A teardown that assumes it can delete its
-    own fixtures fails on a foreign key into a table the test never
-    touched — this is the fourth suite to learn it.
+    The teardown therefore removes what it may and leaves the rest, keyed on a reserved email pattern so
+    the residue is identifiable.
     """
     from noctornal_api.db import connect
     c = connect()
@@ -79,11 +61,8 @@ def conn():
         c.execute(f"DELETE FROM notify.delivery WHERE notification_id IN "
                   f"(SELECT id FROM notify.notification WHERE recipient_id IN {sub})")
         c.execute(f"DELETE FROM notify.notification WHERE recipient_id IN {sub}")
-        # By ACTOR as well -- the gap `test_governance_pg.py` had: an alert
-        # whose actor is a swept user but whose recipient and case are not
-        # survives the two sweeps around it and blocks the user delete with
-        # notification_actor_id_fkey. Closed here on the same day
-        # (2026-09-02), before it was seen to bite in this suite.
+        # By ACTOR as well: an alert whose actor is a swept user but whose recipient and case are not
+        # survives the two sweeps around it and blocks the user delete with notification_actor_id_fkey.
         # notify.delivery cascades from notification.
         c.execute(f"DELETE FROM notify.notification WHERE actor_id IN {sub}")
         c.execute(f"DELETE FROM notify.notification WHERE case_id IN {csub}")
@@ -91,10 +70,9 @@ def conn():
         c.execute(f"DELETE FROM iam.break_glass WHERE user_id IN {sub}")
         c.execute(f"DELETE FROM core.evidence WHERE case_id IN {csub} "
                   f"AND id NOT IN {pinned_evidence}")
-        # The triage queue is a queue, not a ledger: the static runs of a
-        # sample that custody pins stayed QUEUED, went stale over a long
-        # run and failed the readiness tests that read the whole queue
-        # (2026-10-07). A deleted sample takes its own along.
+        # The triage queue is a queue, not a ledger: the static runs of a sample that custody pins stay
+        # QUEUED, go stale over a long run and fail the readiness tests that read the whole queue. A deleted
+        # sample takes its own along.
         c.execute(f"DELETE FROM lab.static_run WHERE status = 'QUEUED' AND "
                   f"sample_id IN (SELECT id FROM lab.sample WHERE submitted_by IN {sub})")
         c.execute(f"DELETE FROM lab.sample WHERE submitted_by IN {sub} "
@@ -124,11 +102,8 @@ def _user(conn, clearance="RED", compartments=()):
     from noctornal_api.stores import PgUserStore
     uid = PgUserStore(conn).create_user(
         f"f19-{uuid4().hex[:8]}@noctornal.test", "F19", "x" * 20)
-    # Since 0059 every compartment column is bound to iam.compartment, and
-    # this helper runs BEFORE _case (which registers) in every test that
-    # uses both -- so it must register what it is about to write. On the
-    # development database the keys were already there; on CI's fresh one
-    # this UPDATE was refused on the Alpha 5 release commit (2026-09-09).
+    # Every compartment column is bound to iam.compartment (0059), and this helper runs BEFORE _case (which
+    # registers) in every test that uses both, so it must register what it is about to write.
     for key in compartments:
         conn.execute(
             "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
@@ -140,12 +115,9 @@ def _user(conn, clearance="RED", compartments=()):
 
 
 def _case(conn, owner, classification="AMBER", compartments=()):
-    # Since migration 0057 a compartment must be registered before a case
-    # can be filed under it, and this helper is the only route these tests
-    # have to a compartmented case. Registering here rather than in each
-    # test keeps the refusal under test the READ-IN ceiling, not the
-    # registry: an unregistered key is refused first, and a test that
-    # cannot reach the check it names proves nothing.
+    # A compartment must be registered before a case can be filed under it (0057), and this helper is the
+    # only route these tests have to a compartmented case. Registering here rather than in each test keeps
+    # the refusal under test the READ-IN ceiling: an unregistered key is refused first.
     from noctornal_api.cases import CaseService
     for key in compartments:
         conn.execute(
@@ -170,18 +142,14 @@ def _assign(conn, case_id, user_id, role="ANALYST", expires_at=None):
 
 
 # =========================================================================
-# 1. Notification — assignment is half the case gate and it was missing
+# 1. Notification: assignment is half the case gate
 # =========================================================================
 
 @pg
 def test_taking_an_analyst_off_a_case_closes_the_notification_centre(conn):
-    """The finding, in one test.
-
-    Clearance is a property of the person; assignment is the thing that
-    ties them to THIS case, and removing somebody from a case is far
-    commoner than lowering their clearance. Without this predicate the
-    notification centre was a standing feed of case content to every
-    analyst who had ever been on it.
+    """Clearance is a property of the person; assignment is the thing that ties them to THIS case, and
+    removing somebody from a case is far commoner than lowering their clearance. Without this predicate the
+    notification centre would be a standing feed of case content to every analyst who had ever been on it.
     """
     from noctornal_api.notifications import NotificationService
 
@@ -413,11 +381,9 @@ def test_a_live_assignment_still_gets_its_email(conn):
 
 @pg
 def test_the_security_officer_alert_carries_no_case_content(conn):
-    """Migration 0017 is explicit: "SECURITY_OFFICER: can read the audit
-    trail but NOT case content." The alert used to send them the case CODE,
-    the case CLASSIFICATION and the analyst's JUSTIFICATION verbatim — a
-    free-text field whose whole purpose is to describe the emergency, which
-    means it quotes case facts."""
+    """Migration 0017 is explicit: "SECURITY_OFFICER: can read the audit trail but NOT case content." The
+    alert carries no case CODE, case CLASSIFICATION or analyst JUSTIFICATION: the justification is a
+    free-text field whose whole purpose is to describe the emergency, which means it quotes case facts."""
     from noctornal_api.break_glass import BreakGlassService
 
     officer = _user(conn, clearance="RED")
@@ -572,15 +538,9 @@ def test_a_document_carrying_the_header_is_marked_at_the_cases_level(conn):
 
 @pg
 def test_a_compartmented_case_header_follows_the_requesters_read_in(conn):
-    """Both directions, and the second was a defect I introduced fixing the
-    first.
-
-    The initial fix hardcoded the builder's compartments to the empty set.
-    That closed the leak and broke the feature: an analyst read into a
-    compartment could not produce a report naming their OWN case, and
-    `report.compartments` was therefore always empty — so
-    `DENY_COMPARTMENTED` stayed unreachable on the built path, which is the
-    exact defect the same commit had just repaired in `check_egress`.
+    """Both directions. Hardcoding the builder's compartments to the empty set closes the leak but breaks
+    the feature: an analyst read into a compartment could not produce a report naming their OWN case, and
+    `report.compartments` would always be empty, leaving `DENY_COMPARTMENTED` unreachable on the built path.
     Closing a hole by refusing everybody is its own defect.
     """
     from noctornal_api.egress import DENY_COMPARTMENTED, Destination
@@ -600,9 +560,8 @@ def test_a_compartmented_case_header_follows_the_requesters_read_in(conn):
     assert code not in str(outside.case)
     assert outside.compartments == frozenset()
 
-    # Read in: the header is there, the document carries the compartment,
-    # and the egress gate refuses to let it leave — which is the branch
-    # that could not previously be reached from a real build at all.
+    # Read in: the header is there, the document carries the compartment, and the egress gate refuses to
+    # let it leave.
     inside = ReportBuilder(conn).build(
         case_id, target_tlp="RED", generated_by=owner,
         include_hypotheses=False, compartments=frozenset({"OP-KESTREL"}))
@@ -714,8 +673,7 @@ def test_a_legal_hold_stops_reject_destroying_the_bytes(conn, policy,
     material under a court hold."""
     from noctornal_api.samples import SampleError, SampleService
 
-    # Destruction is the `destroy` disposition since F2 (2026-09-22);
-    # the default preserves, which a hold does not block.
+    # Destruction is the `destroy` disposition; the default preserves, which a hold does not block.
     monkeypatch.setenv("NOCTORNAL_REJECTED_SAMPLE_DISPOSITION", "destroy")
     who = _user(conn)
     store = _MemStore()
@@ -776,14 +734,13 @@ def test_the_hold_can_be_recorded_around_rather_than_ignored(conn, policy):
 
 @pg
 def test_no_bytes_reach_the_store_when_the_row_is_refused(conn, policy):
-    """`submit()` wrote the ciphertext to the object store BEFORE the row
-    existed, so any failure in between left live malware in an
-    object-locked bucket with no row naming it, no submitter attached and
-    no state machine covering it. Object lock means it then cannot be
-    deleted by anyone, including root.
+    """`submit()` must not write the ciphertext to the object store BEFORE the row exists: any failure in
+    between would leave live malware in an object-locked bucket with no row naming it, no submitter
+    attached and no state machine covering it, and object lock means nobody, including root, can then
+    delete it.
 
-    The router takes `classification` as an unconstrained `Form(...)`
-    string into a `core.tlp` column, which is exactly such a failure.
+    The router takes `classification` as an unconstrained `Form(...)` string into a `core.tlp` column, which
+    is exactly such a failure.
     """
     from noctornal_api.samples import SampleError
 
@@ -812,16 +769,13 @@ def test_a_storage_failure_leaves_no_half_submitted_row(conn, policy):
 
 @pg
 def test_a_sample_is_raised_to_its_cases_floor_on_submit(conn, policy):
-    """`lab.sample` was the one labelled table with no `enforce_tlp_floor`
-    trigger, and the router's `classification` is a Form defaulting to
-    AMBER. So an analyst attaching the dropper from a RED, compartmented
-    case and touching nothing else produced a row at AMBER with no
-    compartments — readable by anyone holding AMBER, including a
-    MALWARE_ANALYST whom migration 0031 grants no case access at all.
+    """`lab.sample` is a labelled table and the router's `classification` is a Form defaulting to AMBER. An
+    analyst attaching the dropper from a RED, compartmented case and touching nothing else must not produce
+    a row at AMBER with no compartments, readable by anyone holding AMBER, including a MALWARE_ANALYST whom
+    migration 0031 grants no case access at all.
 
-    Raised rather than refused: the safe direction is unambiguous, and an
-    analyst who left a form field alone should get a safe default rather
-    than an error.
+    Raised rather than refused: the safe direction is unambiguous, and an analyst who left a form field
+    alone should get a safe default rather than an error.
     """
     owner = _user(conn, clearance="RED", compartments=("OP-KESTREL",))
     case_id = _case(conn, owner, classification="RED",
@@ -883,9 +837,8 @@ def test_the_queue_and_detail_compose_the_cases_labels(conn, policy):
 
 @pg
 def test_queue_refuses_to_guess_at_a_clearance(conn):
-    """It used to default to `clearance="RED"`, so a caller who forgot the
-    argument was silently handed everything — the same fail-open shape that
-    left `download()` with no gate at all, in the same file."""
+    """`queue()` has no default clearance: a caller who forgets the argument must not be silently handed
+    everything (the fail-open shape `download()` must not have either)."""
     from noctornal_api.samples import SampleError, SampleService
 
     with pytest.raises(SampleError, match="needs the caller's clearance"):
@@ -895,11 +848,9 @@ def test_queue_refuses_to_guess_at_a_clearance(conn):
 @pg
 def test_a_failed_integrity_check_is_recorded_not_just_raised(conn, policy,
                                                              monkeypatch):
-    """A tamper alarm that alarms nobody. This used to raise into the
-    router, which mapped it to a 409 — so the one signal that the malware
-    store had been altered produced an error message for one analyst and
-    nothing anybody would ever find. `core.evidence` has written a failed
-    HASH_VERIFIED custody row since Phase 1."""
+    """A failed integrity check is recorded, not just raised. Raised into the router it maps to a 409, so
+    the one signal that the malware store had been altered would produce an error message for one analyst
+    and nothing anybody would ever find. `core.evidence` writes a failed HASH_VERIFIED custody row."""
     from noctornal_api.samples import SampleError, SampleService
 
     monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", "https://samples.example")
@@ -932,15 +883,12 @@ def test_a_failed_integrity_check_is_recorded_not_just_raised(conn, policy,
 @pg
 def test_notifications_cannot_be_redirected_to_an_arbitrary_mailbox(conn,
                                                                    monkeypatch):
-    """Any authenticated user could PUT an arbitrary `address` — no
-    permission, no step-up, no format check, no confirmation to either
-    mailbox — and the drain resolves `coalesce(p.address, u.email)`. Every
-    subsequent subject and summary went to a mailbox they chose, and
-    subjects carry the case CODE, which this codebase argues at length is
-    itself intelligence.
+    """An authenticated user cannot PUT an arbitrary `address`: with no permission, step-up, format check
+    or confirmation, the drain's `coalesce(p.address, u.email)` would send every subsequent subject and
+    summary to a mailbox they chose, and subjects carry the case CODE, which is itself intelligence.
 
-    The egress gate cannot help: it reasons about the KIND of destination,
-    so a corporate mailbox and a burner are the same decision.
+    The egress gate cannot help: it reasons about the KIND of destination, so a corporate mailbox and a
+    burner are the same decision.
     """
     from noctornal_api.notifications import NotificationError, NotificationService
 

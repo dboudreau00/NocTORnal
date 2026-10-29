@@ -1,5 +1,4 @@
-"""F53 (docs/17, 2026-10-08): the Collected tab's Watches section, as the
-console ships it.
+"""The Collected tab's Watches section (docs/17), as the console ships it.
 
 The list and the Add a watch form sit in the Feeds pane's Collected tab, under
 the hits the watches produce. Pure: no database. The markup is read from the

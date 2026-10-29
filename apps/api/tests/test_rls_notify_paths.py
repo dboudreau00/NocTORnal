@@ -1,14 +1,11 @@
-"""The notification readers that must see every row run as a system
-purpose, and nothing but `notify.enqueue` writes a notification (F51,
-2026-10-02).
+"""The notification readers that must see every row run as a system purpose, and nothing but
+`notify.enqueue` writes a notification.
 
-Static: no database. Under 0126 a notification is its recipient's own, so
-work that spans recipients (the drain, the delivery ledger and its
-requeue, Jira's administration, a request's reach count) reads on a
-system connection, and every notice is raised through the definer, which
-checks the recipient instead of the writer. A reader that forgot either
-would fail closed and silently: an empty ledger, a drain that sends
-nothing, a retire that closes nobody's links.
+Static: no database. Under 0126 a notification is its recipient's own, so work that spans recipients (the
+drain, the delivery ledger and its requeue, Jira's administration, a request's reach count) reads on a
+system connection, and every notice is raised through the definer, which checks the recipient instead of
+the writer. A reader that forgot either would fail closed and silently: an empty ledger, a drain that
+sends nothing, a retire that closes nobody's links.
 """
 from __future__ import annotations
 

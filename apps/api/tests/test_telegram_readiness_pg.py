@@ -1,8 +1,6 @@
-"""The telegram_collection readiness row (roadmap F5.3,
-2026-09-24): idle green with no Telegram source, and counts, never names,
-of what stops the active ones: the library, enrolled sessions and machine
-locks. Not blocking, no consequence, settled under Feeds, Sources.
-DATABASE_URL-gated.
+"""The telegram_collection readiness row: idle green with no Telegram source, and counts, never names, of
+what stops the active ones: the library, enrolled sessions and machine locks. Not blocking, no
+consequence, settled under Feeds, Sources. DATABASE_URL-gated.
 """
 from __future__ import annotations
 
@@ -27,10 +25,9 @@ P = "test-tgrdy-"
 def conn(monkeypatch):
     tf.guard_sockets(monkeypatch)
     with rolled_back() as c:
-        # The row counts ACTIVE Telegram sources, and Telegram rows are never
-        # deleted, so whatever another suite left active is switched off for
-        # the length of this transaction, which is rolled back (it used to
-        # skip the whole file when any was).
+        # The row counts ACTIVE Telegram sources, and Telegram rows are never deleted, so whatever
+        # another suite left active is switched off for the length of this transaction, which is rolled
+        # back.
         c.execute("UPDATE collect.source SET is_active = false WHERE is_active "
                   "AND kind = 'TELEGRAM' AND parser_key = 'telegram'")
         yield c

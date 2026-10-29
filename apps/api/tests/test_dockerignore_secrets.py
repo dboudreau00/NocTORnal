@@ -1,36 +1,28 @@
-"""No file a secret can sit in reaches the image (review infra-1,
-2026-10-03).
+"""No file a secret can sit in reaches the image.
 
-The Dockerfile does one `COPY . /app` and compose builds ONE image from the
-whole checkout for every service. A file .gitignore keeps out of a commit is
-therefore still copied into the image the API, the sample origin, the cron
-loop and the Lab workers run, unless .dockerignore names it too. A list of
-NAMES lost that race twice: the first one missed the egress and init env
-files, the second missed everything that is not an exact name (a
-`collector.env.old`, a `secrets.env.bak`, an `.env.production`, a stray
-`private.key`), and Docker anchors a pattern without a slash at the context
-root, so `.env` never matched `apps/api/.env` at all.
+The Dockerfile does one `COPY . /app` and compose builds ONE image from the whole checkout for every
+service. A file .gitignore keeps out of a commit is therefore still copied into the image the API, the
+sample origin, the cron loop and the Lab workers run, unless .dockerignore names it too. A list of NAMES
+loses that race: it misses everything that is not an exact name (a `collector.env.old`, a
+`secrets.env.bak`, an `.env.production`, a stray `private.key`), and Docker anchors a pattern without a
+slash at the context root, so `.env` never matches `apps/api/.env`.
 
-The rules held here, as Docker reads them (a real build proved each, see the
-verifier's FROM scratch repro):
+The rules held here, as Docker reads them:
 
-  * every `.gitignore` rule is either named below as not a secret, or its
-    files are excluded at EVERY depth, not just the root. The witnesses come
-    from the rule itself and are confirmed by `git check-ignore`, so a rule
-    added tomorrow is held to this without anybody editing the test;
-  * infra/production stays out, every file in it today and any name an
-    operator gives the next one, so a backup or an editor copy of a secret
-    file cannot ride along; the only things let back in are the tracked
-    `.example` templates and the compose file, which hold no secret (the
-    image-context tests of the hardening work hold those in the context);
-  * the stray copies an operator really leaves (`.bak`, `.old`, `~`, a swap
-    file, a key) are out wherever they land;
+  * every `.gitignore` rule is either named below as not a secret, or its files are excluded at EVERY
+    depth, not just the root. The witnesses come from the rule itself and are confirmed by
+    `git check-ignore`, so a rule added tomorrow is held to this without anybody editing the test;
+  * infra/production stays out, every file in it today and any name an operator gives the next one, so
+    a backup or an editor copy of a secret file cannot ride along; the only things let back in are the
+    tracked `.example` templates and the compose file, which hold no secret (the image-context tests
+    hold those in the context);
+  * the stray copies an operator really leaves (`.bak`, `.old`, `~`, a swap file, a key) are out
+    wherever they land;
   * the deny-list never eats code the image runs.
 
-Docker's matcher is reproduced (Go's filepath.Match per segment, `**/`
-across any number of segments, a matched directory excluding what is under
-it, `!` re-including, the last match winning), so a pattern that only looks
-right fails.
+Docker's matcher is reproduced (Go's filepath.Match per segment, `**/` across any number of segments, a
+matched directory excluding what is under it, `!` re-including, the last match winning), so a pattern
+that only looks right fails.
 """
 from __future__ import annotations
 
@@ -63,10 +55,9 @@ NOT_A_SECRET = {
 WHERE = ("", "apps/api", "apps/api/src", "scripts", "db", "infra",
          "infra/production", "infra/production/sub", "infra/production/tls")
 
-#: Names a secret takes on in practice beside the file itself: the
-#: verifier's list (collector.env.old, collector.env~, secrets.env.bak,
-#: other.env.swp, private.key, signing.pem, .env.local, .env.production)
-#: and the helper's half-written temp file.
+#: Names a secret takes on in practice beside the file itself (collector.env.old, collector.env~,
+#: secrets.env.bak, other.env.swp, private.key, signing.pem, .env.local, .env.production) and the
+#: helper's half-written temp file.
 STRAYS = (".env", ".env.local", ".env.production", ".env.backup-1",
           "secrets.env", "collector.env", "migrate.env", "secrets.env.bak",
           "collector.env.old", "collector.env~", "other.env.swp",
@@ -267,8 +258,7 @@ def test_infra_production_stays_out_of_the_image_but_for_templates_and_compose()
 @pytest.mark.parametrize("name", STRAYS)
 @pytest.mark.parametrize("where", WHERE)
 def test_a_stray_copy_of_a_secret_is_kept_out_at_every_depth(where, name):
-    """The verifier's list: each of these was in the image of a real build
-    when only the five named env files were excluded."""
+    """Each stray copy of a secret is excluded, not only the five named env files."""
     path = f"{where}/{name}" if where else name
     assert _excluded(path, PATTERNS), path
 
@@ -288,10 +278,9 @@ def test_every_gitignored_secret_name_and_its_copies_are_out(suffix):
 
 @pytest.mark.parametrize("rule", [r for r in _gitignore_rules() if r not in NOT_A_SECRET])
 def test_every_gitignore_rule_is_not_a_secret_or_kept_out_at_every_depth(rule):
-    """The enumeration the verifier asked for: not only the rules that start
-    with infra/production/, but every one, as git itself reads it. A rule
-    named in NOT_A_SECRET is exempt; a rule that is not named must have its
-    files excluded wherever the rule would match them."""
+    """Every .gitignore rule, as git itself reads it, not only those that start with infra/production/.
+    A rule named in NOT_A_SECRET is exempt; a rule that is not named must have its files excluded
+    wherever the rule would match them."""
     if _git() is None:
         pytest.skip("no git history to ask which paths .gitignore keeps out")
     witnesses = _witnesses(rule)
@@ -335,8 +324,7 @@ def test_the_deny_list_never_eats_code_the_image_runs():
 
 
 def test_the_api_test_suite_never_reaches_the_image():
-    """2026-10-07: the image carried all of
-    apps/api/tests, PGP test keys with private blocks among them, into
+    """The image must not carry apps/api/tests, PGP test keys with private blocks among them, into
     every container of the deployment."""
     for path in ("apps/api/tests/test_pgp_keys.py", "apps/api/tests/conftest.py",
                  "apps/api/tests/fixtures/pgp/detached_data_crlf.txt",
@@ -346,8 +334,8 @@ def test_the_api_test_suite_never_reaches_the_image():
 
 
 def test_the_persona_key_file_never_reaches_the_image():
-    """By name (2026-10-03): the API container must not hold the
-    persona key on disk, whatever the file is called."""
+    """By name: the API container must not hold the persona key on disk, whatever the file is
+    called."""
     for path in ("infra/production/collector.env", "collector.env",
                  "scripts/collector.env", "infra/production/collector.env.old",
                  ".env.local"):

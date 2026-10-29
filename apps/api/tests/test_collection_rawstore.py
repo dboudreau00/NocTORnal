@@ -1,9 +1,8 @@
-"""The collected raw markup store (2026-09-24).
+"""The collected raw markup store.
 
-Its own bucket, content-addressed per source, NO object lock (a retention
-clock or a deletion order must be able to remove it), and a delete that
-says whether an object went. The live leg runs only against a MinIO this
-host names in MINIO_ENDPOINT.
+Its own bucket, content-addressed per source, NO object lock (a retention clock or a deletion order
+must be able to remove it), and a delete that says whether an object went. The live leg runs only
+against a MinIO this host names in MINIO_ENDPOINT.
 """
 from __future__ import annotations
 

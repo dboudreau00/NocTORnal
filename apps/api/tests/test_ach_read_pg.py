@@ -7,7 +7,7 @@
   graph does: no key under NONE, whether under PRESENCE, how many items of evidence under COUNT.
   Never which.
 
-The console half is in test_ui_analysis_ach_release_review.py. Env-gated on DATABASE_URL. The email
+The console half is in test_ui_analysis_and_ach_panes.py. Env-gated on DATABASE_URL. The email
 prefix is `achrr-` and must stay unique.
 """
 from __future__ import annotations

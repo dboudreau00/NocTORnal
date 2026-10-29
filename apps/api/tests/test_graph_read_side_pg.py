@@ -1,24 +1,18 @@
-"""The graph read side, as found on re-verification (2026-10-07).
+"""The graph read side: a caller below an entity cannot tell a hidden one from a missing one.
 
-Seven independent verifiers re-ran the earlier review's fixes and found a
-handful of places where a caller below an entity could still tell a hidden
-one from a missing one. Each test here fails without its fix:
+- A label correction is not refused with the ontology's reason when the value it leaves behind is held by
+  an entity above the caller, and accepted when the value is held by nobody
+  (`SelectorStore._types_held_by_others`).
+- A merge whose two entities both hold a tie the caller cannot read, of the same type to the same third
+  party, is made as the same merge without the hidden tie is, not refused naming the tie.
+- `mark_incidental` and `minimise` honour the labels of a conversation and do not answer a random id with
+  a 404.
+- A 409 on a merged node and on a reversal does not name an entity and a merge the caller cannot read.
+- `POST /selectors` does not store or return the password of a URL.
+- `url:login:password`, a login without an `@`, is not taken verbatim.
 
-- A1: a label correction was refused with the ontology's reason when the
-  value it left behind was held by an entity above the caller, and accepted
-  when the value was held by nobody (`SelectorStore._types_held_by_others`).
-- A2: a merge whose two entities both held a tie the caller cannot read, of
-  the same type to the same third party, was refused naming the tie; the
-  same merge without the hidden tie was made.
-- A3: `mark_incidental` and `minimise` ignored the labels of a conversation
-  and answered a random id with a 404.
-- A4, A5: a 409 on a merged node and on a reversal named an entity and a
-  merge the caller cannot read.
-- A6: `POST /selectors` stored and returned the password of a URL.
-- A7: `url:login:password`, a login without an `@`, was taken verbatim.
-
-Everything runs through the real route as the request role and is seeded as
-the owner, as `review_g42_support` does.
+Everything runs through the real route as the request role and is seeded as the owner, as
+`graph_visibility_support` does.
 """
 from __future__ import annotations
 
@@ -26,7 +20,7 @@ from uuid import uuid4
 
 import pytest
 
-import review_g42_support as g
+import graph_visibility_support as g
 import rls_support as s
 
 pytestmark = g.GATED

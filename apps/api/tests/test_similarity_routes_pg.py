@@ -1,11 +1,8 @@
-"""The similarity routes and the status route (F6.3, embeddings,
-2026-09-24).
+"""The similarity routes and the status route (embeddings).
 
-POST routes beside the untouched GET text search: the query travels in the
-body; /similar embeds a missing item on demand; every refusal is a
-sentence; a MEANING query is gated with its case's labels, metered, and
-audited (with a keyed hash, never the text) before it is sent; the GET
-routes answer exactly as before.
+POST routes beside the GET text search: the query travels in the body; /similar embeds a missing item on
+demand; every refusal is a sentence; a MEANING query is gated with its case's labels, metered, and audited
+(with a keyed hash, never the text) before it is sent; the GET routes answer as before.
 
 Env-gated on DATABASE_URL. Prefix `esr-`.
 """

@@ -1,22 +1,16 @@
 """Accepting a proposal is held to the label ceiling, over HTTP.
 
-Final review C12 (2026-09-23). `POST /cases/{id}/proposals/{pid}/accept`
-ran `proposal.review` and nothing else, then handed the caller's
-`classification` to the graph writer. Every other creation route calls
-`check_writable_labels`; this one never did, and the database enforces
-only the case FLOOR. So an AMBER reviewer on an AMBER case could send
-`{"classification": "RED"}` and author a RED element that vanished from
-their own graph at once, which they could then neither correct nor
-retire. The same was true of a proposal whose payload already named a
+`POST /cases/{id}/proposals/{pid}/accept` must call `check_writable_labels` like every other creation
+route; the database enforces only the case FLOOR. Without the check an AMBER reviewer on an AMBER case
+could send `{"classification": "RED"}` and author a RED element that vanishes from their own graph, which
+they could then neither correct nor retire. The same holds for a proposal whose payload already names a
 classification above the reviewer's, with no body at all.
 
-The ATTRIBUTE kind wrote an assertion onto an existing entity with no
-look at that entity's labels, the gap CR7 closed on `graph.py`'s own
-assertion route, and no check that the entity was in the proposal's case.
+The ATTRIBUTE kind writes an assertion onto an existing entity, so it checks that entity's labels and that
+it is in the proposal's case.
 
-Every refusal test here fails on 1667cc1; the within-clearance test is
-the guard that the fix did not close the door it watches. Email prefix
-`pac-`, unique to this file. Env-gated on DATABASE_URL.
+The within-clearance test guards that the check does not close the door it watches. Email prefix `pac-`,
+unique to this file. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -138,7 +132,7 @@ def _nodes(conn, case_id):
 
 
 def test_a_reviewer_cannot_accept_a_node_above_their_own_clearance(conn, client, world):
-    """The finding's own reproduction: AMBER reviewer, `classification: RED`."""
+    """AMBER reviewer, `classification: RED`."""
     w = world
     pid = _propose(conn, w["case"], "NODE",
                    {"node_type": "IDENTITY", "label": "pac_suggested"})
@@ -160,10 +154,8 @@ def test_a_payload_classification_above_the_reviewer_is_refused_too(conn, client
                     "classification": "RED"})
     before = _nodes(conn, w["case"])
     r = _accept(client, conn, w, pid)
-    # A RED payload is RED material: the AMBER reviewer's queue never
-    # showed it, so accept answers the same 404 as reject and defer rather
-    # than a 403 that confirms it exists (ux08-triage:accept-downgrades-
-    # classification, 2026-09-23). Either way nothing is written.
+    # A RED payload is RED material: the AMBER reviewer's queue never showed it, so accept answers the same
+    # 404 as reject and defer rather than a 403 that confirms it exists. Nothing is written either way.
     assert r.status_code == 404, r.text
     assert _nodes(conn, w["case"]) == before
     assert _state(conn, pid)[0] == "PROPOSED"
@@ -258,10 +250,7 @@ def test_the_service_and_the_route_share_one_label_rule():
     assert accepted_classification({}, None) == "AMBER"
     assert accepted_classification(None, None) == "AMBER"
     assert accepted_classification({"classification": "RED"}, None) == "RED"
-    # Raising is allowed; lowering below what the proposal came from is
-    # not (ux08-triage:accept-downgrades-classification, 2026-09-23). This
-    # line asserted "GREEN" until then: a RED suggestion accepted at GREEN
-    # on request, a handling downgrade by keystroke.
+    # Raising is allowed; lowering below what the proposal came from is not.
     assert accepted_classification({"classification": "AMBER"}, "RED") == "RED"
     with pytest.raises(ProposalError, match="cannot be accepted at GREEN"):
         accepted_classification({"classification": "RED"}, "GREEN")

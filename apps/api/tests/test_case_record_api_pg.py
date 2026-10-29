@@ -1,24 +1,12 @@
-"""The case record and the caller's standing on it, over HTTP (2026-09-23).
+"""The case record and the caller's standing on it, over HTTP.
 
-The console's Case record, Status dialog, case list and app bar read these
-fields; each was missing, so the console could not show them:
+The console's Case record, Status dialog, case list and app bar read these fields: `summary`,
+`authority_ref`, the legal next moves, and the caller's role and clearance on the case.
 
-- ux02-cases:case-record-invisible-and-uneditable: `summary` and
-  `authority_ref` were never returned, so the record written at creation
-  could not be shown again;
-- ux02-cases:status-prompt-free-text-one-way-transitions: nothing said
-  which moves are legal from here, so the prompt listed all six;
-- ux02-cases:case-list-lacks-triage-fields and
-  ux02-cases:header-says-analyst-no-permission-cues: nothing said what
-  the CALLER is on the case, or what their clearance is, so every account
-  was "analyst" and every action was offered to everyone.
+The role fields are hints for the console and never a gate; the routes that act still run the
+five-part check, which test_case_lifecycle_api_pg holds.
 
-The role fields are hints for the console and never a gate; the routes
-that act still run the five-part check, which test_case_lifecycle_api_pg
-holds.
-
-**The email prefix is `crec-` and must stay unique**: every fixture here
-tears down by deleting on it.
+**The email prefix is `crec-` and must stay unique**: every fixture here tears down by deleting on it.
 
 Env-gated on DATABASE_URL.
 """

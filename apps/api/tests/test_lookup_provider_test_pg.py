@@ -1,11 +1,9 @@
-"""The provider test (F15.3, 2026-09-24): a
-canary with no case and no case material, run by one administrator
-whatever the provider's exposure, counted against the quota like any send,
-and answered with a status only: never an error detail, an excerpt or a
-body.
+"""The provider test: a canary with no case and no case material, run by one administrator whatever the
+provider's exposure, counted against the quota like any send, and answered with a status only: never an
+error detail, an excerpt or a body.
 
-The fetcher and the routes are fakes; nothing reaches a provider. **The
-email prefix is `lktest-`.** Env-gated on DATABASE_URL.
+The fetcher and the routes are fakes; nothing reaches a provider. The email prefix is `lktest-`.
+Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

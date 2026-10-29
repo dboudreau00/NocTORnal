@@ -1,14 +1,11 @@
-"""Report builder: redaction that is structural, and a document that says
-what it does not contain.
+"""Report builder: redaction that is structural, and a document that says what it does not contain.
 
 The two tests that carry this file:
 
-- `test_material_above_the_target_never_enters_the_document` -- because a
-  textual filter that catches five of the six places a name appears has
-  still disclosed.
-- `test_a_redacted_report_says_that_it_is_redacted` -- because a report that
-  silently drops the ties that made an actor central, then presents a
-  centrality figure computed without them, is misleading rather than
+- `test_material_above_the_target_never_enters_the_document`: a textual filter that catches five of the
+  six places a name appears has still disclosed.
+- `test_a_redacted_report_says_that_it_is_redacted`: a report that silently drops the ties that made an
+  actor central, then presents a centrality figure computed without them, is misleading rather than
   incomplete.
 
 Env-gated on DATABASE_URL.
@@ -38,13 +35,10 @@ def conn():
     yield c
     sub = "(SELECT id FROM iam.app_user WHERE email LIKE 'rpt-%@noctornal.test')"
     csub = f'(SELECT id FROM core."case" WHERE owner_user_id IN {sub})'
-    # Custody rows stay and the chain trigger stays up. Until 2026-09-02
-    # this teardown deleted them with the trigger stood down, which only
-    # ever took the chain's tail and so never tripped `custody_verify.py`
-    # -- the teardown in `test_evidence_pg.py` has the full account. What
-    # a custody row points at stays with it: the exhibit, its case, and
-    # the humans on the custody row, the exhibit and the case. NULL-guarded
-    # because one NULL in a NOT IN list silently deletes nothing.
+    # Custody rows stay and the chain trigger stays up: deleting them with the trigger stood down only takes
+    # the chain's tail and would never trip `custody_verify.py` (see the teardown in `test_evidence_pg.py`).
+    # What a custody row points at stays with it: the exhibit, its case, and the humans on the custody row,
+    # the exhibit and the case. NULL-guarded because one NULL in a NOT IN list silently deletes nothing.
     pinned_evidence = "(SELECT evidence_id FROM core.evidence_custody)"
     pinned_cases = "(SELECT case_id FROM core.evidence WHERE case_id IS NOT NULL)"
     pinned_users = (
@@ -241,9 +235,8 @@ def test_the_evidence_register_identifies_exhibits_by_hash(conn, builder):
     report = builder.build(case_id, target_tlp="AMBER", generated_by=owner)
     assert report.evidence[0]["sha256"] == digest.hex()
     assert report.evidence[0]["blake3"] == digest.hex()
-    # The WHOLE digest (2026-10-07): the released file printed its first
-    # 32 hex characters and an ellipsis, so the document that leaves could
-    # not be checked against a digest recomputed from the exhibit.
+    # The WHOLE digest: the document that leaves must be checkable against a digest recomputed from the
+    # exhibit, so it is not cut to its first 32 hex characters and an ellipsis.
     assert f"`{digest.hex()}`" in render_markdown(report)
 
 
@@ -262,9 +255,8 @@ def test_exhibits_above_the_target_are_withheld_and_counted(conn, builder):
     report = builder.build(case_id, target_tlp="GREEN", generated_by=owner)
     titles = [e["title"] for e in report.evidence]
     assert titles == ["open"]
-    # The default setting is PRESENCE: the document says some exhibits are
-    # above the ceiling and not how many (2026-10-07; this asserted the
-    # exact figure under the default before).
+    # The default setting is PRESENCE: the document says some exhibits are above the ceiling and not how
+    # many.
     assert report.redaction.evidence_some_withheld
     assert report.redaction.evidence_withheld == 0
     conn.execute('UPDATE core."case" SET withheld_disclosure = %s '
@@ -288,11 +280,10 @@ def test_the_report_states_its_authority_and_retention(conn, builder):
 
 
 def test_a_withheld_header_withholds_its_dates_in_words(conn, builder):
-    """Built below the case's own classification, the header is withheld.
-    `build` leaves the opened, retention and review dates None, and the
-    document printed a bare "None" for each, beneath a legal basis and an
-    authority reference that said they were withheld. All five say it in
-    the same words now, and none of the three dates leaks."""
+    """Built below the case's own classification, the header is withheld. `build` leaves the opened,
+    retention and review dates None, and the document must not print a bare "None" for each beneath a legal
+    basis and an authority reference that say they were withheld. All five say it in the same words, and
+    none of the three dates leaks."""
     from noctornal_api.reports import WITHHELD_MARK, render_markdown
     owner = _user(conn)
     case_id = _case(conn, owner, classification="AMBER")
@@ -375,12 +366,10 @@ def _tie(conn, case_id, actor, src, dst, **kw):
 
 
 def test_a_compartmented_entity_makes_the_document_compartmented(conn, builder):
-    """The egress gate judges the DOCUMENT's compartments, and the builder
-    unioned the header's, the exhibits' and the matrix's but not the
-    entities' or the ties' (2026-10-07). A node
-    carrying a compartment, read by a requester cleared for it, went out to
-    `export` and `smtp` with its label in the document and
-    `DENY_COMPARTMENTED` never fired."""
+    """The egress gate judges the DOCUMENT's compartments, so the builder unions the header's, the
+    exhibits', the matrix's, the entities' and the ties'. A node carrying a compartment, read by a requester
+    cleared for it, must not go out to `export` and `smtp` with its label in the document while
+    `DENY_COMPARTMENTED` never fires."""
     from noctornal_api.egress import DENY_COMPARTMENTED, Destination
     from noctornal_api.reports import check_egress, render_markdown
 
@@ -461,11 +450,10 @@ def _exhibits(conn, case_id, owner, *classifications):
     ("NONE", 0, False), ("PRESENCE", 0, True), ("COUNT", 2, False)])
 def test_the_hidden_exhibit_figure_follows_the_cases_disclosure_setting(
         conn, builder, mode, count, some):
-    """The report stated the exact number of exhibits above the ceiling
-    whatever `withheld_disclosure` said (2026-10-07):
-    a case set to NONE has an analyst's register showing 0 and the report
-    saying "2 exhibits are above that level". NONE says nothing, PRESENCE
-    says there are some, and only COUNT gives the figure."""
+    """The report states the number of exhibits above the ceiling only as `withheld_disclosure` allows: a
+    case set to NONE has an analyst's register showing 0 and must not have the report saying "2 exhibits
+    are above that level". NONE says nothing, PRESENCE says there are some, and only COUNT gives the
+    figure."""
     owner = _user(conn)
     case_id = _case(conn, owner, classification="GREEN")
     conn.execute('UPDATE core."case" SET withheld_disclosure = %s WHERE id = %s',
@@ -482,9 +470,8 @@ def test_the_hidden_exhibit_figure_follows_the_cases_disclosure_setting(
     assert body["evidence_withheld"] == count
     assert body["evidence_some_withheld"] is some
     assert ("2 exhibits" in statement) is (mode == "COUNT")
-    # Case-folded since 2026-10-08: under PRESENCE the statement now opens
-    # its sentence with the kinds there are some of ("Some exhibits are
-    # above that level").
+    # Case-folded: under PRESENCE the statement opens its sentence with the kinds there are some of ("Some
+    # exhibits are above that level").
     assert ("some exhibits" in statement.lower()) is (mode == "PRESENCE")
     assert report.redaction.anything_withheld is (mode != "NONE")
     # And under NONE it never claims that nothing was withheld, whatever it
@@ -510,16 +497,11 @@ def test_a_report_carries_the_alternatives_that_were_ruled_out(conn, builder):
             """INSERT INTO core.hypothesis (case_id, statement, created_by)
                VALUES (%s, %s, %s) RETURNING id""",
             (case_id, statement, owner)).fetchone()[0])
-    # Both hypotheses are scored against the assertion, because a matrix
-    # where only one has been examined cannot rank anything (docs/17 F20).
-    # `ids[0]` is strongly contradicted; `ids[1]` is merely consistent with
-    # it, so `ids[1]` is what survives — and it survives on the evidence
-    # rather than on never having been looked at.
-    #
-    # This test previously scored only `ids[0]` and asserted that `ids[1]`
-    # won anyway. It was green, and it was asserting the defect: an
-    # untested hypothesis coming top because zero inconsistency is the
-    # lowest score the scale can produce.
+    # Both hypotheses are scored against the assertion, because a matrix where only one has been examined
+    # cannot rank anything (docs/17 F20). `ids[0]` is strongly contradicted; `ids[1]` is merely consistent
+    # with it, so `ids[1]` is what survives, and it survives on the evidence rather than on never having
+    # been looked at: an untested hypothesis would come top because zero inconsistency is the lowest score
+    # the scale can produce.
     for hypothesis_id, stance in ((ids[0], -2), (ids[1], 1)):
         conn.execute(
             """INSERT INTO core.hypothesis_evidence

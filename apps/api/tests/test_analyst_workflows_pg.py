@@ -1,18 +1,14 @@
-"""Defects found driving the analyst workflows end to end (2026-10-07), each pinned where it
-was found.
+"""Defects found driving the analyst workflows end to end, each pinned where it was found.
 
-- An exhibit above the caller's labels answered its routes with the gate's
-  403 "missing permission evidence.read on this case", to an analyst who
-  holds that permission, while an unknown id answered 404: a hidden exhibit
-  was told from a missing one. The entity and tie routes made that one
-  answer on 2026-10-03 (http_ui-016); the exhibit routes had not.
-- Opening a conversation on a platform key the registry does not hold was
-  the foreign key's violation and a 500.
-- Flagging a handle as incidental answered 200 and the flag when no
-  participant of the conversation had that handle, and changed nothing.
+- An exhibit above the caller's labels answers its routes as an unknown id does (404), as the entity and
+  tie routes do, not with the gate's 403 "missing permission evidence.read on this case" to an analyst who
+  holds that permission: a hidden exhibit must not be told from a missing one.
+- Opening a conversation on a platform key the registry does not hold is refused, not the foreign key's
+  violation and a 500.
+- Flagging a handle as incidental when no participant of the conversation has that handle is refused, not a
+  200 with the flag that changes nothing.
 
-**The email prefix is `g61w-` and must stay unique**: the fixture cleans
-up by deleting on it.
+**The email prefix is `g61w-` and must stay unique**: the fixture cleans up by deleting on it.
 
 Env-gated on DATABASE_URL.
 """

@@ -1,21 +1,17 @@
-"""The egress_boundary readiness row (2026-09-24; docs/00 decision 68).
+"""The egress_boundary readiness row (docs/00 decision 68).
 
-In development, when no proxy is configured, the same in-process policy
-(egress_policy.py) is applied by the pinned client and the connection is
-made directly; a readiness row says the network boundary is not in force.
-This is that row, against a real database: it asks whether the collector
-polls anything, and it never names a source, a host or a relay. It is not
-blocking and has no consequence entry: the failure is reversible
-configuration, refused where it matters (route_for) by name.
+In development, when no proxy is configured, the same in-process policy (egress_policy.py) is applied by
+the pinned client and the connection is made directly; a readiness row says the network boundary is not in
+force. This is that row, against a real database: it asks whether the collector polls anything, and it
+never names a source, a host or a relay. It is not blocking and has no consequence entry: the failure is
+reversible configuration, refused where it matters (route_for) by name.
 
-Until 2026-09-24 the collection use counted every active
-source, so the standing MANUAL capture source (no parser_key, never polled)
-failed a production host with no proxy, and the number told an
-administrator below a source's label that the source existed. It now asks
-only about sources with a parser_key and states presence, not a count.
+Only sources with a parser_key count, and the row states presence, not a count: the standing MANUAL capture
+source (no parser_key, never polled) must not fail a production host with no proxy, and a number would tell
+an administrator below a source's label that the source existed.
 
-The route provider cells install a fake provider module and hide the real
-one with a None entry in sys.modules, so they test this probe on its own.
+The route provider cells install a fake provider module and hide the real one with a None entry in
+sys.modules, so they test this probe on its own.
 
 Email prefix `neb-` (no account is created). Env-gated on DATABASE_URL.
 """
@@ -137,12 +133,9 @@ def test_production_with_nothing_outbound_passes_with_the_honest_wording(conn, m
 
 
 def test_a_source_the_collector_never_polls_is_not_an_outbound_use(conn, monkeypatch):
-    """The reproduction of a failure found 2026-09-24. Manual
-    capture creates a standing MANUAL source with no parser_key, and
-    run_once refuses a source with no adapter before it opens a socket.
-    With only such rows active, a production host with no proxy has
-    nothing going outbound and must pass: the count of every active row
-    failed it, and the production start refusal reads the same function."""
+    """Manual capture creates a standing MANUAL source with no parser_key, and run_once refuses a source
+    with no adapter before it opens a socket. With only such rows active, a production host with no proxy
+    has nothing going outbound and must pass; the production start refusal reads the same function."""
     monkeypatch.setenv(config.ENV_VAR, "production")
     with conn.transaction(force_rollback=True):
         conn.execute("UPDATE collect.source SET is_active = false WHERE is_active")

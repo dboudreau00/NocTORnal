@@ -1,13 +1,10 @@
-"""lab-2 (review of 2026-10-03), through the HTTP routes and the request role.
+"""A newly imported screening list binds the Lab through the HTTP routes and the request role.
 
-The service-level tests (test_review46_screening_window_pg) run on the
-owner connection. The routes run on the request role, which must be able to
-ask the freshness question itself: `screening.bytes_may_move` reads
-lab.screening_list and lab.screening_hash. These go through the real
-routes, with a second session holding the screening lock as a running pass
-would, so the import's own pass skips.
-
-Fails on dc28ffa: the ticket for the listed sample is minted (201).
+The service-level tests (test_review46_screening_window_pg) run on the owner connection. The routes run on
+the request role, which must be able to ask the freshness question itself: `screening.bytes_may_move`
+reads lab.screening_list and lab.screening_hash. These go through the real routes, with a second session
+holding the screening lock as a running pass would, so the import's own pass skips; the ticket for the
+listed sample must not be minted (201).
 
 Email prefix `r46h-`. Env-gated on DATABASE_URL.
 """

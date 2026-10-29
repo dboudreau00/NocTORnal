@@ -1,45 +1,14 @@
-"""Corrections and retirements over HTTP: `PATCH`/`DELETE` on nodes and
-edges, with the five-part gate in front of them.
+"""Corrections and retirements over HTTP: `PATCH`/`DELETE` on nodes and edges, behind the five-part gate.
 
-These four endpoints are the first callers of `graph.node.update`,
-`graph.node.delete`, `graph.edge.update` and `graph.edge.delete` — verbs
-that were seeded in 0017/0053 and never checked, because until now a
-mistyped node label was permanent. A first caller is exactly when the
-refusals need writing down.
+The tests that matter assert what does NOT happen. An element id from another case is a 404 (never a 403 or
+200), byte-identical to the 404 for a missing id, and the element and its edges are untouched. A caller who
+lacks the verb, or the clearance for the element, is refused (a RED node can live in an AMBER case). A soft
+delete keeps the row, its assertions and its history. An empty correction is refused. Invariant 1 (a
+correction carries its own assertion) and invariant 5 (overwritten label/weight reach `audit.event`) have
+named tests.
 
-**The tests that carry this file are the ones that assert what does NOT
-happen**, and they are in that order deliberately:
-
-- an element id from ANOTHER case is a 404 — not a 403, not a 200 — and
-  the element it names is left untouched, INCLUDING its edges. Retiring a
-  node cascades to every tie it carries, so a cross-case retirement is not
-  one wrong row, it is a subgraph;
-- the 404 for another case's element is byte-identical to the 404 for an
-  id that does not exist, so neither endpoint is an existence oracle;
-- a caller who lacks the verb, and a caller who lacks the CLEARANCE for
-  the element (as opposed to the case), are both refused — the CR7 rule:
-  a RED node can live in an AMBER case;
-- a soft delete sets `deleted_at` and the row, its assertions and its
-  history all survive. `DELETE` reads as destruction and this is not that;
-- nothing is silently accepted: an empty correction is refused rather
-  than leaving an assertion behind claiming a change that did not happen
-  (invariant 12), and the count of edges retired alongside a node comes
-  back in the body rather than being discovered later.
-
-Two invariants get their own named tests here because these are the
-endpoints that could break them: **invariant 1** (a correction carries its
-own assertion — "we corrected this" is a claim about the world) and
-**invariant 5** (the overwritten label/weight reach `audit.event`, because
-the correction destructively UPDATEs the only column that held them).
-
-**The email prefix is `gmut-` and must stay unique.** Every fixture in
-this suite cleans up on an email pattern, so two files sharing a prefix
-delete each other's rows — which surfaces as a foreign-key error in
-whichever file tears down second, pointing at a table neither test
-touched.
-
-Not in scope here: curation (tags / node sets) has its own router and its
-own suite; this file is the graph-mutation router only.
+The email prefix is `gmut-` and must stay unique: every fixture cleans up on an email pattern, so two files
+sharing a prefix delete each other's rows.
 
 Env-gated on DATABASE_URL.
 """
@@ -71,13 +40,9 @@ def conn():
     yield c
     sub = "(SELECT id FROM iam.app_user WHERE email LIKE 'gmut-%@noctornal.test')"
     csub = f'(SELECT id FROM core."case" WHERE owner_user_id IN {sub})'
-    # ONE transaction, and assertions/edges/nodes go together: the
-    # invariant-1 trigger is DEFERRED, so it sees the final state (all
-    # gone) rather than firing mid-sweep on a node whose last assertion has
-    # just been removed. Order otherwise follows the foreign keys —
-    # assertion → edge → node → case_assignment → case → session/role →
-    # user. `audit.event` is deliberately untouched: it is append-only
-    # (invariant 6) and carries no FK to app_user.
+    # One transaction: the invariant-1 trigger is DEFERRED, so it sees the final state rather than firing
+    # mid-sweep. Order follows the foreign keys: assertion, edge, node, case_assignment, case,
+    # session/role, user. `audit.event` is untouched: it is append-only (invariant 6).
     with c.transaction():
         c.execute(f"DELETE FROM core.assertion WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM core.edge WHERE case_id IN {csub}")
@@ -122,10 +87,7 @@ def _make_user(conn, *, clearance="AMBER", global_roles=(), compartments=()):
     uid = store.create_user(email, "GMut", PASSWORD)
     secret = totp.generate_secret()
     store.enroll_totp(uid, secret)
-    # Since 0059 every compartment column is bound to iam.compartment. This
-    # helper writes whatever it is handed, so it registers it first rather
-    # than trusting the caller to have done so -- two helpers of this shape
-    # were refused on CI's fresh database on 2026-09-09 while passing here.
+    # Every compartment column is bound to iam.compartment, so the helper registers each key first.
     for key in compartments:
         conn.execute(
             "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
@@ -142,29 +104,18 @@ def _make_user(conn, *, clearance="AMBER", global_roles=(), compartments=()):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
-    is off in these tests.
+    """A signed-in caller, minted as `scripts/bootstrap.py session` does: the account by email, then
+    `SessionService` against the store the API validates against.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Unbound (no address, no User-Agent); only `NOCTORNAL_SESSION_STRICT_BINDING` refuses that, and it is off
+    here. It skips `POST /auth/login`, which answers 204 with the token only in `__Host-session`, and
+    TOTP codes are single-use within a 30-second step.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as the real mint sites pass: step-up gated routes refuse a session without it.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token
@@ -194,11 +145,7 @@ def _create_case(client, token) -> str:
     return r.json()["id"]
 
 
-#: The grading every claim written here carries where a test does not
-#: state its own. The API grades nothing for the caller since
-#: gap-api-grade-required (2026-09-23); these are the values its old
-#: defaults applied silently, so every test below exercises what it did
-#: before, now stated. test_api_grade_required_pg.py holds the refusal.
+#: The grading a claim carries where a test does not state its own; the API grades nothing for the caller.
 UNGRADED = {"basis": "DIRECT_OBSERVATION", "reliability": "F",
             "credibility": "6", "confidence": "LOW"}
 
@@ -241,9 +188,8 @@ def _patch(client, token, case_id, kind, oid, body):
 
 
 def _retire(client, token, case_id, kind, oid, reason="duplicate of another entity"):
-    """`httpx.delete()` accepts no body and these endpoints REQUIRE one —
-    the reason is the thing a reviewer reads six months later — so the
-    request has to be built the long way round."""
+    """`httpx.delete()` accepts no body and these endpoints require one (the reason), so the request is
+    built explicitly."""
     return client.request("DELETE",
                           f"/api/v1/cases/{case_id}/graph/{kind}/{oid}",
                           headers=_auth(token), json={"reason": reason})
@@ -283,14 +229,10 @@ def _audit(conn, action, object_id):
 # =======================================================================
 
 def test_a_node_from_another_case_is_404_not_403_and_not_200(conn, client):
-    """The path's case_id is the one the gate authorised, so an element
-    from a different case must not be reachable through it — even by a
-    caller who owns BOTH cases, which is the case that catches a check
-    written as "may this user touch this node?" instead of "is this node in
-    THIS case?".
+    """The path's case_id is the one the gate authorised, so an element from another case is unreachable
+    through it, even by a caller who owns both cases.
 
-    404 rather than 403 so the status code cannot be used to confirm that a
-    guessed id exists somewhere in the deployment.
+    404 rather than 403 so the status cannot confirm that a guessed id exists.
     """
     _, token = _owner(conn)
     case_a = _create_case(client, token)
@@ -407,9 +349,8 @@ def test_a_read_only_assignee_can_neither_correct_nor_retire(conn, client):
 
 
 def test_a_refused_correction_is_audited(conn, client):
-    """A denial that leaves no trace is a denial nobody can review. The
-    audit row names the permission and which of the five checks failed —
-    server-side only; the client is told neither."""
+    """A denial that leaves no trace cannot be reviewed. The audit row names the permission and the failed
+    check; the client is told neither."""
     from noctornal_api.cases import CaseService
     from noctornal_api.security.access import CHECK_ROLE
     owner_id, owner_token = _owner(conn)
@@ -452,14 +393,11 @@ def test_a_stranger_to_the_case_gets_404_not_403(conn, client):
 
 def test_an_under_cleared_caller_cannot_correct_or_retire_a_red_element(
         conn, client):
-    """CR7: an element is protected by BOTH its own labels and its case's.
-    A RED node inside an AMBER case is not rewritable — nor retirable — by
-    an AMBER analyst who is otherwise fully entitled on the case and merely
-    happens to know the node's id.
+    """An element is protected by both its own labels and its case's: a RED node in an AMBER case can be
+    neither rewritten nor retired by an AMBER analyst who knows its id.
 
-    Retirement is the one that matters most: it dissolves the node and
-    every tie it carries from every analyst's graph, so it must not be
-    reachable by a caller who could not see what they are destroying.
+    Retirement dissolves the node and every tie it carries, so it must not be reachable by a caller who
+    cannot see them.
     """
     from noctornal_api.cases import CaseService
     owner_id, owner_token = _owner(conn, clearance="RED")
@@ -472,11 +410,9 @@ def test_an_under_cleared_caller_cannot_correct_or_retire_a_red_element(
                                   granted_by=owner_id)
     amber = _session(conn, amber_email)
 
-    # The ANALYST role does grant the verb, and the case is AMBER, so the
-    # case-level `require(...)` passes. Only the element's own label stops
-    # this, and it is answered as the node's absence: a 403 "missing
-    # permission" told a caller holding a leaked id that it named something
-    # in the case (beta review http_ui-016, 2026-10-03).
+    # The ANALYST role grants the verb and the case is AMBER, so the case-level `require(...)` passes. Only
+    # the element's own label stops this, and it answers as the node's absence (404): a 403 would tell the
+    # holder of a leaked id that it names something in the case.
     assert _patch(client, amber, case_id, "nodes", red,
                   {"label": "rewritten"}).status_code == 404
     assert _retire(client, amber, case_id, "nodes", red).status_code == 404
@@ -651,9 +587,7 @@ def test_a_retired_element_cannot_be_corrected(conn, client):
 
 
 def test_a_retirement_needs_a_written_reason(conn, client):
-    """Retiring a node dissolves every tie it carries, and the one thing a
-    reviewer cannot reconstruct six months later is what the analyst was
-    thinking. `reason` is required and may not be empty."""
+    """Retiring a node dissolves every tie it carries, so `reason` is required and may not be empty."""
     _, token = _owner(conn)
     case_id = _create_case(client, token)
     a = _new_node(client, token, case_id, "alpha")
@@ -726,12 +660,9 @@ def test_invariant_1_a_correction_carries_its_own_assertion(conn, client):
     assert r.json()["updated"] == ["label"]
     assert _assertion_count(conn, "node_id", a) == 2
 
-    # A single changed field names itself, and the claim carries the new
-    # value — which is the only place the NEW value is recoverable from
-    # once someone corrects it again.
-    # `recorded_at`, not `created_at`: core.assertion distinguishes when we
-    # WROTE the claim down from `observed_at`, when the thing was seen. The
-    # column this originally ordered by does not exist on this table.
+    # A single changed field names itself, and the claim carries the new value, the only place the new value
+    # is recoverable from after a further correction. Ordered by `recorded_at` (when the claim was written),
+    # not `observed_at`.
     claim = conn.execute(
         "SELECT claim_path, claim_value FROM core.assertion "
         " WHERE node_id = %s ORDER BY recorded_at DESC LIMIT 1", (a,)).fetchone()
@@ -766,9 +697,8 @@ def test_the_previous_edge_weight_is_recorded_without_rounding(conn, client):
     a = _new_node(client, token, case_id, "alpha")
     b = _new_node(client, token, case_id, "bravo")
     tie = _new_edge(client, token, case_id, a, b)
-    # `CreateEdgeBody` carries no weight (every edge is created at 1.0), so
-    # the interesting scale is set directly — the point of this test is the
-    # AUDIT round-trip, not how the value got there.
+    # `CreateEdgeBody` carries no weight (edges are created at 1.0), so the weight is set directly: this test
+    # is about the audit round-trip.
     conn.execute("UPDATE core.edge SET weight = 3.1416 WHERE id = %s", (tie,))
     before = _edge_row(conn, tie)[0]
 
@@ -884,16 +814,12 @@ def test_an_unknown_confidence_is_refused_without_leaking_the_schema(
 
 
 def test_an_exhibit_outside_this_case_cannot_be_cited(conn, client):
-    """An exhibit may only support a claim in ITS OWN case. Otherwise a
-    correction could cite an exhibit from a case the caller has no access
-    to, and the assertion would then display a title and hash they were
-    never cleared to see. 404 rather than 403, for the usual reason.
+    """An exhibit may only support a claim in its own case; otherwise a correction could cite an exhibit the
+    caller cannot see and display its title and hash. 404 rather than 403, as above.
 
-    **Stated exactly:** this cites an id that exists nowhere. `_check_evidence`
-    is one query — `WHERE id = %s AND case_id = %s` — so an exhibit that
-    exists in ANOTHER case takes the identical path to the identical 404;
-    what this test does not do is construct one, because ingesting a real
-    exhibit needs MinIO and this suite is DATABASE_URL-only.
+    This cites an id that exists nowhere. `_check_evidence` is one query (`WHERE id = %s AND case_id = %s`),
+    so an exhibit in another case takes the identical path; constructing one needs MinIO and this suite is
+    DATABASE_URL-only.
     """
     _, token = _owner(conn)
     case_id = _create_case(client, token)
@@ -930,14 +856,9 @@ def test_classification_is_not_editable_through_a_correction(conn, client):
 
 # --- the cascade must not reach past the caller's clearance --------------
 #
-# Found by an adversarial pass on 2026-08-07, in code written the same day.
-# `_gate_for_change` gates the NODE against its own labels (the CR7 rule),
-# and the cascade to incident edges had no gate at all — so an AMBER-cleared
-# analyst retiring a node also retired every RED edge touching it, and the
-# returned `edges_retired` count then told them how many RED edges existed.
-#
-# Two defects in one statement: a write past the caller's ceiling, and a
-# counting oracle over material they are refused everywhere else.
+# `_gate_for_change` gates the node against its own labels, so the cascade to incident edges must be gated
+# too: otherwise an AMBER analyst retiring a node also retires its RED edges, and `edges_retired` counts
+# material they cannot see.
 
 def test_retiring_is_refused_when_a_tie_is_above_the_callers_clearance(
         conn, client):
@@ -946,12 +867,8 @@ def test_retiring_is_refused_when_a_tie_is_above_the_callers_clearance(
     case_id = _create_case(client, token)
     a = _new_node(client, token, case_id, "visible-a")
     b = _new_node(client, token, case_id, "visible-b")
-    # A RED edge inside an AMBER case: legal (the floor trigger only forbids
-    # going BELOW the case), and invisible to this caller.
-    # `WHERE id`, not `WHERE src_node_id`: `_new_edge` returns the EDGE id,
-    # and matching it against a node column silently updates nothing --
-    # which made the first version of this test pass against an endpoint
-    # that had refused nothing at all.
+    # A RED edge inside an AMBER case is legal (the floor trigger only forbids going below the case) and
+    # invisible to this caller. `WHERE id`: `_new_edge` returns the edge id, which matches no node column.
     conn.execute(
         "UPDATE core.edge SET classification = 'RED' WHERE id = %s",
         (_new_edge(client, token, case_id, a, b),))

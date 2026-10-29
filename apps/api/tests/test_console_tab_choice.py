@@ -1,16 +1,14 @@
-"""The pane an analyst picks while a case opens is kept (2026-10-08).
+"""The pane an analyst picks while a case opens is kept.
 
-`openCase` shows the workspace as soon as the record has arrived and then
-awaits the graph, the evidence register, the triage queue and the badges,
-which on a large case is seconds. The rail is live meanwhile, and a click on
-Evidence in that window was undone by the `selectTab('graph')` the open ended
-on, so the analyst watched their pane swapped for the Graph. `selectTab` now
-counts the choices made, `openCase` reads the count before and after, and it
+`openCase` shows the workspace as soon as the record has arrived and then awaits the graph, the
+evidence register, the triage queue and the badges, which on a large case is seconds. The rail is live
+meanwhile, and a click on Evidence in that window must not be undone by the `selectTab('graph')` the
+open ends on. `selectTab` counts the choices made, `openCase` reads the count before and after, and it
 ends on Graph (and on a deep link's pane) only when nobody chose.
 
-The functions run under Node with their collaborators stubbed (skipped where
-Node is not installed): a click during the load, a load nobody touched, a
-deep link, a deep link and a click, and a second open that overtakes the first.
+The functions run under Node with their collaborators stubbed (skipped where Node is not installed): a
+click during the load, a load nobody touched, a deep link, a deep link and a click, and a second open
+that overtakes the first.
 """
 from __future__ import annotations
 
@@ -129,8 +127,6 @@ def _run(run: str, scenario: dict | None = None) -> dict:
     if not NODE:
         pytest.skip("Node is not installed here")
     js = _js()
-    # Absent in the build before the fix, so these scenarios run against it
-    # too and fail on what the analyst sees rather than on a missing name.
     found = re.search(r"(?m)^let _tabChoices = 0;$", js)
     declared = found.group(0) if found else ""
     script = HARNESS.replace("__SCENARIO__", json.dumps(scenario or {})) + "\n".join([

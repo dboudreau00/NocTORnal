@@ -1,23 +1,17 @@
-"""Retracting a correction gives its value back
-(graph-retracted-correction-stays-in-force, review 2026-10-03, migration
-0136).
+"""Retracting a correction gives its value back (migration 0136).
 
-`PATCH /graph/nodes/{id}` and `PATCH /graph/edges/{id}` write the new label,
-attributes, weight or end date onto the element and record a claim carrying
-it. Every reader reads the element's columns, never the claims, so
-retracting the correction used to withdraw the claim and leave the value
-standing on nothing: a withdrawn "kingpin" attribute, a withdrawn weight of
-9000, kept driving the canvas and the centrality figures (invariant 1).
+`PATCH /graph/nodes/{id}` and `PATCH /graph/edges/{id}` write the new label, attributes, weight or end
+date onto the element and record a claim carrying it. Every reader reads the element's columns, never the
+claims, so retracting the correction must not withdraw the claim and leave the value standing on nothing:
+a withdrawn "kingpin" attribute, a withdrawn weight of 9000, would keep driving the canvas and the
+centrality figures (invariant 1).
 
-The design, and what these tests hold: a correction records, once, at
-insert, the value each field held just before it (`prior_value`). A
-retraction puts each field it set back to the value its remaining live
-claims support: the newest live correction of that field, or, when none is
-left, the value the element held before the first correction of it. A
-retraction of anything that is not a correction touches nothing on the
-element. A correction recorded before 0136 and not found in the audit log
-has no recorded prior value: the retraction still succeeds, the field is
-left as it is, and the audit row says so.
+The design, and what these tests hold: a correction records, once, at insert, the value each field held
+just before it (`prior_value`). A retraction puts each field it set back to the value its remaining live
+claims support: the newest live correction of that field, or, when none is left, the value the element
+held before the first correction of it. A retraction of anything that is not a correction touches nothing
+on the element. A correction recorded before 0136 and not found in the audit log has no recorded prior
+value: the retraction still succeeds, the field is left as it is, and the audit row says so.
 
 Email prefix `g43b-`. Gated on DATABASE_URL and NOCTORNAL_APP_DB_ROLE.
 """
@@ -126,8 +120,6 @@ def _edge(w):
         "SELECT weight, attrs, valid_to, confidence::text FROM core.edge WHERE id = %s",
         (w["tie"],)).fetchone()
 
-
-# --- the review's reproduction ----------------------------------------------
 
 def test_retracting_the_corrections_puts_the_label_attrs_and_weight_back(w):
     """graph_poc3: PATCH a label and attributes onto a node and a weight of
@@ -340,10 +332,9 @@ def test_a_newer_correction_restores_to_an_older_one_that_has_no_prior_value(w):
 
 
 def test_a_prior_value_that_carries_a_credential_is_never_put_back(w):
-    """A label that quoted a password (written before the credential rules of
-    2026-10-03, and copied into `prior_value` from the audit row by 0136) is
-    not restored to the graph by a retraction: the field stays, and the audit
-    row names it. Clean values are restored as ever (above)."""
+    """A label that quoted a password (written before the credential rules, and copied into `prior_value`
+    from the audit row by 0136) is not restored to the graph by a retraction: the field stays, and the
+    audit row names it. Clean values are restored as ever (above)."""
     from psycopg.types.json import Json
     owner = w["owner"]
     label_claim = _patch(w, "node", w["alpha"], label="renamed")
@@ -390,10 +381,9 @@ def test_the_whole_cycle_works_as_the_request_role(owner, w):
 
 
 def test_two_retractions_at_once_are_ordered_by_the_element_lock(owner, w):
-    """T1 retracts the newest correction and holds its transaction open; T2
-    retracts the oldest and must wait for T1's lock on the element, then
-    read T1's result. Without the lock T2 saw the newest correction still
-    live and put ITS value back, leaving the label on a withdrawn claim."""
+    """T1 retracts the newest correction and holds its transaction open; T2 retracts the oldest and must
+    wait for T1's lock on the element, then read T1's result. Without the lock T2 would see the newest
+    correction still live and put ITS value back, leaving the label on a withdrawn claim."""
     from noctornal_api.graph import GraphWriteService
     first = _patch(w, "node", w["alpha"], label="one")
     second = _patch(w, "node", w["alpha"], label="two")

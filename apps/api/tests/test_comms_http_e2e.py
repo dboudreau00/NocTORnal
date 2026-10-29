@@ -1,14 +1,11 @@
-"""Phase 7 over HTTP: the wiring, and the boundaries only the router holds.
+"""Comms over HTTP: the wiring, and the boundaries only the router holds.
 
-The services are unit-tested elsewhere. What matters here is that
-authentication, the five-part gate and the routers compose -- and three
-things the services genuinely cannot enforce on their own:
+The services are unit-tested elsewhere. What matters here is that authentication, the five-part gate
+and the routers compose, and three things the services cannot enforce on their own:
 
 - the stoplist's two scopes cannot write each other's rows,
-- a conversation id from ANOTHER case cannot be minimised under an
-  authorisation that never covered it,
-- cross-case counts are bounded by the caller's own assignments rather
-  than by a request parameter.
+- a conversation id from ANOTHER case cannot be minimised under an authorisation that never covered it,
+- cross-case counts are bounded by the caller's own assignments rather than by a request parameter.
 
 Env-gated on DATABASE_URL.
 """
@@ -48,8 +45,8 @@ def conn():
     csub = f'(SELECT id FROM core."case" WHERE owner_user_id IN {sub})'
     convs = f"(SELECT id FROM comms.conversation WHERE case_id IN {csub})"
     with c.transaction():
-        # The ledger refuses DELETE since 0089 (F10b, 2026-09-24): removed
-        # as the owner with its triggers off, inside this transaction.
+        # The ledger refuses DELETE (0089): removed as the owner with its triggers off, inside this
+        # transaction.
         c.execute("ALTER TABLE comms.pgp_verification DISABLE TRIGGER USER")
         c.execute(f"DELETE FROM comms.pgp_verification WHERE case_id IN {csub}")
         c.execute("ALTER TABLE comms.pgp_verification ENABLE TRIGGER USER")
@@ -107,29 +104,21 @@ def _make_user(conn, *, clearance="RED", global_roles=()):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    """A signed-in caller, minted the way `scripts/bootstrap.py session` mints one: the account looked
+    up by email, then `SessionService` against the same store the API validates against. Unbound (no
+    address, no User-Agent), which 0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
     is off in these tests.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Not `POST /auth/login`, which answers 204 and leaves the token only in `__Host-session`. TOTP codes
+    are single-use, so two sign-ins for one account inside one 30-second step would fail on the code,
+    not on the thing under test.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as both real mint sites pass: a session that never satisfied MFA is refused
+    # by every step-up gated route.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token
@@ -248,8 +237,8 @@ def test_a_verified_signature_confirms_a_binding_over_http(client, analyst):
         json={"platform_key": "TOX",
               "observed": TOX_PUBKEY + "11111111" + "2222"}).json()["id"]
 
-    # Since F10b a binding is confirmed only when a cited contact block
-    # lists the key's fingerprint and the identifier as its publisher's own.
+    # A binding is confirmed only when a cited contact block lists the key's fingerprint and the
+    # identifier as its publisher's own.
     block = client.post(
         f"/api/v1/cases/{case_id}/comms/contact-blocks", headers=_auth(token),
         json={"raw_text": f"PGP: {VENDOR_FPR}\nTOX: {TOX_PUBKEY}\n",
@@ -450,15 +439,10 @@ def _assign(conn, case_id, user_id, role="ANALYST"):
 
 
 def test_an_amber_reader_cannot_read_a_red_contact_block(conn, client):
-    """The comms tables carry their OWN classification, and
-    `check_writable_labels` caps a writer at their own clearance rather
-    than the case's -- so a RED-cleared analyst can put a RED block in an
-    AMBER case. `require("comms.read")` authorises against the CASE only,
-    so the under-cleared reader got the whole forum post back.
-
-    `read.py`, `evidence.py`, `samples.py` and `coparticipation.py` all
-    filter on element labels. The comms read paths did not.
-    """
+    """The comms tables carry their OWN classification, and `check_writable_labels` caps a writer at
+    their own clearance rather than the case's, so a RED-cleared analyst can put a RED block in an AMBER
+    case. `require("comms.read")` authorises against the CASE only, so the comms read paths must filter
+    on element labels, as `read.py`, `evidence.py`, `samples.py` and `coparticipation.py` do."""
     _, owner_email, owner_secret = _make_user(
         conn, clearance="RED", global_roles=("CASE_OWNER",))
     owner = _session(conn, owner_email)
@@ -546,15 +530,11 @@ def test_an_amber_reader_does_not_see_a_red_conversation_in_the_contact_graph(
 # ---------------------------------------------------------------------------
 
 def test_impersonation_does_not_reach_a_case_the_gate_would_refuse(conn, client):
-    """`_visible_cases` tested assignment and expiry only, omitting the
-    verb, clearance and compartments. `assign_user` performs no clearance
-    check and a case's classification can be raised afterwards, so an
-    assignment to a case the five-part gate REFUSES is a reachable state
-    -- `assign_user_checked` exists because of it.
-
-    The impersonation query has no label filter of its own, so it returned
-    publisher handles and source URLs out of a case the caller cannot open.
-    """
+    """`_visible_cases` must test the verb, clearance and compartments, not only assignment and expiry.
+    `assign_user` performs no clearance check and a case's classification can be raised afterwards, so
+    an assignment to a case the five-part gate REFUSES is a reachable state (`assign_user_checked`
+    exists because of it). The impersonation query has no label filter of its own, so it would return
+    publisher handles and source URLs out of a case the caller cannot open."""
     _, owner_email, owner_secret = _make_user(
         conn, clearance="RED", global_roles=("CASE_OWNER",))
     owner = _session(conn, owner_email)
@@ -625,9 +605,8 @@ def test_a_publisher_identity_from_another_case_is_refused(conn, client):
 
 
 def test_an_unknown_object_id_is_a_400_not_a_500(conn, client):
-    """An unknown id used to raise ForeignKeyViolation, which is not a
-    ContactBlockError and so escaped as a 500 -- making 201-vs-500 an
-    existence oracle for any id a caller can name."""
+    """An unknown id is a 400, not a 500: a ForeignKeyViolation is not a ContactBlockError, and a
+    201-vs-500 split would be an existence oracle for any id a caller can name."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
     token = _session(conn, email)
     case_id = _create_case(client, token)

@@ -1,27 +1,18 @@
-"""GET /admin/readiness -- the code-side half of the legal register, in one
-place, over HTTP.
+"""GET /admin/readiness: the code-side half of the legal register, in one place, over HTTP.
 
-Until 2026-09-02 the facts that decide whether a deployment may be switched
-on were scattered: docs/16's blocking items behind a Lab banner, the six
-unconfirmed retention rules behind `GET /retention/rules`, "who is the
-security officer" behind a break-glass refusal, and the KEK, rate-limit and
-Redis warnings in process-log lines nobody reads after boot. Nothing showed
-an operator whether the deployment was ready, so readiness was whatever the
-last person to look at the logs remembered.
+The facts that decide whether a deployment may be switched on (docs/16's blocking items, the unconfirmed
+retention rules, who the security officer is, the KEK, rate-limit and Redis warnings) must show an
+operator whether the deployment is ready, rather than sit in a Lab banner, a retention listing, a
+break-glass refusal and process-log lines nobody reads after boot.
 
 What these tests carry:
 
-- the endpoint exists, is gated on `user.manage`, and answers 200 with one
-  entry per check, each carrying evidence text -- a check with no evidence
-  is an opinion;
-- flipping one input flips exactly the check that reads it, with the
-  action an operator should take;
-- a service that is down is a FAILED CHECK with the error as evidence, never
-  a 500 -- because a readiness endpoint that crashes when Redis is down has
-  reported the outage as its own bug, which is this codebase's signature
-  defect wearing an operator's hat;
-- the service's declared check names and the router's response are the same
-  list, read from both sides.
+- the endpoint exists, is gated on `user.manage`, and answers 200 with one entry per check, each carrying
+  evidence text: a check with no evidence is an opinion;
+- flipping one input flips exactly the check that reads it, with the action an operator should take;
+- a service that is down is a FAILED CHECK with the error as evidence, never a 500: a readiness endpoint
+  that crashes when Redis is down has reported the outage as its own bug;
+- the service's declared check names and the router's response are the same list, read from both sides.
 
 Email prefix `rdy-`, unique to this file. Env-gated on DATABASE_URL.
 """
@@ -48,72 +39,67 @@ EXPECTED_CHECKS = (
     "prohibited_content_policy",
     "sample_origin_configured",
     "retention_rules_confirmed",
-    # F30 (2026-10-02): collected documents past their clock and unswept.
+    # Collected documents past their clock and unswept.
     "retention_sweep_current",
     "security_officer_present",
     "sys_admin_present",
     "totp_kek_set",
     "kek_ring_opens_stored_secrets",
     "ingest_pepper_set",
-    # 2026-09-23, sec-dev-secrets-in-production: a credential some file in
-    # this repository (or MinIO) publishes, on any process.
+    # A credential some file in this repository (or MinIO) publishes, on any process.
     "credentials_not_published",
     "rate_limiting_enabled",
-    # 2026-10-08, docs/17 "a missing hop count": the proxies in front are counted.
+    # docs/17 "a missing hop count": the proxies in front are counted.
     "proxy_hops_declared",
     "redis_limiter_store",
-    # 2026-09-23, sec-redis-isolation: docs/16 C8's other half.
+    # docs/16 C8's other half.
     "redis_limiter_isolated",
     "evidence_bucket_object_lock",
-    # 2026-09-22, docs/17 F2: the store rejected samples are preserved in.
+    # docs/17: the store rejected samples are preserved in.
     "preservation_bucket_object_lock",
     "evidence_size_cap_declared",
     "migrations_at_head",
     "app_db_role_not_owner",
-    # S1 (2026-09-25): row-level security is the second line here.
+    # Row-level security is the second line here.
     "row_level_security_enforced",
     "smtp_configured",
-    # docs/00 decision 71, L1 and L2 (2026-09-24): the compartment registry, the
-    # captures no lock fits, and the Triage claims written under older rules.
+    # docs/00 decision 71: the compartment registry, the captures no lock fits, and the Triage claims
+    # written under older rules.
     "compartment_bindings_intact",
     "captured_documents_compartmented",
     "triage_claims_within_labels",
     "triage_claims_dated",
     "egress_boundary",  # the network boundary (docs/00 decision 68)
-    # 2026-09-24, F1 roles: CONCOR's BLAS cap took effect.
+    # CONCOR's BLAS cap took effect.
     "role_analysis_thread_capped",
-    # Two different people can change the two-person policy (F9).
+    # Two different people can change the two-person policy.
     "dual_control_policy_changeable",
-    # F11 and F12 (2026-09-24): static triage can run and its queue
-    # drains; every active YARA rule set has a build this host can load.
+    # Static triage can run and its queue drains; every active YARA rule set has a build this host can
+    # load.
     "sample_static_analysis",
     "yara_rules_active",
     # Every forum and Telegram source configured and covered (docs/00
     # decision 69).
     "collection_sources_configured",
     "collection_authority_current",
-    # S2: every outbound use has a route and every sealed exit opens.
+    # Every outbound use has a route and every sealed exit opens.
     "egress_routes_cover_sources",
     "egress_exits_open",
-    # F10a and F10c (2026-09-24): a usable gpg at the floor, and
-    # Web Key Directory lookups off, on, or half configured.
+    # A usable gpg at the floor, and Web Key Directory lookups off, on, or half configured.
     "pgp_verifier",
     "pgp_key_directory",
-    # The similarity indexes (F6.1 and F6.2).
+    # The similarity indexes.
     "embedding_wording_current",
     "embedding_meaning_endpoint",
-    # Outbound integrations (F8, F7 and F15.2).
+    # Outbound integrations.
     "notify_outbox_draining", "jira_destination", "outbound_lookup_providers",
-    # F13 and F14 (2026-09-24): lists held under a recorded authority
-    # and every sample screened; the configured sandbox reachable,
+    # Lists held under a recorded authority and every sample screened; the configured sandbox reachable,
     # authenticated and routed.
     "prohibited_content_screening",
     "sandbox_integration",
-    # The forum adapters (F3 and F4).
     "forum_collection",
-    # Telegram collection (F5.3).
     "telegram_collection",
-    # A collector process (2026-10-02): the persona key's split.
+    # The persona key's split.
     "collector_split",
 )
 
@@ -158,29 +144,21 @@ def _make_user(conn, *, global_roles=()):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
-    is off in these tests.
+    """A signed-in caller, minted the way `scripts/bootstrap.py session` mints one: the account looked up
+    by email, then `SessionService` against the same store the API validates against. Unbound (no address,
+    no User-Agent), which 0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it is off in
+    these tests.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Not `POST /auth/login`, which answers 204 and leaves the token only in `__Host-session`: nothing in
+    this file is about the sign-in path. It also avoids the login helper's constraint that TOTP codes are
+    single-use, so two sign-ins for one account inside one 30-second step fail on the code.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as both real mint sites pass: a session that never satisfied MFA is refused by
+    # every step-up gated route.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token
@@ -203,11 +181,9 @@ def _by_name(body: dict) -> dict:
 def no_active_officers(conn):
     """Deactivate every SECURITY_OFFICER for the duration of one test.
 
-    Straight SQL rather than the admin endpoint, because `set_active`
-    refuses to deactivate the last active officer -- which is correct, and
-    is also exactly the state this fixture needs to produce. The prior
-    state is restored in `finally` so a failing assertion cannot leave the
-    database with no reviewer for break-glass.
+    Straight SQL rather than the admin endpoint, because `set_active` refuses to deactivate the last active
+    officer, which is exactly the state this fixture needs to produce. The prior state is restored in
+    `finally` so a failing assertion cannot leave the database with no reviewer for break-glass.
     """
     ids = [r[0] for r in conn.execute(
         """SELECT u.id FROM iam.app_user u
@@ -434,10 +410,8 @@ def test_migrations_check_compares_the_database_to_the_script_head(conn, client)
 
 # --- the KEK check, and the one decoder it is allowed to have ------------
 #
-# `totp_kek_set` was the one entry in the register that no test ever
-# flipped, which is how it came to keep its own copy of a rule the envelope
-# already owned. These tests flip it four ways and, in the first one, read
-# BOTH halves of the contract on a single value.
+# These tests flip `totp_kek_set` four ways and, in the first one, read BOTH halves of the contract on a
+# single value.
 
 #: Exactly 32 bytes, so the base64 of it is a KEK the envelope accepts.
 _KEK_BYTES = b"readiness-probe-kek-32-bytes!!!!"
@@ -472,19 +446,14 @@ def test_the_kek_check_agrees_with_the_envelope_on_the_same_value(
         conn, client, monkeypatch, label, raw):
     """One test that reads both sides of a contract that crosses files.
 
-    Until 2026-09-02 `readiness._totp_kek_set` decoded with
-    `base64.b64decode(raw, validate=True)` while `envelope._load_kek`
-    decoded leniently, and the check's docstring nonetheless claimed "the
-    same test `envelope._load_kek` applies". So a KEK carrying a trailing
-    newline sealed and opened every TOTP secret in the product and was
-    still reported `ok=false, ready=false` with the evidence
-    "NOCTORNAL_TOTP_KEK is set but is not valid base64" -- a working
-    deployment reported as broken, with the wrong reason, which is the
-    exact defect the readiness module exists to prevent.
+    `readiness._totp_kek_set` must apply the same test as `envelope._load_kek`. If it decoded strictly
+    (`base64.b64decode(raw, validate=True)`) while the envelope decodes leniently, a KEK carrying a trailing
+    newline would seal and open every TOTP secret in the product and still be reported `ok=false` with
+    "NOCTORNAL_TOTP_KEK is set but is not valid base64": a working deployment reported as broken, with the
+    wrong reason.
 
-    The two halves are pinned to each other here rather than to a literal,
-    so tightening `_load_kek` later moves this check with it instead of
-    silently reopening the gap.
+    The two halves are pinned to each other here rather than to a literal, so tightening `_load_kek` later
+    moves this check with it instead of silently reopening the gap.
     """
     token = _admin_token(conn)   # minted while the KEK still works
     monkeypatch.setenv("NOCTORNAL_TOTP_KEK", raw)
@@ -554,18 +523,13 @@ def test_the_kek_never_appears_in_the_register(conn, client, monkeypatch):
         assert raw.strip() not in check["action"], check
 
 
-# --- docs/16 C9: the sample origin ---------------------------------------
-
 def test_the_sample_origin_check_reads_the_same_value_download_does(
         conn, client, monkeypatch):
-    """docs/16 C9 is in the register because its configured half is a plain
-    env fact, and until 2026-09-02 it was missing: `ready=true` was
-    returned for deployments where `samples.download()` refuses every
-    request, while the module docstring claimed to be "the code-side half
-    of the legal register ... in one place".
+    """docs/16 C9 is in the register because its configured half is a plain env fact: `ready=true` must not
+    be returned for a deployment where `samples.download()` refuses every request.
 
-    Reads both halves: the register's verdict and `samples.sample_origin()`,
-    the reader `download()` itself consults.
+    Reads both halves: the register's verdict and `samples.sample_origin()`, the reader `download()` itself
+    consults.
     """
     from noctornal_api.samples import sample_origin
     token = _admin_token(conn)

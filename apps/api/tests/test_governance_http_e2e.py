@@ -1,26 +1,20 @@
 """Phases 4, 6 and 9 over HTTP: the routers, and what they refuse.
 
-These four routers reached services that had no interface at all until
-now, which meant the two most consequential operations in the system --
-destroying data on a schedule, and granting emergency access -- were
-reachable only from a Python shell. A shell has no five-part gate, no rate
-limit and no step-up, so "there was no endpoint" was never a safety
-property.
+These routers front the two most consequential operations in the system: destroying data on a schedule, and
+granting emergency access. A shell has no five-part gate, no rate limit and no step-up, so "there is no
+endpoint" is not a safety property.
 
 The tests that carry this file are the refusals:
 
 - a purge does not destroy by default,
 - an ingest key cannot read anything (invariant 11),
-- you cannot review your own break-glass, or authorise your own PII
-  reveal,
-- a global governance role does not reach a case you have no relationship
-  to.
+- you cannot review your own break-glass, or authorise your own PII reveal,
+- a global governance role does not reach a case you have no relationship to.
 
-**The email prefix is `ghe-` and must stay unique.** Every fixture in this
-suite cleans up by deleting on an email pattern, so two files sharing a
-prefix delete each other's rows — which surfaces as a foreign-key error in
-whichever file teardowns second, pointing at a table neither test touched.
-`test_governance_pg.py` already owns `gov-`.
+**The email prefix is `ghe-` and must stay unique.** Every fixture in this suite cleans up by deleting on an
+email pattern, so two files sharing a prefix delete each other's rows, which surfaces as a foreign-key error
+in whichever file tears down second, pointing at a table neither test touched. `test_governance_pg.py`
+already owns `gov-`.
 
 Env-gated on DATABASE_URL.
 """
@@ -112,21 +106,15 @@ def _make_user(conn, *, clearance="RED", global_roles=(), mfa=True):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
-    is off in these tests.
+    """A signed-in caller, minted the way `scripts/bootstrap.py session` mints one: the account looked up by
+    email, then `SessionService` against the same store the API validates against. Unbound (no address, no
+    User-Agent, because nothing here has one to give), which 0058 records and only
+    `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it is off in these tests.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Not `POST /auth/login`, which answers 204 and leaves the token only in `__Host-session`. Nothing in this
+    file is about the sign-in path, so this takes the short route to a session. TOTP codes are single-use,
+    so two sign-ins for one account inside one 30-second step would fail on the code, not on the thing under
+    test.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
@@ -172,9 +160,7 @@ def test_placeholder_retention_rules_are_surfaced_not_hidden(conn, client):
     # Every rule reports whether anybody has confirmed it.
     assert all("is_placeholder" in rule for rule in body["rules"])
     if body["unconfirmed"]:
-        # Why, in the analyst's words rather than a design-document
-        # citation, and with the count's own noun (README screenshot
-        # review, 2026-09-23).
+        # Why, in the analyst's words rather than a design-document citation, and with the count's own noun.
         n = len(body["unconfirmed"])
         assert body["notice"].startswith(
             f"{n} rule still holds" if n == 1 else f"{n} rules still hold")
@@ -217,8 +203,8 @@ def test_a_purge_needs_a_written_authority(conn, client):
     assert client.post("/api/v1/retention/purge", headers=_auth(token),
                        json={"case_id": case_id,
                              "authority": "x"}).status_code == 422
-    # And a purge with NO case is refused outright: it used to run
-    # `due(case_id=None)` -- every expired exhibit in the deployment.
+    # And a purge with NO case is refused outright: `due(case_id=None)` would cover every expired exhibit in
+    # the deployment.
     assert client.post("/api/v1/retention/purge", headers=_auth(token),
                        json={"authority": "scheduled retention run"}
                        ).status_code == 422
@@ -274,15 +260,10 @@ def test_a_global_retention_role_does_not_reach_an_unrelated_case(conn, client):
 def test_break_glass_refuses_when_nobody_can_review_it(conn, client):
     """A grant nobody will review is just access with a better story.
 
-    The service asks whether ANY active user holds SECURITY_OFFICER, so
-    reproducing the refusal means there must be none anywhere — which
-    makes this test a global-state mutation, and global state is the trap
-    this suite keeps relearning (retention rules, the comms stoplist).
-
-    Deactivating every officer and not restoring them made the NEXT test
-    that needed one fail, in a different file, with an error pointing at
-    neither. Hence the try/finally: the restore is the point, not the
-    tidiness.
+    The service asks whether ANY active user holds SECURITY_OFFICER, so reproducing the refusal means there
+    must be none anywhere, which makes this test a global-state mutation. Deactivating every officer and not
+    restoring them would make the NEXT test that needs one fail, in a different file, with an error pointing
+    at neither. Hence the try/finally: the restore is the point, not the tidiness.
     """
     officers = [r[0] for r in conn.execute(
         """SELECT u.id FROM iam.app_user u
@@ -352,15 +333,11 @@ def test_an_ingest_key_can_write_and_cannot_read_anything(conn, client):
     file. The key path reaches exactly one endpoint."""
     _, email, secret = _make_user(conn, global_roles=("SYS_ADMIN",))
     token = _session(conn, email)
-    # Registered before the key is issued under it. Since 2026-09-09
-    # (migration 0059) `ingest.api_key.forced_compartment` is bound to
-    # `iam.compartment`, so a stealer-log key under a key nobody
-    # registered is a 400 naming it -- the contract
-    # `test_compartment_binding_pg.py` pins -- and this test got that 400
-    # where it expected the 201. A raw insert rather than the product
-    # route because a second registration is a refusal by design, and
-    # this file runs more than once against the same database. Never
-    # deleted: the registry refuses to drop a key still carried by a row.
+    # Registered before the key is issued under it: `ingest.api_key.forced_compartment` is bound to
+    # `iam.compartment` (0059), so a stealer-log key under a compartment nobody registered is a 400 naming it
+    # (the contract `test_compartment_binding_pg.py` pins). A raw insert rather than the product route
+    # because a second registration is a refusal by design, and this file runs more than once against the
+    # same database. Never deleted: the registry refuses to drop a key still carried by a row.
     conn.execute(
         "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
         "ON CONFLICT (key) DO NOTHING",
@@ -417,16 +394,12 @@ def test_a_bad_ingest_key_is_one_message_for_every_failure(conn, client):
 
 
 def test_you_cannot_authorise_your_own_pii_reveal(conn, client):
-    """The authorisation IS the control, and authorising yourself removes
-    it.
+    """The authorisation IS the control, and authorising yourself removes it.
 
-    Rearranged 2026-09-22 for migration 0062, which revoked
-    `victim_pii.authorise` from CASE_OWNER (docs/17 F16). The officer used
-    to create the case and authorise on it as its owner; a case owner can
-    no longer authorise at all, so that request now stops at the case gate
-    (403, asserted in test_roles_and_pii_pg) before this self-check. The
-    self-check is still reachable the way it matters: an officer assigned
-    to the case as SECURITY_OFFICER, naming themselves.
+    Migration 0062 revoked `victim_pii.authorise` from CASE_OWNER (docs/17), so a case owner cannot
+    authorise at all and that request stops at the case gate (403, asserted in test_roles_and_pii_pg)
+    before the self-check. The self-check is reachable the way it matters: an officer assigned to the case
+    as SECURITY_OFFICER, naming themselves.
     """
     from noctornal_api.cases import CaseService
     owner, owner_email, _ = _make_user(conn, global_roles=("CASE_OWNER",))
@@ -502,12 +475,10 @@ def test_governance_routes_need_authentication(client):
 
 
 # ---------------------------------------------------------------------------
-# Regressions for the second adversarial pass (2026-07-25)
+# Routes must name their case
 #
-# Four of these were REPRODUCED LIVE against the first version of these
-# routers. `require_global` checks the verb, the account and step-up and
-# knows nothing about a case, so every route that let `case_id` default to
-# None ran with no case check at all.
+# `require_global` checks the verb, the account and step-up and knows nothing about a case, so a route that
+# lets `case_id` default to None runs with no case check at all.
 # ---------------------------------------------------------------------------
 
 def test_a_purge_cannot_be_run_without_naming_a_case(conn, client):
@@ -537,9 +508,9 @@ def test_a_purge_of_someone_elses_case_is_refused(conn, client):
 
 
 def test_legal_hold_is_bound_to_the_exhibits_own_case(conn, client):
-    """It was a blind `UPDATE core.evidence ... WHERE id = %s`: a holder
-    of the global role could LIFT a court-ordered hold on any exhibit in
-    the deployment and then purge it. Reproduced live."""
+    """Legal hold is bound to the exhibit's own case. A blind `UPDATE core.evidence ... WHERE id = %s`
+    would let a holder of the global role LIFT a court-ordered hold on any exhibit in the deployment and
+    then purge it."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
     token = _session(conn, email)
     r = client.post("/api/v1/retention/legal-hold", headers=_auth(token),
@@ -589,12 +560,10 @@ def test_out_of_schedule_purge_refuses_exhibits_outside_its_case(conn, client):
 
 
 def test_break_glass_serialises_instead_of_500ing(conn, client):
-    """`awaiting_review` is a @property; calling it raised TypeError and
-    EVERY break-glass response 500'd -- including the review queue, which
-    IS the control. The grant row was written anyway, so access was
-    granted invisibly and the officer who must review it could not list
-    it. The e2e suite missed it because the only queue test asserted 200
-    against an EMPTY queue, where the comprehension never runs."""
+    """`awaiting_review` is a @property; calling it raises TypeError and EVERY break-glass response would
+    500, including the review queue, which IS the control. The grant row would be written anyway, so access
+    is granted invisibly and the officer who must review it cannot list it. The queue must be non-empty
+    here: with an EMPTY queue the comprehension never runs."""
     _, so_email, so_secret = _make_user(conn, global_roles=("SECURITY_OFFICER",))
     officer = _session(conn, so_email)
 

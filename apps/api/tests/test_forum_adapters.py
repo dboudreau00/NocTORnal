@@ -1,11 +1,9 @@
-"""The XenForo and MyBB adapters without a database (F3 and F4, 2026-09-24).
+"""The XenForo and MyBB adapters without a database.
 
-The contract they register under, their settings and refusals, the
-cursor, the deletion rule, a walk over a fake RunContext (pagination as a
-hint, a forged page number, the first visit's order), the bounded child
-(a page built to exhaust lexbor is abandoned at the wall clock), and the
-production refusal of the development override. The walk through
-run_once and the database is test_forum_collection_pg.py.
+The contract they register under, their settings and refusals, the cursor, the deletion rule, a walk over
+a fake RunContext (pagination as a hint, a forged page number, the first visit's order), the bounded child
+(a page built to exhaust lexbor is abandoned at the wall clock), and the production refusal of the
+development override. The walk through run_once and the database is test_forum_collection_pg.py.
 """
 from __future__ import annotations
 
@@ -380,11 +378,9 @@ def test_a_child_that_outruns_its_wall_clock_is_abandoned(monkeypatch):
 
 
 def test_a_page_built_to_exhaust_the_parser_never_holds_the_caller():
-    """Repeated unclosed <a> within 4 MiB: lexbor's tree builder is
-    quadratic on it on Windows (measured 2026-09-24: over 25 seconds), and
-    Linux's build parses it inside the wall clock. Either way the caller has
-    an answer, the page or an abandonment, by the wall clock plus the
-    child's start and kill."""
+    """Repeated unclosed <a> within 4 MiB: lexbor's tree builder is quadratic on it on Windows (over 25
+    seconds measured), and Linux's build parses it inside the wall clock. Either way the caller has an
+    answer, the page or an abandonment, by the wall clock plus the child's start and kill."""
     unit = "<a>" * 64 + "x" + "</a>" * 64
     hostile = (unit * (fp.MAX_PAGE_BYTES // len(unit)))[:fp.MAX_PAGE_BYTES].encode()
     fetched = fh.fetched(fh.XF_THREAD, 200, hostile)

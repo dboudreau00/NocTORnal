@@ -1,15 +1,11 @@
-"""The egress proxy's decisions against the database (S2, 2026-09-24;
-docs/20 section 8.5).
+"""The egress proxy's decisions against the database (docs/20 section 8.5).
 
-A real proxy on an ephemeral loopback port, the collection framework's
-schema (or the stand-in egress_support creates where it is missing), and
-loopback origins admitted by patching the classifier the way
-test_collection_ssrf_rebinding.py patches collection._is_blocked:
-127.0.0.1 stands in for a public forum. Names resolve through a fake
-resolver that counts the lookups.
+A real proxy on an ephemeral loopback port, the collection framework's schema (or the stand-in
+egress_support creates where it is missing), and loopback origins admitted by patching the classifier the
+way test_collection_ssrf_rebinding.py patches collection._is_blocked: 127.0.0.1 stands in for a public
+forum. Names resolve through a fake resolver that counts the lookups.
 
-Runs are inserted as run_once writes them (a feed run's
-egress_profile_id is NULL).
+Runs are inserted as run_once writes them (a feed run's egress_profile_id is NULL).
 
 Env-gated on DATABASE_URL.
 """
@@ -620,8 +616,7 @@ def test_a_second_persona_on_the_profile_is_profile_shared(conn, people, loopbac
     ("RETIRED", None, None, "persona_unavailable", "persona_unavailable"),
     ("HEALTHY", "now() + interval '1 hour'", None, "persona_unavailable",
      "persona_unavailable"),
-    # A machine lock refuses a run and lets an act (the enrolment that
-    # clears it) through (2026-09-24).
+    # A machine lock refuses a run and lets an act (the enrolment that clears it) through.
     ("HEALTHY", None, "CREDENTIAL_DUPLICATED", "persona_unavailable", None),
 ])
 def test_an_unusable_persona_is_refused(conn, people, loopback_public, resolver, proxy,

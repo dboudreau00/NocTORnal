@@ -1,11 +1,9 @@
-"""The two readiness rows static triage and YARA add (F11 N and F12 M,
-2026-09-24).
+"""The two readiness rows static triage and YARA add.
 
-`sample_static_analysis` fails on a settings problem, a child that will
-not start, or a queue that nothing drains, and passes a draining backfill;
-it says what the child could still reach. `yara_rules_active` fails when
-an active rule set has no build this host can load after a full pass, in
-counts only: readiness has no caller, so it names no set and no person.
+`sample_static_analysis` fails on a settings problem, a child that will not start, or a queue that nothing
+drains, and passes a draining backfill; it says what the child could still reach. `yara_rules_active`
+fails when an active rule set has no build this host can load after a full pass, in counts only: readiness
+has no caller, so it names no set and no person.
 
 Email prefix `rsq-` (rst- is test_retention_storage_pg's). Env-gated on DATABASE_URL.
 """
@@ -52,14 +50,12 @@ def conn():
 
 @contextmanager
 def _own_queue(conn):
-    """A transaction that is always rolled back, in which the static-triage
-    queue holds only what the test puts there.
+    """A transaction that is always rolled back, in which the static-triage queue holds only what the test
+    puts there.
 
-    `_sample_static_analysis` reads the whole of `lab.static_run`, so runs
-    other suites left queued went stale during a long full run and failed
-    these tests (beta, 2026-10-07). Every run already there that the check
-    reads is set aside, ended a day ago, for the test's duration; the
-    rollback restores it untouched.
+    `_sample_static_analysis` reads the whole of `lab.static_run`, so runs other suites left queued go stale
+    during a long full run and fail these tests. Every run already there that the check reads is set aside,
+    ended a day ago, for the test's duration; the rollback restores it untouched.
     """
     with conn.transaction(force_rollback=True):
         conn.execute("""UPDATE lab.static_run
@@ -114,10 +110,9 @@ def test_it_fails_only_when_the_queue_is_stale(queue):
 
 @pytest.mark.parametrize("status", ["FAILED", "SKIPPED", "ABANDONED"])
 def test_a_run_that_ended_otherwise_within_the_hour_is_a_drainer_too(queue, status):
-    """Only lab_triage ends a run, so a run it FAILED, SKIPPED or ABANDONED
-    within the hour proves a drainer ran as much as a DONE one; the check
-    used to read only DONE and told an operator whose drainer was working
-    through refusals to schedule one (2026-10-07)."""
+    """Only lab_triage ends a run, so a run it FAILED, SKIPPED or ABANDONED within the hour proves a
+    drainer ran as much as a DONE one; reading only DONE would tell an operator whose drainer is working
+    through refusals to schedule one."""
     conn = queue
     who = make_user(conn, PREFIX)
     s = _sample(conn, who)
@@ -196,9 +191,8 @@ def test_it_passes_with_a_caveat_on_other_platforms_and_without_yara_x(queue, mo
 ])
 def test_the_exposure_caveat_names_only_what_applies_and_agrees(
         queue, monkeypatch, exposure, says, never):
-    """The verifier saw "the database host: ... would reach them" with one
-    exposure (F11, 2026-09-24). Each fact is named only when the selftest
-    reported it, and the sentence reads the same for one or two."""
+    """Each exposure fact is named only when the selftest reported it, and the sentence reads the same for
+    one or two."""
     conn = queue
     from noctornal_api import lab_triage
     real = lab_triage.selftest

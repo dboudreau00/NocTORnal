@@ -1,11 +1,9 @@
-"""Web Key Directory lookups, the pure parts (F10c, comms, 2026-09-24).
+"""Web Key Directory lookups, the pure parts.
 
-No network: a fake route and a fake fetcher. What holds: only the hash
-leaves (no ?l=); an address that is never a public directory is refused;
-the directories come from the wkd route's allowlist and a wildcard turns
-lookups off; the fallback to the direct method happens only when the
-advanced host's name does not exist; no redirect is followed and no
-User-Agent is sent; every policy problem fails closed.
+No network: a fake route and a fake fetcher. What holds: only the hash leaves (no ?l=); an address that is
+never a public directory is refused; the directories come from the wkd route's allowlist and a wildcard
+turns lookups off; the fallback to the direct method happens only when the advanced host's name does not
+exist; no redirect is followed and no User-Agent is sent; every policy problem fails closed.
 """
 from __future__ import annotations
 

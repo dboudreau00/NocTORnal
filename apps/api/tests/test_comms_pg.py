@@ -1,17 +1,16 @@
-"""Phase 7 comms: durable selectors, device fingerprints, provenance.
+"""Comms: durable selectors, device fingerprints, provenance.
 
-docs/10: "Read the durable selector column carefully. Getting this wrong is
-the single biggest source of false attribution in this domain."
+docs/10: "Read the durable selector column carefully. Getting this wrong is the single biggest source
+of false attribution in this domain."
 
 So the tests that carry this file are the three traps:
 
-- `test_a_rotated_tox_nospam_still_correlates` — the nospam is
-  user-changeable and actors change it to shed contacts. Keying on the full
-  76 hex silently shows two people.
-- `test_a_telegram_username_yields_NO_durable_value` — usernames are
-  recycled, so a match can attribute a new person's traffic to an old case.
-- `test_simplex_says_it_has_no_identifier_rather_than_returning_nothing` —
-  an absence of data must not read as an absence of activity.
+- `test_a_rotated_tox_nospam_still_correlates`: the nospam is user-changeable and actors change it to
+  shed contacts. Keying on the full 76 hex silently shows two people.
+- `test_a_telegram_username_yields_NO_durable_value`: usernames are recycled, so a match can attribute
+  a new person's traffic to an old case.
+- `test_simplex_says_it_has_no_identifier_rather_than_returning_nothing`: an absence of data must not
+  read as an absence of activity.
 
 Env-gated on DATABASE_URL.
 """
@@ -32,9 +31,7 @@ os.environ.setdefault("NOCTORNAL_TOTP_KEK", "A" * 43 + "=")
 
 # 76 hex: 64 public key + 8 nospam + 4 checksum.
 TOX_PUBKEY = "a" * 64
-#: The CANONICAL form is uppercase, and it is the ontology that says so.
-#: These tests used to pin the lowercase form, which is how the two
-#: normalisers were able to drift apart unnoticed -- see
+#: The CANONICAL form is uppercase, and it is the ontology that says so; see
 #: `test_comms_and_the_ontology_agree_on_canonical_form` below.
 TOX_PUBKEY_CANONICAL = "A" * 64
 TOX_ID_1 = TOX_PUBKEY + "11111111" + "2222"
@@ -149,23 +146,19 @@ def test_a_bare_public_key_is_accepted_as_already_durable():
 ])
 def test_comms_and_the_ontology_agree_on_canonical_form(
         platform_key, selector_type, observed):
-    """The invariant that was silently false.
+    """`comms` and the ontology agree on canonical form.
 
-    `comms.channel_binding.durable_value` and `core.selector.norm_value`
-    are the two indexes entity resolution joins across. `comms` hand-rolled
-    its own canonical forms and they drifted from the ontology's in three
-    places, each failing silently and differently:
+    `comms.channel_binding.durable_value` and `core.selector.norm_value` are the two indexes entity
+    resolution joins across. If their canonical forms drift, each failure is silent and different:
 
-    - **Matrix** lowercased the whole MXID, merging two accounts that
-      differ only in localpart case -- confident false attribution from
-      the module written to prevent it.
-    - **Tox** disagreed on case, so a join between the two indexes matched
-      nothing and read as "no correlation".
-    - **Telegram** refused negative ids as though they were usernames.
+    - **Matrix**: lowercasing the whole MXID would merge two accounts that differ only in localpart
+      case, a confident false attribution.
+    - **Tox**: a case disagreement makes a join between the two indexes match nothing, which reads as
+      "no correlation".
+    - **Telegram**: negative ids must not be refused as though they were usernames.
 
-    Testing each normaliser against its own expected output would never
-    have caught any of it: both sides were internally consistent. Only
-    comparing them does.
+    Testing each normaliser against its own expected output would not catch any of it, since both
+    sides are internally consistent. Only comparing them does.
     """
     from noctornal_ontology import normalise as ontology_normalise
 
@@ -186,18 +179,14 @@ def test_an_mxid_localpart_keeps_its_case():
 
 
 def test_a_telegram_channel_id_is_durable_and_is_not_called_a_username():
-    """A numeric supergroup id was refused with an error saying it was a
-    @username -- both a refusal and a wrong explanation."""
+    """A numeric supergroup id is durable and is not called a @username."""
     from noctornal_api.comms import normalise
-    # CR3 (2026-07-26): the durable form is namespaced by Telegram id
-    # space (u: user, c: channel/supergroup, g: basic group) and the
-    # Bot-API encoding is decoded ARITHMETICALLY rather than by dropping
-    # the characters "100" — which inverted the encoding only for an
-    # exactly-ten-digit channel id, and this test used one.
+    # The durable form is namespaced by Telegram id space (u: user, c: channel/supergroup, g: basic
+    # group) and the Bot-API encoding is decoded ARITHMETICALLY rather than by dropping the characters
+    # "100", which inverts the encoding only for an exactly-ten-digit channel id, as used here.
     assert normalise("TELEGRAM", "-1001234567890").durable == "c:1234567890"
-    # A bare positive is genuinely ambiguous between a user and an MTProto
-    # channel, so it is REFUSED (2026-09-11) rather than assumed to be the
-    # user; a caller that knows says so with an explicit prefix.
+    # A bare positive is genuinely ambiguous between a user and an MTProto channel, so it is REFUSED
+    # rather than assumed to be the user; a caller that knows says so with an explicit prefix.
     bare = normalise("TELEGRAM", "1234567890")
     assert bare.durable is None and "u:<id>" in bare.note
     assert normalise("TELEGRAM", "u:1234567890").durable == "u:1234567890"
@@ -562,9 +551,8 @@ def test_every_platform_carries_a_note_an_analyst_can_act_on(conn, svc):
 
 
 def test_the_platform_reference_needs_external_confirmation():
-    """docs/16 C5. These mappings change: Discord, Telegram and Matrix have
-    all altered identifier semantics in the last few years, and a stale
-    mapping produces confident false attribution."""
+    """docs/16. These mappings change: Discord, Telegram and Matrix have all altered identifier
+    semantics in the last few years, and a stale mapping produces confident false attribution."""
     from pathlib import Path
     register = Path(__file__).resolve().parents[3] / "docs" / "16-legal-and-external.md"
     assert register.exists()

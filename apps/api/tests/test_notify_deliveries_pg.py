@@ -1,18 +1,14 @@
-"""N4 (2026-09-02): the delivery ledger is read back, and a channel with no
-transport cannot be switched on.
+"""The delivery ledger is read back, and a channel with no transport cannot be switched on.
 
-`notify.delivery` records every refusal with a reason and the address each
-message actually reached (migration 0044), and until now nothing rendered
-it: the one table that answers "did the summary leave the building, and
-where did it go" was write-only. GET /notifications/deliveries is the read.
+`notify.delivery` records every refusal with a reason and the address each message actually reached
+(migration 0044), and GET /notifications/deliveries renders it: it answers "did the summary leave the
+building, and where did it go".
 
-Separately, a user could enable JIRA -- for which no transport exists in
-this build -- or WEBHOOK with no NOCTORNAL_WEBHOOK_URL configured, and the
-drain then reported the impossibility as a retryable transport failure,
-five times per notification, forever. Refusing at the preference is the
-honest place: the user is told at the moment they ask.
+A user cannot enable JIRA without an active destination, or WEBHOOK with no NOCTORNAL_WEBHOOK_URL
+configured: otherwise the drain reports the impossibility as a retryable transport failure, five times per
+notification, forever. Refusing at the preference tells the user at the moment they ask.
 
-**The email prefix is `ndel-` and must stay unique.**
+The email prefix is `ndel-` and must stay unique.
 
 Env-gated on DATABASE_URL.
 """
@@ -81,29 +77,18 @@ def _make_user(conn, *, clearance="AMBER", global_roles=()):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
-    is off in these tests.
+    """A signed-in caller, minted as `scripts/bootstrap.py session` does: the account by email, then
+    `SessionService` against the store the API validates against.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Unbound (no address, no User-Agent); only `NOCTORNAL_SESSION_STRICT_BINDING` refuses that, and it is off
+    here. It skips `POST /auth/login`, which answers 204 with the token only in `__Host-session`, and
+    TOTP codes are single-use within a 30-second step.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as the real mint sites pass: step-up gated routes refuse a session without it.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token
@@ -132,20 +117,16 @@ def _raise(conn, recipient, actor, **kw):
 
 
 def _drain_until_attempted(conn, notification_id, send_mail, *, passes=10):
-    """Drain until OUR row has actually been tried, not just once.
+    """Drain until our row has actually been tried, not just once.
 
-    URGENT puts the row at the front of `due()`'s ordering, but `due()`
-    orders by priority THEN age and caps at MAX_PER_DRAIN=200, so 200+
-    older due URGENT rows -- which a killed run of any suite leaves behind
-    -- starve it out of a single pass anyway. The ledger assertions below
-    would then fail on a PENDING row that was never reached: a failure
-    reported as the wrong thing, and the reason a hand-deletion of 676 rows
-    from this database was load-bearing for these tests on 2026-09-02.
+    URGENT puts the row at the front of `due()`'s ordering, but `due()` orders by priority then age and caps
+    at MAX_PER_DRAIN=200, so 200+ older due URGENT rows, which a killed run of any suite leaves behind,
+    starve it out of a single pass. The ledger assertions would then fail on a PENDING row that was never
+    reached, a failure reported as the wrong thing.
 
-    Each pass backs the rows it touched off into the future
-    (`transports._fail` sets `deliver_after = now() + 2^attempts minutes`),
-    so the backlog drains rather than repeating. Bounded, because a loop
-    that cannot terminate is worse than a starved assertion.
+    Each pass backs the rows it touched off into the future (`transports._fail` sets `deliver_after = now()
+    + 2^attempts minutes`), so the backlog drains rather than repeating. Bounded, because a loop that
+    cannot terminate is worse than a starved assertion.
     """
     from noctornal_api.transports import dispatch_due
     for _ in range(passes):
@@ -292,10 +273,8 @@ def test_the_ledger_is_behind_integration_manage(conn, client):
 # ---------------------------------------------------------------------------
 
 def test_jira_cannot_be_enabled_without_an_active_destination(conn, monkeypatch):
-    """F7 (2026-09-24): Jira has a transport now, and needs a live
-    destination; with none, enabling it would queue deliveries suppressed as
-    DESTINATION_OFF. The destination-present half is in
-    test_jira_destination_pg.py."""
+    """Jira needs a live destination; with none, enabling it would queue deliveries suppressed as
+    DESTINATION_OFF. The destination-present half is in test_jira_destination_pg.py."""
     from noctornal_api import jira
     from noctornal_api.notifications import NotificationError, NotificationService
 
@@ -320,20 +299,14 @@ def test_webhook_cannot_be_enabled_without_a_url(conn, monkeypatch):
 
 
 def test_editing_an_already_enabled_channel_is_not_a_new_enable(conn, monkeypatch):
-    """`_require_transport`'s docstring has always promised that "editing
-    the other settings of an already-enabled channel is not the moment to
-    discover the URL was unset". Until 2026-09-02 the call site tested
-    `fields.get("enabled") is True` -- the PAYLOAD, not the transition --
-    so a client PUTting the whole preference object back (which is what a
-    settings pane does when you change a quiet window) was refused with
+    """`_require_transport`'s docstring promises that "editing the other settings of an already-enabled
+    channel is not the moment to discover the URL was unset". The call site must test the transition, not
+    `fields.get("enabled") is True` (the payload): a client PUTting the whole preference object back, as a
+    settings pane does when you change a quiet window, is not enabling anything and must not be refused with
     "WEBHOOK cannot be enabled: NOCTORNAL_WEBHOOK_URL is not configured".
-    Nobody was enabling anything, and the operator reading that message
-    would go looking for a URL they had never needed to unset.
 
-    The docstring made the promise and the code did not keep it. This test
-    reads both sides: the claim is in `notifications._require_transport`
-    and the comparison that honours it is in
-    `NotificationService.set_preference`.
+    This test reads both sides: the claim is in `notifications._require_transport` and the comparison that
+    honours it is in `NotificationService.set_preference`.
     """
     from noctornal_api.notifications import NotificationService
 
@@ -363,7 +336,7 @@ def test_disabling_an_unconfigured_channel_is_always_allowed(conn, monkeypatch):
 def test_the_refusal_reaches_the_client_as_a_400(conn, client, monkeypatch):
     from noctornal_api import jira
 
-    monkeypatch.setattr(jira, "routing", lambda conn: None)  # F7
+    monkeypatch.setattr(jira, "routing", lambda conn: None)
     _, email, secret = _make_user(conn)
     token = _session(conn, email)
     r = client.put("/api/v1/notifications/preferences/JIRA", headers=_auth(token),

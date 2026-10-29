@@ -373,18 +373,16 @@ def test_nonsense_parameters_are_refused(conn, kwargs):
 # ---------------------------------------------------------------------------
 
 def test_a_big_room_full_of_unresolved_handles_does_not_score_like_a_dm(conn):
-    """THE regression for this module.
+    """A big room full of unresolved handles must not score like a DM.
 
-    Newman weighting divided by the count remaining AFTER incidental,
-    unresolved and invisible participants were dropped. With the shipped
-    defaults that is the catastrophic case, not an edge case: a
-    500-member channel where only two members are resolved gave a
-    denominator of 2, so 1/(2-1) = 1.0 and two people who merely sat in
-    the same open channel scored EXACTLY as high as a two-party DM.
+    Newman weighting must divide by the room's size BEFORE incidental, unresolved and invisible
+    participants are dropped. Dividing by the count remaining is the catastrophic case with the shipped
+    defaults, not an edge case: a 500-member channel where only two members are resolved would give a
+    denominator of 2, so 1/(2-1) = 1.0 and two people who merely sat in the same open channel would
+    score EXACTLY as high as a two-party DM.
 
-    Every earlier test in this file had all participants resolved, so
-    raw_size == size and they passed either way. That is why the defect
-    survived them.
+    The other tests in this file have all participants resolved, so raw_size == size and they pass
+    either way; this one does not.
     """
     uid = _user(conn)
     case_id = _case(conn, uid)

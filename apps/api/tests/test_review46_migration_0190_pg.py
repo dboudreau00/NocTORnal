@@ -1,11 +1,9 @@
-"""Migration 0148 (egress-notify-address-list, review of 2026-10-03): the CHECK
-on notify.preference.address, its round trip, and that the database and the
-service read the same rule.
+"""Migration 0148 (egress-notify-address-list): the CHECK on notify.preference.address, its round trip, and
+that the database and the service read the same rule.
 
-Every schema change runs inside a transaction that is rolled back (the
-test_notify_ledger_migration_pg.py pattern), so the database the rest of the
-suite uses never sees the intermediate state. Prefix `r46m-`. Env-gated on
-DATABASE_URL.
+Every schema change runs inside a transaction that is rolled back (the test_notify_ledger_migration_pg.py
+pattern), so the database the rest of the suite uses never sees the intermediate state. Prefix `r46m-`.
+Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

@@ -1,21 +1,13 @@
-"""A stored TOTP secret that cannot be opened is a server fault, answered
-as one (2026-09-11).
-
-Until then `PgUserStore.get_totp_secret` raised `InvalidTag` straight
-through `AuthService.authenticate` and the router turned it into a 500 --
-after the password had verified. The analyst saw "Unexpected error", and
-retyped a password that was right. No database: the store is a fake that
-raises what the envelope raises.
+"""A stored TOTP secret that cannot be opened is never looked at for a wrong
+password, and is not needed for a recovery code. How it is answered is in
+test_unopenable_totp_counts_as_a_failed_login.py. No database: the store is a
+fake.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from uuid import uuid4
 
-import pytest
-from cryptography.exceptions import InvalidTag
-
-from noctornal_api.security import envelope, passwords
+from noctornal_api.security import passwords
 from noctornal_api.security.auth import AuthOutcome, AuthService, AuthUser
 
 PASSWORD = "right-password"
@@ -56,26 +48,8 @@ class _Store:
         return False
 
 
-@pytest.mark.parametrize("raises", [
-    InvalidTag(),                          # a key of that id that does not open it
-    envelope.KeyUnavailable("env:v0"),     # no key of that id in the ring
-])
-def test_an_unopenable_secret_is_its_own_outcome_and_burns_nothing(raises):
-    store = _Store(raises)
-    result = AuthService(store, now=lambda: datetime.now(timezone.utc)).authenticate(
-        "a@x", PASSWORD, "123456")
-    assert result.outcome is AuthOutcome.SECOND_FACTOR_UNAVAILABLE
-    assert not result.ok
-    assert result.user_id == store.user.id
-    assert result.audit_reason == "totp_secret_unopenable"
-    # Nothing the caller sent was wrong, so no lockout attempt is spent
-    # and nothing is cleared either.
-    assert store.failed == [] and store.cleared == []
-
-
 def test_a_wrong_password_never_reaches_the_secret():
-    """The outcome is reachable only after the password verified: a
-    guesser cannot use it to learn that an account is enrolled."""
+    """The secret is opened only after the password verified."""
     store = _Store(AssertionError("get_totp_secret must not be called"))
     result = AuthService(store).authenticate("a@x", "wrong", "123456")
     assert result.outcome is AuthOutcome.INVALID_CREDENTIALS

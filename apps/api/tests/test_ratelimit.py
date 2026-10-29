@@ -242,16 +242,11 @@ def test_the_audit_throttle_never_fails_a_request():
 
 
 def test_the_audit_throttle_fails_CLOSED_not_open():
-    """Found by adversarial review, and it reads backwards until you see it.
-
-    An unreachable backend is the SAME condition that makes every
-    DENY-policy limit refuse every request. A throttle that failed open
-    would therefore, during an outage, turn each of those refusals into a
-    serialised, undeletable, append-only audit write -- the outage authoring
-    the exact flood the throttle exists to prevent. The outage is already
-    logged loudly by check(); what is given up is one audit row per subject,
-    during the window in which the audit log is the thing under threat.
-    """
+    """An unreachable backend is the SAME condition that makes every DENY-policy limit refuse every
+    request. A throttle that failed open would, during an outage, turn each of those refusals into a
+    serialised, undeletable, append-only audit write: the outage authoring the exact flood the throttle
+    exists to prevent. The outage is already logged loudly by check(); what is given up is one audit row
+    per subject, during the window in which the audit log is the thing under threat."""
     limiter = RateLimiter(DeadBackend(), limits={
         "x": Limit("x", quota=1, per_seconds=1, scope=Scope.USER)})
     assert limiter.should_audit("x", "u:1") is False
@@ -319,10 +314,8 @@ def test_every_cost_bearing_limit_fails_closed():
     quietly adding a second one."""
     fail_open = {name for name, limit in LIMITS.items()
                  if limit.on_backend_failure is OnBackendFailure.ALLOW}
-    # Both blanket meters, and only the blanket meters. `request.source` is
-    # the address-scoped half added after review found the credential half
-    # was not a ceiling at all; denying either would turn a Redis restart
-    # into a total outage.
+    # Both blanket meters, and only the blanket meters. `request.source` is the address-scoped half; the
+    # credential half alone is not a ceiling. Denying either would turn a Redis restart into a total outage.
     assert fail_open == {"request", "request.source"}
 
 
@@ -450,21 +443,15 @@ def test_the_attempt_limit_is_generous_enough_for_a_natted_organisation():
 
 
 # ---------------------------------------------------------------------------
-# Regressions from the adversarial review pass (2026-07-25)
-#
-# Each of these is a defect that shipped, was found by a reviewer trying to
-# break the limiter rather than to confirm it, and was reproduced against
-# the running app before being fixed. They are named for the defect.
+# Regressions: each is named for the defect it guards.
 # ---------------------------------------------------------------------------
 
 def test_ipv4_mapped_addresses_are_not_all_the_same_subject():
     """`::ffff:a.b.c.d` addresses ALL share the /64 `::/64`.
 
-    A dual-stack listener -- uvicorn bound to `::`, which is the default on
-    many deployments -- reports every IPv4 peer in that form. Before the
-    unmapping, every IPv4 client in the world therefore shared ONE login
-    bucket, and the first person to mistype a password locked out everyone
-    else. The limiter would have looked like it was working.
+    A dual-stack listener (uvicorn bound to `::`, the default on many deployments) reports every IPv4 peer
+    in that form. Without the unmapping, every IPv4 client in the world would share ONE login bucket, and
+    the first person to mistype a password would lock out everyone else.
     """
     assert ip_subject("::ffff:198.51.100.7") == ip_subject("198.51.100.7")
     assert ip_subject("::ffff:198.51.100.7") != ip_subject("::ffff:203.0.113.99")
@@ -478,15 +465,10 @@ def test_real_ipv6_addresses_still_collapse_to_their_64():
 
 
 def test_the_blanket_ceiling_has_a_meter_the_caller_cannot_mint():
-    """The critical one.
-
-    `request` is keyed on the presented credential, which the caller
-    supplies and nothing validates -- so rotating a random Bearer token per
-    request mints a fresh meter every time. Reproduced against the real app:
-    with the limit shrunk to 3, a fixed token gave 27 refusals in 30
-    requests and a rotating one gave zero. The credential meter subdivides;
-    it cannot bound. `request.source` is the meter that bounds, because a
-    caller cannot choose their own peer address.
+    """`request` is keyed on the presented credential, which the caller supplies and nothing validates, so
+    rotating a random Bearer token per request mints a fresh meter every time. The credential meter
+    subdivides; it cannot bound. `request.source` is the meter that bounds, because a caller cannot choose
+    their own peer address.
     """
     assert LIMITS["request"].scope is Scope.CREDENTIAL
     assert LIMITS["request.source"].scope is Scope.IP

@@ -137,7 +137,7 @@ def test_the_worker_mounts_only_its_socket(worker):
 
 def test_the_worker_is_the_application_image_running_the_worker(doc, worker):
     # The image migrate builds, never pulled (one builder: the note above
-    # x-noctornal-app in compose.yml, and test_g48_image_context).
+    # x-noctornal-app in compose.yml, and test_image_context_and_production_stack).
     assert worker["image"] == doc["services"]["migrate"]["image"]
     assert "build" in doc["services"]["migrate"] and "build" not in worker
     assert worker["pull_policy"] == "never"

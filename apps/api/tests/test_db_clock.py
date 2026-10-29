@@ -1,23 +1,17 @@
-"""`db_clock.py`: the wait that makes a write order a precondition (2026-10-08).
+"""`db_clock.py`: the wait that makes a write order a precondition.
 
-Five tests failed in a full run and passed when their file ran alone, and
-none of them had state left by another suite. The development machine's
-WSL2 VM steps its clock: for a tenth of a second in five, every row is
-stamped five or six seconds ahead of the rows around it (Hyper-V time sync
-against systemd-timesyncd, the Windows host's own clock being out). A test
-that writes two rows a moment apart, and then reads "the newest" or "the
-oldest" of them, finds them in the wrong order about one run in fifty, alone
-as well as in the suite. The suites that do so wait on the clock before the
+The development machine's WSL2 VM steps its clock: for a tenth of a second in five, every row is
+stamped five or six seconds ahead of the rows around it (Hyper-V time sync against systemd-timesyncd).
+A test that writes two rows a moment apart, and then reads "the newest" or "the oldest" of them, finds
+them in the wrong order about one run in fifty. The suites that do so wait on the clock before the
 second write (`db_clock.wait_until_after`).
 
-What these hold: the wait does not end on a reading taken INSIDE the step
-that stamped the row, which would let the next write land after the step and
-be stamped before it; it ends once the clock reads later outside any step; it
-says so when the clock never does; it costs nothing where the database's
-clock and the host's agree; and the measurement it decides that on is the
-database's own. The wait is run against scripted readings, which is the only
-way to place a reading inside a step on a machine that has none.
-Env-gated on DATABASE_URL, except the scripted ones.
+What these hold: the wait does not end on a reading taken INSIDE the step that stamped the row, which
+would let the next write land after the step and be stamped before it; it ends once the clock reads
+later outside any step; it says so when the clock never does; it costs nothing where the database's
+clock and the host's agree; and the measurement it decides that on is the database's own. The wait is
+run against scripted readings, which is the only way to place a reading inside a step on a machine that
+has none. Env-gated on DATABASE_URL, except the scripted ones.
 """
 from __future__ import annotations
 

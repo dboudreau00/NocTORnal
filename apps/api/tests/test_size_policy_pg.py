@@ -1,7 +1,6 @@
-"""The two policy routes state the cap the routers enforce (2026-09-11).
+"""The two policy routes state the cap the routers enforce.
 
-Env-gated on DATABASE_URL. **The email prefix is `szp-` and must stay
-unique.**
+Env-gated on DATABASE_URL. **The email prefix is `szp-` and must stay unique.**
 """
 from __future__ import annotations
 

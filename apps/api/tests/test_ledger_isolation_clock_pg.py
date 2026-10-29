@@ -1,28 +1,24 @@
-"""The ledgers refuse a stale tail, stamp the append and keep their sequences
-to the trigger (F51, 2026-10-03: tail-read-isolation, the time half
-of evidence-ledger-actor-time-forgeable, and the sequence side channel).
+"""The ledgers refuse a stale tail, stamp the append and keep their sequences to the trigger.
 
-`audit.event` and `core.evidence_custody` hash-chain every row to the previous
-one. 0149 takes the lock, THEN draws the number and reads the tail; 0150 and
-0151 pin who a request may name. What the review of the draw-inside-the-lock
-work found and 0149 and 0169 hold on top of that, each failing without it:
+`audit.event` and `core.evidence_custody` hash-chain every row to the previous one. 0149 takes the lock, then
+draws the number and reads the tail; 0150 and 0151 pin who a request may name. On top of that, 0149 and 0169
+hold the following, each failing without it:
 
-- the order of the steps in each trigger (isolation guard, lock, draw and
-  clock, tail) by the text of the live function, and the draw inside the lock
-  by behaviour: a writer that is waiting for the lock has not drawn;
-- the tail read is exact only in READ COMMITTED, so a transaction at any other
-  level is refused with `invalid_transaction_state` and the chain does not
-  fork, while READ COMMITTED and READ UNCOMMITTED still land;
-- a row is stamped with the clock at its append, not the start of a
-  transaction a request can hold open, and time order is chain order;
-- neither ledger column has a default, and the runtime roles hold no privilege
-  on either sequence (`SELECT last_value` read the whole log's volume);
-- with `audit.event` under row-level security (0168), a request's append still
-  chains, is still pinned to who it may name, and an unbound connection's claim
-  to a user is kept as a claim and not lost.
+- the order of the steps in each trigger (isolation guard, lock, draw and clock, tail) by the text of the
+  live function, and the draw inside the lock by behaviour: a writer that is waiting for the lock has not
+  drawn;
+- the tail read is exact only in READ COMMITTED, so a transaction at any other level is refused with
+  `invalid_transaction_state` and the chain does not fork, while READ COMMITTED and READ UNCOMMITTED still
+  land;
+- a row is stamped with the clock at its append, not the start of a transaction a request can hold open, and
+  time order is chain order;
+- neither ledger column has a default, and the runtime roles hold no privilege on either sequence
+  (`SELECT last_value` would read the whole log's volume);
+- with `audit.event` under row-level security (0168), a request's append still chains, is still pinned to
+  who it may name, and an unbound connection's claim to a user is kept as a claim and not lost.
 
-The concurrency and the attribution contract themselves are
-`test_ledger_chain_g49_pg.py` and `test_ledger_attribution_g49_pg.py`.
+The concurrency and the attribution contract themselves are `test_ledger_chain_pg.py` and
+`test_ledger_attribution_pg.py`.
 
 Gated like the other row-security tests. Account prefix `rlsled-`.
 """
@@ -300,12 +296,10 @@ def test_a_read_committed_append_still_lands(owner, ledger, level):
 
 
 def test_a_request_choosing_repeatable_read_cannot_fork_the_audit_chain(owner):
-    """The verifier's reproduction: a bound analyst begins REPEATABLE READ and
-    takes its snapshot, an honest writer appends and commits, then the analyst
-    appends its own row. It used to chain off the stale tail, fork the log and
-    make `verify_chain` report tampering that no later write clears. It is
-    refused now, the chain stays one list, and its next READ COMMITTED
-    append chains to the honest writer's row."""
+    """A bound analyst begins REPEATABLE READ and takes its snapshot, an honest writer appends and commits,
+    then the analyst appends its own row. That append is refused: chaining off the stale tail would fork the
+    log and make `verify_chain` report tampering that no later write clears. The chain stays one list, and
+    the analyst's next READ COMMITTED append chains to the honest writer's row."""
     from noctornal_api.audit_verify import verify_chain
 
     analyst = _user(owner)
@@ -361,9 +355,9 @@ def test_a_row_is_stamped_at_its_append_not_at_the_start_of_its_transaction(owne
 @pytest.mark.parametrize("ledger", ["audit", "custody"])
 def test_time_order_is_chain_order_when_the_earlier_writer_holds_its_transaction_open(
         owner, ledger):
-    """A began first and holds its transaction open; B appends and commits;
-    then A appends. A is later in the chain, and its time must not be earlier
-    than B's, as it was when the time was the transaction's start."""
+    """A began first and holds its transaction open; B appends and commits; then A appends. A is later in
+    the chain, and its time must not be earlier than B's, which it would be if the time were the
+    transaction's start."""
     slow, slow_append, slow_rows = _ledger_writer(owner, ledger, "request")
     fast, fast_append, fast_rows = _ledger_writer(owner, ledger, "owner")
     try:

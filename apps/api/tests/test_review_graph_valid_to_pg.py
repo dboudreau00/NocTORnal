@@ -1,21 +1,14 @@
-"""`valid_to` can be set where the console says it can
-(graph-valid-to-cannot-be-set-after-creation, review 2026-10-03).
+"""`valid_to` can be set where the console says it can.
 
-The Retire dialog and the docstrings of the retirement endpoint told the
-analyst that to say "this stopped being true in March" they should set
-`valid_to`, and no endpoint could: `valid_from` and `valid_to` were taken
-by `POST /nodes` and `POST /edges` only, and a `PATCH` carrying one was
-dropped by pydantic. The one thing left was retiring the element, which
-removes it from every as-of view and which the same dialog says is the
-wrong tool.
+The Retire dialog and the docstrings of the retirement endpoint tell the analyst that to say "this stopped
+being true in March" they should set `valid_to`. Retiring the element instead removes it from every as-of
+view, and the same dialog says it is the wrong tool, so an endpoint must take the date after creation.
 
-The decision (2026-10-03): the date is a correction like any
-other. `PATCH /graph/nodes/{id}` and `PATCH /graph/edges/{id}` take
-`valid_to`; it is recorded as a graded claim (`claim_path` `valid_to`) with
-the previous value in the audit row and in the claim's `prior_value`, so
-retracting it puts the old date back. A date is sent with its UTC offset
-(it is the instant the as-of view and trust decay are drawn from), `null`
-clears it, leaving it out leaves it alone.
+The date is a correction like any other. `PATCH /graph/nodes/{id}` and `PATCH /graph/edges/{id}` take
+`valid_to`; it is recorded as a graded claim (`claim_path` `valid_to`) with the previous value in the
+audit row and in the claim's `prior_value`, so retracting it puts the old date back. A date is sent with
+its UTC offset (it is the instant the as-of view and trust decay are drawn from), `null` clears it,
+leaving it out leaves it alone.
 
 Email prefix `g43e-`. Gated on DATABASE_URL and NOCTORNAL_APP_DB_ROLE.
 """
@@ -273,9 +266,9 @@ def test_create_still_takes_both_dates_and_a_plain_patch_is_unchanged(w):
 
 
 def test_the_retirement_endpoint_says_where_the_date_is_set(w):
-    """The docstring that sent the analyst to a field that did not exist now
-    names the one that does."""
+    """The retirement endpoint's description names the field and the request that set a
+    node's end date."""
     from noctornal_api.http.routers import graph as router
     doc = router.soft_delete_node.__doc__
-    assert "PATCH" in doc and "valid_to" in doc and "until then no endpoint" in doc
+    assert "PATCH" in doc and "valid_to" in doc
     assert "valid_to" in router.__doc__ and "correction" in router.__doc__

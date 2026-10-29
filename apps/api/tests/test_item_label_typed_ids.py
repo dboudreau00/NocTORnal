@@ -1,19 +1,14 @@
-"""F36 (docs/17, 2026-10-02): a run's warning names a skipped Telegram
-message by its typed id.
+"""A run's warning names a skipped Telegram message by its typed id (docs/17).
 
-The warning stores the item's id, and the id is the site's text, so it passes
-through the credential redactor. The redactor reads `c:123/45` alone on a
-line as `user:password` and masked it, so the warning said
-"Item 'c:[REDACTED]' was skipped" and the analyst could not tell which message
-it meant. `_item_label` now keeps the one shape the Telegram adapter writes
-(`c:<chat>/<message>`, or `g:<chat>/<message>@u:<persona>`) and the forum
-adapters' `post:<n>` and `member:<n>` (`redact` reads `post:1001` as
-`user:password` just the same), and nothing else: a real secret that happens to
-look like one, a longer string that merely contains one, and every other id
-still goes through `redact`.
+The warning stores the item's id, and the id is the site's text, so it passes through the credential
+redactor. The redactor reads `c:123/45` alone on a line as `user:password`, which would make the warning say
+"Item 'c:[REDACTED]' was skipped". `_item_label` keeps the one shape the Telegram adapter writes
+(`c:<chat>/<message>`, or `g:<chat>/<message>@u:<persona>`) and the forum adapters' `post:<n>` and
+`member:<n>` (`redact` reads `post:1001` as `user:password` just the same), and nothing else: a real secret
+that happens to look like one, a longer string that merely contains one, and every other id still goes
+through `redact`.
 
-Pure: no database. The end-to-end sentence is held in
-test_telegram_collection_pg.
+Pure: no database. The end-to-end sentence is held in test_telegram_collection_pg.
 """
 from __future__ import annotations
 

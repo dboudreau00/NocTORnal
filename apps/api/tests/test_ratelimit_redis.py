@@ -1,16 +1,11 @@
-"""The Redis leg: prove the Lua script and the pure Python decide the same
-way, request for request.
+"""The Redis leg: prove the Lua script and the pure Python decide the same way, request for request.
 
-Two implementations of one algorithm is two chances to be wrong, and the
-failure mode is quiet -- a limiter that is 20% too generous looks exactly
-like a limiter that works. So the central test here does not assert
-hand-computed values a second time; it runs the SAME request sequence
-through `InProcessBackend` and `RedisBackend` and asserts the allow/deny
-sequences are identical. If the two ever disagree, that is the bug.
+Two implementations of one algorithm is two chances to be wrong, and the failure is quiet: a limiter that
+is 20% too generous looks like one that works. So the central test runs the SAME request sequence through
+`InProcessBackend` and `RedisBackend` and asserts the allow/deny sequences are identical.
 
-Env-gated on REDIS_URL, like the Postgres legs are on DATABASE_URL. Note
-that CI fails the run if anything skips, so this gate means "the Redis
-service is missing", not "these tests are optional".
+Env-gated on REDIS_URL, like the Postgres legs are on DATABASE_URL. CI fails the run if anything skips, so
+this gate means "the Redis service is missing", not "these tests are optional".
 """
 from __future__ import annotations
 
@@ -33,12 +28,10 @@ def backend():
 
 
 def _forget(*patterns: str) -> None:
-    """Delete what a test wrote. `test:` keys are not the limiter's, and
-    since 2026-09-23 the readiness row `redis_limiter_isolated` reports a
-    Redis holding them as SHARED (sec-redis-isolation), so a suite that
-    left them for their TTL (a minute, for `claim_once`) would flip the
-    register it tests in whichever readiness test ran next. Best effort:
-    a Redis that went away mid-test is that test's failure, not this one's."""
+    """Delete what a test wrote. `test:` keys are not the limiter's, and the readiness row
+    `redis_limiter_isolated` reports a Redis holding them as SHARED, so a suite that left them for their TTL
+    (a minute, for `claim_once`) would flip the register it tests in whichever readiness test ran next.
+    Best effort: a Redis that went away mid-test is that test's failure, not this one's."""
     import redis
 
     try:
@@ -69,14 +62,10 @@ _CLOCK_READ = ("local now = redis.call('TIME')\n"
 
 
 def _on_a_clock(backend, now_us):
-    """`backend`, its script's one clock read replaced by `now_us()`
-    (microseconds) passed as an argument. Every other line is what production
-    runs, called through `RedisBackend`'s own parsing. What a test asserts
-    then does not depend on how long a Redis round trip took, nor on Redis's
-    clock holding still between two of them, which a host that steps its
-    clock does not promise: the development machine's moves it by five
-    seconds and back a tenth of a second later, every five seconds
-    (db_clock.py)."""
+    """`backend`, its script's one clock read replaced by `now_us()` (microseconds) passed as an argument.
+    Every other line is what production runs, called through `RedisBackend`'s own parsing. What a test
+    asserts then does not depend on how long a Redis round trip took, nor on Redis's clock holding still
+    between two of them, which a host that steps its clock does not promise (db_clock.py)."""
     from noctornal_api.ratelimit_redis import _GCRA_LUA
 
     assert _GCRA_LUA.count(_CLOCK_READ) == 1
@@ -88,11 +77,10 @@ def _on_a_clock(backend, now_us):
 
 def test_the_script_allows_the_burst_then_refuses(backend, key):
     emission, tolerance = 60_000_000, 180_000_000  # a minute each, burst 3
-    # The three requests and the refusal land in one instant, held still. On
-    # Redis's own clock, 0.1 s between two of them (a slow round trip, or a step
-    # of the host's clock) gave the meter an emission back and the count read
-    # one higher than the burst had left. A minute each keeps the meter's real
-    # expiry, which is Redis's clock too, far longer than the test.
+    # The three requests and the refusal land in one instant, held still: on Redis's own clock, 0.1 s
+    # between two of them (a slow round trip, or a step of the host's clock) would give the meter an
+    # emission back. A minute each keeps the meter's real expiry, also Redis's clock, far longer than the
+    # test.
     _on_a_clock(backend, lambda: 1_790_000_000 * 1_000_000)
     for expected in (2, 1, 0):
         decision = backend.measure(key, emission, tolerance)
@@ -128,26 +116,18 @@ def test_the_meter_expires_on_its_own(backend, key):
 
 
 def test_redis_and_python_agree_request_for_request(key):
-    """The test that matters. One algorithm, two implementations, one
-    decision sequence, asserted at the boundaries.
+    """One algorithm, two implementations, one decision sequence, asserted at the boundaries.
 
-    Both sides run on ONE injected clock (2026-10-07). Until then
-    each read its own wall clock, every Redis round trip added elapsed time
-    to the Redis side only, and on a loaded machine the two drifted across
-    a boundary the other had not reached: the test failed with nothing
-    wrong (known since 2026-07-30). The production script reads Redis's
-    TIME and `measure` takes no clock, by design (the next test asserts
-    both), so the Redis side here runs the production script's own text
-    with that one read replaced by an argument, called through
-    `RedisBackend`'s own parsing; every other line is what production runs.
-    Time being exact, requests land ON the boundary (allow_at == now),
-    which wall time could never place, and whole decisions are compared,
-    not just the verdict.
+    Both sides run on ONE injected clock: with each reading its own wall clock, every Redis round trip adds
+    elapsed time to the Redis side only, and on a loaded machine the two drift across a boundary the other
+    has not reached. The production script reads Redis's TIME and `measure` takes no clock, by design (the
+    next test asserts both), so the Redis side here runs the production script's own text with that one
+    read replaced by an argument, called through `RedisBackend`'s own parsing. Time being exact, requests
+    land ON the boundary (allow_at == now), and whole decisions are compared, not just the verdict.
 
-    The clock is whole seconds at a realistic epoch, so the in-process
-    side's float clock converts exactly and the Redis side carries numbers
-    the size production does; an emission of a minute keeps every meter's
-    real TTL far longer than the test.
+    The clock is whole seconds at a realistic epoch, so the in-process side's float clock converts exactly
+    and the Redis side carries numbers the size production does; an emission of a minute keeps every
+    meter's real TTL far longer than the test.
     """
     import random
 
@@ -187,14 +167,11 @@ def test_redis_and_python_agree_request_for_request(key):
 
 
 def test_time_comes_from_redis_not_from_the_caller(backend, key):
-    """There is no `now` parameter to pass, by design. Several API
-    processes with disagreeing clocks would otherwise each enforce their
-    own idea of the rate, and one whose clock stepped backwards would hand
-    out free capacity while it caught up -- the development host for this
-    project has an unsynchronised clock, so this is not hypothetical.
+    """There is no `now` parameter to pass, by design. Several API processes with disagreeing clocks would
+    otherwise each enforce their own idea of the rate, and one whose clock stepped backwards would hand out
+    free capacity while it caught up.
 
-    Asserted structurally: the script reads TIME itself, and `measure`
-    exposes no clock argument to get wrong.
+    Asserted structurally: the script reads TIME itself, and `measure` exposes no clock argument.
     """
     import inspect
 
@@ -236,10 +213,9 @@ def test_an_unreachable_redis_raises_backend_unavailable_not_a_redis_error():
 
 
 def test_a_dead_backend_does_not_hang_the_request():
-    """redis-py's default socket timeout is None. A Redis that accepts
-    connections and stops answering would then hang every limited request
-    for as long as the TCP stack allows -- the limiter causing the outage
-    it was installed to prevent."""
+    """redis-py's default socket timeout is None, so a Redis that accepts connections and stops answering
+    would hang every limited request for as long as the TCP stack allows: the limiter causing the outage
+    it exists to prevent."""
     from noctornal_api.ratelimit_redis import (
         CONNECT_TIMEOUT_S,
         SOCKET_TIMEOUT_S,

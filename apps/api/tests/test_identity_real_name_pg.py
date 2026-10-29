@@ -1,17 +1,15 @@
-"""A persona carries no real name (invariant 2; docs/17, "`real_name` on an
-identity").
+"""A persona carries no real name (invariant 2; docs/17, "`real_name` on an identity").
 
-`IDENTITY` is a handle that was observed and `PERSON` is a human that was
-assessed; they meet only through a reversible `ATTRIBUTED_TO` tie. The schema
-cannot keep a name off a persona, because `core.node.attrs` is free-form jsonb,
-so the graph service, the one writer, refuses the key at creation and at
-correction. A PERSON may carry one.
+`IDENTITY` is a handle that was observed and `PERSON` is a human that was assessed; they meet only through
+a reversible `ATTRIBUTED_TO` tie. `core.node.attrs` is free-form jsonb, so the schema cannot keep a name off
+a persona: the graph service, the one writer, refuses the key at creation and at correction. A PERSON may
+carry one.
 """
 from __future__ import annotations
 
 import pytest
 
-import review_g42_support as g
+import graph_visibility_support as g
 import rls_support as s
 
 pytestmark = g.GATED

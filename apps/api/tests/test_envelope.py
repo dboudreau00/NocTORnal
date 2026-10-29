@@ -33,12 +33,10 @@ def test_missing_kek_refuses(monkeypatch):
         envelope.encrypt("x")
 
 
-# --- the ring (2026-09-11) --------------------------------------------------
+# --- the ring ---------------------------------------------------------------
 #
-# `key_id` was written beside every blob and read by nothing: `decrypt`
-# accepted it and used the one env key regardless. These pin that the id
-# now SELECTS a key, that a retired key opens and never seals, and that
-# the two ways a blob can fail to open are told apart by name.
+# `key_id` is written beside every blob and SELECTS the key that opens it. These pin that a retired key
+# opens and never seals, and that the two ways a blob can fail to open are told apart by name.
 
 import base64  # noqa: E402
 
@@ -135,12 +133,10 @@ def test_a_blob_too_short_to_be_an_envelope_reports_rather_than_raises(
         monkeypatch, blob):
     """The third way a stored secret fails to open.
 
-    `data_key_ciphertext` is NOT NULL, so `SampleService.reject` records
-    a destroyed key as zero bytes. Those bytes used to reach AESGCM,
-    which answered `ValueError: Nonce must be between 8 and 128 bytes` --
-    true, and about the wrong question. Outside `UNOPENABLE`, it escaped
-    every caller that had asked only whether the blob opened: the
-    readiness check died on it and the rewrap tool aborted mid-pass.
+    `data_key_ciphertext` is NOT NULL, so `SampleService.reject` records a destroyed key as zero bytes.
+    Those bytes must not reach AESGCM: its `ValueError: Nonce must be between 8 and 128 bytes` is outside
+    `UNOPENABLE` and would escape every caller that asked only whether the blob opened (the readiness
+    check, the rewrap tool mid-pass).
     """
     _ring(monkeypatch, active=_A)
     with pytest.raises(envelope.MalformedBlob):

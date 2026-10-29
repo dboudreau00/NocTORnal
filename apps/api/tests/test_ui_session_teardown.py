@@ -1,20 +1,14 @@
 """The session's edges, held from the shipped console files.
 
-Four findings of the final adversarial review (2026-09-23), each with the
-check that would have caught it:
-
-- C4: the password, TOTP secret and QR code an administrator was issued
-  for another account stayed in the Admin pane after a sign-out, for the
-  next analyst signed in on the same tab.
-- C19: signing in on the first-run card left the sign-in form hidden, so
-  the first sign-out after a first run showed an empty page.
-- C20: refetches driven by the live channel slid the session's idle
-  window, so a console left open on a busy case never timed out. Found
-  while fixing it: every case switch after the first left the socket
-  reconnecting about once a second, forever, and each handshake slides
-  the session too.
-- U16: a password typed into the in-place sign-in sheet stayed in its
-  hidden input after Cancel or "Sign in as someone else".
+- The password, TOTP secret and QR code an administrator was issued for another account do not stay in
+  the Admin pane after a sign-out, for the next analyst signed in on the same tab.
+- Signing in on the first-run card does not leave the sign-in form hidden, so the first sign-out after
+  a first run does not show an empty page.
+- Refetches driven by the live channel do not slide the session's idle window, so a console left open
+  on a busy case times out. A case switch does not leave the socket reconnecting about once a second,
+  since each handshake slides the session too.
+- A password typed into the in-place sign-in sheet does not stay in its hidden input after Cancel or
+  "Sign in as someone else".
 
 Pure, like test_ui_first_run_session: the static assets, with the real
 functions run under Node against stubs (skipped where Node is absent).
@@ -104,9 +98,7 @@ const document = { cookie: '', contains() { return true; }, activeElement: null 
 """
 
 
-# ---------------------------------------------------------------------------
-# C4: one-time credentials end with the session that was shown them
-# ---------------------------------------------------------------------------
+# One-time credentials end with the session that was shown them
 
 _FIRST_RUN_BOXES = {"setup-creds", "setup-codes-list"}
 
@@ -197,9 +189,7 @@ const issue = () => { $('adm-creds').children = ['password', 'secret', 'qr']; };
     assert got["other"]["order"] == ["clear:adm-creds", "show:view-app"], got["other"]
 
 
-# ---------------------------------------------------------------------------
-# C19: the sign-in form survives a first run
-# ---------------------------------------------------------------------------
+# The sign-in form survives a first run
 
 def test_the_sign_in_form_is_there_after_a_first_run():
     """First run hides the form (`probeFirstRun`) and the card's sign-in
@@ -257,9 +247,7 @@ const firstRun = () => {   // what probeFirstRun and the card leave behind
     assert got["cardUp"] is True, "the sign-in form was put over a first-run card"
 
 
-# ---------------------------------------------------------------------------
-# C20: the live channel does not keep an empty desk signed in
-# ---------------------------------------------------------------------------
+# The live channel does not keep an empty desk signed in
 
 _LIVE_STUBS = r"""
 let now = 0; Date.now = () => now;
@@ -356,11 +344,9 @@ out.renewed = log.filter((l) => l === 'refetch');
 
 
 def test_a_case_switch_does_not_leave_the_socket_reconnecting_forever():
-    """`disconnectLive` lets `_ws` go and closes the old socket, and the
-    close event arrives later. The handler reconnected it anyway, and the
-    reconnect closed the NEW socket, whose handler reconnected again: a
-    socket a second for the life of the tab, each handshake sliding the
-    session. Measured at 23 sockets in 23 seconds before the fix."""
+    """`disconnectLive` lets `_ws` go and closes the old socket, and the close event arrives later. The
+    handler must not reconnect it: the reconnect would close the NEW socket, whose handler would
+    reconnect again, a socket a second for the life of the tab, each handshake sliding the session."""
     got = _run_node(_live_source(r"""
 connectLive(); sockets[0].ready();
 connectLive(); sockets[1].ready();             // the analyst opens another case

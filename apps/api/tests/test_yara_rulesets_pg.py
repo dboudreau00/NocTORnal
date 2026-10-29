@@ -1,4 +1,4 @@
-"""YARA rule sets as records (F12 and migration 0080, 2026-09-24).
+"""YARA rule sets as records (migration 0080).
 
 A set is labelled and its labels only rise; its compartments change only
 by the registry's rename (which must be recognised as one, and a swap of
@@ -303,10 +303,9 @@ def test_an_identical_bundle_is_refused_naming_its_twin(conn):
 
 
 def test_a_key_is_unique_only_among_sets_at_the_same_labels(conn):
-    """The verifier of 2026-09-24: creating a set answered "a rule set with
-    the key X exists already" for a RED or compartmented set the AMBER
-    caller could not see, and a key says what another unit hunts.
-    A key now collides only with a set at the same labels, which the
+    """A key is unique only among sets at the same labels. Creating a set must not answer "a rule set
+    with the key X exists already" for a RED or compartmented set the AMBER caller cannot see, since a
+    key says what another unit hunts. A key collides only with a set at the same labels, which the
     caller can always read, so a refusal confirms nothing hidden."""
     from noctornal_api.yara_rules import RulesetError, RulesetService
     comp = f"YRS-H{uuid4().hex[:4].upper()}"
@@ -460,10 +459,9 @@ def test_0080_downgrade_refuses_while_rulesets_exist(conn, monkeypatch):
 
 
 def test_a_budgeted_pass_starts_no_compile_or_run_it_cannot_finish(conn, monkeypatch):
-    """Found 2026-09-24: a pass run with --budget bounded its runs but
-    started a compile whenever the deadline had not yet passed, so one
-    compile's full wall limit could overrun the budget. Neither starts
-    unless its worst case fits."""
+    """A pass run with --budget starts no compile or run it cannot finish: a compile started whenever
+    the deadline had not yet passed could overrun the budget by one compile's full wall limit. Neither
+    starts unless its worst case fits."""
     import time
 
     from lab_static_fixtures import MemoryStore, declare_policy

@@ -1,25 +1,21 @@
-"""The sandbox path against the database and a local CAPEv2 stub (F14,
-2026-09-24).
+"""The sandbox path against the database and a local CAPEv2 stub.
 
 What these hold:
 
-- a request: queued when nothing needs a second person; awaiting the named
-  authoriser's sign-off when the target is exposed or the network route or
-  machine is live; the sign-off is that person's alone, re-checked, and
-  refused to the requester by the service and by a CHECK; one request per
-  sample and target in flight; a record-only row is never sent or changed;
-- the worker ends lapsed and orphaned requests, refuses a send whose
-  sample, labels, target, requester, authoriser or screening changed, and
-  sends nothing to an instance that answers without a token or with no
-  route; an integrity mismatch raises the alarm and sends nothing;
-- a send: the SHARED custody row is committed before the upload arrives;
-  the last check is made in the transaction that commits the send, so a
-  match or a new list in that window stops it; a lost answer is
-  UNCONFIRMED and never resent; a connection that never opened is
-  NOT_SENT; a worker killed mid-send is UNCONFIRMED on the next pass;
-- a report becomes a machine SANDBOX analysis linked from the detonation;
-  a sample withdrawn or a case closed meanwhile records nothing; the
-  configured auto-propose proposes payload-configuration values only;
+- a request: queued when nothing needs a second person; awaiting the named authoriser's sign-off when the
+  target is exposed or the network route or machine is live; the sign-off is that person's alone,
+  re-checked, and refused to the requester by the service and by a CHECK; one request per sample and
+  target in flight; a record-only row is never sent or changed;
+- the worker ends lapsed and orphaned requests, refuses a send whose sample, labels, target, requester,
+  authoriser or screening changed, and sends nothing to an instance that answers without a token or with
+  no route; an integrity mismatch raises the alarm and sends nothing;
+- a send: the SHARED custody row is committed before the upload arrives; the last check is made in the
+  transaction that commits the send, so a match or a new list in that window stops it; a lost answer is
+  UNCONFIRMED and never resent; a connection that never opened is NOT_SENT; a worker killed mid-send is
+  UNCONFIRMED on the next pass;
+- a report becomes a machine SANDBOX analysis linked from the detonation; a sample withdrawn or a case
+  closed meanwhile records nothing; the configured auto-propose proposes payload-configuration values
+  only;
 - the guard: request fields, illegal edges, DELETE and TRUNCATE refused.
 
 Email prefix `sbx-`. Env-gated on DATABASE_URL.
@@ -178,9 +174,8 @@ def test_a_live_route_or_machine_on_a_none_target_needs_signoff(conn, store, cap
     owner, case = _owned_case(conn)
     s, _ = _sample(conn, store, who, case_id=case)
     svc = _svc(conn, store)
-    # With a live machine listed every send names its machine (lab-1,
-    # 2026-10-03), so the route cases name the isolated one: the live ROUTE is
-    # what takes the second person here.
+    # With a live machine listed every send names its machine, so the route cases name the isolated one:
+    # the live ROUTE is what takes the second person here.
     with pytest.raises(SandboxError, match="sign-off"):
         svc.request(s.id, requested_by=who, network_route="internet",
                     machine="win10")
@@ -690,7 +685,7 @@ def test_the_guard_holds_the_record(conn, store, cape):
                    'CONFIRMED', external_ref = '1' WHERE id = %s""", (det,))
 
 
-# --- the report path on hostile or failing answers (2026-09-24) --------
+# --- the report path on hostile or failing answers --------------------
 
 def _dispatch_with(conn, store, **changes):
     """One pass with some settings changed past what the environment's
@@ -726,8 +721,8 @@ def _polled(conn, det) -> bool:
 
 
 def test_a_report_with_a_malformed_network_section_is_recorded_with_its_gaps(conn, store, cape):
-    """Until 2026-09-24 an object at network.hosts raised out of the pass,
-    left the row SUBMITTED and stopped every later pass at it."""
+    """An object at network.hosts must not raise out of the pass: it would leave the row SUBMITTED and
+    stop every later pass at it."""
     who = _requester(conn)
     s, data = _sample(conn, store, who)
     body = capev2_stub.report(hashlib.sha256(data).hexdigest(),
@@ -747,8 +742,8 @@ def test_a_report_with_a_malformed_network_section_is_recorded_with_its_gaps(con
 
 
 def test_a_report_postgres_would_refuse_is_made_storable(conn, store, cape):
-    """A NUL (jsonb refuses it) or a lone surrogate (UTF-8 cannot write it)
-    anywhere in a report used to fail the insert on every pass."""
+    """A NUL (jsonb refuses it) or a lone surrogate (UTF-8 cannot write it) anywhere in a report must not
+    fail the insert on every pass."""
     who = _requester(conn)
     s, data = _sample(conn, store, who)
     raw = capev2_stub.report(
@@ -764,9 +759,8 @@ def test_a_report_postgres_would_refuse_is_made_storable(conn, store, cape):
 
 
 def test_a_report_that_cannot_be_fetched_is_retried_then_given_up(conn, store, cape):
-    """A failed fetch is retried on the next pass
-    WITHIN GIVE_UP_AFTER. Until 2026-09-24 a reported task skipped the age
-    check, so a report that could never be fetched was retried for ever."""
+    """A failed fetch is retried on the next pass WITHIN GIVE_UP_AFTER: a reported task is age-checked
+    too, so a report that can never be fetched is not retried for ever."""
     who = _requester(conn)
     _s1, _d1, old = _in_flight(conn, store, cape, who, 803, age="2 hours")
     _s2, _d2, young = _in_flight(conn, store, cape, who, 804)

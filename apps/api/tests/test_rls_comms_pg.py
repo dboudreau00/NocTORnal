@@ -1,20 +1,17 @@
-"""Row-level security on the communications records (S1, 2026-09-25).
+"""Row-level security on the communications records.
 
-0122 puts bindings, contact blocks and their entries, conversations with
-their messages and participants, device fingerprints, the PGP registry and
-its ledger, and the stoplist under policy. Run as the request role, bound
-by a real session's proof, with the fixtures seeded as the owner:
+0122 puts bindings, contact blocks and their entries, conversations with their messages and participants,
+device fingerprints, the PGP registry and its ledger, and the stoplist under policy. Run as the request
+role, bound by a real session's proof, with the fixtures seeded as the owner:
 
-- a conversation above the reader is hidden with its participants and
-  messages, and a message above the reader is hidden inside a visible one;
-- minimisation drops EVERY body of the conversation, a message above the
-  minimiser included, and reports that count (docs/16 L4); as the request
-  role it dropped the bodies the minimiser could read and called it done;
-- the incidental flag is refused, as a missing conversation is, on a
-  conversation above the flagger (it landed there until 2026-10-07, when
-  the route gained the conversation's own label gate, A3);
-- Triage reads a proposal parsed from a RED contact block as RED to an
-  AMBER reader, through the fact, never as the case's label;
+- a conversation above the reader is hidden with its participants and messages, and a message above the
+  reader is hidden inside a visible one;
+- minimisation drops EVERY body of the conversation, a message above the minimiser included, and reports
+  that count (docs/16 L4);
+- the incidental flag is refused, as a missing conversation is, on a conversation above the flagger (the
+  route has the conversation's own label gate);
+- Triage reads a proposal parsed from a RED contact block as RED to an AMBER reader, through the fact,
+  never as the case's label;
 - nothing calls a row-security helper per row.
 
 Gated like the other row-security tests. Account prefix `rlscom-`.
@@ -129,12 +126,9 @@ def test_minimisation_drops_every_body_the_minimiser_could_not_read_too(owner, c
 
 
 def test_the_incidental_flag_does_not_land_on_a_conversation_above_the_flagger(owner, client):
-    """This asserted the flag LANDING (200) on a RED conversation for an AMBER
-    analyst, which told a flagger of a conversation they cannot read from one
-    that does not exist (a random id answered 404) and let them write to it
-    (verification round three, A3, 2026-10-07). It is now the missing
-    conversation's 404 and nothing is written; a reader of the conversation
-    still flags it."""
+    """A flagger of a conversation above their label gets the missing conversation's 404 and nothing is
+    written, so they cannot tell it from one that does not exist; a reader of the conversation still
+    flags it."""
     analyst = s.user(owner, "AMBER", prefix=PREFIX)
     boss = s.user(owner, "RED", prefix=PREFIX)
     case_id = s.case(owner, boss)

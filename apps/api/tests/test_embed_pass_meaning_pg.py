@@ -1,22 +1,18 @@
-"""Similar meaning: the gate, the audit before egress and the model change
-(F6.2, embeddings, 2026-09-24).
+"""Similar meaning: the gate, the audit before egress and the model change.
 
-Against a stub model server on loopback (tests/embedding_stub.py), through
-the real route (development: egress_policy applied in process, a direct
-pinned connection). Declared as this host's own (LOCAL_HOST) the stub is
-Destination.MODEL_HOST: ceilinged, no platform floor, no compartments.
-Undeclared it is outside this host (MODEL_REMOTE): the floor, the
-AUTHORITY declaration, and the content rules for unvetted, uncleared and
-message categories and closed cases.
+Against a stub model server on loopback (tests/embedding_stub.py), through the real route (development:
+egress_policy applied in process, a direct pinned connection). Declared as this host's own (LOCAL_HOST) the
+stub is Destination.MODEL_HOST: ceilinged, no platform floor, no compartments. Undeclared it is outside
+this host (MODEL_REMOTE): the floor, the AUTHORITY declaration, and the content rules for unvetted,
+uncleared and message categories and closed cases.
 
-What leaves is audited before it leaves: the stub reads audit.event on its
-own connection while it is answering and finds EMBED_BATCH_SENT naming
-exactly the ids it was sent. A failed audit write sends nothing; blocking
-readiness failures send nothing; an endpoint outside this host with no
-AUTHORITY is sent nothing, not even the canary, and nothing is written.
+What leaves is audited before it leaves: the stub reads audit.event on its own connection while it is
+answering and finds EMBED_BATCH_SENT naming exactly the ids it was sent. A failed audit write sends
+nothing; blocking readiness failures send nothing; an endpoint outside this host with no AUTHORITY is sent
+nothing, not even the canary, and nothing is written.
 
-The batch holds no row lock while the model answers: writers, an audited
-writer and a compartment rename all finish at once while the stub sleeps.
+The batch holds no row lock while the model answers: writers, an audited writer and a compartment rename
+all finish at once while the stub sleeps.
 
 Env-gated on DATABASE_URL. Prefix `emp-`.
 """
@@ -245,8 +241,7 @@ def test_blocking_failures_send_nothing(conn, stub):
 def test_outside_this_host_without_authority_nothing_at_all_is_sent(conn, stub):
     svc = _service(conn, stub, local=False)
     _doc(conn, "anything")
-    # Before and after, not "== 0": a row another suite left is not this
-    # pass's write (2026-10-07).
+    # Before and after, not "== 0": a row another suite left is not this pass's write.
     before = conn.execute("SELECT count(*) FROM collect.document_embedding").fetchone()[0]
     result = svc.run_pass("MEANING", max_seconds=0)
     assert result.refused == "no_authority"

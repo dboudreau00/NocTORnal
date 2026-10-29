@@ -1,21 +1,18 @@
-"""K3: search never reached collected documents.
+"""Search reaches collected documents.
 
-`collect.document.search_tsv` has been maintained by a trigger since 0016
-and indexed by a GIN since 0011, and `SearchService` queried `core.node`
-and `core.evidence` only. So the one place an analyst types a handle, a
-domain or a phrase and expects everything the case knows about it did not
-look at anything the collector had collected -- the phase that exists to
-find those things.
+`collect.document.search_tsv` is maintained by a trigger (0016) and indexed by a GIN (0011), and
+`SearchService` queries it as well as `core.node` and `core.evidence`: the one place an analyst types a
+handle, a domain or a phrase expects everything the case knows about it, including what the collector
+collected.
 
-The document half joins at the CALLER's clearance, exactly as the node
-and evidence halves do and as `CollectionService.documents` does:
-`collect.document.classification` defaults to AMBER and can be higher, so
-a RED post must be invisible to an AMBER analyst rather than
-discoverable-then-403. A node carrying the same token still appears for
-that analyst, because the two halves are filtered independently.
+The document half joins at the CALLER's clearance, exactly as the node and evidence halves do and as
+`CollectionService.documents` does: `collect.document.classification` defaults to AMBER and can be
+higher, so a RED post must be invisible to an AMBER analyst rather than discoverable-then-403. A node
+carrying the same token still appears for that analyst, because the two halves are filtered
+independently.
 
-Env-gated on DATABASE_URL. Users are `srchd-`, sources `test-srcs3-`; no
-other suite's teardown pattern matches either.
+Env-gated on DATABASE_URL. Users are `srchd-`, sources `test-srcs3-`; no other suite's teardown pattern
+matches either.
 """
 from __future__ import annotations
 
@@ -90,29 +87,21 @@ def _user(conn, *, clearance="RED", roles=()):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
-    is off in these tests.
+    """A signed-in caller, minted the way `scripts/bootstrap.py session` mints one: the account looked up
+    by email, then `SessionService` against the same store the API validates against. Unbound (no address,
+    no User-Agent), which 0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it is off in
+    these tests.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Not `POST /auth/login`, which answers 204 and leaves the token only in `__Host-session`. Nothing in
+    this file is about the sign-in path, and TOTP codes are single-use, so two sign-ins for one account
+    inside one 30-second step would fail on the code, not on the thing under test.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as both real mint sites pass: a session that never satisfied MFA is refused by
+    # every step-up gated route.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token
@@ -174,9 +163,8 @@ def _hits(rows, kind) -> set[str]:
 # --- the service --------------------------------------------------------
 
 def test_a_collected_document_is_found_by_search_at_the_callers_clearance(conn):
-    """The whole finding: a RED caller finds the post, an AMBER caller
-    does not, and the AMBER caller still finds the node carrying the same
-    token -- the two halves are filtered independently."""
+    """A RED caller finds the post, an AMBER caller does not, and the AMBER caller still finds the node
+    carrying the same token: the two halves are filtered independently."""
     from noctornal_api.curation import SearchService
 
     token = _token()

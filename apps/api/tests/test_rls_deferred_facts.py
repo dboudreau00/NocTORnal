@@ -1,13 +1,10 @@
-"""Label joins that feed a decision read facts, not policied rows (S1).
+"""Label joins that feed a decision read facts, not policied rows.
 
-Static: no database. 2026-09-25. Under row-level security a LEFT JOIN to
-a row the reader may not see reads as no row at all, and a label computed
-as the strictest of what the join found then reads LOW: the anti-join
-trap, turned into a leak. Every such join over a table the registry puts
-under policy reads the definer fact functions instead (`iam.element_facts`,
-`iam.case_facts`), and each one converted is pinned here by the SQL
-constant or function that carries it, so a later edit cannot quietly put
-the plain join back.
+Static: no database. Under row-level security a LEFT JOIN to a row the reader may not see reads as no row
+at all, and a label computed as the strictest of what the join found then reads LOW: the anti-join trap,
+turned into a leak. Every such join over a table the registry puts under policy reads the definer fact
+functions instead (`iam.element_facts`, `iam.case_facts`), and each one is pinned here by the SQL constant
+or function that carries it, so a later edit cannot quietly put the plain join back.
 """
 from __future__ import annotations
 

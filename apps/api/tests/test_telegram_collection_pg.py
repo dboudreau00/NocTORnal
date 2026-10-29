@@ -1,11 +1,9 @@
-"""Telegram polls through the collection foundation's run_once, with a fake
-transport and no network (roadmap F5.3, 2026-09-24).
+"""Telegram polls through the collection foundation's run_once, with a fake transport and no network.
 
-The authority before any transport, the member scope, Telegram's answers
-on the persona before its lock is released, the documents and their
-capture records, deletions and edits, watches on typed ids, a migrated
-group, the guards on the chat and message rows, the ceilings, the missing
-library and the missing proxy, and the custody log. DATABASE_URL-gated.
+The authority before any transport, the member scope, Telegram's answers on the persona before its lock is
+released, the documents and their capture records, deletions and edits, watches on typed ids, a migrated
+group, the guards on the chat and message rows, the ceilings, the missing library and the missing proxy,
+and the custody log. DATABASE_URL-gated.
 """
 from __future__ import annotations
 
@@ -280,10 +278,8 @@ def test_a_poisoned_capture_record_skips_its_message_and_the_cursor_moves_on(con
                                sleep=lambda _s: None).run_once(world["source"],
                                                                actor_id=None)
     assert result.status == "PARTIAL" and result.items_new == 2
-    # The foundation's ITEM_SKIPPED sentence, naming the message by its
-    # typed id. The redactor used to mask a bare 'c:<digits>/2' as
-    # user:password, so the warning could not say which message it meant
-    # (F36, 2026-10-02).
+    # The foundation's ITEM_SKIPPED sentence, naming the message by its typed id. The redactor must not
+    # mask a bare 'c:<digits>/2' as user:password, or the warning could not say which message it means.
     assert any(f"Item '{world['chat']['durable_id']}/2' was skipped: the database "
                f"refused it (CheckViolation)" in w
                for w in result.warnings), result.warnings

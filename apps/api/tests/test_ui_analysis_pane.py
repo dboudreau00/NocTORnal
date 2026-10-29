@@ -1,12 +1,9 @@
-"""The Analysis pane, held to the 2026-09-22 usability review (lens
-ux10-analytics), finding by finding.
+"""The Analysis pane.
 
-Behavioural where it matters: the shipped functions run under node with a
-fake DOM and a canvas context that records what is drawn, the harness shape
-of `test_ui_case_state_races.py`. Static checks hold the wiring the harness
-does not run. The server half of each finding is in
-`test_analytics_leads_and_coverage.py` (pure) and
-`test_analytics_latest_pg.py` (database).
+Behavioural where it matters: the shipped functions run under node with a fake DOM and a canvas
+context that records what is drawn, the harness shape of `test_ui_case_state_races.py`. Static checks
+hold the wiring the harness does not run. The server half is in `test_analytics_leads_and_coverage.py`
+(pure) and `test_analytics_latest_pg.py` (database).
 
 Pure: no database. The node halves skip when node is not installed.
 """
@@ -250,8 +247,8 @@ drawHistory();
 out.texts = texts;
 console.log(JSON.stringify(out));
 """)
-    # One label, on the left: "lowest" alone in the top right corner sat on
-    # the newest, highest point of a rising line (2026-09-24).
+    # One label, on the left: "lowest" alone in the top right corner would sit on the newest, highest
+    # point of a rising line.
     assert "highest 50.000 · lowest 10.000" in got["texts"], got
     assert "1 Jan 2026" in got["texts"] and "23 Sep 2026" in got["texts"]
 
@@ -562,9 +559,8 @@ def test_the_css_no_longer_makes_the_row_look_clickable_and_fits_the_controls():
     assert re.search(r"#an-kpp-n \{ min-width: [0-9.]+em; \}", css)
     assert "#an-run { white-space: nowrap; }" in css
     assert "#an-body tr.charted td" in css
-    # The stored-run status is a sentence now; it wraps under the controls
-    # instead of squeezing the decay select to "(" (found in the capture
-    # of the fix, 2026-09-23).
+    # The stored-run status is a sentence; it wraps under the controls instead of squeezing the decay
+    # select to "(".
     assert "#pane-analytics .pane-head { flex-wrap: wrap;" in css
     assert "#pane-analytics .pane-head > .field { flex: none; }" in css
 
@@ -616,8 +612,7 @@ def test_a_new_removal_set_size_fetches_only_the_key_player():
 """)
     assert got["kpp"] == "k4", "a stale stored set was shown instead of a fresh one"
     assert got["suite"] == "r" and not got["suiteAsked"]
-    # The card says it is reading while it reads, and searching only once a
-    # search has been asked for (found reviewing the fix, 2026-09-23).
+    # The card says it is reading while it reads, and searching only once a search has been asked for.
     assert got["renders"][0] == {"pending": True, "reading": True, "n": 4}
     assert got["renders"][1] == {"pending": True, "n": 4}
     assert "$('an-kpp-n').addEventListener('change', onKppSizeChange);" in _js()
@@ -673,9 +668,8 @@ def test_a_size_changed_during_a_first_run_asks_for_the_new_size():
 
 
 def test_a_late_run_reply_never_draws_over_the_size_on_screen():
-    """C3's guard, restored for the card alone: whichever order the two
-    replies land in, the card ends on the set for the size the control
-    shows."""
+    """The card ends on the set for the size the control shows, whichever order the two replies land
+    in."""
     got = _run(_kpp_race_harness() + r"""
 (async () => {
   // The run's reply for the OLD size lands after the new size was asked for.
@@ -795,9 +789,7 @@ function fmtTime(v) { return String(v); }
     assert got["failed"] == [], "a throttle the status line explains also raised a banner"
 
 
-# ---------------------------------------------------------------------------
-# metrics-hide-review-and-evidence-state and explanations-in-developer-language
-# ---------------------------------------------------------------------------
+# The coverage and projection lines show review and evidence state in the reader's words
 
 def test_the_coverage_and_the_projection_line_speak_the_readers_words():
     got = _run(_PRELUDE + _src("reviewCoverageText", "decayWords") + r"""
@@ -919,10 +911,8 @@ console.log(JSON.stringify(out));
 
 
 def test_a_set_on_the_graph_says_when_its_run_has_left_the_pane_or_gone_stale():
-    """Found reviewing results-dont-reach-the-graph (2026-09-23): a set shown
-    from the pane stayed "from the Analysis pane" after the pane had
-    cleared that run or marked it stale, so the graph kept emphasising
-    people on the strength of numbers the pane no longer vouched for."""
+    """A set shown on the graph says "from the Analysis pane" only while the pane vouches for it: once
+    the pane clears that run or marks it stale, the graph stops emphasising people on its numbers."""
     got = _run(_PRELUDE + r"""
 function setRendered() {}
 function selectTab() {}

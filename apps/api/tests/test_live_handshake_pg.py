@@ -1,38 +1,28 @@
-"""The live socket's credential-free refusals, read where they happen: at
-the ASGI layer, and under the real server.
+"""The live socket's credential-free refusals, read where they happen: at the ASGI layer, and under the
+real server.
 
-`test_live_pg` drives the socket through Starlette's `TestClient`, and a
-`TestClient` completes the close handshake in-process, so it cannot tell
-a refusal sent before `accept()` from one sent after. That difference is
-the whole of the 2026-09-09 finding (W1): under uvicorn's `websockets`
-backend -- `--ws auto` with `websockets` installed, which is what every
-launch script runs -- a close sent AFTER `accept()` writes the close
-frame and then holds the transport for a ten-second `close_timeout`
-waiting for the peer's echo, while a close sent BEFORE is an HTTP 403
-and an immediate `transport.close()`. A hostile peer that never echoed
-therefore held one TCP connection per refused socket for ten seconds,
-uncounted by the budget that had refused it, and the ceiling reported
-zero.
+`test_live_pg` drives the socket through Starlette's `TestClient`, which completes the close handshake
+in-process, so it cannot tell a refusal sent before `accept()` from one sent after. The difference matters:
+under uvicorn's `websockets` backend (`--ws auto` with `websockets` installed, which every launch script
+runs) a close sent after `accept()` writes the close frame and then holds the transport for a ten-second
+`close_timeout` waiting for the peer's echo, while a close sent before is an HTTP 403 and an immediate
+`transport.close()`. A hostile peer that never echoes would hold one TCP connection per refused socket for
+ten seconds, uncounted by the budget that refused it.
 
 Two kinds of test, on purpose:
 
-* The ASGI-stream tests hand the real app a websocket scope and record
-  every message it sends. They are cheap and deterministic, and they
-  assert the one fact the fix rests on: the refusal is the FIRST message,
-  with no `websocket.accept` in front of it.
-* The hostile-run test starts uvicorn in a thread, with the backend the
-  launch scripts select, and drives raw TCP sockets that complete the
-  upgrade and then send nothing: no hello, no close echo. It reads
-  `server_state.connections`, the set every uvicorn protocol removes
-  itself from in `connection_lost`, so the number it asserts on is the
-  server's own count of held transports and not a proxy for it. Run
-  against the post-accept version of the refusal on 2026-09-09 it held
-  thirty-two connections for the full ten seconds; against the
-  pre-accept version it was back to the two budgeted sockets within a
-  second.
+* The ASGI-stream tests hand the real app a websocket scope and record every message it sends. They are
+  cheap and deterministic, and assert that the refusal is the first message, with no `websocket.accept` in
+  front of it.
+* The hostile-run test starts uvicorn in a thread, with the backend the launch scripts select, and drives
+  raw TCP sockets that complete the upgrade and then send nothing: no hello, no close echo. It reads
+  `server_state.connections`, the set every uvicorn protocol removes itself from in `connection_lost`, so
+  the number it asserts on is the server's own count of held transports. Against a post-accept refusal it
+  held thirty-two connections for the full ten seconds; against the pre-accept one it is back to the two
+  budgeted sockets within a second.
 
-Env-gated on DATABASE_URL like the other socket tests: the app comes from
-`create_app()`, and one test here mints a session to fill the hub.
+Env-gated on DATABASE_URL like the other socket tests: the app comes from `create_app()`, and one test here
+mints a session to fill the hub.
 """
 from __future__ import annotations
 
@@ -98,10 +88,8 @@ def _token(conn) -> str:
 
 def _budget(monkeypatch, *, pending: int, per_peer: int = 8,
             hello: float = 20.0):
-    """Shrink the budget for one test, and start it from a fresh sampler
-    so a line written by an earlier test does not swallow this one's.
-    `raising=False` on the sampler so the same test runs against the
-    pre-2026-09-09 module, where it did not exist, and fails on
+    """Shrink the budget for one test, and start it from a fresh sampler so a line written by an earlier
+    test does not swallow this one's. `raising=False` on the sampler, so a module without it fails on
     behaviour rather than on a missing attribute."""
     from noctornal_api.http.routers import live
     monkeypatch.delenv(STRICT, raising=False)
@@ -116,15 +104,12 @@ def _budget(monkeypatch, *, pending: int, per_peer: int = 8,
 
 
 def _sent_by(app, *, ip: str = PEER_A) -> list[dict]:
-    """Hand `app` one websocket scope from `ip` and return every ASGI
-    message it sent, in order.
+    """Hand `app` one websocket scope from `ip` and return every ASGI message it sent, in order.
 
-    `receive` yields `websocket.connect` once and then a disconnect, so a
-    handler that accepted and sat waiting for a hello sees the peer leave
-    and returns: the drive terminates either way, and the stream shows
-    which way it went. Under `asyncio.run` on this thread, not on a
-    `TestClient` portal, precisely so nothing completes a close handshake
-    on the app's behalf.
+    `receive` yields `websocket.connect` once and then a disconnect, so a handler that accepted and waited
+    for a hello sees the peer leave and returns: the drive terminates either way, and the stream shows which
+    way it went. Under `asyncio.run` on this thread, not a `TestClient` portal, so nothing completes a close
+    handshake on the app's behalf.
     """
     sent: list[dict] = []
     inbound = iter([{"type": "websocket.connect"},
@@ -157,10 +142,8 @@ def _types(sent: list[dict]) -> list[str]:
 # --- the ASGI send stream: no accept in front of a refusal ---------------
 
 def test_a_full_budget_is_refused_before_accept(monkeypatch):
-    """With the budget full of one silent socket, the next socket from the
-    same peer gets `websocket.close` as the FIRST message the app sends.
-    Before the fix the stream read accept-then-close, and under uvicorn
-    that accept is what armed the ten-second linger."""
+    """With the budget full of one silent socket, the next socket from the same peer gets `websocket.close`
+    as the first message the app sends: an accept first would arm the ten-second linger under uvicorn."""
     from fastapi.testclient import TestClient
     live = _budget(monkeypatch, pending=1, per_peer=1)
     app = _app()
@@ -188,10 +171,9 @@ def test_the_off_switch_refuses_before_accept(monkeypatch):
 
 
 def test_a_full_hub_refuses_before_accept(conn, monkeypatch):
-    """The hub ceiling is the third credential-free refusal. It used to be
-    checked inside `_handshake`, after `accept()`; with one authenticated
-    subscriber holding a ceiling of one, the next socket's stream must
-    open with the 1013 close and nothing in front of it."""
+    """The hub ceiling is the third credential-free refusal, checked before `accept()`: with one
+    authenticated subscriber holding a ceiling of one, the next socket's stream opens with the 1013 close
+    and nothing in front of it."""
     from fastapi.testclient import TestClient
     live = _budget(monkeypatch, pending=4)
     monkeypatch.setattr(live, "_MAX_SOCKETS", 1)
@@ -211,11 +193,9 @@ def test_a_full_hub_refuses_before_accept(conn, monkeypatch):
 
 
 def test_refusals_are_logged_sampled_not_per_connection(monkeypatch, caplog):
-    """One WARNING per window, carrying the count, not one per refused
-    connection. The refusal is reached with no credential and no completed
-    handshake, so a line per attempt would let one address write the log
-    as fast as it can open TCP connections. Before the fix twenty refusals
-    were twenty lines."""
+    """One WARNING per window, carrying the count, not one per refused connection. The refusal is reached
+    with no credential and no completed handshake, so a line per attempt would let one address write the log
+    as fast as it can open TCP connections."""
     from fastapi.testclient import TestClient
     live = _budget(monkeypatch, pending=1, per_peer=1)
     app = _app()
@@ -302,18 +282,14 @@ def _upgrade(port: int) -> tuple[socket.socket, int]:
 
 
 def test_a_hostile_peer_holds_nothing_past_the_budget(monkeypatch):
-    """The measurement the finding asked for. Two silent sockets fill a
-    budget of two; thirty more from the same address are refused; and the
-    server's own connection set must be back to two promptly -- well
-    inside the ten-second close timeout that a post-accept refusal would
-    have held every one of the thirty for.
+    """Two silent sockets fill a budget of two; thirty more from the same address are refused; and the
+    server's own connection set must be back to two promptly, well inside the ten-second close timeout a
+    post-accept refusal would hold each of the thirty for.
 
-    Asserted on `server_state.connections` rather than on anything the
-    app reports, because the app was what reported zero while the
-    transports were held. The refused sockets must also have been
-    answered with a 403, never a 101: a 101 means a handshake completed
-    and a close frame was written, which is exactly the frame a hostile
-    peer declines to echo.
+    Asserted on `server_state.connections` rather than anything the app reports, because the app reports
+    zero while the transports are held. The refused sockets must be answered with a 403, never a 101: a 101
+    means a handshake completed and a close frame was written, which is exactly the frame a hostile peer
+    declines to echo.
     """
     from uvicorn.protocols.websockets.websockets_sansio_impl import (
         WebSocketsSansIOProtocol)

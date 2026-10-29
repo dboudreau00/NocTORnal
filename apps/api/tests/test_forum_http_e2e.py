@@ -1,14 +1,11 @@
-"""The forum adapters over HTTP, and their readiness row (F3 and F4,
-2026-09-24).
+"""The forum adapters over HTTP, and their readiness row.
 
-A XenForo or MyBB source is made through the product's own route (POST
-/collection/sources with the forum parsers' address and settings rules,
-the step-up for its exit, the audit row), polled through the run route
-(refused from this server's own address; BLOCKED with no authority), and
-a forum document's side rows are read back through GET
-/collection/documents/{id}/forum under the labels. The default registry
-is used as shipped: no override. DATABASE_URL-gated; nothing contacts a
-forum (every poll here stops before a request).
+A XenForo or MyBB source is made through the product's own route (POST /collection/sources with the forum
+parsers' address and settings rules, the step-up for its exit, the audit row), polled through the run route
+(refused from this server's own address; BLOCKED with no authority), and a forum document's side rows are
+read back through GET /collection/documents/{id}/forum under the labels. The default registry is used as
+shipped: no override. DATABASE_URL-gated; nothing contacts a forum (every poll here stops before a
+request).
 """
 from __future__ import annotations
 

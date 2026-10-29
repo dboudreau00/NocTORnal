@@ -1,10 +1,7 @@
-"""The provider key vault (F15.2, 2026-09-24): sealed
-at rest, never returned by any method or route, used only inside
-secret_in_scope after an audit row, and bound to the origin and route it
-was entered for.
+"""The provider key vault: sealed at rest, never returned by any method or route, used only inside
+secret_in_scope after an audit row, and bound to the origin and route it was entered for.
 
-Nothing reaches a provider. **The email prefix is `pvvlt-`.** Env-gated on
-DATABASE_URL.
+Nothing reaches a provider. **The email prefix is `pvvlt-`.** Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

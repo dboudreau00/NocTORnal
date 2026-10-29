@@ -1,34 +1,28 @@
-"""One chain, however many writers (evidence-audit-chain-forks, 2026-10-03).
+"""One chain, however many writers.
 
-`audit.event.seq` and `core.evidence_custody.id` were serial columns drawn
-BEFORE the BEFORE INSERT trigger took the advisory lock that serialises the
-chain. Two writers handed 33 and 34 could reach the lock in the opposite
-order: 34 chained off the old tail, 33 then chained off 34, and the next
-writer, which takes the HIGHEST number as the tail, chained off 34 too. Row
-33 became a dead end that nothing names as a predecessor, and a dead end is a
-row an owner can delete while the verifier still says intact. 0149 draws the
-number inside the lock.
+`audit.event.seq` and `core.evidence_custody.id` are drawn inside the BEFORE INSERT trigger's advisory lock,
+which serialises the chain (0149). Drawn before the lock, two writers handed 33 and 34 could reach it in the
+opposite order: 34 chained off the old tail, 33 then chained off 34, and the next writer, which takes the
+highest number as the tail, chained off 34 too. Row 33 would be a dead end that nothing names as a
+predecessor, and a dead end is a row an owner can delete while the verifier still says intact.
 
-What these tests hold, each against the unfixed trigger as well as the fixed
-one (they fail without 0149):
+What these tests hold, each failing without 0149:
 
-- CONCURRENCY: writers on three roles (the owner, the system role, the
-  request role bound to a user) append at once, twenty rounds each, and the
-  rows after the watermark form ONE linked list in number order, with no fork;
-- THE MECHANISM, deterministically: a caller that supplies a high number and
-  then a low one used to chain the low one off the high one; the number is now
-  the trigger's, so number order is chain order whatever the caller says;
-- THE VERIFIER: a fork written after the boundary 0149 records is a break and
-  makes `intact` false; one with a claimant at or below it is legacy and is
-  only listed; a database that has no boundary treats every fork as legacy;
-- THE FUNCTIONS: both chain functions run as the definer with a pinned path,
-  the boundary functions exist, and the attribution trigger fires before the
-  chain trigger;
-- THE MIGRATIONS: 0149, 0150 and 0151 downgrade and upgrade again, in a
-  rolled-back transaction, leaving the database as it was.
+- Concurrency: writers on three roles (the owner, the system role, the request role bound to a user) append
+  at once, twenty rounds each, and the rows after the watermark form one linked list in number order, with
+  no fork.
+- The mechanism, deterministically: the number is the trigger's, so a caller that supplies a high number and
+  then a low one still gets number order as chain order.
+- The verifier: a fork written after the boundary 0149 records is a break and makes `intact` false; one with
+  a claimant at or below it is legacy and is only listed; a database that has no boundary treats every fork
+  as legacy.
+- The functions: both chain functions run as the definer with a pinned path, the boundary functions exist,
+  and the attribution trigger fires before the chain trigger.
+- The migrations: 0149, 0150 and 0151 downgrade and upgrade again, in a rolled-back transaction, leaving the
+  database as it was.
 
-Rows these tests commit stay (both ledgers are append-only); they are
-recognisable by their `G49_CHAIN_` actions.
+Rows these tests commit stay (both ledgers are append-only); they are recognisable by their `G49_CHAIN_`
+actions.
 """
 from __future__ import annotations
 
@@ -292,10 +286,6 @@ def test_a_chain_is_only_extended_from_a_snapshot_that_can_see_the_tail(tamperab
             "INSERT INTO audit.event (actor_kind, action, detail) "
             "VALUES ('SYSTEM', 'G49_CHAIN_RR', '{}'::jsonb)")
 
-
-# ---------------------------------------------------------------------------
-# The verifier
-# ---------------------------------------------------------------------------
 
 def _seed(conn, n: int = 4) -> int:
     start = conn.execute("SELECT coalesce(max(seq), 0) FROM audit.event").fetchone()[0]

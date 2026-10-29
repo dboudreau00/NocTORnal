@@ -1,10 +1,9 @@
-"""The persona vault's new machinery (the collection foundation, 2026-09-24).
+"""The persona vault's machinery: lease, redaction, holds and locks, visibility.
 
-The lease and its compare-and-set reseal, a JSON credential's leaves
-redacted exactly, the machine's holds and locks that only the platform (the
-adapter's signal) writes and no sequence of human writes can undo, the
-guard that holds that against any writer, the visibility over every bound
-source, the listing, and one persona per egress profile.
+The lease and its compare-and-set reseal, a JSON credential's leaves redacted exactly, the holds and locks
+that only the platform (the adapter's signal) writes and no sequence of human writes can undo, the guard
+that holds that against any writer, the visibility over every bound source, the listing, and one persona per
+egress profile.
 
 DATABASE_URL-gated.
 """
@@ -186,8 +185,7 @@ def test_destroy_secret_leaves_no_sealed_row(conn):
     from noctornal_api.collection import PersonaVault
     from noctornal_api.security import persona_sealed
 
-    # The persona ring's inventory since 2026-10-02 (A collector process):
-    # the TOTP ring's no longer holds the column.
+    # The persona ring inventories the column; the TOTP ring does not.
     def sealed_personas():
         return sum(g.rows for g in persona_sealed.key_groups(conn))
 
@@ -429,12 +427,9 @@ def _handle(conn, persona_id):
 
 
 def test_egress_separation_never_names_a_persona_the_caller_cannot_see(conn):
-    """Found by a rolled-back probe (2026-09-25): once
-    PERSONA_VISIBLE_SQL looked at bound sources, personas() and set_status
-    hid a persona bound to a RED source from an AMBER caller, and this
-    check still named it, in both of its findings. It now lists only the
-    handles the caller may see and says, as one bit, that another shares
-    the exit."""
+    """With PERSONA_VISIBLE_SQL reading bound sources, a persona bound to a RED source is hidden from an
+    AMBER caller, so the egress check lists only the handles the caller may see and says, as one bit, that
+    another shares the exit."""
     from noctornal_api.collection import PersonaVault
 
     vault = PersonaVault(conn)
@@ -482,10 +477,9 @@ def test_the_public_read_leg_keeps_its_finding_without_the_hidden_handle(conn):
 
 
 def test_the_lease_refuses_what_the_gate_refuses(conn):
-    """Until 2026-09-25 the lease had a rule of its own, and a
-    COOLDOWN with no end, which PERSONA_USABLE_SQL (the gate, the due list
-    and the proxy) reads as unusable, still opened through use(). Now the
-    lease asks the same predicate; a stopping lease still opens it."""
+    """The lease asks the same predicate as the gate: a COOLDOWN with no end, which PERSONA_USABLE_SQL (the
+    gate, the due list and the proxy) reads as unusable, does not open through use(). A stopping lease
+    still opens it."""
     from noctornal_api.collection import (
         COOLDOWN,
         PersonaGate,
@@ -511,8 +505,8 @@ def test_the_lease_refuses_what_the_gate_refuses(conn):
 
 
 def test_the_persona_row_reads_usability_as_the_sql_does(conn):
-    """Persona.is_usable is the same rule as PERSONA_USABLE_SQL over the
-    fields it carries, a COOLDOWN with no end included (2026-09-25)."""
+    """Persona.is_usable is the same rule as PERSONA_USABLE_SQL over the fields it carries, a COOLDOWN with
+    no end included."""
     from noctornal_api.collection import PERSONA_USABLE_SQL, Persona
 
     now = datetime.now(timezone.utc)
@@ -535,9 +529,8 @@ def test_the_persona_row_reads_usability_as_the_sql_does(conn):
 
 
 def test_a_person_reaches_the_gate_only_with_their_ceiling(conn):
-    """No ceiling is the worker's reading and sees every persona; a person
-    who reaches the gate without theirs is a caller that forgot it, refused
-    before anything is read (2026-09-25)."""
+    """No ceiling is the worker's reading and sees every persona; a person who reaches the gate without
+    theirs is a caller that forgot it, refused before anything is read."""
     from noctornal_api.collection import CollectionError, PersonaGate
 
     actor, _ = h.user(conn, P, roles=("COLLECTOR",))

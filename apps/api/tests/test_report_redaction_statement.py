@@ -1,15 +1,11 @@
-"""The marking statement says only what the case's withheld-disclosure setting
-lets it say (0030, decision 179), and says it the same way for all three
-figures.
+"""The marking statement says only what the case's withheld-disclosure setting lets it say (0030, decision
+179), and says it the same way for all three figures.
 
-Beta 1.1 group C (2026-10-08). The setting decides what a reader may learn of
-material above the ceiling they asked for: under NONE nothing, under
-PRESENCE that there is some, under COUNT how much. The exhibit figure
-followed it since 2026-10-07; the entity figure, the relationship figure and
-the hypothesis matrix's evidence were still stated exactly under PRESENCE,
-the builder never told `Redaction` which setting it had built under, and a
-statement built under NONE read "nothing has been withheld" beside a
-document that had left material out.
+The setting decides what a reader may learn of material above the ceiling they asked for: under NONE
+nothing, under PRESENCE that there is some, under COUNT how much. The exhibit figure, the entity figure,
+the relationship figure and the hypothesis matrix's evidence all follow it, the builder tells `Redaction`
+which setting it built under, and a statement built under NONE must not read "nothing has been withheld"
+beside a document that left material out.
 
 No database: these are the statement's rules on a hand-built `Redaction`.
 """

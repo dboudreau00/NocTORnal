@@ -1,8 +1,7 @@
-"""The forum parsing toolkit (F3 and F4, 2026-09-24).
+"""The forum parsing toolkit.
 
-Pure: no database, no socket. Ids, text, times, the URL model, quotes,
-signatures, fragments, login walls, challenges and drift, over short
-inline pages and hostile input built at run time (a fixture file may not
+Pure: no database, no socket. Ids, text, times, the URL model, quotes, signatures, fragments, login walls,
+challenges and drift, over short inline pages and hostile input built at run time (a fixture file may not
 carry control or invisible characters: check_source_hygiene refuses them).
 """
 from __future__ import annotations

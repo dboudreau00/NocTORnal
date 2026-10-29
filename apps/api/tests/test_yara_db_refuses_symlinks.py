@@ -1,15 +1,12 @@
-"""scripts/yara_db.py refuses symbolic links in a pulled rule repository
-(infra-13, 2026-10-03).
+"""scripts/yara_db.py refuses symbolic links in a pulled rule repository.
 
-A source's repository is somebody else's tree, fetched at HEAD. A
-`rules/innocent.yar` that is a symlink to a path on the operator's machine
-was kept by the prune (it has the right extension), listed by `os.walk` as a
-file, opened by `_source_bundle` and stored in a rule set version by `import`,
-where lab members and the activating Security Officer read it as rule text.
+A source's repository is somebody else's tree, fetched at HEAD. A `rules/innocent.yar` that is a symlink to
+a path on the operator's machine would be kept by the prune (it has the right extension), listed by
+`os.walk` as a file, opened by `_source_bundle` and stored in a rule set version by `import`, where lab
+members and the activating Security Officer read it as rule text.
 
-Creating a symlink needs a privilege on Windows (and git there checks them out
-as text), so these skip where one cannot be made; CI runs on Linux. The
-reproduction before the fix is `scratchpad/review/yara_symlink_probe2.py`.
+Creating a symlink needs a privilege on Windows (and git there checks them out as text), so these skip
+where one cannot be made; CI runs on Linux.
 """
 from __future__ import annotations
 

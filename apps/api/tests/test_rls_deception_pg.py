@@ -1,17 +1,15 @@
-"""Row-level security on the deception records (S1, 2026-09-25).
+"""Row-level security on the deception records.
 
-0119 puts captures, BEC messages and calls under the ELEMENT policy and
-their redirect chains, Received chains and attachment lists under their
-record. Run as the request role, bound by a real session's proof, with the
-fixtures seeded as the owner:
+0119 puts captures, BEC messages and calls under the ELEMENT policy and their redirect chains, Received
+chains and attachment lists under their record. Run as the request role, bound by a real session's proof,
+with the fixtures seeded as the owner:
 
-- a record is visible in a readable case within the reader's ceiling for
-  that case: a RED capture in an AMBER case is hidden from an AMBER
-  analyst, a grant on that case raises it, and a case they are not on
+- a record is visible in a readable case within the reader's ceiling for that case: a RED capture in an
+  AMBER case is hidden from an AMBER analyst, a grant on that case raises it, and a case they are not on
   shows nothing;
 - the chain follows its capture;
-- the service's own reads, which filter on the same composed labels,
-  answer exactly as the owner's do for that reader;
+- the service's own reads, which filter on the same composed labels, answer exactly as the owner's do for
+  that reader;
 - a write the author could not read back is refused;
 - the policy is initplans only.
 

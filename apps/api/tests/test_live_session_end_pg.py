@@ -1,15 +1,11 @@
-"""The live socket ends when the session behind it does (2026-09-23).
+"""The live socket ends when the session behind it does.
 
-ux01-firstrun:live-dot-green-on-dead-session. The socket was validated at
-its handshake and never again, so after the 30-minute idle expiry, a
-sign-out elsewhere or a revocation, the console kept a green "Live" dot
-and the first colleague's edit then fired a refetch that threw the analyst
-to the sign-in form at a moment of somebody else's choosing. The stream now
-asks on every idle ping, without sliding the session, and closes with the
-policy code and `SESSION_ENDED_REASON`, which the console turns into a
-signed-out dot and the in-place sign-in.
+The stream asks on every idle ping, without sliding the session, and closes with the policy code and
+`SESSION_ENDED_REASON` after the 30-minute idle expiry, a sign-out elsewhere or a revocation. The console
+turns that into a signed-out dot and the in-place sign-in, rather than a green "Live" dot that stays up
+until a colleague's edit fires a refetch that throws the analyst to the sign-in form.
 
-**The email prefix is `lsend-` and must stay unique.**
+The email prefix is `lsend-` and must stay unique.
 
 Env-gated on DATABASE_URL.
 """
@@ -89,9 +85,8 @@ def test_a_socket_on_a_revoked_session_closes_with_the_session_reason(conn, live
 
 
 def test_an_idle_expired_session_ends_its_socket_and_asking_slides_nothing(conn, live):
-    """Asking must not keep the session alive: `touch=False`, or a console
-    that is merely open would never reach its idle timeout (final review
-    C20)."""
+    """Asking must not keep the session alive: `touch=False`, or a console that is merely open would never
+    reach its idle timeout."""
     from fastapi.testclient import TestClient
     from starlette.websockets import WebSocketDisconnect
     session_id, token = _session(conn)

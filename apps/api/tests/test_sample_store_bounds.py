@@ -1,15 +1,13 @@
-"""Final review C7, 2026-09-23: both sample stores give up in seconds.
+"""Both sample stores give up in seconds.
 
-`SampleStorage` and `PreservationStorage` built their MinIO clients with
-minio-py's defaults, a five-minute connect and read timeout and five
-retries, so one stalled call could hold a request for about half an hour.
-A preserving rejection makes those calls inside a transaction holding the
-sample's row lock, and until C7 the working-copy delete also ran while the
-audit chain's advisory lock was held, which stalled every audited write in
-the deployment behind it.
+`SampleStorage` and `PreservationStorage` build their MinIO clients with a bounded timeout and retry
+count; minio-py's defaults (a five-minute connect and read timeout and five retries) would let one stalled
+call hold a request for about half an hour. A preserving rejection makes those calls inside a transaction
+holding the sample's row lock, and the working-copy delete must not run while the audit chain's advisory
+lock is held, or a stalled store would stall every audited write in the deployment.
 
-No network and no database: the clients are only constructed, and what is
-read is the pool they were handed.
+No network and no database: the clients are only constructed, and what is read is the pool they were
+handed.
 """
 from __future__ import annotations
 
@@ -52,11 +50,9 @@ def test_a_request_that_went_out_is_never_sent_again(which):
 
 
 def test_the_preservation_store_never_resends_a_write_on_a_5xx():
-    """A 502 or 504 can come from a proxy after the store took the held
-    PUT, so a 5xx does not prove nothing was written, and a resent held
-    write is a second held version nothing can delete. Only reads are
-    resent (final review verifier on C7, 2026-09-23: the stores' docstring
-    and docs/11 claimed a 5xx meant nothing had been written)."""
+    """A 502 or 504 can come from a proxy after the store took the held PUT, so a 5xx does not prove
+    nothing was written, and a resent held write is a second held version nothing can delete. Only reads
+    are resent."""
     from noctornal_api import samples
     retries = samples.PreservationStorage()._client._http.connection_pool_kw[
         "retries"]
@@ -76,8 +72,7 @@ def test_the_samples_store_still_resends_on_a_5xx():
 
 
 def test_certificates_are_still_verified(monkeypatch):
-    """Handing minio-py a pool replaces its own, certificate settings
-    included, so they are restated rather than lost."""
+    """Handing minio-py a pool replaces its own, certificate settings included, so they are restated."""
     from noctornal_api import samples
     monkeypatch.setenv("SAMPLE_SECURE", "true")
     pool = samples.SampleStorage()._client._http.connection_pool_kw

@@ -1,16 +1,12 @@
-"""2026-09-23: the Security Officer can reach the officer's
-half of a preserved-sample retrieval, held by reading the shipped console
-and router.
+"""The Security Officer can reach the officer's half of a preserved-sample retrieval, held by reading the
+shipped console and router.
 
-The authorise form and Revoke were drawn only inside the Lab's sample card,
-which reads `GET /samples/{id}` under `sample.read`. SECURITY_OFFICER holds
-no `sample.read` (Security Officers read no case content) and is assigned
-to no case, so the one role allowed to authorise never saw the form, and
-the lead investigator was told to ask for something nobody could give.
+The authorise form and Revoke must not be drawn only inside the Lab's sample card, which reads
+`GET /samples/{id}` under `sample.read`: SECURITY_OFFICER holds no `sample.read` and is assigned to no case,
+so the one role allowed to authorise would never see the form.
 
-Pure: no database, no browser. Beside test_ui_invariants.py for the reason
-that file gives: a property nobody checks survives until the first
-refactor.
+Pure: no database, no browser. Beside test_ui_invariants.py for the reason that file gives: a property
+nobody checks survives until the first refactor.
 """
 from __future__ import annotations
 
@@ -96,9 +92,8 @@ def test_the_new_copy_has_no_dashes_and_no_inline_style():
 
 
 def test_the_list_takes_the_views_existing_layout():
-    """The list reuses the deployment view's `.admin-view > .pane` rule
-    rather than a stylesheet rule of its own: g04 does not own app.css
-    (final review verifier, 2026-09-23)."""
+    """The list reuses the deployment view's `.admin-view > .pane` rule rather than a stylesheet rule of
+    its own."""
     assert "el('section', 'pane preserved-review')" in _fn(
         "buildPreservedReview")
     css = (STATIC / "app.css").read_text(encoding="utf-8")

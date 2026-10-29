@@ -1,63 +1,38 @@
-"""The live socket's COOKIE credential, and the origin check that had to
-arrive with it.
+"""The live socket's cookie credential, and the origin check that comes with it.
 
-Until this change `routers/live.py` read no cookie at all: the socket took
-a session token from its first frame and nothing else, so the console had
-to keep the login-body token in page memory for the life of the tab. That
-token is the thing Wave 2 deletes, and it cannot be deleted while the one
-credential that survives a reload -- `__Host-session` -- is the one
-credential the live channel refuses. A websocket upgrade is an ordinary
-HTTP request until the server switches protocols, the browser attaches
-cookies to it, and `starlette.websockets.WebSocket` is an
-`HTTPConnection`, so `ws.cookies` was readable here the whole time.
+A websocket upgrade is an ordinary HTTP request until the server switches protocols, and the browser
+attaches cookies to it, so `ws.cookies` is readable and `__Host-session`, the credential that survives a
+reload, can authenticate the socket.
 
-Two halves, and the second is not optional:
+Two halves:
 
-* **The cookie is preferred, the first frame remains the fallback.** The
-  frame is what `scripts/bootstrap.py session` has to use -- it mints
-  through `SessionService` in a shell, for a browser it has never met, and
-  a shell has no cookie jar. That recovery path is now the only reason the
-  hello frame has a token field at all, and these tests hold both paths to
-  the same outcomes so removing the wrong one is a visible failure.
-* **A cookie-authenticated socket checks `Origin` before `accept()`.** Any
-  page on any origin may open a WebSocket to this one: no preflight, no
-  CORS answer to withhold, no same-origin rule on the handshake. Before,
-  such a socket carried a cookie this file never read and gained nothing
-  by it; now it carries one that authenticates, which is
-  cross-site WebSocket hijacking with a case's activity stream on the
-  other end. `SameSite=strict` stops that from a cross-SITE page, and
-  nothing else does: SameSite's unit is the registrable domain, so a page
-  on a sibling subdomain is same-site and a compliant browser attaches
-  the host-only `__Host-session` to its upgrade. There the origin check
-  is the only control, which is why the refusals below are asserted as
-  hard as the acceptances.
+* The cookie is preferred, the first frame remains the fallback. The frame is what `scripts/bootstrap.py
+  session` has to use: it mints through `SessionService` in a shell, and a shell has no cookie jar. These
+  tests hold both paths to the same outcomes so removing the wrong one is a visible failure.
+* A cookie-authenticated socket checks `Origin` before `accept()`. Any page on any origin may open a
+  WebSocket to this one (no preflight, no CORS answer to withhold), and a cookie that authenticates makes
+  that cross-site WebSocket hijacking with a case's activity stream on the other end. `SameSite=strict`
+  stops it from a cross-site page only: SameSite's unit is the registrable domain, so a page on a sibling
+  subdomain is same-site and the host-only `__Host-session` is attached to its upgrade. There the origin
+  check is the only control, so the refusals are asserted as hard as the acceptances.
 
-Three properties these tests pin that a reasonable-looking edit would
-break:
+Three properties a reasonable-looking edit would break:
 
-1. the refusal is the FIRST message the app sends -- no `websocket.accept`
-   in front of it, for the reason `test_live_handshake_pg` documents at
-   length (a post-accept close arms uvicorn's ten-second linger);
-2. it takes no pending-budget slot, so a hostile page cannot spend the
-   budget analysts need by pointing a visitor's browser at this server;
-3. the origin it is compared against is CONFIGURATION -- `public_origin()`
-   -- and never the request's own `Host`. `samples.py` records what
-   happened on 2026-09-09 when an origin check was derived from a header
-   the client sends, so one test here sends a lying `Host`.
+1. the refusal is the first message the app sends, with no `websocket.accept` in front of it (see
+   `test_live_handshake_pg`: a post-accept close arms uvicorn's ten-second linger);
+2. it takes no pending-budget slot, so a hostile page cannot spend the budget analysts need by pointing a
+   visitor's browser at this server;
+3. the origin it is compared against is configuration (`public_origin()`), never the request's own `Host`,
+   which the client chooses; one test sends a lying `Host`.
 
-One refusal that is not about the cookie is tested here too, because a
-session is what makes it worth asserting: a process configured as the
-SAMPLE ORIGIN opens no socket at all. `_allowed_on_sample_origin`
-(`http/app.py`) holds invariant 10 for HTTP from inside an
-`@app.middleware("http")`, and Starlette runs no http middleware for a
-`websocket` scope, so the check in `live()` is the only copy of that rule
-an upgrade ever meets. `test_live_origin` proves the middleware is blind
-here without a database; what needs one is the part below -- that a live
-analyst session, the very one that reaches "ready" above, buys nothing on
-such a process.
+One refusal that is not about the cookie is tested here too: a process configured as the sample origin
+opens no socket at all. `_allowed_on_sample_origin` (`http/app.py`) holds invariant 10 for HTTP from inside
+an `@app.middleware("http")`, and Starlette runs no http middleware for a `websocket` scope, so the check in
+`live()` is the only copy of that rule an upgrade meets. `test_live_origin` proves the middleware is blind
+here without a database; what needs one is that a live analyst session buys nothing on such a process.
 
-Env-gated on DATABASE_URL: the app comes from `create_app()` and every
-test mints a session. Email prefix `lck-`, unique to this file.
+Env-gated on DATABASE_URL: the app comes from `create_app()` and every test mints a session. Email prefix
+`lck-`, unique to this file.
 """
 from __future__ import annotations
 
@@ -116,17 +91,13 @@ def conn():
 
 @pytest.fixture
 def live(monkeypatch):
-    """The router module with this process's origin declared, and every
-    environment switch that would otherwise decide these tests cleared.
+    """The router module with this process's origin declared, and every environment switch that would
+    otherwise decide these tests cleared.
 
-    `NOCTORNAL_PUBLIC_ORIGIN` rather than `NOCTORNAL_BASE_URL`, because
-    `public_origin()` is what the check reads and the point of these tests
-    is which one that is. `NOCTORNAL_SAMPLE_ORIGIN` is cleared so
-    `origin_split()` stays `unconfigured` and this app does not turn into
-    the sample process mid-test. Strict binding is off: every session here
-    is minted the way `bootstrap.py` mints one, with no address and no
-    User-Agent recorded, and strict mode refuses exactly that (correctly --
-    `test_session_binding_pg` owns that contract).
+    `NOCTORNAL_PUBLIC_ORIGIN` rather than `NOCTORNAL_BASE_URL`, because `public_origin()` is what the check
+    reads. `NOCTORNAL_SAMPLE_ORIGIN` is cleared so `origin_split()` stays `unconfigured`. Strict binding is
+    off: every session here is minted as `bootstrap.py` mints one, with no address and no User-Agent
+    recorded, which strict mode refuses (`test_session_binding_pg` owns that contract).
     """
     from noctornal_api.http.routers import live as module
     monkeypatch.delenv(STRICT, raising=False)
@@ -226,14 +197,12 @@ def _sent_by(app, headers: dict[str, str]) -> list[dict]:
 # --- the cookie is a credential this socket accepts ----------------------
 
 def test_a_cookie_alone_reaches_ready(conn, live):
-    """The point of the change. No token in the hello frame, no
-    `Authorization` header, nothing in page memory: the browser's own
-    session cookie authenticates the socket, and the case gate downstream
-    is untouched -- the cookie value IS a session token, so `_authenticate`
-    sees exactly what it always saw.
+    """No token in the hello frame, no `Authorization` header, nothing in page memory: the browser's own
+    session cookie authenticates the socket, and the case gate downstream is untouched (the cookie value is
+    a session token, so `_authenticate` sees what it always sees).
 
-    The hello frame is still REQUIRED, and still carries the case id;
-    what it no longer has to carry is the credential.
+    The hello frame is still required and still carries the case id; it no longer has to carry the
+    credential.
     """
     owner = _user(conn)
     case_id = _case(conn, owner)
@@ -305,25 +274,18 @@ def test_a_matching_origin_is_accepted(conn, live):
 
 
 def test_a_foreign_origin_with_a_cookie_is_refused_before_accept(conn, live):
-    """Cross-site WebSocket hijacking, refused. The cookie is VALID -- the
-    same one that reaches "ready" in the test above -- so what is being
-    refused is a live credential presented from a page this server does not
-    serve, which is precisely the attack: the browser attaches the cookie,
-    the handshake has no preflight to fail, and the socket would otherwise
+    """Cross-site WebSocket hijacking is refused. The cookie is valid, the same one that reaches "ready"
+    above, so what is refused is a live credential presented from a page this server does not serve: the
+    browser attaches the cookie, the handshake has no preflight to fail, and the socket would otherwise
     stream case activity to script on `evil`.
 
-    Refused BEFORE `accept()`, asserted on the ASGI send stream because
-    that is the only place the difference is visible: a `TestClient`
-    completes the close handshake itself, while under uvicorn a
-    post-accept close writes a frame and then holds the transport for ten
-    seconds waiting for an echo the attacker's page need never send. A
-    refusal a hostile page can cause is the last one that should linger.
+    Refused before `accept()`, asserted on the ASGI send stream because that is the only place the
+    difference is visible: a `TestClient` completes the close handshake itself, while under uvicorn a
+    post-accept close holds the transport for ten seconds waiting for an echo the attacker's page need never
+    send.
 
-    The lying `Host` header is deliberate: `samples.py` records what
-    happened on 2026-09-09 when an origin check was derived from
-    `request.url`, which Starlette builds from the header the client sends.
-    This check reads configuration, so a caller claiming to be the console
-    gets nowhere.
+    The lying `Host` header is deliberate: an origin check derived from `request.url` would trust the header
+    the client sends. This check reads configuration, so a caller claiming to be the console gets nowhere.
     """
     from starlette.websockets import WebSocketDisconnect
     owner = _user(conn)
@@ -363,16 +325,13 @@ def test_a_foreign_origin_with_a_cookie_is_refused_before_accept(conn, live):
 
 
 def test_no_origin_at_all_is_allowed_through(conn, live):
-    """A browser always sends `Origin` on an upgrade and cannot be made to
-    omit it, so a socket without one is not a browser: a shell, a curl, an
-    integration test. Refusing it would break the token path this file
-    still needs and would protect nothing -- such a caller holds the cookie
-    value only because it was handed to it, and that value IS the session
-    token it could have put in the first frame instead.
+    """A browser always sends `Origin` on an upgrade and cannot be made to omit it, so a socket without one
+    is not a browser: a shell, a curl, an integration test. Refusing it would break the token path and
+    protect nothing, because such a caller holds the cookie value only because it was handed to it, and that
+    value is the session token it could have put in the first frame.
 
-    Asserted next to the refusal it is so easily confused with: the same
-    process, the same cookie, one with a foreign `Origin` and one with
-    none.
+    Asserted next to the refusal it is easily confused with: the same process, the same cookie, one with a
+    foreign `Origin` and one with none.
     """
     from starlette.websockets import WebSocketDisconnect
     owner = _user(conn)
@@ -392,12 +351,10 @@ def test_no_origin_at_all_is_allowed_through(conn, live):
 
 def test_a_foreign_origin_without_a_cookie_still_reaches_the_token_path(
         conn, live):
-    """The check is about the COOKIE, not about the origin on its own. A
-    caller that sends no cookie has nothing the browser attached for it, so
-    there is nothing to hijack: it presents a token in the frame or it gets
-    "no credentials", exactly as before this change. Narrowing the rule
-    this way is what keeps a non-browser client with an odd `Origin` --
-    an Electron shell, a test harness -- working."""
+    """The check is about the cookie, not the origin on its own. A caller that sends no cookie has nothing
+    the browser attached for it, so there is nothing to hijack: it presents a token in the frame or gets "no
+    credentials". Narrowing the rule this way keeps a non-browser client with an odd `Origin` (an Electron
+    shell, a test harness) working."""
     owner = _user(conn)
     _, token = _session(conn, owner)
 
@@ -410,18 +367,14 @@ def test_a_foreign_origin_without_a_cookie_still_reaches_the_token_path(
 
 def test_the_refusal_is_logged_with_the_origin_escaped(conn, live, monkeypatch,
                                                        caplog):
-    """The security officer chasing a hijack attempt needs the origin that
-    tried it, and the log line is the ONLY place it exists: a pre-accept
-    refusal reaches the browser as a 403, which carries neither the close
-    code nor the reason, so nothing the page sees names anything. Through
-    the same sampler as every other pre-accept refusal -- a refusal any
-    visited page can cause must not let that page choose the log volume --
-    and through `repr` so a header carrying a newline cannot forge a second
-    line in it -- a log line naming a caller-chosen string is an injection
-    site, and this one is reachable from any page an analyst visits.
+    """The security officer chasing a hijack attempt needs the origin that tried it, and the log line is the
+    only place it exists: a pre-accept refusal reaches the browser as a 403, which carries neither the close
+    code nor the reason. The line goes through the same sampler as every other pre-accept refusal (a refusal
+    any visited page can cause must not let that page choose the log volume) and through `repr`, so a header
+    carrying a newline cannot forge a second line.
 
-    A FRESH sampler, because a refusal written by an earlier test in this
-    process would otherwise swallow this one's line.
+    A fresh sampler, because a refusal written by an earlier test in this process would otherwise swallow
+    this one's line.
     """
     monkeypatch.setattr(live, "_refusals", live._SampledWarning())
     owner = _user(conn)
@@ -446,31 +399,18 @@ def test_the_sample_origin_process_refuses_a_valid_session_its_socket(
         conn, live, monkeypatch):
     """Invariant 10 over the transport the http gate cannot see.
 
-    The credential here is not a near miss: it is the same cookie that
-    reaches "ready" at the top of this file, on the same app object, and
-    the `Origin` it arrives with is the one this process is configured to
-    serve -- so `_cross_site_upgrade` would admit it, and every other
-    refusal in `live()` is about a budget rather than about a caller. The
-    only thing between that valid session and a subscription is the
-    sample-origin check, which is exactly the point: reconfiguring this
-    process as the sample origin must take the live channel away from
-    everyone, including the analyst whose session it is.
+    The credential is the same valid cookie that reaches "ready" at the top of this file, with the `Origin`
+    this process is configured to serve, so `_cross_site_upgrade` would admit it. The only thing between that
+    session and a subscription is the sample-origin check: reconfiguring this process as the sample origin
+    must take the live channel away from everyone, including the analyst whose session it is.
 
-    Why the check has to exist in `live()` at all is the middleware.
-    `_allowed_on_sample_origin` (`http/app.py`) 404s everything but the
-    download on such a process, but it runs inside an
-    `@app.middleware("http")` and Starlette hands a `websocket` scope
-    straight to the router -- so before this check, a sample-origin
-    process authenticated sockets and streamed a case's changes out of
-    the one process that is supposed to hold no session at all.
-    `test_live_origin` puts both scopes through one app to show that the
-    http gate really is blind here; what this test adds is the part that
-    needs a database, which is that a LIVE session buys nothing.
+    The check must exist in `live()` because `_allowed_on_sample_origin` (`http/app.py`) runs inside an
+    `@app.middleware("http")` and Starlette hands a `websocket` scope straight to the router.
+    `test_live_origin` shows the http gate is blind here; this test adds the part that needs a database: a
+    live session buys nothing.
 
-    Refused before `accept()`, on the ASGI stream, for the reason the
-    cross-site refusal is: a post-accept close holds the transport for
-    uvicorn's ten-second close timeout, and a refusal every misdirected
-    client will keep retrying is the last one that should linger.
+    Refused before `accept()`, on the ASGI stream, for the reason the cross-site refusal is: a post-accept
+    close holds the transport for uvicorn's ten-second close timeout.
     """
     from starlette.websockets import WebSocketDisconnect
     owner = _user(conn)
@@ -485,11 +425,9 @@ def test_the_sample_origin_process_refuses_a_valid_session_its_socket(
             ws.send_json({"case_id": str(case_id)})
             assert ws.receive_json()["type"] == "ready"
 
-    # The same process, now deployed as the sample origin. `NOCTORNAL_BASE_URL`
-    # is pinned as well as the other two: `origin_split()` reads all three,
-    # and an ambient application origin that happened to equal SAMPLE would
-    # make this "same_origin" -- a different verdict, refusing for a
-    # different reason.
+    # The same process, deployed as the sample origin. `NOCTORNAL_BASE_URL` is pinned too: `origin_split()`
+    # reads all three, and an ambient application origin equal to SAMPLE would make this "same_origin",
+    # refusing for a different reason.
     monkeypatch.setenv("NOCTORNAL_BASE_URL", ORIGIN)
     monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", SAMPLE)
     monkeypatch.setenv("NOCTORNAL_PUBLIC_ORIGIN", SAMPLE)

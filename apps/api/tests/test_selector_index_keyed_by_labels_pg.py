@@ -1,18 +1,14 @@
-"""The selector index is keyed by labels (beta review, 2026-10-03, second
-round: graph-selector-record-oracle, http_ui-002, rls-2; migration 0134).
+"""The selector index is keyed by labels (migration 0134).
 
-`core.selector` was one row per (case, type, value), so a value an entity
-above the caller held was a row the caller's own sighting collided with.
-The route-level behaviour is held in `test_review_g42_selector_edge_pg`;
-here is what the database and the other readers must keep true for it:
+`core.selector` was one row per (case, type, value), so a value an entity above the caller held was a row
+the caller's own sighting collided with. The route-level behaviour is held in
+`test_selectors_and_ties_above_caller_pg`; here is what the database and the other readers must keep true for it:
 
-- a row carries its owner's labels whoever writes it, an unowned one the
-  floor, and the key is value plus labels;
-- 0134 is reversible on an empty database and says so, honestly, on one that
-  holds a value at two labels;
+- a row carries its owner's labels whoever writes it, an unowned one the floor, and the key is value plus
+  labels;
+- 0134 is reversible on an empty database and says so, honestly, on one that holds a value at two labels;
 - a compartmented holder is held back exactly as a RED one is;
-- a lookup of a value that two entities hold at different labels is held to
-  the stricter one (the check read the first row it met).
+- a lookup of a value that two entities hold at different labels is held to the stricter one.
 """
 from __future__ import annotations
 
@@ -23,7 +19,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-import review_g42_support as g
+import graph_visibility_support as g
 import rls_support as s
 
 VERSIONS = Path(__file__).resolve().parents[3] / "db" / "migrations" / "versions"

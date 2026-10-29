@@ -1,14 +1,11 @@
-"""Collection fixtures name only hosts nobody can own (2026-09-24).
+"""Collection fixtures name only hosts nobody can own.
 
-The forum adapters keep captured pages under tests/fixtures/xenforo and
-tests/fixtures/mybb, and the Telegram adapter under tests/fixtures/telegram.
-A captured page carries its site's links; a fixture that names a
-registrable host puts a stranger's domain in the suite as a criminal
-forum. Every host a fixture names must be one RFC 2606, 6761 or 7686
-reserves, except a board software vendor's own footer host, allowed by
-name. The collection foundation tests' own stand-in addresses are held
-to the same rule.
-Pure: it reads files and runs nothing.
+The forum adapters keep captured pages under tests/fixtures/xenforo and tests/fixtures/mybb, and the
+Telegram adapter under tests/fixtures/telegram. A captured page carries its site's links; a fixture
+that names a registrable host puts a stranger's domain in the suite as a criminal forum. Every host a
+fixture names must be one RFC 2606, 6761 or 7686 reserves, except a board software vendor's own footer
+host, allowed by name. The collection foundation tests' own stand-in addresses are held to the same
+rule. Pure: it reads files and runs nothing.
 """
 from __future__ import annotations
 

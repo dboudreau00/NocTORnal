@@ -1,10 +1,8 @@
-"""`scripts/audit_verify.py`: verify both chains from a shell and keep the tail
-anchor (evidence-chain-no-anchor, 2026-10-03).
+"""`scripts/audit_verify.py`: verify both chains from a shell and keep the tail anchor.
 
-The script is the operator's half of the anchor: `/audit/verify` returns the
-tail and accepts it back, and this records it in a file the operator keeps
-out of this system's reach and compares it on the next run. The tamper is in
-a transaction that is rolled back, as in `test_ledger_anchor_g49_pg.py`.
+The script is the operator's half of the anchor: `/audit/verify` returns the tail and accepts it back, and
+this records it in a file the operator keeps out of this system's reach and compares it on the next run. The
+tamper is in a transaction that is rolled back, as in `test_ledger_anchor_pg.py`.
 """
 from __future__ import annotations
 
@@ -107,10 +105,6 @@ def test_record_needs_a_file(tool):
     with pytest.raises(SystemExit):
         tool.main(["--record"])
 
-
-# ---------------------------------------------------------------------------
-# g49v-record-with-limit and g49v-script-exit-codes (2026-10-03)
-# ---------------------------------------------------------------------------
 
 def test_record_cannot_be_combined_with_limit(tool, tamperable, anchors, capsys):
     """An anchor is read back as "every row up to it is unchanged". A run that

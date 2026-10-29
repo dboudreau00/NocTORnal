@@ -1,10 +1,8 @@
-"""Lowering a lookup provider's exposure is two administrators' act
-(F15.2, 2026-09-24): requested by one, decided by a different holder of
-integration.manage, once, before it lapses, and held by the database as
-well as by the service.
+"""Lowering a lookup provider's exposure is two administrators' act: requested by one, decided by a
+different holder of integration.manage, once, before it lapses, and held by the database as well as by the
+service.
 
-Routes are fakes; nothing reaches a provider. **The email prefix is
-`pvchg-`.** Env-gated on DATABASE_URL.
+Routes are fakes; nothing reaches a provider. **The email prefix is `pvchg-`.** Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -213,12 +211,11 @@ def test_the_two_person_path_over_http(conn):
 
 
 
-# --- a new destination is a new determination (2026-09-25) ------------------------
+# --- a new destination is a new determination ------------------------------------
 #
-# The probe: one administrator created a VENDOR provider, a second
-# approved it, and the first then PATCHed base_url to another host, re-entered
-# a key and enabled it, still VENDOR, with nobody else involved. A second
-# administrator approves the exposure of ONE destination.
+# One administrator creates a VENDOR provider and a second approves it; the first must not then PATCH
+# base_url to another host, re-enter a key and enable it, still VENDOR, with nobody else involved. A
+# second administrator approves the exposure of ONE destination.
 
 ATTACKER = "https://paste.attacker.example/api"
 

@@ -1,37 +1,24 @@
-"""Every read of a collected document checks its compartments (L1,
-2026-09-24).
+"""Every read of a collected document checks its compartments.
 
-A capture into a compartmented case is stored under the case's
-compartments, and the value of that is lost the moment one reader forgets
-to check them: the document is then listed, searched or quoted to somebody
-outside the compartment. test_document_compartments_pg.py proves the
-predicate is bound to the right set on every route that exists; this file
-is the static half, which a NEW reader meets before anyone writes a route
-test for it (a forum adapter's listing, a raw-HTML read, the similarity
-reads' join back).
+A capture into a compartmented case is stored under the case's compartments; that is lost the moment one
+reader forgets to check them. test_document_compartments_pg.py proves the predicate on every route that
+exists; this file is the static half, which a new reader meets before anyone writes a route test for it.
 
-The rule, read from the source and never by importing a module whose
-optional extra may be absent:
+The rule, read from the source and never by importing a module whose optional extra may be absent:
 
-- a UNIT is one SQL text: a string literal, f-string or `+` chain as it
-  appears in the code, with module constants (this module's, or imported
-  from another module of the package) resolved into it. One unit per
-  statement, not per function, so a guarded statement cannot vouch for an
-  unguarded one beside it;
-- a unit is a DOCUMENT READ when it names `collect.document` and touches a
-  column of it other than id, source_id, classification, compartments,
-  purged_at or captured_at (title, body_text, body_html_key, author_uid,
-  thread_ref, anything added later), or label-checks it
+- a UNIT is one SQL text: a string literal, f-string or `+` chain as it appears in the code, with module
+  constants (this module's, or imported from another module of the package) resolved into it. One unit per
+  statement, not per function, so a guarded statement cannot vouch for an unguarded one beside it;
+- a unit is a DOCUMENT READ when it names `collect.document` and touches a column of it other than id,
+  source_id, classification, compartments, purged_at or captured_at, or label-checks it
   (`classification <=`). A pure INSERT writes and reads nothing;
-- a document read must carry `<alias>.compartments <@` for one of the
-  aliases it gives `collect.document` (or `compartments <@` unqualified
-  when it gives none), or `proposals._SOURCE_COMPARTMENTS <@`;
-- once any migration binds `collect.source.compartments` (none does yet),
-  a document read that joins the source must check
-  `<alias>.compartments <@` on the source too, as it already checks the
-  source's classification (docs/05, rule 7);
-- `EXEMPT` names the few units that are not reads by a person, each with
-  its reason, and an entry that no longer matches one fails as stale.
+- a document read must carry `<alias>.compartments <@` for one of the aliases it gives `collect.document`
+  (or `compartments <@` unqualified when it gives none), or `proposals._SOURCE_COMPARTMENTS <@`;
+- once any migration binds `collect.source.compartments` (none does yet), a document read that joins the
+  source must check `<alias>.compartments <@` on the source too, as it already checks the source's
+  classification (docs/05, rule 7);
+- `EXEMPT` names the few units that are not reads by a person, each with its reason, and an entry that no
+  longer matches one fails as stale.
 
 Pure: parses the source; no database.
 """
@@ -67,8 +54,7 @@ EXEMPT: dict[str, str] = {
         "accept route has already held the reviewer to the proposal's "
         "readability, which includes the document's compartments "
         "(_READABLE), and the date is written, never shown here"),
-    # The collector's and the retention sweep's own statements (2026-09-24):
-    # worker paths with no reader and no label check.
+    # The collector's and the retention sweep's own statements: worker paths with no reader and no label check.
     "collection:CollectionService._attach_raw": (
         "the collector's writer: it points a document it just stored at its "
         "markup object, and shows nothing to a person"),
@@ -78,8 +64,7 @@ EXEMPT: dict[str, str] = {
     "collection:CollectionService._mark_deleted": (
         "the collector's writer: it flags the latest version of an item the "
         "site no longer shows, and shows nothing to a person"),
-    # Telegram (F5.3, 2026-09-24): the adapter's commit marks the deletions a
-    # session saw on the latest version of each message; a worker path.
+    # Telegram: the adapter's commit marks deletions on the latest version of each message; a worker path.
     "telegram:TelegramAdapter.commit": (
         "the Telegram collector's writer: it marks a deleted message on its "
         "latest version, and shows nothing to a person"),
@@ -91,7 +76,6 @@ EXEMPT: dict[str, str] = {
         "content and shows nothing to a person"),
     "retention:RetentionService._held_document_count": (
         "the retention sweep's count of held documents: a number, no content"),
-    # graph-url-selector-keeps-credentials, 2026-10-03.
     "proposals:ProposalReview._refuse_userinfo_selector": (
         "an accept's check that a proposal's span is not inside a link's "
         "userinfo: it reads the cited document's text only to refuse the "
@@ -99,7 +83,6 @@ EXEMPT: dict[str, str] = {
         "cannot read returns no text (row security, CUSTOM_DOCUMENT) and "
         "the check then has nothing to compare against, as its docstring "
         "says"),
-    # F30, 2026-10-02.
     "retention:RetentionService.document_backlog": (
         "the sweep's and the readiness row's count of documents past their "
         "clock, and the oldest deadline among those no hold keeps: numbers "
@@ -107,7 +90,6 @@ EXEMPT: dict[str, str] = {
     "retention:RetentionService._purge_documents": (
         "the retention sweep's purge: it locks, rechecks and empties "
         "documents, and shows nothing to a person"),
-    # The embedding pass (F6.1, F6.4, 2026-09-24).
     "embeddings:EmbeddingService.read_items": (
         "the embedding pass reads every document to embed it; nothing it reads "
         "is returned to a person, and every similarity read joins back with "
@@ -117,12 +99,10 @@ EXEMPT: dict[str, str] = {
         "category, to withhold the claim from a model endpoint; nothing is "
         "returned to a person"),
 }
-# legacy_records.py's listings are operator reads across every case by
-# design (scripts/legacy_records.py, run on the server). They need no entry
-# above: they assemble their statements from function arguments, which a
-# static read cannot resolve, so they are never units here. That is the
-# scan's limit, stated rather than hidden; the route tests are the guard
-# for anything a person reads.
+# legacy_records.py's listings are operator reads across every case by design (scripts/legacy_records.py,
+# run on the server). They need no entry above: they build their statements from function arguments, which a
+# static read cannot resolve, so they are never units here. That is the scan's limit; the route tests guard
+# anything a person reads.
 
 #: The columns a unit may touch without reading content: identity and the
 #: labels the gate itself compares.

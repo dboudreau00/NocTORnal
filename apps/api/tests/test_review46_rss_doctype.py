@@ -1,16 +1,12 @@
-"""collection-rss-doctype-bypass-utf16 (review of 2026-10-03).
+"""`parse_rss` refuses a DOCTYPE or ENTITY declaration however the feed hides it.
 
-`parse_rss` refuses a DOCTYPE or ENTITY declaration, the stated defence
-against XXE and billion-laughs on the host that holds every persona
-credential. It scanned the raw BYTES for an ASCII `<!DOCTYPE` and then let
-ElementTree parse the same bytes under the encoding the document declared,
-so a feed served as UTF-16 (`<\\x00!\\x00D\\x00...`) was never refused and its
-internal entity was expanded. Two more bypasses of the same defence turned
-up beside it and are pinned here: a comment containing `<x` ended the
-"prolog" early, and so did a comment of over a mebibyte.
+The refusal is the stated defence against XXE and billion-laughs on the host that holds every persona
+credential. Scanning the raw BYTES for an ASCII `<!DOCTYPE` and then letting ElementTree parse the same
+bytes under the encoding the document declared would let a feed served as UTF-16 (`<\\x00!\\x00D\\x00...`)
+through, with its internal entity expanded. Two more bypasses of the same defence are pinned here: a
+comment containing `<x` ending the "prolog" early, and so does a comment of over a mebibyte.
 
-These fail on dc28ffa: each hostile feed below is PARSED and its title is
-the entity's replacement text.
+Each hostile feed below must be refused, not PARSED with its title the entity's replacement text.
 
 No database and no network.
 """
@@ -159,11 +155,10 @@ def test_an_ebcdic_feed_is_refused_not_guessed_at():
 
 
 def test_a_text_escape_codec_cannot_smuggle_the_declaration_past_the_scan():
-    """`unicode_escape` turns the ASCII text `\\x3c!DOCTYPE` into `<!DOCTYPE`.
-    The scan runs over the decoded text and the parser is given that same
-    text, so an escape would be seen; and since collection-rss-codec-dos
-    (2026-10-03) a feed may declare only the encodings in `_FEED_CODECS`, so
-    the escape codec is refused by name before it decodes anything."""
+    """`unicode_escape` turns the ASCII text `\\x3c!DOCTYPE` into `<!DOCTYPE`. The scan runs over the
+    decoded text and the parser is given that same text, so an escape would be seen; and a feed may declare
+    only the encodings in `_FEED_CODECS`, so the escape codec is refused by name before it decodes
+    anything."""
     body = (b'<?xml version="1.0" encoding="unicode_escape"?>'
             b'\\x3c!DOCTYPE rss [\\x3c!ENTITY inj "INJECTED-BY-DTD">]>'
             b"<rss><channel><item><title>&inj;</title><guid>g</guid></item></channel></rss>")
@@ -176,11 +171,10 @@ def test_the_old_utf8_refusal_still_holds_and_names_the_same_cause():
         parse_rss(_feed().encode())
 
 
-# 2026-10-07: a BOM-less UTF-16 feed that does not begin
-# with `<?` fell to the UTF-8 branch. The decoded text kept its NULs, the
-# prolog walk saw no declaration, and the parser then re-detected UTF-16 and
-# expanded the DTD (a 1 MB feed became 45 M characters). A NUL is not a legal
-# XML character, so the decode refuses it: no encoding has to be guessed.
+# A BOM-less UTF-16 feed that does not begin with `<?` must not fall to the UTF-8 branch: the decoded text
+# would keep its NULs, the prolog walk would see no declaration, and the parser would re-detect UTF-16 and
+# expand the DTD (a 1 MB feed becoming 45 M characters). A NUL is not a legal XML character, so the decode
+# refuses it: no encoding has to be guessed.
 _BILLION = ('<!DOCTYPE rss [<!ENTITY big "' + "A" * 450 + '">]>'
             "<rss><channel><item><guid>g</guid><title>"
             + "&big;" * 2_000 + "</title></item></channel></rss>")

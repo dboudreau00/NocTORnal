@@ -1,11 +1,9 @@
-"""The console's forum lines (F3 and F4, 2026-09-24).
+"""The console's forum lines.
 
-Pure: no database. The Add a source form's forum settings (shown for the
-two forum parsers, MyBB's zone and formats for MyBB alone, bounded as the
-server bounds them), the MyBB format lists held equal to the server's, the
-Poll now confirmation when a read would leave from this server, and the
-Forum details a collected forum document offers. Functions run under Node
-over the collection foundation tests' stub DOM.
+Pure: no database. The Add a source form's forum settings (shown for the two forum parsers, MyBB's zone and
+formats for MyBB alone, bounded as the server bounds them), the MyBB format lists held equal to the
+server's, the Poll now confirmation when a read would leave from this server, and the Forum details a
+collected forum document offers. Functions run under Node over the collection foundation tests' stub DOM.
 """
 from __future__ import annotations
 

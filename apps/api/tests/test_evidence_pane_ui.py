@@ -1,28 +1,21 @@
-"""The Evidence pane as the console draws it (ux07-evidence, 2026-09-23).
+"""The Evidence pane as the console draws it.
 
-Every finding of the 2026-09-22 review's Evidence pane walk-through is held
-here from the console's side; `test_evidence_register_pg.py` holds the
-server's. Each was a sentence, a chip or a missing control telling the
-analyst something false or nothing at all:
+`test_evidence_register_pg.py` holds the server's side. Each of these is a sentence, a chip or a control
+that must not tell the analyst something false or nothing at all:
 
-- worm-chip-outlives-lock: "WORM LOCKED" for ever, on a lock that lapses.
-- no-forward-trace-from-exhibit: nothing said what rests on an exhibit.
-- upload-drops-provenance: no acquisition time, source or authority, and
-  "acquired" meant uploaded.
-- custody-rows-not-court-legible: minute precision and no row detail.
-- hash-and-id-not-reachable: sixteen hex in the card, the rest in a
-  tooltip, and the exhibit id nowhere.
-- coverage-vanishes-with-metrics: the headline figure hung on an optional
-  call and vanished with it.
-- no-exhibit-export-control: no way to produce an exhibit.
-- evidence-list-silently-capped: the newest 200, without a word.
-- verify-writes-custody-silently: a permanent entry that looked like a
-  harmless check.
+- the WORM chip does not read "WORM LOCKED" for ever on a lock that lapses;
+- the card says what rests on an exhibit (the forward trace from it);
+- an upload shows its acquisition time, source and authority, and "acquired" does not mean uploaded;
+- custody rows are court-legible: second precision and row detail;
+- the hash and the exhibit id are reachable in full;
+- the coverage headline does not hang on an optional call;
+- an exhibit can be exported;
+- a capped evidence list says it is capped;
+- verify says it writes a permanent custody entry.
 
-Pure: no database, no browser. The checks marked `needs_node` EXECUTE the
-shipped functions under Node with a small DOM stub, because "the lapsed
-lock renders as a warning" is a claim about behaviour; reading the source
-for a class name would pass on a branch nothing reaches.
+Pure: no database, no browser. The checks marked `needs_node` EXECUTE the shipped functions under Node with
+a small DOM stub, because "the lapsed lock renders as a warning" is a claim about behaviour; reading the
+source for a class name would pass on a branch nothing reaches.
 """
 from __future__ import annotations
 
@@ -189,15 +182,14 @@ console.log(JSON.stringify([
     assert live[:2] == ["chip flag", "WORM until D(2027-09-17)"]
     assert "until T(2027-09-17T03:02:03Z,s) the object store refuses" in live[2], (
         "the instant the store holds to, to the second")
-    # x-lock-extension (2026-09-24): the lock follows the case's retention
-    # date from lodging and when it is extended, so the chip no longer says
-    # the lock ignores that date.
+    # The lock follows the case's retention date from lodging and when it is extended, so the chip does not
+    # say the lock ignores that date.
     assert "runs to the case's retention date" in live[2]
     assert "lengthened when that date is extended" in live[2]
     assert "does not follow" not in live[2]
     assert "before the case's retention date" not in live[2]
-    # A lock that still ends first says so, and where it can be lengthened,
-    # rather than claiming to run to the date (verifier, 2026-09-24).
+    # A lock that still ends first says so, and where it can be lengthened, rather than claiming to run to
+    # the date.
     assert short[:2] == ["chip flag", "WORM until D(2027-09-17)"]
     assert "ends before the case's retention date" in short[2]
     assert "the Evidence pane can lengthen it" in short[2]
@@ -207,8 +199,8 @@ console.log(JSON.stringify([
     assert "no longer refuses" in lapsed[2]
     assert undated[1] == "WORM" and "does not carry the date" in undated[2]
     assert purged is None, "a purged exhibit has no bytes to lock"
-    # Only the day on record: never "until the end of" it (verifier,
-    # 2026-09-23: the lock ends part way through its last day).
+    # Only the day on record: never "until the end of" it, because the lock ends part way through its last
+    # day.
     assert day_only[:2] == ["chip flag", "WORM until D(2027-09-17)"]
     assert "until some time on D(2027-09-17)" in day_only[2]
     assert "do not rely on the lock on that day itself" in day_only[2]
@@ -227,8 +219,8 @@ def test_the_fixed_flag_is_gone_and_the_policy_line_names_the_period():
     policy = re.sub(r"/\*.*?\*/", "", _fn("renderEvidencePolicy"), flags=re.S)
     assert "from acquisition" not in policy, (
         "the lock runs from lodging, and 'acquired' is the stated time")
-    # x-lock-extension (2026-09-24): the lock runs to the case's date. How the period is counted, the horizon and
-    # that nobody can shorten one are in the manual; the line says the one thing that is always true.
+    # The lock runs to the case's date. How the period is counted, the horizon and that nobody can shorten
+    # one are in the manual; the line says the one thing that is always true.
     assert "locked until the case\\'s retention date" in policy
     assert "does not follow the case" not in policy
 
@@ -284,10 +276,9 @@ console.log(JSON.stringify({ acquired: texts(acquired), all: texts(card) }));
 
 @needs_node
 def test_attacker_markup_is_produced_through_the_sample_origin(tmp_path):
-    """x-hostile-export (2026-09-24). The card said "No export here" and sent
-    the analyst to a procedure outside the product, because nothing could
-    produce attacker markup. It now offers the production, which fetches
-    the bytes from the sample origin, and never this origin's export."""
+    """The card offers the production of attacker markup, which fetches the bytes from the sample origin
+    and never this origin's export. It does not say "No export here" and send the analyst to a procedure
+    outside the product."""
     ev = dict(_EXHIBIT, is_hostile_markup=True)
     got = _run(tmp_path, _CARD_FNS, """
 const card = exhibitCard(%s, { may_export: true, may_audit: false });
@@ -330,9 +321,8 @@ console.log(JSON.stringify({ text: b.textContent, expanded: b.attrs['aria-expand
 
 @needs_node
 def test_a_purged_exhibit_says_why_nothing_rests_on_it(tmp_path):
-    """The server counts a purged exhibit as backing nothing, as the canvas
-    does (verifier, 2026-09-23); the card says why, rather than reading like
-    an exhibit nobody used, and offers nothing to open."""
+    """The server counts a purged exhibit as backing nothing, as the canvas does; the card says why, rather
+    than reading like an exhibit nobody used, and offers nothing to open."""
     ev = dict(_EXHIBIT, purged_at="2026-09-20T10:00:00Z", backs_nodes=2)
     got = _run(tmp_path, _CARD_FNS, """
 const card = exhibitCard(%s, { may_export: true, may_audit: false });
@@ -426,7 +416,6 @@ console.log(JSON.stringify([
 """)
     plain, none, tiny, unknown, disagree, empty = got
     assert plain["text"] == "evidence: 1 of 3 elements (33%) rest on an exhibit"
-    # A chip in the canvas status line (ux03 control-bar-squeezes-canvas).
     assert plain["cls"] == "cs-chip coverage-low"
     assert none["cls"].endswith("coverage-none")
     assert "(<1%)" in tiny["text"] and "truncated" in tiny["title"]
@@ -633,8 +622,7 @@ def test_the_routes_the_pane_calls_are_mounted(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# x-hostile-export (2026-09-24): attacker markup leaves through the sample
-# origin, in two legs, as the Lab's download does
+# Attacker markup leaves through the sample origin, in two legs, as the Lab's download does
 # ---------------------------------------------------------------------------
 
 def test_a_production_is_minted_here_and_spent_at_the_sample_origin():
@@ -689,8 +677,7 @@ console.log(JSON.stringify([
     assert extended == ("locked in storage until T(2029-03-01T00:00:00+00:00,s), "
                         "was until T(2027-01-10T03:02:03+00:00,s), to meet the "
                         "case's retention date D(2029-03-01)")
-    # Stopped by the horizon short of the date: the row does not claim it
-    # met it (x-lock-extension, verifier, 2026-09-24).
+    # Stopped by the horizon short of the date: the row does not claim it met it.
     assert capped == ("locked in storage until T(2036-09-22T10:00:00+00:00,s), "
                       "toward the case's retention date D(2208-01-01), as far "
                       "as one step sets it")
@@ -708,7 +695,7 @@ def test_the_custody_detail_lets_the_new_keys_through():
 
 
 # ---------------------------------------------------------------------------
-# x-lock-extension (2026-09-24): the case record says what the locks did
+# The case record says what the locks did
 # ---------------------------------------------------------------------------
 
 @needs_node
@@ -736,9 +723,8 @@ console.log(JSON.stringify([
     assert "on 2 exhibits now holds" in mixed[0]
     assert "on 1 exhibit could not be lengthened" in mixed[0]
     assert "audit log names each" in mixed[0]
-    # A failure is retried from the Evidence pane, which counts a lock
-    # short of the case; the record refuses an unchanged date (verifier,
-    # 2026-09-24).
+    # A failure is retried from the Evidence pane, which counts a lock short of the case; the record
+    # refuses an unchanged date.
     assert "the Evidence pane offers to lengthen those locks again" in mixed[0]
     assert "until the date is extended again" not in mixed[0]
     assert "as far ahead as this deployment sets a lock in one step" in capped[0]
@@ -750,11 +736,9 @@ console.log(JSON.stringify([
 
 @needs_node
 def test_a_later_retention_date_is_confirmed_with_the_year_spelled_out(tmp_path):
-    """x-lock-extension, verifier, 2026-09-24. Extending the date lengthens
-    a storage lock nobody can shorten, and one person typing 2208 for 2028
-    made that commitment with no question asked, while raising the
-    classification asks one. The question names the date and says it
-    cannot be taken back, and saveCaseRecord asks it before the PATCH."""
+    """Extending the date lengthens a storage lock nobody can shorten, and one person typing 2208 for 2028
+    would make that commitment with no question asked, while raising the classification asks one. The
+    question names the date and says it cannot be taken back, and saveCaseRecord asks it before the PATCH."""
     [q] = _run(tmp_path, ["retentionLockQuestion"], """
 console.log(JSON.stringify([retentionLockQuestion('OP-NIGHTJAR-26', '2208-12-31')]));
 """)
@@ -771,8 +755,7 @@ console.log(JSON.stringify([retentionLockQuestion('OP-NIGHTJAR-26', '2208-12-31'
 
 
 # ---------------------------------------------------------------------------
-# x-lock-extension, verifier (2026-09-24): locks short of the case are
-# counted, said, and can be lengthened from the pane
+# Locks short of the case are counted, said, and can be lengthened from the pane
 # ---------------------------------------------------------------------------
 
 @needs_node
@@ -825,8 +808,7 @@ console.log(JSON.stringify(out));
 
 
 # ---------------------------------------------------------------------------
-# x-inspector-chips (2026-09-24): the inspector's exhibit list states the
-# lock and the digest the way the card does
+# The inspector's exhibit list states the lock and the digest the way the card does
 # ---------------------------------------------------------------------------
 
 @needs_node

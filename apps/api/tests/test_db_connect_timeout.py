@@ -1,17 +1,12 @@
 """A database that is down must FAIL, not hang.
 
-`db.connect()` used to call `psycopg.connect(dsn(), autocommit=True)` with
-no `connect_timeout`. libpq's default on a host that does not answer is
-effectively unbounded, so with Postgres down every request, every test and
-every script sat in TCP connect until something external killed it. On
-2026-09-01 a read-only audit sat for five minutes with no message before a
-300s harness timeout ended it -- the codebase's signature shape again: a
-failure that does not report itself as one.
+`db.connect()` passes a `connect_timeout`: libpq's default on a host that does not answer is
+effectively unbounded, so with Postgres down every request, every test and every script would sit in
+TCP connect until something external killed it, a failure that does not report itself as one.
 
-This test is deliberately DB-free: it points at an address that swallows
-SYNs and asserts that `connect()` gives up. On the unpatched code it would
-itself hang, which is a useless regression test, so the call runs on a
-daemon thread under a watchdog and a hang is reported as a failure.
+This test is deliberately DB-free: it points at an address that swallows SYNs and asserts that
+`connect()` gives up. Without the timeout it would itself hang, which is a useless regression test, so
+the call runs on a daemon thread under a watchdog and a hang is reported as a failure.
 """
 from __future__ import annotations
 

@@ -1,19 +1,14 @@
-"""The Feeds pane after the ux12-feeds review (2026-09-22, fixed 2026-09-23).
+"""The Feeds pane can be worked, not only looked at.
 
-The review found a pane that could be looked at and not worked: a queue
-row's score named no selector, copies from one partner read as a second
-source, nothing could be opened, dismissed or attached, the Category
-filter shrank to itself and followed the analyst into the next case, dead
-letters named no feed and were the same list in every case, the Keys tab
-flagged a key as somebody else's and offered no Revoke, Poll now was one
-unconfirmed click the server would refuse, and the rail badge was never
-set. Each is held here.
+A queue row's score names its selector, copies from one partner are not read as a second source, a row can
+be opened, dismissed and attached, the Category filter does not shrink to itself or follow the analyst into
+the next case, dead letters name their feed and are scoped to the case, the Keys tab offers Revoke, Poll now
+is confirmed and says when the server would refuse it, and the rail badge is set. Each is held here.
 
-Pure, like `test_ui_invariants.py`: these read the shipped static assets.
-The checks marked `needs_node` EXECUTE the shipped functions under Node,
-because "a resend is not called corroboration" is a claim about what the
-function returns; they skip where Node is absent. The server halves are
-in `test_feeds_review_pg.py`.
+Pure, like `test_ui_invariants.py`: these read the shipped static assets. The checks marked `needs_node`
+EXECUTE the shipped functions under Node, because "a resend is not called corroboration" is a claim about
+what the function returns; they skip where Node is absent. The server halves are in
+`test_feeds_review_pg.py`.
 """
 from __future__ import annotations
 
@@ -85,10 +80,6 @@ def _run(sources: list[str], body: str, tmp_path: Path):
     return json.loads(out.stdout)
 
 
-# ---------------------------------------------------------------------------
-# ux12-feeds:also-sent-by-false-corroboration
-# ---------------------------------------------------------------------------
-
 def _src(feed, copies, this_feed):
     return {"feed": feed, "copies": copies, "this_feed": this_feed}
 
@@ -122,11 +113,10 @@ def test_a_resend_from_one_feed_is_not_called_a_second_source(tmp_path):
 
 @needs_node
 def test_a_copy_the_reader_cannot_see_is_never_called_a_resend(tmp_path):
-    """The fix round's case (2026-09-23): one readable resend and one copy
-    the reader cannot see printed "2 copies, all from this feed: a resend,
-    not a second source; 1 copy you cannot see", denying corroboration
-    about the copy nobody here can read. Near-duplicate matching runs
-    across the deployment, so unseen copies are the ordinary case."""
+    """One readable resend and one copy the reader cannot see must not print "2 copies, all from this feed:
+    a resend, not a second source; 1 copy you cannot see", which denies corroboration about the copy nobody
+    here can read. Near-duplicate matching runs across the deployment, so unseen copies are the ordinary
+    case."""
     rows = [
         {"feed": "A", "duplicate_count": 2,
          "duplicate_sources": [_src("A", 1, True)]},
@@ -178,10 +168,6 @@ console.log(JSON.stringify(foldUnderPrimaries(rows).map(
         "lost")
 
 
-# ---------------------------------------------------------------------------
-# ux12-feeds:watched-hit-unnamed-and-contradicted
-# ---------------------------------------------------------------------------
-
 @needs_node
 def test_every_term_of_a_score_is_said_with_its_selector_and_watch(tmp_path):
     got = _run([_fn("scoreTerms")], """
@@ -231,10 +217,6 @@ def test_collected_says_it_is_the_polls_and_points_at_the_queue():
     assert "are in the Ingest" in hits
 
 
-# ---------------------------------------------------------------------------
-# ux12-feeds:queue-is-a-dead-end
-# ---------------------------------------------------------------------------
-
 def test_a_queue_row_can_be_opened_triaged_and_attached():
     row = _code(_fn("ingestRow"))
     for verb in ("'Open'", "'Mark triaged'", "'Link\u2026'",
@@ -258,10 +240,6 @@ def test_the_queue_defaults_to_what_needs_triage():
     assert '<option value="NEW" selected>Needs triage</option>' in sel
     assert "params.set('triage_state', tri)" in _fn("loadIngestQueue")
 
-
-# ---------------------------------------------------------------------------
-# ux12-feeds:category-filter-collapses-and-sticks
-# ---------------------------------------------------------------------------
 
 def test_category_options_come_from_the_whole_queue():
     load = _code(_fn("loadIngestQueue"))
@@ -289,10 +267,6 @@ def test_a_filtered_empty_queue_says_it_is_filtered():
     assert "ing-clear-filter" in _fn("loadIngestQueue")
 
 
-# ---------------------------------------------------------------------------
-# ux12-feeds:feeds-badge-never-set
-# ---------------------------------------------------------------------------
-
 def test_the_feeds_badge_is_set_and_counted_on_case_open():
     assert "$('feeds-badge')" in _fn("paintFeedsBadge")
     assert "watched_untriaged" in _fn("paintFeedsBadge")
@@ -303,10 +277,6 @@ def test_the_feeds_badge_is_set_and_counted_on_case_open():
         "a refused badge read is asked again on every case open, humming "
         "AUTHZ_DENIED")
 
-
-# ---------------------------------------------------------------------------
-# ux12-feeds:dead-letters-no-feed-no-scope
-# ---------------------------------------------------------------------------
 
 def test_a_dead_letter_names_its_feed_key_and_case():
     row = _code(_fn("deadLetterRow"))
@@ -335,8 +305,7 @@ def test_a_dead_letter_can_be_repaired_and_replayed():
 
 
 def test_replay_is_offered_only_to_a_reader_the_server_would_let_replay():
-    """Fix round (2026-09-23): every reader was offered it and a REVIEWER
-    met a 403 inside the form."""
+    """A REVIEWER must not be offered replay and then meet a 403 inside the form."""
     row = _code(_fn("deadLetterRow"))
     assert "if (d.can_replay && !d.replayed_at" in row
     # `replayTargets` offers no case unless `intoCase` (r2 c19 moved the
@@ -349,10 +318,6 @@ def test_replay_is_offered_only_to_a_reader_the_server_would_let_replay():
     assert "rows.some((d) => d.can_replay)" in load
     assert "'repair and replay them: analysts and lead investigators can'" in load
 
-
-# ---------------------------------------------------------------------------
-# ux12-feeds:poll-now-one-click-and-blocked
-# ---------------------------------------------------------------------------
 
 def test_poll_now_is_confirmed_and_names_what_it_touches():
     row = _code(_fn("dueRow"))
@@ -374,19 +339,14 @@ def test_poll_now_is_off_while_the_server_would_refuse_it():
 
 
 def test_a_reader_who_may_not_poll_is_told_why_in_the_pane():
-    """Fix round (2026-09-23): a non-collector saw greyed Poll now buttons
-    whose only reason was a title on a disabled control, which a keyboard
-    never reaches and a touch screen never shows."""
+    """A non-collector is told why Poll now is unavailable in the pane: a title on a disabled control is
+    never reached by a keyboard and never shown on a touch screen."""
     paint = _code(_fn("paintRunState"))
     assert "run.allowed === false" in paint
     assert "collector role" in paint
     assert "box.classList.toggle('warn'" in paint, (
         "a reader who simply does not poll is shown a warning")
 
-
-# ---------------------------------------------------------------------------
-# ux12-feeds:mixed-unlabelled-timezones (the due line says how long ago)
-# ---------------------------------------------------------------------------
 
 @needs_node
 def test_a_due_time_says_how_long_ago_it_passed(tmp_path):
@@ -401,10 +361,6 @@ console.log(JSON.stringify([
     assert got == [", 3 hours ago", ", 5 minutes ago", ""]
     assert "fmtTime(s.due_at) + dueAgo(s.due_at)" in _fn("dueRow")
 
-
-# ---------------------------------------------------------------------------
-# ux12-feeds:confidence-label-ambiguous
-# ---------------------------------------------------------------------------
 
 @needs_node
 def test_the_category_guess_is_said_in_words(tmp_path):
@@ -423,10 +379,6 @@ def test_the_row_labels_a_category_guess_and_offers_a_correction():
     assert "'/ingest/records/' + r.id + '/category'" in row
     assert "r.category_was" in row, "the classifier's output is not kept"
 
-
-# ---------------------------------------------------------------------------
-# ux12-feeds:keys-tab-read-only
-# ---------------------------------------------------------------------------
 
 def test_a_live_key_can_be_revoked_with_a_reason_and_a_confirm():
     row = _code(_fn("keyRow"))
@@ -449,9 +401,8 @@ def test_a_key_can_be_issued_and_its_secret_shows_once():
 
 
 def test_the_issue_form_starts_again_at_unknown_after_a_key_is_issued():
-    """Fix round (2026-09-23): `form.reset()` put the category select,
-    whose options are built at run time, back on its FIRST option, so the
-    next key was offered as STEALER_LOG."""
+    """`form.reset()` would put the category select, whose options are built at run time, back on its FIRST
+    option, so the next key would be offered as STEALER_LOG."""
     issue = _code(_fn("issueKey"))
     assert "resetKeyForm();" in issue
     assert "$('key-issue-form').reset();" not in issue
@@ -460,20 +411,12 @@ def test_the_issue_form_starts_again_at_unknown_after_a_key_is_issued():
     assert reset.index(".reset();") < reset.index("cat.value = 'UNKNOWN'")
 
 
-# ---------------------------------------------------------------------------
-# ux12-feeds:suppressed-hits-no-response
-# ---------------------------------------------------------------------------
-
 def test_a_watch_hit_can_be_suppressed_or_unsuppressed():
     row = _code(_fn("watchHitRow"))
     assert "'/unsuppress'" in row and "'/suppress'" in row
     assert "json: { reason: why.trim() }" in row
     assert row.index("if (h.suppressed)") < row.index("'/unsuppress'")
 
-
-# ---------------------------------------------------------------------------
-# ux12-feeds:rescore-silent
-# ---------------------------------------------------------------------------
 
 def test_rescore_says_what_changed_and_there_is_a_rescore_all():
     one = _code(_fn("rescoreRecord"))

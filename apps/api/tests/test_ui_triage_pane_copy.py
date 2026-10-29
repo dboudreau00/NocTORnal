@@ -1,17 +1,15 @@
-"""The Triage pane, held to the Alpha 6 release review (2026-09-24).
+"""The Triage pane.
 
 Pure: the shipped static assets, with the real functions run under Node
 against stubs (skipped where Node is absent), beside test_ui_invariants.
-The server halves are in test_triage_release_review_pg.py. Each test
-fails on d0faa34 and names the finding it holds:
+The server halves are in test_triage_and_capture_pg.py.
 
-- c14: the keys' cursor was a bare index, so after a live reload A, R and
-  D acted on a card the analyst never picked, and the dialogs did not
-  name it.
-- c1: a card whose Accept the server refuses said TLP:RED and offered it.
-- c15: the capture form offered every level, reset to AMBER on every case.
-- a read-only case badged proposals and feed records nobody may clear.
-- the Undo was offered to a REVIEWER, whose role cannot retire.
+- The keys' cursor follows the picked card, so after a live reload A, R and D do not act on a card the
+  analyst never picked, and the dialogs name it.
+- A card whose Accept the server refuses does not say TLP:RED and offer it.
+- The capture form offers only the levels the case allows and does not reset to AMBER on every case.
+- A read-only case does not badge proposals and feed records nobody may clear.
+- The Undo is not offered to a REVIEWER, whose role cannot retire.
 """
 from __future__ import annotations
 
@@ -45,9 +43,8 @@ ATTR = (f"{{ id: 'a1', kind: 'ATTRIBUTE', state: 'PROPOSED', "
 
 @needs_node
 def test_the_cursor_follows_the_picked_card_across_a_live_reload(tmp_path):
-    """The verifier's reproduction: pick the second card, a colleague's
-    capture lands a higher-scored one above it, and the reload kept the
-    index, so the keys moved to the newcomer."""
+    """Pick the second card, then a colleague's capture lands a higher-scored one above it: the reload
+    must follow the picked card, not keep the index, or the keys move to the newcomer."""
     got = _run([_fn("splitLead"), _fn("moreDetails"),
                 _fn("renderTriage"), _fn("pickTriageCard"),
                 _fn("triageSourceLine"), _fn("triageKeyTarget"),
@@ -142,8 +139,8 @@ def test_every_reset_of_the_index_resets_the_id_too():
     assert "state.triageId = null;" in switch
     change = js[js.index("$('triage-state').addEventListener('change'"):]
     assert "state.triageId = null;" in change[:change.index("});")]
-    # openCase's own reset too (the verifier of the fix round): harmless
-    # while the switch handler clears it, and one rule is easier to keep.
+    # openCase resets it too: harmless while the switch handler clears it, and one rule is easier to
+    # keep.
     opened = _fn("openCase")
     assert "state.triageIndex = 0;\n  state.triageId = null;" in opened
 
@@ -257,7 +254,7 @@ def test_the_case_switch_and_every_load_fit_the_capture_form():
     load = _fn("loadTriage")
     assert "syncCaptureForm(state.caseRec);" in load
     assert "state.captureRefused = data.capture_refused || '';" in load
-    # L1 (2026-09-24): the queue also says what a capture is stored under.
+    # The queue also says what a capture is stored under.
     assert "state.captureLabels = data.capture_labels || null;" in load
     assert ("syncCaptureForm(state.caseRec, state.captureRefused, "
             "state.captureLabels);") in load
@@ -278,10 +275,9 @@ def test_the_case_switch_and_every_load_fit_the_capture_form():
 
 @needs_node
 def test_a_capture_reply_says_whose_label_is_whose_and_names_none_above(tmp_path):
-    """The fix round (2026-09-24): a re-paste leaves the shared document at
-    its earlier label, so "Stored at" is said only when the document and
-    the proposals agree; a label above the analyst comes back null and the
-    line names none."""
+    """A re-paste leaves the shared document at its earlier label, so "Stored at" is said only when the
+    document and the proposals agree; a label above the analyst comes back null and the line names
+    none."""
     got = _run([_fn("captureLabelWords")], """
 console.log(JSON.stringify([
   captureLabelWords({ classification: 'RED', document_classification: 'RED' }),

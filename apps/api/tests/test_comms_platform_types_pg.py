@@ -1,5 +1,5 @@
-"""The Telegram platform names the ontology's durable selector type (roadmap
-F5.4 (b), 2026-09-24; migration 0107). DATABASE_URL-gated.
+"""The Telegram platform names the ontology's durable selector type (migration 0107).
+DATABASE_URL-gated.
 """
 from __future__ import annotations
 

@@ -1,13 +1,10 @@
-"""The Analysis pane's regular-role card: REGE (ROADMAP-REMAINING phase 3,
-2026-10-02).
+"""The Analysis pane's regular-role card (REGE).
 
-Held to the Roles card's tests (test_ui_analysis_roles.py) point for point,
-and behavioural where it matters: the shipped loader, renderer and image
-table run under node with the fake DOM of `test_ui_analysis_pane.py`, whose
-prelude and extractors this file imports. The rule every loader keeps (a
-case token, and a reply for a case left is dropped) is asserted here for
-`loadRege`. The server halves are `test_rege.py`, `test_rege_pg.py` and
-`test_rege_http_pg.py`.
+Held to the Roles card's tests (test_ui_analysis_roles.py) point for point, and behavioural where it
+matters: the shipped loader, renderer and image table run under node with the fake DOM of
+`test_ui_analysis_pane.py`, whose prelude and extractors this file imports. The rule every loader keeps
+(a case token, and a reply for a case left is dropped) is asserted here for `loadRege`. The server
+halves are `test_rege.py`, `test_rege_pg.py` and `test_rege_http_pg.py`.
 
 Pure: no database. The node halves skip when node is not installed.
 """
@@ -73,10 +70,8 @@ def test_the_card_reads_the_stored_run_first_and_computes_on_run():
 
 
 def test_opening_the_pane_on_a_stale_stored_run_shows_it_and_computes_nothing():
-    """The stored run no longer matches the graph: opening the pane still
-    shows it, flagged stale, and never computes (a metered run) or reports
-    that nothing was stored. Only the 404 case was held before, so reading
-    the stored run as missing, or computing over it, passed (2026-10-02)."""
+    """The stored run no longer matches the graph: opening the pane still shows it, flagged stale, and
+    never computes (a metered run) or reports that nothing was stored."""
     got = _run(_loader() + r"""
 (async () => {
   loadRege(true); await tick();

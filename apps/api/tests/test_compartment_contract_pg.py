@@ -1,32 +1,22 @@
-"""The compartment registry contract (docs/00 decision 71, 2026-09-24).
+"""The compartment registry contract (docs/00 decision 71).
 
-0059 bound eighteen compartment columns to `iam.compartment` and rendered
-`iam.compartment_in_use` as a fixed union over them, which no later
-migration could extend: three later features would each have restated
-it, and whichever ran last would have dropped the others' columns from
-the guard.
-Migration 0069 makes the triggers the registry: `iam.compartment_bindings()`
-reads every binding from the catalog, and `iam.compartment_in_use` asks
-each of them, refusing while any cannot be read. docs/05, "Binding a
-compartment column", is the contract every later compartments column
-follows; this file enforces it:
+The triggers are the registry: `iam.compartment_bindings()` reads every binding from the catalog, and
+`iam.compartment_in_use` asks each of them, refusing while any cannot be read (migration 0069). A fixed
+union over the columns could not be extended by a later migration without restating it, and whichever
+ran last would drop the others' columns from the guard. docs/05, "Binding a compartment column", is the
+contract every later compartments column follows; this file enforces it:
 
-- the migrations (0059's tuple plus every later `ADDED_BOUND_COLUMNS`,
-  less any `REMOVED_BOUND_COLUMNS`, in chain order), the release's
-  `compartment_lifecycle.BOUND_COLUMNS` and the live bindings are one set;
-- every text column named like a compartment is bound, and every column a
-  binding names is in that set;
-- no later migration uses another name for its declaration, or restates
-  the three registry functions;
-- a column bound after 0059 guards its keys with no function restated, and
-  a binding that cannot be read fails CLOSED, per trigger, with the reason;
+- the migrations (0059's tuple plus every later `ADDED_BOUND_COLUMNS`, less any `REMOVED_BOUND_COLUMNS`,
+  in chain order), the release's `compartment_lifecycle.BOUND_COLUMNS` and the live bindings are one set;
+- every text column named like a compartment is bound, and every column a binding names is in that set;
+- no later migration uses another name for its declaration, or restates the three registry functions;
+- a column bound after 0059 guards its keys with no function restated, and a binding that cannot be
+  read fails CLOSED, per trigger, with the reason;
 - the downgrade body is 0059's, and the readiness row reads the bindings.
 
-`added_bound_columns()` and `bound_columns_at_head()` are for the other
-compartment tests and for later ones: import them rather than restating
-a list. Env-gated on DATABASE_URL. Registry keys `CC-T1-`. Everything that
-creates a scratch table or binding runs in a transaction that is rolled
-back.
+`added_bound_columns()` and `bound_columns_at_head()` are for the other compartment tests and for later
+ones: import them rather than restating a list. Env-gated on DATABASE_URL. Registry keys `CC-T1-`.
+Everything that creates a scratch table or binding runs in a transaction that is rolled back.
 """
 from __future__ import annotations
 

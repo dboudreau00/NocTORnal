@@ -1,10 +1,9 @@
-"""The lookup ledger as a record (F15.3, 2026-09-24):
-never deleted, what was asked and by whose authority fixed, the state
-machine held by the database, and retention that empties values, notes
-and bodies while every row, fingerprint and attempt stays.
+"""The lookup ledger as a record: never deleted, what was asked and by whose authority fixed, the state
+machine held by the database, and retention that empties values, notes and bodies while every row,
+fingerprint and attempt stays.
 
-The fetcher and the routes are fakes; nothing reaches a provider. **The
-email prefix is `lkledg-`.** Env-gated on DATABASE_URL.
+The fetcher and the routes are fakes; nothing reaches a provider. The email prefix is `lkledg-`.
+Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

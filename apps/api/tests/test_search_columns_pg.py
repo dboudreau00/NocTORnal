@@ -1,23 +1,17 @@
-"""The Search pane's four columns and what each row says (ux09-search,
-2026-09-23), against a real database.
+"""The Search pane's four columns and what each row says, against a real database.
 
-- hit-rows-unexplained: a row was a label and a bare rank. Hits now carry
-  the entity's type and TLP and whether their own name matched, and an
-  attribute KEY is never the reason an entity is found ("role" returned
-  seven broker personas, "seen" every crew member through first_seen_forum).
-- documents-unsearchable: the console never searched collected documents.
-  `/search/documents` is the pane's third column, and says `not_searched`
-  (naming the roles that read documents) rather than an empty list to a
-  caller without the global collection.read.
-- assertions-unsearchable: nothing searched a claim. `/search/assertions`
-  finds live claims by rationale, reference, cited exhibit title or exact
-  grading, gated as the inspector's assertion list is.
-- ux19-copy developer-speak-in-copy: `/roles/holders` is the grant table a
-  refusal is explained by, and the comms notice names no design document.
+- Hits carry the entity's type and TLP and whether their own name matched, and an attribute KEY is never
+  the reason an entity is found ("role" would return every broker persona, "seen" every crew member
+  through first_seen_forum).
+- `/search/documents` is the pane's third column, and says `not_searched` (naming the roles that read
+  documents) rather than an empty list to a caller without the global collection.read.
+- `/search/assertions` finds live claims by rationale, reference, cited exhibit title or exact grading,
+  gated as the inspector's assertion list is.
+- `/roles/holders` is the grant table a refusal is explained by, and the comms notice names no design
+  document.
 
-The pure half is test_search_ui_invariants.py. Env-gated on DATABASE_URL.
-Users are `scol-`, sources `test-scol-`; no other suite's teardown pattern
-matches either.
+The pure half is test_search_ui_invariants.py. Env-gated on DATABASE_URL. Users are `scol-`, sources
+`test-scol-`; no other suite's teardown pattern matches either.
 """
 from __future__ import annotations
 
@@ -211,9 +205,8 @@ def world(conn):
 # --- hit-rows-unexplained ------------------------------------------------
 
 def test_an_attribute_key_is_never_why_an_entity_is_found(conn, world):
-    """The finding's repro: a key name ("role", "first_seen_forum") found
-    every entity carrying the key. A VALUE still finds it, and names the
-    attribute."""
+    """A key name ("role", "first_seen_forum") does not find every entity carrying the key. A VALUE still
+    finds it, and names the attribute."""
     owner, _, case_id = world
     tok = _tok()
     key = f"{tok}role"
@@ -266,10 +259,9 @@ def test_a_hit_says_what_it_is_and_whether_its_name_matched(conn, client, world)
 
 def test_a_query_split_across_parts_names_every_part_and_claims_no_name(
         conn, client, world):
-    """"meridian exchange" found 18 personas through crew plus
-    first_seen_forum, none carried an attribute reason, and the pane said
-    "via the name and attributes together" for names holding neither word
-    (verifier of hit-rows-unexplained, 2026-09-23)."""
+    """A query split across parts ("meridian exchange") names every part that matched and claims no
+    attribute reason it does not have: the pane must not say "via the name and attributes together" for
+    names holding neither word."""
     owner, email, case_id = world
     crew, forum, name = _tok(), _tok(), _tok()
     two_attrs = _node(conn, case_id, owner, "quiet persona",
@@ -352,8 +344,8 @@ def test_the_documents_column_finds_documents_at_the_callers_own_ceiling(
 
 def test_a_caller_who_may_not_read_documents_is_told_so_not_shown_none(
         conn, client, world):
-    """READ_ONLY holds case.read and no collection.read: the column says
-    it was not searched, and names the roles that read documents."""
+    """READ_ONLY holds case.read and no collection.read: the column says it was not searched, and names
+    the roles that read documents."""
     owner, _, case_id = world
     tok = _tok()
     _doc(conn, _source(conn), body=f"contact {tok}")
@@ -525,12 +517,9 @@ def _refusal_contexts(js: str) -> list[str]:
 
 def test_every_refusal_reads_as_a_sentence_against_the_real_grant_table(
         conn, client, tmp_path):
-    """With the grant table as the database holds it, every context the
-    console gives `refusalText` becomes role names and still reads as a
-    sentence. The Audit chain refusal most accounts see had become
-    "Refused. the Security officer role is granted to Security officer
-    alone: ..." (verifier of ux19-copy developer-speak-in-copy, 2026-09-23),
-    and nothing ran the contexts against the real table."""
+    """With the grant table as the database holds it, every context the console gives `refusalText`
+    becomes role names and still reads as a sentence, not "Refused. the Security officer role is granted
+    to Security officer alone: ..."."""
     import json
     import re
 

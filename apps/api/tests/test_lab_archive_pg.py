@@ -1,19 +1,14 @@
-"""Archive expansion against the database (roadmap phase 8 "archive
-expansion", 2026-10-02).
+"""Archive expansion against the database.
 
-What these hold: an archive sample's members become child samples through
-the upload's own path, carrying the parent's case, labels and submitter,
-the parent link and the member's archive path, a SYSTEM custody row and a
-queued static triage of their own; a member is never labelled below its
-archive (0158's trigger); every member is screened before its row exists
-and its triage is queued, and a match, at creation or on a later import,
-isolates the whole tree for good with results that say why (0159);
-nesting is bounded by depth; RAR and 7-Zip are refused by name; a
-duplicate member is recorded and not stored twice; a whole-archive
-refusal names its limit and stores nothing; the archive's own legal hold
-reaches its members; the card's tree read shows a reader only what they
-may see; expansion happens once; the downgrades of 0159 and 0160 refuse
-while their rows exist.
+What these hold: an archive sample's members become child samples through the upload's own path, carrying
+the parent's case, labels and submitter, the parent link and the member's archive path, a SYSTEM custody row
+and a queued static triage of their own; a member is never labelled below its archive (0158's trigger);
+every member is screened before its row exists and its triage is queued, and a match, at creation or on a
+later import, isolates the whole tree for good with results that say why (0159); nesting is bounded by
+depth; RAR and 7-Zip are refused by name; a duplicate member is recorded and not stored twice; a
+whole-archive refusal names its limit and stores nothing; the archive's own legal hold reaches its members;
+the card's tree read shows a reader only what they may see; expansion happens once; the downgrades of 0159
+and 0160 refuse while their rows exist.
 
 Email prefix `arch-`. Env-gated on DATABASE_URL.
 """
@@ -174,8 +169,7 @@ def test_an_archive_expands_into_members_that_are_samples_of_the_same_material(c
     assert findings["refused"] == [{"path": "../escape.exe",
                                     "reason": "the path walks out of the archive "
                                               "(a .. component)"}]
-    # "unscreened" counts the refused entries with bytes behind them (2026-10-03): the
-    # traversal name holds content.
+    # "unscreened" counts the refused entries with bytes behind them: the traversal name holds content.
     assert findings["counts"] == {"entries": 3, "accepted": 2, "refused": 1,
                                   "stored": 2, "unscreened": 1}
     # Each member was stored exactly as an upload is: its own envelope in
@@ -213,23 +207,27 @@ def test_a_zip_link_or_device_entry_carrying_a_payload_is_expanded_as_a_member(
     """In a zip a link or a device is a mode bit on an entry that carries
     bytes, which Windows and most extractors write out as an ordinary file.
     Refused as content-free, a payload marked so was neither expanded nor
-    screened and the card said every member was compared (2026-10-07). An entry that holds
-    more than a link target is read as the
-    file it is; a real link stays a content-free refusal."""
+    screened and the card said every member was compared. An entry that holds
+    any bytes, even a link target's worth, is read as the file it is; only an
+    empty one stays a content-free refusal."""
     owner = make_user(conn, PREFIX, roles=("CASE_OWNER",))
     case = make_case(conn, owner, classification="AMBER")
     link = zipfile.ZipInfo("invoice.exe")
     link.external_attr = 0o120777 << 16
     dev = zipfile.ZipInfo("tool.exe")
     dev.external_attr = 0o020644 << 16
-    real = zipfile.ZipInfo("latest")
-    real.external_attr = 0o120777 << 16
+    short = zipfile.ZipInfo("latest")
+    short.external_attr = 0o120777 << 16
+    empty = zipfile.ZipInfo("dangling")
+    empty.external_attr = 0o120777 << 16
     parent = _submit(conn, store, owner, zip_of([
         (link, member_bytes("link") + bytes(4096)), (dev, member_bytes("dev")),
-        (real, b"invoice.exe"), ("ok.exe", member_bytes("ok"))]), case_id=case)
+        (short, b"invoice.exe"), (empty, b""), ("ok.exe", member_bytes("ok"))]),
+        case_id=case)
     _run_parent(conn, store, parent)
     findings = _finding(conn, parent.id)[0]
-    assert [m["path"] for m in findings["members"]] == ["invoice.exe", "tool.exe", "ok.exe"]
+    assert [m["path"] for m in findings["members"]] == [
+        "invoice.exe", "tool.exe", "latest", "ok.exe"]
     assert findings["counts"]["refused"] == 1 and findings["counts"]["unscreened"] == 0
 
 

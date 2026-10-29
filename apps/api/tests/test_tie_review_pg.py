@@ -1,35 +1,20 @@
 """A tie's review state: born right, and a person can move it.
 
-gap-tie-review and ux05 review-state-never-leaves-proposed (2026-09-23).
-`core.edge.review` defaulted to PROPOSED and no statement in the API ever
-set it, so every tie in every case read "review PROPOSED": an analyst's
-own direct observation, a suggestion already accepted in Triage, all of
-them. The canvas rang every node and the inspector's "Unreviewed
-proposals" always equalled "Ties in projection", a signal that could never
-clear and so carried no information.
+`core.edge.review` is set at birth: a tie a person asserts is born ACCEPTED, one founded on a machine's
+claim (AUTOMATED_INFERENCE) is born PROPOSED, and a Triage acceptance is born ACCEPTED although its
+claim keeps the machine's basis. Held here:
 
-Held here:
+- `POST .../graph/edges/{id}/review` moves it, audited (EDGE_REVIEWED with the state left and the
+  note, in the same transaction), and the projection the canvas rings from reads the new state;
+- it refuses REJECTED and SUPERSEDED, a dispute or reopening with no note, the state the tie is already
+  in (with no audit row), a retired tie, another case's tie, a caller without `proposal.review` (the
+  ANALYST), and a caller below the tie's own label;
+- `GET .../review` reads the decision back, and hides a tie above the caller's clearance behind the
+  same 404 as a missing one;
+- migration 0067 gives the older ties (all PROPOSED) the state the same rule would have given them,
+  audited, leaving a machine's unaccepted tie and anything a person has reviewed alone; the Review
+  history names it rather than "unknown".
 
-- a tie a person asserts is born ACCEPTED, one founded on a machine's
-  claim (AUTOMATED_INFERENCE) is born PROPOSED, and a Triage acceptance is
-  born ACCEPTED although its claim keeps the machine's basis;
-- `POST .../graph/edges/{id}/review` moves it, audited (EDGE_REVIEWED with
-  the state left and the note, in the same transaction), and the projection
-  the canvas rings from reads the new state;
-- what it refuses: REJECTED and SUPERSEDED, a dispute or reopening with no
-  note, the state the tie is already in (with no audit row), a retired tie,
-  another case's tie, a caller without `proposal.review` (the ANALYST), and
-  a caller below the tie's own label;
-- `GET .../review` reads the decision back, and hides a tie above the
-  caller's clearance behind the same 404 as a missing one;
-- migration 0067's statement gives the ties entered before Alpha 6 (all
-  PROPOSED) the state the same rule would have given them, audited,
-  leaving a machine's unaccepted tie and anything a person has reviewed
-  alone, and the Review history names it rather than "unknown". It began
-  as an upgrade-kit file for operators to run by hand; an upgrade that
-  forgot it rang every node, so the migration runs it.
-
-Every test that exercises the route or the born state fails on 245cb57.
 Email prefix `trev-`, unique to this file. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
@@ -49,8 +34,8 @@ os.environ.setdefault("NOCTORNAL_TOTP_KEK", "A" * 43 + "=")
 
 PREFIX = "trev-"
 
-#: Every write here carries its whole grading: the API is moving to refuse
-#: a claim whose grading is left to defaults (gap-api-grade-required).
+#: Every write here carries its whole grading: the API refuses a claim whose grading is left to
+#: defaults.
 GRADED = {"basis": "DIRECT_OBSERVATION", "reliability": "B",
           "credibility": "2", "confidence": "MODERATE"}
 
@@ -328,8 +313,8 @@ def test_a_retired_tie_is_not_reviewed(conn, client, world):
 # ---------------------------------------------------------------------------
 
 def test_an_analyst_without_the_verb_is_refused(conn, client, world):
-    """The owner's decision: `proposal.review`, which the Lead investigator
-    and the REVIEWER hold and the ANALYST does not."""
+    """`proposal.review` gates the move: the Lead investigator and the REVIEWER hold it and the
+    ANALYST does not."""
     w = world
     tie = _tie(w, basis="AUTOMATED_INFERENCE")
     r = _review(client, conn, w, tie, {"review": "ACCEPTED"}, who="analyst")
@@ -359,13 +344,12 @@ def test_another_cases_tie_is_the_same_404_as_a_missing_one(conn, client, world)
 
 def test_a_tie_above_the_callers_clearance_is_refused_and_unreadable(
         conn, client, world):
-    """CR7: the tie's own label gates the review, not only the case's; and
-    its review record is a 404 to a reader who cannot see it."""
+    """The tie's own label gates the review, not only the case's; its review record is a 404 to a
+    reader who cannot see it."""
     w = world
     red = _tie(w, basis="AUTOMATED_INFERENCE", classification="RED")
     r = _review(client, conn, w, red, {"review": "ACCEPTED"}, who="reviewer")
-    # The missing tie's own 404, not a 403 that confirms the id (beta review
-    # http_ui-016, 2026-10-03).
+    # The missing tie's own 404, not a 403 that confirms the id.
     assert r.status_code == 404, r.text
     assert _review_col(conn, red) == "PROPOSED"
     got = client.get(f"/api/v1/cases/{w['case']}/graph/edges/{red}/review",
@@ -382,9 +366,7 @@ def test_the_review_routes_need_authentication(client):
     assert client.get(path).status_code == 401
 
 
-# ---------------------------------------------------------------------------
-# Ties entered before Alpha 6: migration 0067
-# ---------------------------------------------------------------------------
+# Ties entered before review state was set at birth: migration 0067
 
 MIGRATION = (Path(__file__).resolve().parents[3] / "db" / "migrations"
              / "versions" / "0067_tie_review_born_state.py")
@@ -401,8 +383,8 @@ def _born_state_sql() -> str:
 
 
 def _entered_before_alpha6(conn, edge_id):
-    """What every tie entered before Alpha 6 holds, whoever entered it: the
-    column default, because nothing set it."""
+    """What every tie entered before the review state was set holds, whoever entered it: the column
+    default, because nothing set it."""
     conn.execute("UPDATE core.edge SET review = 'PROPOSED' WHERE id = %s",
                  (edge_id,))
 
@@ -422,13 +404,9 @@ def _accepted_from_triage(conn, client, w):
 
 def test_the_upgrade_gives_old_ties_the_state_they_would_be_born_in(
         conn, client, world):
-    """ux05-inspector:review-state-never-leaves-proposed, the 2026-09-23
-    verifier: with only the born rule, every tie on an upgraded estate
-    stayed PROPOSED (quill_shrike66 read 14 unreviewed of 14, its own
-    direct observation among them), and the only way out was one click per
-    tie. The migration's statement is run as it stands, inside a
-    transaction that is rolled back, so the estate this suite runs on is
-    left as it was."""
+    """With only the born rule, every tie on an upgraded estate would stay PROPOSED, with one click
+    per tie the only way out. The migration's statement is run as it stands, inside a transaction that
+    is rolled back, so the estate this suite runs on is left as it was."""
     from datetime import datetime, timezone
 
     from psycopg.rows import dict_row

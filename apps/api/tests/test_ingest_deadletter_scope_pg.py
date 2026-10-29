@@ -1,34 +1,20 @@
-"""GET /ingest/dead-letters is scoped to what the caller may read
-(2026-09-09).
+"""GET /ingest/dead-letters is scoped to what the caller may read.
 
-Until then the listing was gated on the global `ingest.read` verb and
-filtered by the caller's clearance ceiling alone, so an ANALYST on one
-case read every other case's dead letters: the partner key, the error
-class, the classification and the failure rate of feeds into cases they
-were never assigned to. The Alpha 4 review named exactly those fields.
-
-`ingest.dead_letter` has no `case_id`; the batch is parsed INTO a case and
-the case lands on `ingest.record`. So a dead letter's case is the case its
-batch's records went to, and the fixtures here always feed one parseable
-record alongside the junk line, because a batch that wholly dead-letters
-has no records and is therefore UNATTACHED -- the operator's, not any
-case's.
+`ingest.dead_letter` has no `case_id`; the batch is parsed into a case and the case lands on
+`ingest.record`. A dead letter's case is the case its batch's records went to, so the fixtures feed one
+parseable record alongside the junk line: a batch that wholly dead-letters has no records and is
+unattached (the operator's, not any case's).
 
 The tests are the refusals:
 
 - each case's reader sees only their own case's dead letters;
-- the caller's clearance still bounds every row (this predicate PREDATES
-  the change and is pinned here next to the case predicate so the two
-  cannot be separated again);
-- unattached rows -- no case at all -- are for holders of `ingest.manage`,
-  the verb `/quarantine` requires and the console probes to decide whether
-  to show the quarantine section, and an operator's stale step-up withholds
-  them out loud rather than silently;
-- a key filter naming a feed outside the caller's cases is a 404, the
-  answer `/records` gives for a case off-scope;
+- the caller's clearance still bounds every row, pinned beside the case predicate so the two stay together;
+- unattached rows are for holders of `ingest.manage`, the verb `/quarantine` requires and the console probes,
+  and an operator's stale step-up withholds them out loud rather than silently;
+- a key filter naming a feed outside the caller's cases is a 404, as `/records` answers for an off-scope case;
 - a caller with neither verb is a 403, which is what the console expects.
 
-**The email prefix is `dls-` and must stay unique.**
+The email prefix is `dls-` and must stay unique.
 
 Env-gated on DATABASE_URL.
 """
@@ -100,10 +86,7 @@ def _make_user(conn, *, clearance="RED", compartments=(), global_roles=()):
     uid = store.create_user(email, "Scope", PASSWORD)
     secret = totp.generate_secret()
     store.enroll_totp(uid, secret)
-    # Since 0059 every compartment column is bound to iam.compartment. This
-    # helper writes whatever it is handed, so it registers it first rather
-    # than trusting the caller to have done so -- two helpers of this shape
-    # were refused on CI's fresh database on 2026-09-09 while passing here.
+    # Every compartment column is bound to iam.compartment, so the helper registers each key first.
     for key in compartments:
         conn.execute(
             "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
@@ -119,29 +102,18 @@ def _make_user(conn, *, clearance="RED", compartments=(), global_roles=()):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
-    is off in these tests.
+    """A signed-in caller, minted as `scripts/bootstrap.py session` does: the account by email, then
+    `SessionService` against the store the API validates against.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Unbound (no address, no User-Agent); only `NOCTORNAL_SESSION_STRICT_BINDING` refuses that, and it is off
+    here. It skips `POST /auth/login`, which answers 204 with the token only in `__Host-session`, and
+    TOTP codes are single-use within a 30-second step.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as the real mint sites pass: step-up gated routes refuse a session without it.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token
@@ -199,9 +171,8 @@ def _ids(body: dict) -> set[str]:
 # ---------------------------------------------------------------------------
 
 def test_each_case_reader_sees_only_their_own_cases_dead_letters(conn, client):
-    """Two owners, two cases, one dead letter each. Before 2026-09-09 both
-    saw both: the listing was bounded by the global verb and the ceiling,
-    and nothing in it asked which case a batch had fed."""
+    """Two owners, two cases, one dead letter each: each sees only their own, because the listing asks which
+    case a batch fed."""
     one, one_email, one_secret = _make_user(conn, global_roles=("CASE_OWNER",))
     two, two_email, two_secret = _make_user(conn, global_roles=("CASE_OWNER",))
     one_token = _session(conn, one_email)
@@ -216,9 +187,7 @@ def test_each_case_reader_sees_only_their_own_cases_dead_letters(conn, client):
     assert dead_one in _ids(seen_by_one) and dead_two not in _ids(seen_by_one)
     assert dead_two in _ids(seen_by_two) and dead_one not in _ids(seen_by_two)
 
-    # The response says what it covered, and each row says whose it is --
-    # naming the feed, which is the intelligence the review named and which
-    # this listing had never carried.
+    # The response says what it covered, and each row says whose it is, naming the feed.
     assert seen_by_one["scope"]["cases"] == [case_one]
     assert seen_by_one["scope"]["unattached"] is False
     row = next(d for d in seen_by_one["dead_letters"] if d["id"] == dead_one)
@@ -229,10 +198,8 @@ def test_each_case_reader_sees_only_their_own_cases_dead_letters(conn, client):
 
 
 def test_an_amber_holder_does_not_see_a_red_dead_letter_on_their_own_case(conn, client):
-    """The ceiling predicate. It was already in the query before
-    2026-09-09 -- this pins it beside the new case predicate, on a caller
-    who PASSES the case predicate, so a later edit cannot drop one while
-    keeping the other. A dead letter inherits the issuing key's ceiling
+    """The ceiling predicate, pinned beside the case predicate on a caller who passes the case predicate, so
+    a later edit cannot drop one while keeping the other. A dead letter inherits the issuing key's ceiling
     (`IngestService._dead_letter`), so a RED key makes a RED row."""
     owner, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
     owner_token = _session(conn, owner_email)
@@ -252,12 +219,9 @@ def test_an_amber_holder_does_not_see_a_red_dead_letter_on_their_own_case(conn, 
 
 
 def test_unattached_dead_letters_are_for_the_operator_verb(conn, client):
-    """A batch that fed no case belongs to no case. `ingest.manage` is the
-    verb `/quarantine` requires and the console probes; `ingest.read` on a
-    case cannot reach a row with no case. Before 2026-09-09 every holder of
-    `ingest.read` saw these, and the operator -- SYS_ADMIN holds
-    `ingest.manage` and NOT `ingest.read` -- could not open the listing at
-    all."""
+    """A batch that fed no case belongs to no case. `ingest.manage` is the verb `/quarantine` requires and
+    the console probes; `ingest.read` on a case cannot reach a row with no case. SYS_ADMIN holds
+    `ingest.manage` and not `ingest.read`, so the operator must still be able to open the listing."""
     owner, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
     owner_token = _session(conn, owner_email)
     case_id = _create_case(client, owner_token)
@@ -273,9 +237,8 @@ def test_unattached_dead_letters_are_for_the_operator_verb(conn, client):
     by_operator = _listing(client, op_token)
     assert unattached in _ids(by_operator), "the operator sees the unattached row"
     assert attached not in _ids(by_operator), "and not the case's"
-    # `replay_into_case` since the fix round (2026-09-23): the operator
-    # holds no ingest.replay, so a replay may not name a case, and the
-    # unattached row is theirs to replay into quarantine (`can_replay`).
+    # `replay_into_case` is false: the operator holds no ingest.replay, so a replay may not name a case, and
+    # the unattached row is theirs to replay into quarantine (`can_replay`).
     assert by_operator["scope"] == {"cases": [], "unattached": True,
                                     "unattached_withheld": None,
                                     "replay_into_case": False}
@@ -349,9 +312,8 @@ def test_the_console_and_the_endpoint_agree_on_the_contract(conn, client):
     app_js = (Path(__file__).resolve().parents[1] / "src" / "noctornal_api"
               / "http" / "static" / "app.js").read_text(encoding="utf-8")
     start = app_js.index("async function loadDeadLetters()")
-    # The whole function, not its first 900 characters: it grew a case
-    # scope and a feed filter ahead of the refusal branch (ux12-feeds:
-    # dead-letters-no-feed-no-scope, 2026-09-23).
+    # The whole function, not its first 900 characters: the refusal branch comes after a case scope and a
+    # feed filter.
     fn = app_js[start:app_js.index("\n}\n", start)]
     assert "'/ingest/dead-letters?" in fn
     assert "body.dead_letters" in fn and "body.count" in fn
@@ -372,12 +334,11 @@ def test_the_console_and_the_endpoint_agree_on_the_contract(conn, client):
     assert "ingest.read" in r.json()["detail"]
 
 
-# --- the decisions are the gate's (2026-09-11) --------------------------------
+# --- the decisions are the gate's --------------------------------------------
 #
-# Each test below replaces `evaluate` in the router module with a verdict of
-# its own. If the SQL predicates were still deciding, the replacement would
-# change nothing; the rows appearing and vanishing with the fake verdict is
-# the proof that the gate is what answers.
+# Each test below replaces `evaluate` in the router module with a verdict of its own. If the SQL predicates
+# were still deciding, the replacement would change nothing; rows appearing and vanishing with the fake
+# verdict prove the gate is what answers.
 
 
 def test_the_verb_is_the_gates_answer(conn, client, monkeypatch):

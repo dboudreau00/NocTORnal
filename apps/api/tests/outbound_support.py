@@ -246,7 +246,7 @@ def teardown(conn, prefix: str) -> None:
     _try(conn, f"DELETE FROM iam.session WHERE user_id IN {users}")
     _try(conn, f"DELETE FROM iam.user_role WHERE user_id IN {users}")
     # Cases and people last, one at a time: whatever a ledger still names
-    # stays, as intended (test_f19_review_pg.py).
+    # stays, as intended (test_notification_and_sample_edge_cases_pg.py).
     for (case_id,) in conn.execute(f"SELECT id FROM core.\"case\" WHERE owner_user_id IN "
                                    f"{users}").fetchall():
         _try(conn, "DELETE FROM core.selector WHERE case_id = %s", (case_id,))

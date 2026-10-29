@@ -1,15 +1,12 @@
-"""Opening a conversation never meets a capture the caller may not read (rls-5; g45, 2026-10-03).
+"""Opening a conversation never meets a capture the caller may not read.
 
-`conversation_external_idx` made (case, platform, external reference)
-unique across labels and `open_conversation` upserted on it. When a RED or
-compartmented capture of a room existed, an AMBER caller's upsert met a row
-the UPDATE policy hides: the request role got Postgres's row-security
-refusal (a 403 and an RLS_REFUSED row, where a fresh reference answers
-201), so a caller with `comms.bind` could confirm whether the case holds a
-hidden capture of a room by its external id. On a connection row security
-does not filter the same call retitled the hidden row and returned its id.
-0147 keys the index per labels, so the row an upsert can meet is always one
-the caller may read.
+`open_conversation` upserts on (case, platform, external reference). If that index were unique across
+labels, then when a RED or compartmented capture of a room existed an AMBER caller's upsert would meet a
+row the UPDATE policy hides: the request role would get Postgres's row-security refusal (a 403 and an
+RLS_REFUSED row, where a fresh reference answers 201), so a caller with `comms.bind` could confirm whether
+the case holds a hidden capture of a room by its external id. On a connection row security does not
+filter, the same call would retitle the hidden row and return its id. 0147 keys the index per labels, so
+the row an upsert can meet is always one the caller may read.
 
 Accounts carry the prefix `g45conv-`, unique to this file.
 """

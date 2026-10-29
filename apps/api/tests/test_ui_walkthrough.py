@@ -1,5 +1,4 @@
-"""The first-sign-in walkthrough and the Help entry, held from the shipped
-files (2026-10-06).
+"""The first-sign-in walkthrough and the Help entry, held from the shipped files.
 
 The public beta is meant to be usable by a first-time user, so the console
 tells a new analyst what it is, what it must not be used on yet and where to
@@ -282,11 +281,10 @@ def test_the_demo_command_is_the_one_bootstrap_and_the_installer_give():
     assert "' --code OP-LATTICEWORK-26 --classification CLEAR'" in block
     installer = ROOT / "release" / "install.sh"
     if installer.is_file():
-        # The installer's closing card gives the code it loaded the demo
-        # under (`--code %s`, DEMO_CODE_NAME), which is the code the tour
-        # prints and the one `bootstrap.py demo-network` creates when it is
-        # given none. OP-SHOWCASE-26 is the README's larger showcase, a
-        # different recipe (2026-10-07).
+        # The installer's closing card gives the code it loaded the demo under (`--code %s`,
+        # DEMO_CODE_NAME), which is the code the tour prints and the one `bootstrap.py demo-network`
+        # creates when it is given none. OP-SHOWCASE-26 is the README's larger showcase, a different
+        # recipe.
         card = installer.read_text(encoding="utf-8")
         assert 'DEMO_CODE_NAME="OP-LATTICEWORK-26"' in card
         assert (".venv/bin/python scripts/bootstrap.py demo-network "

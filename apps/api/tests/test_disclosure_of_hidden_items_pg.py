@@ -1,18 +1,16 @@
-"""What a reader is told about what they cannot see (beta review, 2026-10-03).
+"""What a reader is told about what they cannot see.
 
-- rls-9: the node-set member list said exactly how many hidden entities each
-  working set held, whatever the case's withheld_disclosure said.
-- graph-coparticipation-ignores-withheld-none: the co-participation network
-  said how many participants resolved to an entity the reader cannot see, and
-  with the filters narrowed it to one room, whatever the setting said.
-- http_ui-008: a comms binding took any node id (another case's, one above the
-  caller, an unknown one as a 500).
-- http_ui-016: for a change to an element above the caller the gate answered
-  403 "missing permission", and for an unknown id 404, so a caller holding a
-  leaked id could confirm it. One answer now, the audit row kept.
+- The node-set member list says how many hidden entities each working set holds only as the case's
+  withheld_disclosure allows.
+- The co-participation network says how many participants resolved to an entity the reader cannot see
+  only as the setting allows, with the filters narrowed to one room too.
+- A comms binding takes only a node of its own case that the caller may see (another case's, one above the
+  caller, or an unknown one must not be a 500).
+- For a change to an element above the caller the gate gives one answer whether the id is hidden or
+  unknown, so a caller holding a leaked id cannot confirm it. The audit row is kept.
 
-NONE says nothing, PRESENCE says whether, COUNT says how many: the graph's
-own rule (`projections.Withheld`), here by `element_gate.withheld_notice`.
+NONE says nothing, PRESENCE says whether, COUNT says how many: the graph's own rule
+(`projections.Withheld`), here by `element_gate.withheld_notice`.
 """
 from __future__ import annotations
 
@@ -20,7 +18,7 @@ from uuid import uuid4
 
 import pytest
 
-import review_g42_support as g
+import graph_visibility_support as g
 import rls_support as s
 
 pytestmark = g.GATED
@@ -67,8 +65,7 @@ def test_a_working_set_says_what_it_withholds_as_the_case_allows(owner, client):
 
     none = members(w.analyst, "NONE")
     assert [m["node_id"] for m in none["members"]] == [str(visible)]
-    # members_total and truncated are the page's own fields (http_ui-015), not
-    # a statement about what is withheld
+    # members_total and truncated are the page's own fields, not a statement about what is withheld
     assert set(none) == {"set_id", "members", "merged_away", "members_total",
                          "truncated"}
     presence = members(w.analyst, "PRESENCE")
@@ -145,7 +142,7 @@ def test_an_oversized_rooms_projectable_count_is_a_count_too():
     assert count["coverage"]["participants_excluded_not_visible"] == 3
 
 
-# --- comms binding (http_ui-008) ---------------------------------------------
+# --- comms binding ---------------------------------------------------------------
 
 def _bind(client, w, uid, node, observed=None):
     return client.post(w.url("/comms/bindings"), headers=w.headers(uid), json={
@@ -176,7 +173,7 @@ def test_a_binding_names_an_entity_of_this_case_the_caller_may_read(owner, clien
     assert _bind(client, w, w.boss, hidden).status_code == 201
 
 
-# --- hidden is missing (http_ui-016) -------------------------------------------
+# --- hidden is missing ---------------------------------------------------------
 
 def _denials(owner, uid) -> int:
     return owner.execute("SELECT count(*) FROM audit.event WHERE action = "

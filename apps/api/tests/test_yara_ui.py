@@ -1,6 +1,5 @@
-"""The console's YARA surfaces (F12 J, 2026-09-24): the Lab's Rules
-subtab, the YARA section of the static triage panel, "Use as family
-assessment", and the Oversight list an officer activates from.
+"""The console's YARA surfaces: the Lab's Rules subtab, the YARA section of the static triage panel,
+"Use as family assessment", and the Oversight list an officer activates from.
 
 Pure: no database, no browser.
 """

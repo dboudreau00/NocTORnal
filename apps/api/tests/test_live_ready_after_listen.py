@@ -1,17 +1,11 @@
-"""The live socket says "ready" only once the hub is listening (2026-10-08).
+"""The live socket says "ready" only once the hub is listening (docs/17, "the socket says ready early").
 
-docs/17 "the socket says ready early": `live()` sent `{"type": "ready"}` as
-soon as `_Hub.subscribe()` returned, and `subscribe()` returned as soon as it
-had started the listener task, not when that task's `LISTEN` had run. A write
-made between "ready" and the registration reached nobody, the console had
-already turned its dot green on "ready", and the socket tests covered the gap
-with `time.sleep(1.0)`. Now `subscribe()` waits for the registration, a hub
-that cannot register ends the socket with 1013 instead of saying ready, and
-the sleeps are gone.
+`subscribe()` waits for the listener's `LISTEN` registration, so a write made after "ready" reaches the
+subscriber; a hub that cannot register ends the socket with 1013 instead of saying ready. Otherwise the
+console would turn its dot green on a socket that could miss writes.
 
-No database: the listener is a stand-in whose `LISTEN` can be held, so the gap
-is made on purpose and the result is the same on a quiet machine and a loaded
-one.
+No database: the listener is a stand-in whose `LISTEN` can be held, so the gap is made on purpose and the
+result is the same on a quiet machine and a loaded one.
 """
 from __future__ import annotations
 
@@ -321,8 +315,8 @@ def test_a_hub_that_cannot_listen_closes_the_socket_instead_of_saying_ready(live
 
 def test_the_socket_tests_no_longer_wait_for_the_listener():
     """The three that covered the gap with a one-second sleep after "ready"
-    (test_g45_live_labels_pg.py) rely on the order now, as a client does."""
+    (test_live_socket_labels_pg.py) rely on the order now, as a client does."""
     from pathlib import Path
-    text = Path(__file__).with_name("test_g45_live_labels_pg.py").read_text(encoding="utf-8")
+    text = Path(__file__).with_name("test_live_socket_labels_pg.py").read_text(encoding="utf-8")
     assert "time.sleep(" not in text
     assert "LISTEN registers after" not in text

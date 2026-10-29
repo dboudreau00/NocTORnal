@@ -1,19 +1,16 @@
-"""Legal holds: what a hold names, what the console is told, and what a hold
-says about a purge it waited for (2026-10-08).
+"""Legal holds: what a hold names, what the console is told, and what a hold says about a purge it waited
+for.
 
-- hold rows name no exhibit: a hold or a lift wrote its audit row with
-  `object_id` NULL and `/audit/events` returns no `detail`, so an officer
-  could not tell which exhibit was held. The row names the exhibit, and the
-  case for a case-level hold.
-- no console control for a hold: the register and the case record say whether
-  the reader may place and lift one (`may_hold`), carry whether the case is
-  held, and give a hold's reason to the people who place and lift holds and
-  to nobody else.
-- a hold cannot reach into a delete in flight: the hold response reports what
-  the purge destroyed while it waited, counted over what the holder may see.
+- A hold or a lift writes an audit row that names the exhibit, and the case for a case-level hold, so an
+  officer can tell which exhibit was held (`/audit/events` returns no `detail`).
+- The register and the case record say whether the reader may place and lift a hold (`may_hold`), carry
+  whether the case is held, and give a hold's reason to the people who place and lift holds and to nobody
+  else.
+- A hold cannot reach into a delete in flight: the hold response reports what the purge destroyed while it
+  waited, counted over what the holder may see.
 
-Accounts `g44t-*` (the prefix `g44_support` cleans up); the object store is
-`g44_support.VersionedStore`, so nothing is written to the dev bucket.
+Accounts `g44t-*` (the prefix `evidence_retention_support` cleans up); the object store is `evidence_retention_support.VersionedStore`, so
+nothing is written to the dev bucket.
 """
 from __future__ import annotations
 
@@ -22,7 +19,7 @@ from dataclasses import replace
 
 import pytest
 
-import g44_support as g
+import evidence_retention_support as g
 import rls_support as s
 
 pytestmark = g.GATED

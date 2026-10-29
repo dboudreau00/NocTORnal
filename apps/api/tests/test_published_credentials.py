@@ -1,27 +1,20 @@
-"""Every credential value this repository publishes, refused in production
-and reported by the readiness register (sec-dev-secrets-in-production,
-2026-09-23).
+"""Every credential value this repository publishes is refused in production and reported by the
+readiness register.
 
-Until that date the boot check knew one published value,
-`dev_only_change_me`. The repository publishes more: the placeholders in
-infra/production/secrets.env.example, the throwaway pepper the suites and
-the demo seeders set, the KEK printed in the CI workflow (and the one
-conftest sets), the development Redis URL that carries no password at all,
-and MinIO's own `minioadmin`. A production deployment carrying any of them
-started cleanly.
+The repository publishes more than `dev_only_change_me`: the placeholders in
+infra/production/secrets.env.example, the throwaway pepper the suites and the demo seeders set, the KEK
+printed in the CI workflow (and the one conftest sets), the development Redis URL that carries no password
+at all, and MinIO's own `minioadmin`. A production deployment carrying any of them must not start.
 
 Two halves are held here:
 
-* the rules, one at a time against a dictionary, as test_config_boot.py
-  does (its `_production()` is imported so the two files cannot disagree
-  about what a good environment is);
-* the REPOSITORY. `test_every_credential_the_repository_publishes_is_
-  refused` reads the files that publish credentials (the CI workflow, both
-  compose files' development half, the production template, the installers,
-  the launchers, and every `os.environ.setdefault` in the suites and
-  scripts) and fails if any credential literal in them would start a
-  production API. That is what makes the marker list in config.py a list of
-  what the repository publishes rather than of what somebody remembered.
+* the rules, one at a time against a dictionary, as test_config_boot.py does (its `_production()` is
+  imported so the two files cannot disagree about what a good environment is);
+* the REPOSITORY. `test_every_credential_the_repository_publishes_is_refused` reads the files that publish
+  credentials (the CI workflow, both compose files' development half, the production template, the
+  installers, the launchers, and every `os.environ.setdefault` in the suites and scripts) and fails if any
+  credential literal in them would start a production API. That keeps the marker list in config.py a list
+  of what the repository publishes rather than of what somebody remembered.
 
 Pure: no database, no Redis.
 """
@@ -100,12 +93,9 @@ def test_minios_default_inside_a_longer_secret_is_not_its_default():
     assert _refused(env) == []
 
 
-# The identity half of a pair (review of sec-dev-secrets-in-production,
-# 2026-09-23). `_KEY` marks an access key as a credential, and the first cut
-# refused `MINIO_ACCESS_KEY=minioadmin` beside a strong secret, telling the
-# operator "anyone who has read the source already holds this deployment's
-# secret". The access key is the account NAME; the sentence was false and
-# the refusal would have taught somebody to unset NOCTORNAL_ENV.
+# The identity half of a pair. `_KEY` marks an access key as a credential, but the access key is the
+# account NAME, not the secret: refusing `MINIO_ACCESS_KEY=minioadmin` beside a strong secret would give a
+# false reason and teach somebody to unset NOCTORNAL_ENV.
 
 _IDENTITIES = ("MINIO_ACCESS_KEY", "SAMPLE_ACCESS_KEY", "PRESERVE_ACCESS_KEY",
                "NOCTORNAL_TOTP_KEK_ID")
@@ -203,9 +193,8 @@ def test_the_templates_kek_placeholder_is_one_refusal_not_two():
     "redis://limiter@redis:6379/0",
     "redis://:@redis:6379/0",
     "REDIS://redis:6379/0",
-    # A blank query password sets nothing in redis-py either (c23,
-    # 2026-09-24), and a differently cased name is passed on as an
-    # unknown keyword rather than as the password.
+    # A blank query password sets nothing in redis-py either, and a differently cased name is passed on as
+    # an unknown keyword rather than as the password.
     "redis://redis:6379/0?password=",
     "redis://redis:6379/0?PASSWORD=Zm4tRq",
 ])
@@ -220,9 +209,8 @@ def test_a_redis_url_with_no_password_is_refused(url):
     "rediss://redis.example.gov:6380/0",
     "unix:///run/redis/limiter.sock",
     "redis://limiter:Zm4tR@redis:6379/0",
-    # c23 (2026-09-24): redis-py's `parse_url` hands a `password` query
-    # argument to the connection just as it does the userinfo one, and
-    # this was refused at boot as "asks for no password".
+    # redis-py's `parse_url` hands a `password` query argument to the connection just as it does the
+    # userinfo one, so these are not "asks for no password".
     "redis://redis:6379/0?password=Zm4tRq",
     "redis://redis:6379/1?socket_timeout=2&password=Zm4tRq",
 ])
@@ -242,10 +230,9 @@ def test_redis_authenticated_another_way_is_accepted(url):
     "redis://limiter:Zm4tRq@redis:6379/0",
 ])
 def test_the_password_the_check_accepts_is_the_one_the_client_uses(url):
-    """The acceptance above is only true if redis-py really authenticates
-    with the password in each shape, so it is asked rather than assumed;
-    and the evidence and log line that print the URL must print none of
-    it (c23, 2026-09-24)."""
+    """The acceptance above is only true if redis-py really authenticates with the password in each shape,
+    so it is asked rather than assumed; and the evidence and log line that print the URL must print none of
+    it."""
     connection = pytest.importorskip("redis.connection")
     from noctornal_api.http.limits import redacted_url
 
@@ -356,10 +343,9 @@ def _py_assignments(path: Path):
 
 
 def _is_credential_literal(name: str, value: str) -> bool:
-    # Variables that carry an IDENTITY rather than a secret (`noctornal` as
-    # an access key) are classified by config's own function, so the scan
-    # and the runtime rule cannot disagree about which half of a pair is the
-    # secret, which is what they did before the 2026-09-23 review.
+    # Variables that carry an IDENTITY rather than a secret (`noctornal` as an access key) are classified
+    # by config's own function, so the scan and the runtime rule cannot disagree about which half of a
+    # pair is the secret.
     if not config._carries_credential(name) or config._names_identity(name):
         return False
     if not value or "$" in value or "%" in value or value.startswith("<"):

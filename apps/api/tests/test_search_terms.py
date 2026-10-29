@@ -1,10 +1,9 @@
 """How a search query becomes SQL terms (curation.py), without a database.
 
-The DB-backed behaviour is test_search_selectors_pg.py. These pin the
-three pure helpers that decide what a query may match, because each one
-guards a way the 2026-09-22 search fixes could go wrong quietly: a
-wildcard that matches everything, operator syntax reaching `to_tsquery`,
-and a lossy normaliser reporting an unrelated selector as an exact match.
+The DB-backed behaviour is test_search_selectors_pg.py. These pin the three pure helpers that decide what
+a query may match, because each one guards a way search could go wrong quietly: a wildcard that matches
+everything, operator syntax reaching `to_tsquery`, and a lossy normaliser reporting an unrelated selector
+as an exact match.
 """
 from __future__ import annotations
 
@@ -74,11 +73,9 @@ def _forms(query: str) -> dict[str, str]:
 
 
 def test_letters_are_never_formatting_to_a_digits_only_type():
-    """"u:12345678" kept eight of nine letters and digits, which passed the
-    coverage rule, so a Telegram user came back as an EXACT Discord, ICQ,
-    phone, ASN or IMEI match on the same digits (verifier of the
-    2026-09-22 fix). The same rule keeps "0x1234" from being the PHONE
-    "0" once a phone extension is stripped."""
+    """"u:12345678" keeps eight of nine letters and digits, which would pass the coverage rule, so a
+    Telegram user must not come back as an EXACT Discord, ICQ, phone, ASN or IMEI match on the same
+    digits. The same rule keeps "0x1234" from being the PHONE "0" once a phone extension is stripped."""
     forms = _forms("u:12345678")
     assert forms["TELEGRAM_ID"] == "u:12345678"
     for digits_only in ("DISCORD_ID", "ICQ", "PHONE", "ASN", "IMEI"):
@@ -112,13 +109,11 @@ _DIGITS_ONLY = ("DISCORD_ID", "ICQ", "PHONE", "ASN", "IMEI")
 
 
 def test_punctuation_that_names_another_identifier_is_not_formatting():
-    """The digits-only normalisers keep the digits of anything, so the
-    letters rule alone still let "-123456789" (a Telegram basic group in
-    Bot-API form) be the ICQ number 123456789, and "10.0.0.1" the ASN,
-    ICQ, phone and IMEI 10001, all EXACT (verifier of the second
-    2026-09-22 fix round). A minus sign, an address's dots, a slash, a
-    date's separators and a range's hyphen make the string some other
-    value, and none of those types is offered it."""
+    """The digits-only normalisers keep the digits of anything, so the letters rule alone would let
+    "-123456789" (a Telegram basic group in Bot-API form) be the ICQ number 123456789, and "10.0.0.1" the
+    ASN, ICQ, phone and IMEI 10001, all EXACT. A minus sign, an address's dots, a slash, a date's
+    separators and a range's hyphen make the string some other value, and none of those types is offered
+    it."""
     for query in ("-123456789", "10.0.0.1", "12.34.56.78", "12.345.67.89",
                   "12/34/56789", "-1001234567890", "2026-09-23", "23.09.2026",
                   "09-23-2026", "1.10", "10.15.7", "1-10", "10-100"):
@@ -157,9 +152,8 @@ def test_a_types_own_separators_are_still_formatting():
 
 
 def test_a_leading_type_label_names_the_type():
-    """"ICQ: 123456789" found nothing once letters stopped being formatting
-    (verifier of the second 2026-09-22 fix round). The label is read as the
-    type, its value as that type's value, and nothing else."""
+    """"ICQ: 123456789" is found: the leading label is read as the type, its value as that type's value,
+    and nothing else."""
     from noctornal_api.curation import type_label
     for query in ("ICQ: 123456789", "ICQ 123456789", "icq:123456789",
                   "ICQ number: 123-456-789", "  Icq :  123456789 "):
@@ -184,12 +178,10 @@ def test_a_leading_type_label_names_the_type():
 
 
 def test_an_identity_preserving_rewrite_is_still_an_exact_form():
-    """A Gmail "+tag", googlemail.com, a Unicode domain and a URL's
-    default port are, by the ontology's own normalisers, the same
-    identifier as the stored form. They are not one contiguous run of the
-    query's letters and digits, so `_lossless` dropped them, and as the
-    fragment pattern is the query as typed the selector was not matched at
-    all (2026-09-23)."""
+    """A Gmail "+tag", googlemail.com, a Unicode domain and a URL's default port are, by the ontology's own
+    normalisers, the same identifier as the stored form. They are not one contiguous run of the query's
+    letters and digits, so `_lossless` must not drop them: the fragment pattern is the query as typed, and
+    the selector would not be matched at all."""
     assert _forms("alice+burner@gmail.com")["EMAIL"] == "alice@gmail.com"
     assert _forms("ember.hobby+shop@gmail.com")["EMAIL"] == "emberhobby@gmail.com"
     assert _forms("Alice@GoogleMail.com")["EMAIL"] == "alice@gmail.com"

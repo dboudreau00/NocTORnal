@@ -1,13 +1,10 @@
-"""Who may hold the system role's DSN, refused at boot (S1, 2026-09-25).
+"""Who may hold the system role's DSN, refused at boot.
 
-`NOCTORNAL_WORKER_DATABASE_URL` connects as the role that bypasses row
-security. Every production process but the sample origin needs it (the
-work that must see every row runs on it); the sample origin, which serves
-hostile bytes, must never hold it; it must not be the role DATABASE_URL
-names; the initdb-only password belongs to the database alone; and the
-development switch that makes the suite assume the runtime roles never
-reaches production. Empty is unset everywhere: the sample origin's compose
-value is "".
+`NOCTORNAL_WORKER_DATABASE_URL` connects as the role that bypasses row security. Every production process
+but the sample origin needs it (the work that must see every row runs on it); the sample origin, which
+serves hostile bytes, must never hold it; it must not be the role DATABASE_URL names; the initdb-only
+password belongs to the database alone; and the development switch that makes the suite assume the runtime
+roles never reaches production. Empty is unset everywhere: the sample origin's compose value is "".
 """
 from __future__ import annotations
 

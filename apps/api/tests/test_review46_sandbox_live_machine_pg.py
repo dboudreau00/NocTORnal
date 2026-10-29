@@ -1,10 +1,8 @@
-"""lab-1 (review of 2026-10-03): a send to a sandbox whose operator lists a
-LIVE analysis machine skipped the second person whenever no machine was
-named, the console's default. The worker then posted to CAPE with no
-`machine` field and CAPE's scheduler could pick the live machine.
+"""A send to a sandbox whose operator lists a LIVE analysis machine always needs the second person.
 
-These fail on dc28ffa: the unnamed request was QUEUED with no sign-off, and
-a row queued before the live machine was listed was sent.
+When no machine is named (the console's default) the worker would post to CAPE with no `machine` field
+and CAPE's scheduler could pick the live machine. So the unnamed request is not QUEUED without sign-off,
+and a row queued before the live machine was listed is not sent.
 
 Email prefix `r46s-`. Env-gated on DATABASE_URL.
 """
@@ -115,13 +113,11 @@ def test_naming_the_machine_still_works_both_ways(conn, store, cape):
 
 def test_an_unnamed_send_is_refused_even_when_it_already_takes_the_second_person(
         conn, store, cape, monkeypatch):
-    """lab-1, gap found on verification (2026-10-03): a send already before a
-    second person for its route or its exposure used to be accepted unnamed,
-    on the reasoning that the second person was involved. The row then
-    recorded no machine, CAPE could choose the live one, and the authoriser's
-    card named the exposure and never said the sample might run on the
-    internet-attached machine. With a live machine listed every send names its
-    machine, so what the second person approves is the machine it will run on."""
+    """A send already before a second person for its route or its exposure is not accepted unnamed on the
+    reasoning that the second person is involved: the row would record no machine, CAPE could choose the
+    live one, and the authoriser's card would name the exposure and never say the sample might run on the
+    internet-attached machine. With a live machine listed every send names its machine, so what the second
+    person approves is the machine it will run on."""
     from noctornal_api.sandbox import SandboxError
     who = make_user(conn, PREFIX, roles=(ROLE,))
     owner = make_user(conn, PREFIX, roles=("CASE_OWNER",))

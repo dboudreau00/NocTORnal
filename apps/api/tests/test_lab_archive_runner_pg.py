@@ -1,27 +1,20 @@
-"""Archive expansion goes through the isolated analysis runner, as every
-static triage step does (phase 8 merged with docs/17 F42, 2026-10-03).
+"""Archive expansion goes through the isolated analysis runner, as every static triage step does (docs/17).
 
-Until the merge the expansion child was started by one direct call to the
-local bounded runner. It is now `analysis_runner`'s kind `lab_archive_child`,
-so in production it runs in the isolated worker (no secrets, no network, a
-read-only root and a tmpfs of a mebibyte, which is also why it never
-extracts to a path), and the runner's refusals are the expansion's:
+The expansion child is `analysis_runner`'s kind `lab_archive_child`, so in production it runs in the
+isolated worker (no secrets, no network, a read-only root and a tmpfs of a mebibyte, which is also why it
+never extracts to a path), and the runner's refusals are the expansion's:
 
-- a worker that is busy, gone, refusing or answering garbage, and a
-  production with no worker at all, INTERRUPT the run, which waits at the
-  same attempt with nothing written. They are never recorded as a fact
-  about the archive: no member, no ARCHIVE finding, no failure on the
-  archive, and never an archive read as expanded or as clean (the "members
-  were not compared" gap stays). The same request expands it once the
+- a worker that is busy, gone, refusing or answering garbage, and a production with no worker at all,
+  INTERRUPT the run, which waits at the same attempt with nothing written. They are never recorded as a fact
+  about the archive: no member, no ARCHIVE finding, no failure on the archive, and never an archive read as
+  expanded or as clean (the "members were not compared" gap stays). The same request expands it once the
   worker is back.
-- a failure that is the archive's own (a child that crashed) is still
-  recorded as the archive's, as before.
-- what the worker answers is the answer the local child gives, byte for
-  byte, and a setting that asks for more output than the worker hands back
-  is refused by name, not found out as a worker that refuses every request.
+- a failure that is the archive's own (a child that crashed) is still recorded as the archive's.
+- what the worker answers is the answer the local child gives, byte for byte, and a setting that asks for
+  more output than the worker hands back is refused by name, not found out as a worker that refuses every
+  request.
 
-Email prefix `arch-` (test_lab_archive_pg's). DATABASE_URL-gated, except the
-tests that need no database.
+Email prefix `arch-` (test_lab_archive_pg's). DATABASE_URL-gated, except the tests that need no database.
 """
 from __future__ import annotations
 
@@ -275,9 +268,8 @@ def test_a_run_the_sandbox_failed_under_the_archive_child_waits_at_the_same_atte
 @needs_db
 def test_a_child_that_crashed_is_still_a_failed_expansion_of_the_archive(
         conn, store, monkeypatch):
-    """The control: the child's own failure finishes the run DONE and is
-    recorded on the archive, a finding with a failure that the next run
-    resumes (it is not an end), as before the merge."""
+    """The control: the child's own failure finishes the run DONE and is recorded on the archive, a finding
+    with a failure that the next run resumes (it is not an end)."""
     owner = make_user(conn, PREFIX, roles=("CASE_OWNER",))
     parent = _submit(conn, store, owner, zip_of([("a.exe", member_bytes("a"))]))
     _spy(monkeypatch, fail_archive_with="crashed")

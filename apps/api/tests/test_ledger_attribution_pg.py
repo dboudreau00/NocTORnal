@@ -1,27 +1,22 @@
-"""The request role cannot attribute or date a ledger row
-(evidence-ledger-actor-time-forgeable, 2026-10-03; 0150, 0151).
+"""The request role cannot attribute or date a ledger row (0150, 0151).
 
-Both ledgers hash whatever the INSERT supplies. A connection bound to analyst
-A could write `LEGAL_HOLD_LIFTED by user B, 2020-01-01` into `audit.event`
-and `EXPORTED by user B, hash_verified true` into `core.evidence_custody`,
-and the chain still verified, because it is computed over the forged row.
+Both ledgers hash whatever the INSERT supplies. Without the guard, a connection bound to analyst A could
+write `LEGAL_HOLD_LIFTED by user B, 2020-01-01` into `audit.event` and `EXPORTED by user B, hash_verified
+true` into `core.evidence_custody`, and the chain would still verify, because it is computed over the forged
+row.
 
-The seed is the owner and the system role (which row security never
-filters); what is under test is a connection SET ROLE to the request role and
-bound with a real session's proof, as `rls_support` builds one.
+The seed is the owner and the system role (which row security never filters); what is under test is a
+connection SET ROLE to the request role and bound with a real session's proof, as `rls_support` builds one.
 
-Both directions, as the brief asks:
+Both directions:
 
-- FORGERY REFUSED: a bound connection that names another user is refused, in
-  both ledgers; a connection bound to nobody cannot attribute an audit row
-  (the claim is demoted to `detail`, the row survives) and cannot write a
-  custody row at all; the request role's date on an audit row is its own to
-  give no longer;
-- LEGITIMATE WRITERS STILL WORK: the user's own rows, rows naming nobody, the
-  system role writing for anyone with the date it chose, the owner likewise,
-  and the five request-path writers that name a user the connection is not
-  bound to (a sign-out, a refused session, a refusal written on a side
-  connection, an RLS refusal) all keep their actor.
+- Forgery refused: a bound connection that names another user is refused, in both ledgers; a connection
+  bound to nobody cannot attribute an audit row (the claim is demoted to `detail`, the row survives) and
+  cannot write a custody row at all; the date on an audit row is not the request role's to give.
+- Legitimate writers still work: the user's own rows, rows naming nobody, the system role writing for
+  anyone with the date it chose, the owner likewise, and the five request-path writers that name a user the
+  connection is not bound to (a sign-out, a refused session, a refusal written on a side connection, an RLS
+  refusal) all keep their actor.
 
 Every test here fails on a database without 0150 or 0151.
 """
@@ -287,8 +282,8 @@ def _client():
 
 
 def test_a_sign_out_keeps_its_actor(owner, people, assumed):
-    """The revoke ends the connection's binding, so before 0150 the row named
-    a user the connection was no longer bound to. The system role writes it."""
+    """The revoke ends the connection's binding, so the row would name a user the connection is no longer
+    bound to (0150). The system role writes it."""
     sid = owner.execute(
         "SELECT id FROM iam.session WHERE user_id = %s", (people["a"],)).fetchone()[0]
     r = _client().post("/api/v1/auth/logout",
@@ -432,11 +427,9 @@ def test_a_spent_production_ticket_keeps_its_holder_as_the_actor(owner, people, 
 
 def test_a_process_with_no_system_role_demotes_these_rows_and_loses_none(
         owner, people, assumed, monkeypatch):
-    """The sample origin holds no system connection on purpose. A refused
-    session and a sign-out there are still answered as they always were (401
-    and 204, never a 503) and still leave a row; the database cannot vouch for
-    the actor it was told, so the row names nobody and keeps the claim in its
-    detail."""
+    """The sample origin holds no system connection on purpose. A refused session and a sign-out there are
+    still answered as usual (401 and 204, never a 503) and still leave a row; the database cannot vouch for
+    the actor it was told, so the row names nobody and keeps the claim in its detail."""
     from noctornal_api import db
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
@@ -553,10 +546,7 @@ def test_a_spent_ticket_proves_its_holder_even_after_the_account_is_deactivated(
                       (people["a"],))
 
 
-# ---------------------------------------------------------------------------
 # A refusal that names the wrong person is kept, not dropped
-# (g49v-apply-refusal-row-lost, 2026-10-03)
-# ---------------------------------------------------------------------------
 
 def _refusal_rows(owner, object_id):
     return owner.execute(
@@ -566,11 +556,10 @@ def _refusal_rows(owner, object_id):
 
 def test_a_refusal_naming_a_user_the_connection_is_not_bound_to_is_kept_without_an_actor(
         owner, people, assumed, caplog):
-    """The database refuses a request-role row that names someone other than
-    the bound user (a forgery, or a writer that named the wrong person), and
-    `record_out_of_band` used to log that and drop the row. A refusal is the
-    record that an attempt was made: it is written again without an actor and
-    with the claim in the detail."""
+    """The database refuses a request-role row that names someone other than the bound user (a forgery, or a
+    writer that named the wrong person). A refusal is the record that an attempt was made, so
+    `record_out_of_band` writes it again without an actor and with the claim in the detail rather than
+    dropping it."""
     from noctornal_api.approvals import record_out_of_band
 
     object_id = uuid4()
@@ -660,10 +649,7 @@ def test_a_refusal_whose_every_attempt_is_refused_is_logged_and_never_raised(
     assert [r for r in caplog.records if "could not record" in r.getMessage()]
 
 
-# ---------------------------------------------------------------------------
-# A misconfigured system connection is loud (g49v-system-fallback-silent,
-# 2026-10-03)
-# ---------------------------------------------------------------------------
+# A misconfigured system connection is loud
 
 def _sign_out(owner, people, monkeypatch, error):
     """Sign `people["a"]` out with a system connection that raises `error`."""

@@ -1,12 +1,9 @@
-"""A board cannot poison a persona's session jar into a header the client
-refuses (2026-10-07).
+"""A board cannot poison a persona's session jar into a header the client refuses.
 
-Each cookie was capped at 4096 characters and the jar at 20, but the Cookie
-header they made could reach some 80 KB, and pinned_http refuses a header
-value over 8192 characters; a value printable but not ASCII passed too and
-failed to encode. Either made every later request of the session raise, and
-the poisoned jar was sealed as it stood, so every later run failed alike.
-Pure.
+Each cookie is capped at 4096 characters and the jar at 20, but the Cookie header they make could reach some
+80 KB, and pinned_http refuses a header value over 8192 characters; a value printable but not ASCII would
+pass too and fail to encode. Either would make every later request of the session raise, and the poisoned
+jar would be sealed as it stood, so every later run would fail alike. Pure.
 """
 from __future__ import annotations
 

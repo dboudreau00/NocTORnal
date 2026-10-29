@@ -1,8 +1,6 @@
-"""Administration, Integrations and the delivery ledger as the console
-ships them (F8 and F7, 2026-09-24): the subtabs are shown only
-to a holder of integration.manage, the ledger lives there and the Inbox
-points to it, a webhook address and a Jira issue are named and never
-linked, and a case owner can keep a case out of Jira.
+"""Administration, Integrations and the delivery ledger as the console ships them: the subtabs are shown
+only to a holder of integration.manage, the ledger lives there and the Inbox points to it, a webhook address
+and a Jira issue are named and never linked, and a case owner can keep a case out of Jira.
 
 Pure: reads the shipped source, as test_ui_invariants.py does.
 """
@@ -103,13 +101,12 @@ def test_no_outbound_markup_carries_an_inline_style_or_script():
             not in chunk
 
 
-# --- an account whose only way in is Integrations (F8 G1) ------------------------------
+# An account whose only way in is Integrations
 
 def test_an_integration_only_account_opens_on_its_own_section_and_is_told_so(tmp_path):
-    """F8 G1: enterAdminPane opens the first section the account may
-    open, and adminViewTitle names integrations for an account whose only
-    flag is integration_manage. It opened on the Accounts refusal and the
-    entry's tooltip promised "Accounts and the readiness register"."""
+    """enterAdminPane opens the first section the account may open, and adminViewTitle names integrations
+    for an account whose only flag is integration_manage. It must not open on the Accounts refusal, and the
+    entry's tooltip must not promise "Accounts and the readiness register"."""
     import json
     import shutil
     import subprocess

@@ -1,24 +1,20 @@
-"""A pasted link never carries its password onto the graph
-(graph-url-selector-keeps-credentials, review 2026-10-03).
+"""A pasted link never carries its password onto the graph.
 
-`url_norm` rebuilt the netloc with `user:password@` and kept the query byte
-for byte, while its own comment says a token in a norm_value is a secret in
-a selector label on the graph, in search and in reports. A capture of a
-stealer line or a leak paste proposed the link with that normal form as its
-label, the raw value in `attrs` and 45 characters of context in the
-rationale; accepting it wrote the password into `core.node.label`.
+`url_norm` must not rebuild the netloc with `user:password@` and keep the query byte for byte: a token in
+a norm_value is a secret in a selector label on the graph, in search and in reports. A capture of a stealer
+line or a leak paste proposes the link with that normal form as its label, the raw value in `attrs` and 45
+characters of context in the rationale; accepting it would write the password into `core.node.label`.
 
 What these tests hold (no database: the pieces that decide it):
 
-- the normal form has no userinfo and no credential-bearing query value,
-  for every shape a password can take, and stays a fixed point;
-- everything that is not a credential keeps its exact bytes and order, and
-  the fragment rules of L5 are untouched;
-- the text a person reads (a rationale's context, a raw value) shows
-  REDACTED in its place, without swallowing the sentence around it;
-- the extractor does not split a password across two selectors, does not
-  copy a long token into every rationale, and still ends a bracketed URL
-  where it always did.
+- the normal form has no userinfo and no credential-bearing query value, for every shape a password can
+  take, and stays a fixed point;
+- everything that is not a credential keeps its exact bytes and order, and the fragment rules of L5 are
+  untouched;
+- the text a person reads (a rationale's context, a raw value) shows REDACTED in its place, without
+  swallowing the sentence around it;
+- the extractor does not split a password across two selectors, does not copy a long token into every
+  rationale, and still ends a bracketed URL where it always did.
 
 The database half (capture, accept, create, correct, the stored rows) is
 `test_review_graph_url_credentials_pg.py`.
@@ -39,7 +35,7 @@ PASSWORDS = ["Passw0rd!", "hunter2", "p@ss", "pa/ss", "pa?ss", "pa#ss", "p:ss",
              "a%40b", "!$&'()*+,;=", "ghp_" + "x" * 36]
 
 
-# --- the review's reproduction ----------------------------------------------
+# --- three URLs that carried secrets ----------------------------------------
 
 def test_the_reviews_three_urls_come_back_without_their_secrets():
     """graph_poc9, verbatim."""
@@ -245,9 +241,8 @@ def test_a_long_token_is_left_out_of_a_window_not_copied_into_every_rationale():
 
 
 def test_a_url_hit_keeps_the_text_it_was_found_at():
-    """Offsets are the point of extraction (docs/04): widening over a
-    userinfo moves `char_end` with the raw value, so a reviewer's
-    highlighting still lands on the match."""
+    """Offsets are the point of extraction (docs/04): widening over a userinfo moves `char_end` with the
+    raw value, so a reviewer's highlighting still lands on the match."""
     from noctornal_api.extraction import find_selectors
     text = "a https://u:p)w@h.example/x, b"
     (hit,) = find_selectors(text)
@@ -265,7 +260,7 @@ def test_carries_credential_names_the_url_types_only():
     assert not carries_credential("URL", None)
 
 
-# --- the verifier's round: shapes the first fix still kept ---------------------
+# --- further shapes a credential can take --------------------------------------
 
 @pytest.mark.parametrize("url, expected", [
     # userinfo nested in a query value, plain and percent-encoded
@@ -387,9 +382,8 @@ def test_a_link_without_a_credential_has_no_span():
     ("redis://:0123456789abcdef0123456789abcdef@cache.example:6379/0", "cache.example"),
 ])
 def test_the_userinfo_of_a_link_that_is_not_http_is_not_a_selector(line, host):
-    """The verifier's reproduction: `mysql://root:Secret123@db.example/app`
-    was an EMAIL selector `Secret123@db.example`, and a password holding `!`
-    a partial local part. Only http and https links are URL selectors."""
+    """`mysql://root:Secret123@db.example/app` must not yield an EMAIL selector `Secret123@db.example`, nor
+    a password holding `!` a partial local part. Only http and https links are URL selectors."""
     from noctornal_api.extraction import find_selectors
     text = f"dump line: {line}"
     hits = find_selectors(text)
@@ -488,14 +482,14 @@ def test_a_value_that_does_not_parse_is_returned_as_written_unless_a_secret_is_i
     assert url_norm(text) == text
 
 
-# --- verification round three, A7 (2026-10-07): a login that is not an address -
+# --- a login that is not an address --------------------------------------------
 
 @pytest.mark.parametrize("url, expected", [
     ("https://y.example/login:carol:Zq9Pass7p", "https://y.example/login"),
     ("https://y.example/login|carol|Zq9Pass7p", "https://y.example/login"),
     ("https://y.example/a/b/login:carol:Zq9:Pass7p", "https://y.example/a/b/login"),
     ("https://y.example/login:carol:Zq9Pass7p?next=1", "https://y.example/login"),
-    # a path with one colon is a path, and the e-mail form is as it was
+    # a path with one colon is a path, and the e-mail form is unchanged
     ("https://y.example/wiki/Talk:Page", "https://y.example/wiki/Talk:Page"),
     ("https://y.example/login:alice@example.com:Passw0rd", "https://y.example/login"),
     ("https://y.example/a:b/c", "https://y.example/a:b/c"),

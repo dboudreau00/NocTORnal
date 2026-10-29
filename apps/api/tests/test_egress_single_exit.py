@@ -1,20 +1,16 @@
-"""Every outbound connection goes through egress.route_for (S2,
-2026-09-24; docs/00 decision 68).
+"""Every outbound connection goes through egress.route_for (docs/00 decision 68).
 
-In production the application network is internal, so a connection made
-around the proxy fails at the network. This file makes it fail in the
-suite instead: an AST scan of apps/api/src that resolves every import and
-alias and finds each construction, call or subclass of an outbound
-primitive, allowed only in a named module with the reason it is allowed. A
-text grep missed an aliased import; a suite-wide socket guard in conftest
-was rejected because it would sit under every database and MinIO test.
-A planted module proves the scan catches what it must.
+In production the application network is internal, so a connection made around the proxy fails at the
+network. This file makes it fail in the suite instead: an AST scan of apps/api/src that resolves every
+import and alias and finds each construction, call or subclass of an outbound primitive, allowed only in a
+named module with the reason it is allowed. The scan is AST-based because a text grep misses an aliased
+import; a suite-wide socket guard in conftest would sit under every database and MinIO test. A planted
+module proves the scan catches what it must.
 
-`scripts/` is scanned by the same rules (docs/17, "yara_db.py is outside the
-single client"), with one more primitive: a program started to reach the
-network on its own account, which the scan reads as a subprocess whose
-command is `git`. The one script that does is an operator's tool and has an
-allowance that says why.
+`scripts/` is scanned by the same rules (docs/17, "yara_db.py is outside the single client"), with one
+more primitive: a program started to reach the network on its own account, which the scan reads as a
+subprocess whose command is `git`. The one script that does is an operator's tool and has an allowance that
+says why.
 """
 from __future__ import annotations
 
@@ -43,8 +39,8 @@ METHODS = {"wrap_socket", "create_connection"}
 #: Packages whose mere import is an outbound client.
 PACKAGES = {"requests", "httpx", "aiohttp"}
 
-#: Module -> why it may hold outbound primitives. Every entry must still
-#: have a finding (a stale permission is how a list rots).
+#: Module -> why it may hold outbound primitives. Every entry must still match a finding (a stale
+#: permission is how a list rots).
 ALLOWED = {
     "pinned_http.py": "the one outbound client (docs/00 decision 72); its classes "
                       "subclass HTTPConnection",
@@ -56,21 +52,18 @@ ALLOWED = {
     "rawstore.py": "the raw-markup store's client, to MinIO on the internal network",
     "transports.py": "subclasses of smtplib.SMTP and SMTP_SSL whose socket is "
                      "pinned_http.open_connection on the smtp route (F7)",
-    # F5.2 and F5.3 (2026-09-24).
     "telegram_wire.py": "the Telegram client, built only with the persona route's "
                         "SOCKS5 proxy from route.telethon_proxy() and a connection "
                         "class that refuses any other proxy, a local address or a "
                         "destination outside Telegram's networks (docs/20 section 8.4)",
-    # docs/17 F42 (2026-10-02).
     "analysis_runner.py": "the client of the isolated analysis worker: a Unix "
                           "socket on a volume, never a network address",
     "analysis_worker.py": "the isolated analysis worker's Unix socket listener; "
                           "the worker has no network at all",
 }
 
-#: Script -> why it may start a program that opens connections of its own. The
-#: scripts run beside the application, not in it, and most start no such
-#: program. Every entry must still have a finding.
+#: Script -> why it may start a program that opens connections of its own. The scripts run beside the
+#: application, not in it, and most start no such program. Every entry must still match a finding.
 SCRIPT_ALLOWED = {
     "yara_db.py": "the operator's rule-corpus tool: `git clone` and `git fetch` of "
                   "the public rule repositories named in yara/sources.json, run by "
@@ -82,10 +75,8 @@ SCRIPT_ALLOWED = {
                   "Security Officer activate",
 }
 
-#: Modules part way through their conversion onto the one client, with the
-#: primitives each still names. Empty since transports.py moved onto
-#: pinned_http (F7); the test below fails while an entry has nothing left to
-#: excuse.
+#: Modules part way through their conversion onto the one client, with the primitives each still names.
+#: Empty; the test below fails while an entry has nothing left to excuse.
 PENDING: dict[str, set[str]] = {}
 
 #: Only these build EgressRoute objects: everything else takes its route

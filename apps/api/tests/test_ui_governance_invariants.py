@@ -1,11 +1,10 @@
-"""The console halves of the 2026-09-22 governance fixes, as checks.
+"""The console halves of the governance fixes, as checks.
 
-Break-glass, retention, purge, the Destroyed list, Share and the way into
-Administration each said something the server did not do, or asked for
-something nobody could supply. `test_breakglass_share_admin_pg.py` holds
-the server halves; these hold the console to them by reading the shipped
-static assets, beside `test_ui_invariants.py` and for the same reason: a
-property nobody checks survives until the first refactor.
+Break-glass, retention, purge, the Destroyed list, Share and the way into Administration must not say
+something the server does not do, or ask for something nobody can supply.
+`test_breakglass_share_admin_pg.py` holds the server halves; these hold the console to them by reading
+the shipped static assets, beside `test_ui_invariants.py` and for the same reason: a property nobody
+checks survives until the first refactor.
 
 Pure: no database, no browser.
 """
@@ -56,9 +55,7 @@ def _between(html: str, start: str, end: str) -> str:
     return html[a:html.index(end, a)]
 
 
-# ---------------------------------------------------------------------------
-# Break-glass (ux15 breakglass-grant-raises-nothing)
-# ---------------------------------------------------------------------------
+# Break-glass: a grant names a level
 
 def test_the_console_never_sends_a_grant_without_a_level():
     """A grant naming no classification is read by no access decision. The
@@ -101,13 +98,13 @@ def test_the_console_minimum_matches_the_router():
 
 
 def test_invoke_is_styled_as_the_danger_it_is():
-    """docs/06: break-glass is --danger. It was a neutral `btn`."""
+    """docs/06: break-glass is --danger, not a neutral `btn`."""
     tag = _element(_html(), "glass-invoke")
     assert re.search(r'class="btn danger"', tag), tag
 
 
 def test_a_live_grant_shows_in_the_header_on_every_screen():
-    """The only sign of a live grant was a card on one Lifecycle subtab."""
+    """A live grant shows in the header on every screen, not only on one Lifecycle subtab."""
     header = _between(_html(), '<header class="appbar">', "</header>")
     assert 'id="hdr-glass"' in header
     chip = _fn("renderGlassChip")
@@ -122,9 +119,8 @@ def test_the_chip_is_refreshed_on_every_case_switch():
 
 
 def test_the_chip_names_a_level_only_where_it_is_in_force():
-    """Verifier follow-up, 2026-09-23. With a RED grant scoped to
-    OP-KESTREL-26 live, the chip on OP-NIGHTJAR-26 read "BREAK-GLASS RED":
-    it took the first raising grant whatever case was open."""
+    """With a RED grant scoped to OP-KESTREL-26 live, the chip on OP-NIGHTJAR-26 must not read
+    "BREAK-GLASS RED": it names a level only for a grant that applies to the open case."""
     chip = _code(_fn("renderGlassChip"))
     applies = _code(_fn("grantAppliesHere"))
     assert "g.scope !== 'case'" in applies
@@ -138,9 +134,8 @@ def test_the_chip_names_a_level_only_where_it_is_in_force():
 
 
 def test_the_chip_keeps_its_end_time_on_a_laptop():
-    """The fix round hid the end time at 1500px and below, so on every
-    common laptop the chip said "BREAK-GLASS RED" with no end. The palette
-    label gives way instead while a grant is live."""
+    """The end time stays on common laptop widths; the palette label gives way instead while a grant
+    is live."""
     assert "'hdr-glass-until'" in _fn("renderGlassChip")
     css = (STATIC / "app.css").read_text(encoding="utf-8")
     assert re.search(r"\.appbar:has\(#hdr-glass:not\(\[hidden\]\)\) "
@@ -157,10 +152,9 @@ def test_the_chip_keeps_its_end_time_on_a_laptop():
 
 
 def test_the_effect_text_says_what_a_case_grant_opens():
-    """Verifier follow-up, 2026-09-23. "Raises your clearance to RED on
-    OP-X only" was true of one route: the graph and the lists still hid
-    RED on that case. They honour the grant now, and the text says so and
-    says what it still does not raise."""
+    """The effect text says what a case grant opens. "Raises your clearance to RED on OP-X only" must
+    be true of every route: the graph and the lists honour the grant, and the text says so and says
+    what it still does not raise."""
     effect = re.sub(r"'\s*\+\s*'", "", _code(_fn("updateGlassEffect")))
     # What a grant opens, and what it does not raise, is in the manual; the form says who is told and that it adds
     # no permission and no compartment.
@@ -171,12 +165,10 @@ def test_the_effect_text_says_what_a_case_grant_opens():
     assert "opens exhibits on that case; it does" not in gov
 
 
-# ---------------------------------------------------------------------------
-# The officer's review (ux15 glass-review-queue-uninformative-irreversibl)
-# ---------------------------------------------------------------------------
+# The officer's review
 
 def test_the_review_card_reads_the_keys_the_server_sends():
-    """`user_email` was read and never sent, so every card was a UUID."""
+    """The review card reads `user_email`, which the server sends, rather than showing a UUID."""
     card = _fn("glassRow")
     for key in ("user_display_name", "user_email", "granted_classification",
                 "is_live", "revoked_at", "case_code", "action_count"):
@@ -193,8 +185,8 @@ def test_live_and_expired_are_labelled_differently():
 
 
 def test_a_verdict_is_confirmed_and_carries_a_note():
-    """The server refuses to revisit a review, so one stray click was a
-    permanent finding about a named colleague, with no reasoning."""
+    """The server refuses to revisit a review, so a verdict is confirmed and carries a note: one stray
+    click would be a permanent finding about a named colleague, with no reasoning."""
     card = _fn("glassRow")
     assert "window.confirm" in card
     assert "note: why" in card
@@ -203,9 +195,8 @@ def test_a_verdict_is_confirmed_and_carries_a_note():
 
 
 def test_a_live_grant_offers_no_verdict():
-    """2026-09-23: the server refuses a verdict on a live
-    grant, so the card must not offer one; it offers End it now, and the
-    live branch returns before any verdict button is built."""
+    """The server refuses a verdict on a live grant, so the card must not offer one; it offers End it
+    now, and the live branch returns before any verdict button is built."""
     card = _code(_fn("glassRow"))
     live = card.index("if (g.is_live) {")
     assert live < card.index("'JUSTIFIED'")
@@ -221,9 +212,8 @@ def _js_string(expr: str) -> str:
 
 
 def test_every_glass_text_counts_what_the_server_counts():
-    """2026-09-23: the invoke pane and the cards said
-    "each exhibit it opens" while captures, messages and entity changes
-    were counted too. One constant, word for word the server's."""
+    """The invoke pane and the cards count what the server counts (exhibits, captures, messages and
+    entity changes): one constant, word for word the server's."""
     js = _js()
     m = re.search(r"^const GLASS_COUNTED = (.*?);$", js, re.M | re.S)
     assert m, "app.js has lost GLASS_COUNTED"
@@ -240,16 +230,16 @@ def test_every_glass_text_counts_what_the_server_counts():
 
 
 def test_the_roster_says_when_emergency_access_ends():
-    """2026-09-23: the server sends the end of the grant
-    a colleague opens the case through; the Share panel shows it."""
+    """The server sends the end of the grant a colleague opens the case through; the Share panel shows
+    it."""
     assert "u.emergency_access_until" in _fn("shareRow")
     cases = (SRC / "http" / "routers" / "cases.py").read_text(encoding="utf-8")
     assert '"emergency_access_until"' in cases
 
 
 def test_the_officer_view_is_named_for_both_its_queues():
-    """2026-09-23: an officer-only account's view holds
-    the break-glass queue and the preserved-sample authorisations."""
+    """An officer-only account's view holds the break-glass queue and the preserved-sample
+    authorisations, and is named for both."""
     name = _fn("adminViewName")
     assert "'Oversight'" in name and "'Break-glass review'" not in name
     assert "adminViewTitle()" in _fn("refreshAdminEntry")
@@ -261,9 +251,9 @@ def test_your_own_grant_offers_no_verdict():
 
 
 def test_the_review_card_says_raised_only_when_it_did():
-    """Fix round, 2026-09-23: "raised to RED" was drawn for any grant naming
-    RED, including one by somebody who already held RED. The level they
-    started from is recorded with the invoke and read back for the card."""
+    """The review card says "raised to RED" only when the grant raised the level, not for a grant
+    naming RED by somebody who already held RED. The level they started from is recorded with the
+    invoke and read back for the card."""
     card = _code(_fn("glassRow"))
     assert "g.raised === true" in card and "g.raised === false" in card
     assert "g.base_clearance" in card
@@ -274,9 +264,7 @@ def test_the_review_card_says_raised_only_when_it_did():
     assert '"base_clearance": base[0]' in bg
 
 
-# ---------------------------------------------------------------------------
-# Purge (ux15 purge-one-click-destroy, ux17 purge-no-confirmation)
-# ---------------------------------------------------------------------------
+# Purge
 
 def test_a_real_purge_is_only_reachable_through_the_confirmation():
     js = _js()
@@ -317,9 +305,7 @@ def test_the_dry_run_is_the_default_each_time_the_pane_opens():
     assert re.search(r"name === 'retention'\) \{ purgeDefaults\(\);", _js())
 
 
-# ---------------------------------------------------------------------------
-# The Destroyed list (ux15 tombstone-rows-blank)
-# ---------------------------------------------------------------------------
+# The Destroyed list
 
 def test_the_tombstone_row_reads_what_a_tombstone_carries():
     """It read `object_id` and `sha256`; a tombstone is a BATCH and carries
@@ -344,11 +330,9 @@ def test_every_storage_outcome_is_drawn():
 
 
 def test_an_early_purge_the_store_refused_is_not_called_self_healing():
-    """Fix round, 2026-09-23. `purge_out_of_schedule` has no next sweep: a
-    refused exhibit is not due and never comes back due. The row said it
-    "stays due until the lock expires" on every refused batch, so a
-    court-ordered early destruction refused by object lock read as one
-    that would finish itself."""
+    """`purge_out_of_schedule` has no next sweep: a refused exhibit is not due and never comes back
+    due. The row must not say it "stays due until the lock expires", or a court-ordered early
+    destruction refused by object lock reads as one that would finish itself."""
     retention = (SRC / "retention.py").read_text(encoding="utf-8")
     assert 'rule="out-of-schedule"' in retention
     body = _fn("tombStorage")
@@ -357,9 +341,7 @@ def test_an_early_purge_the_store_refused_is_not_called_self_healing():
     assert "four-eyes approval" in body
 
 
-# ---------------------------------------------------------------------------
-# Retention rules (ux15 rule-confirm-misstates-effect)
-# ---------------------------------------------------------------------------
+# Retention rules
 
 def test_the_confirmation_does_not_claim_existing_clocks_moved():
     js = _js()
@@ -378,9 +360,7 @@ def test_the_rules_are_labelled_deployment_wide():
     assert "deployment-wide" in rules
 
 
-# ---------------------------------------------------------------------------
-# Sharing (ux02, ux16 no-user-id-for-share, ux19 raw-ids-instead-of-names)
-# ---------------------------------------------------------------------------
+# Sharing
 
 def test_sharing_does_not_ask_for_a_database_id():
     assert "iam.app_user.id" not in _code(_js())
@@ -407,8 +387,8 @@ def test_share_shows_the_roster_and_can_take_someone_off():
 
 
 def test_share_offers_add_and_remove_only_to_a_granter():
-    """Fix round, 2026-09-23: every roster reader, LIAISON and READ_ONLY
-    included, was offered Add and Remove, and every click was a 403."""
+    """Only a granter is offered Add and Remove on Share: a roster reader (LIAISON, READ_ONLY) would
+    get a 403 on every click."""
     roster = _fn("loadShareRoster")
     assert "body.you_can_grant" in roster and "shareCanGrant(" in roster
     assert "!u.is_owner && canGrant" in _fn("shareRow")
@@ -426,13 +406,10 @@ def test_the_account_card_and_the_credentials_show_the_account_id():
 
 
 def test_an_approval_is_titled_with_the_entities_it_merges():
-    """ux19: the card's title was the catalogue key and its body was two
-    UUIDs, so the approver could not see what they were signing."""
+    """The card's title names the entities it merges, so the approver can see what they are signing."""
     title = _fn("approvalTitle")
-    # Named by the SERVER since ux08-triage:approval-row-uuids-no-requester
-    # (2026-09-23): `labelOf` knew only what the projection drew, so a
-    # merge outside it was still two UUIDs. The behaviour is run in
-    # test_ui_triage_inbox.py.
+    # Named by the SERVER: `labelOf` knows only what the projection draws, so a merge outside it would
+    # be two UUIDs. The behaviour is run in test_ui_triage_inbox.py.
     assert "approvalEntity(s.source, p.source_node_id)" in title
     assert "approvalEntity(s.target, p.target_node_id)" in title
     row = _fn("approvalRow")
@@ -444,15 +421,11 @@ def test_an_approval_is_titled_with_the_entities_it_merges():
     assert 'item["subjects"]' in apr
 
 
-# The assertion line's author and exhibit names (the other half of ux19)
-# belong to the inspector, which group g03 owns and fixes as ux05
-# assertion-drops-claim-and-source with the same `created_by_name` and
-# `evidence_title` fields; its tests hold them there.
+# The assertion line's author and exhibit names belong to the inspector, which reads the same
+# `created_by_name` and `evidence_title` fields; its tests hold them there.
 
 
-# ---------------------------------------------------------------------------
-# Administration without a case (ux16 admin-unreachable-without-a-case)
-# ---------------------------------------------------------------------------
+# Administration without a case
 
 def test_administration_is_reachable_from_the_case_list():
     html = _html()
@@ -481,9 +454,7 @@ def test_the_deep_link_and_the_palette_work_with_no_case():
     assert "showAdmin" in no_case
 
 
-# ---------------------------------------------------------------------------
-# Retire (ux17 retire-promises-nonexistent-undo)
-# ---------------------------------------------------------------------------
+# Retire promises no undo
 
 def test_retire_promises_no_undo_and_names_what_goes():
     body = _code(_fn("wireElementActions"))
@@ -499,7 +470,7 @@ def test_retire_promises_no_undo_and_names_what_goes():
 
 _DASHES = re.compile("[\\u2013\\u2014]")
 
-#: Functions written or rewritten on 2026-09-22 whose strings a user reads.
+#: Functions whose strings a user reads.
 _OWNED = ("invokeBreakGlass", "updateGlassEffect", "fillGlassForm", "adminViewTitle",
           "describeGrant", "renderGlassChip", "renderGlassMine", "glassRow",
           "grantAppliesHere",

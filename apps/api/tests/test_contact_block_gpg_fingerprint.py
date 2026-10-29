@@ -1,14 +1,12 @@
-"""F37 (docs/17, 2026-10-02): a fingerprint copied from gpg parses whole.
+"""A fingerprint copied from gpg parses whole (docs/17).
 
-gpg prints a v4 fingerprint as ten groups of four hex digits with TWO spaces
-in the middle, and the contact-block parser cut a value at the first run of
-two spaces, so a line copied from gpg kept 20 of its 40 hex characters:
-`PGP_FPR` with a 20-hex durable value that could neither confirm a key nor
-attribute a signature. The parser now keeps whole hex groups on a PGP_FPR
-line (`_fingerprint_head`), narrowly: only ten or sixteen groups of four, only
-where the line is a PGP_FPR line, and only the groups themselves, so a comment
-after the fingerprint is still a comment. It changes `block_fingerprint` for
-a block that carries such a line, so `PARSER_VERSION` moved to cb-2.
+gpg prints a v4 fingerprint as ten groups of four hex digits with TWO spaces in the middle. Cutting a
+value at the first run of two spaces would keep 20 of its 40 hex characters: a `PGP_FPR` with a 20-hex
+durable value that could neither confirm a key nor attribute a signature. The contact-block parser
+keeps whole hex groups on a PGP_FPR line (`_fingerprint_head`), narrowly: only ten or sixteen groups of
+four, only where the line is a PGP_FPR line, and only the groups themselves, so a comment after the
+fingerprint is still a comment. It changes `block_fingerprint` for a block that carries such a line, so
+`PARSER_VERSION` is cb-2.
 
 Pure: no database. The stored half is test_contact_block_gpg_fingerprint_pg.
 """
@@ -52,9 +50,8 @@ def test_every_label_that_names_a_fingerprint_keeps_the_groups(label):
 
 
 def test_the_old_reading_was_a_truncation():
-    """What the parser did before F37, so the test above is known to be
-    about the defect and not a coincidence: cut at the first run of two
-    spaces, twenty hex characters remained."""
+    """The naive reading is a truncation, so the test above is known to be about this defect: cut at
+    the first run of two spaces, twenty hex characters remain."""
     import re
 
     cut = re.split(r"\s+[←<←]|\s{2,}|\s+\(|\s+--\s+|\s+#", GPG)[0]

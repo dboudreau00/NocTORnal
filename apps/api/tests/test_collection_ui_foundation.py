@@ -1,12 +1,9 @@
-"""The Feeds Sources pane's collection foundation, as the console ships it
-(2026-09-24).
+"""The Feeds Sources pane's collection foundation, as the console ships it.
 
-Pure: no database. The markup is read from the shipped index.html; the
-functions marked `needs_node` run under Node over a stub DOM and are judged
-by what they draw and what they send. The server halves are
-test_collection_sources_http_e2e.py, test_collection_binding_http_e2e.py,
-test_collection_authority_http_e2e.py and
-test_collected_document_hold_http_e2e.py.
+Pure: no database. The markup is read from the shipped index.html; the functions marked `needs_node`
+run under Node over a stub DOM and are judged by what they draw and what they send. The server halves
+are test_collection_sources_http_e2e.py, test_collection_binding_http_e2e.py,
+test_collection_authority_http_e2e.py and test_collected_document_hold_http_e2e.py.
 """
 from __future__ import annotations
 
@@ -470,10 +467,6 @@ console.log(JSON.stringify({ offered, platforms, ua: $('sp-ua-field').hidden,
         "with no persona parser the form hides and the section says so")
 
 
-# ---------------------------------------------------------------------------
-# Collected documents (retention and holds, docs/00 decision 74)
-# ---------------------------------------------------------------------------
-
 @needs_node
 def test_a_held_document_says_so_and_only_a_holder_gets_the_verb(tmp_path):
     got = _run(["collectedDocRow", "documentHoldActions"], r"""
@@ -505,16 +498,15 @@ console.log(JSON.stringify({ reader: [text(reader), buttons(reader), chips(reade
 def test_the_document_listing_carries_whether_the_caller_may_hold():
     load = _fn("loadCollectedDocuments")
     assert "const canHold = Boolean(body.can_hold);" in load
-    # 2026-09-25: the row is wrapped with its Similar control (F6.3),
-    # which passes canHold through.
+    # The row is wrapped with its Similar control, which passes canHold through.
     assert "(d) => collectedDocRowWithSimilar(d, canHold)" in load
     assert "collectedDocRow(d, canHold)" in _fn("collectedDocRowWithSimilar")
 
 
 @needs_node
 def test_a_stopped_authority_offers_nothing_and_draws_no_source_states(tmp_path):
-    """Screenshot review, 2026-09-24: under a revoked authority a source
-    still read 'waiting for a second person', which it never will be."""
+    """Under a revoked authority a source does not read 'waiting for a second person', which it never
+    will be."""
     got = _run(["authorityRow", "authorityTargetLine", "authorityTargetText",
                 "authorityChip", "personaLabel", "authorityEligible"], r"""
 const target = { id: 'T1', source_id: 'S1', source_name: 'Board', source_kind: 'XENFORO',

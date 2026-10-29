@@ -1,8 +1,5 @@
-"""The half of docs/17 F15(i) that needed a database.
-
-The defect was that the collector's timing lived in memory and the process
-it lived in is created per request, so neither the jitter nor the rate
-limit did anything. Both now live on `collect.source`.
+"""The collector's timing lives on `collect.source`, because the process is created per request and
+in-memory jitter or rate limiting would do nothing (docs/17). DATABASE_URL-gated.
 """
 from __future__ import annotations
 
@@ -55,10 +52,9 @@ def test_a_new_source_is_due_immediately(conn):
 
 
 def test_the_schedule_is_rolled_once_and_stored_not_re_rolled_on_read(conn):
-    """The defect in one test. `due_sources` used to compute the next time
-    freshly on every call, so the realised interval depended on how often
-    the scheduler polls -- and frequent polling collapsed the variance
-    toward the floor, which is a regular cadence."""
+    """The next time is rolled once and stored. Recomputing it on every `due_sources` call would make
+    the realised interval depend on how often the scheduler polls, and frequent polling would collapse
+    the variance toward the floor, which is a regular cadence."""
     from noctornal_api.collection import CollectionService
     source_id = _source(conn)
     svc = CollectionService(conn)
@@ -101,9 +97,8 @@ def test_a_failed_run_still_reschedules(conn, invalid_names_fail_fast):
 
 
 def test_the_rate_limit_survives_a_new_service_instance(conn):
-    """`RateLimiter` state used to live on the instance and
-    `CollectionService` is built per request, so `max_rps` never fired at
-    all. docs/04 ties it directly to not burning personas."""
+    """`RateLimiter` state lives in the database, because `CollectionService` is built per request and
+    instance state would never fire `max_rps`. docs/04 ties it directly to not burning personas."""
     from noctornal_api.collection import RateLimiter
     source_id = _source(conn, max_rps=2.0)
 
@@ -119,14 +114,10 @@ def test_the_rate_limit_survives_a_new_service_instance(conn):
 
 
 def test_a_never_polled_source_is_not_reported_as_broken(conn):
-    """`WHERE health <> 'OK'` looked right and was not: a source that has
-    never run carries the default health with zero failures, so every newly
-    added source appeared on the alert list beside a parser that genuinely
-    stopped matching.
-
-    Found by looking at the rendered list — three entries, one real. It
-    matters because the list exists BECAUSE silent failure is silent, and a
-    list padded with non-alerts is one people stop watching.
+    """`WHERE health <> 'OK'` is not enough: a source that has never run carries the default health
+    with zero failures, so every newly added source would appear on the alert list beside a parser that
+    genuinely stopped matching. The list exists BECAUSE silent failure is silent, and a list padded
+    with non-alerts is one people stop watching.
     """
     from noctornal_api.collection import CollectionService
     fresh = _source(conn)

@@ -1,29 +1,19 @@
 """A read-only case's samples take no more Lab work, over HTTP.
 
-c7/c21 (2026-09-24). A sample attached to a case is that case's content
-(`cases.CONTENT_READ_ONLY_STATES`), and the server's own 409 and the
-console strip both say a CLOSED case's samples cannot be changed. Only
-`POST /samples` and the propose path refused: assign, record an analysis,
-request a detonation and reject all answered 2xx on a CLOSED or ARCHIVED
-case's sample, and under the `destroy` disposition one analyst could
-destroy an ARCHIVED case's sample, bypassing the retention purge's two
-people. What this file holds, against the real gate and a real database:
+A sample attached to a case is that case's content (`cases.CONTENT_READ_ONLY_STATES`). Against the real
+gate and a real database:
 
-- every Lab write on an existing sample is refused with the gate's 409
-  titled "Case is read-only", naming the state, and leaves an audit row;
-  nothing it would have written is there afterwards;
+- every Lab write on an existing sample is refused with the gate's 409 titled "Case is read-only",
+  naming the state, and leaves an audit row; nothing it would have written is there afterwards;
 - reopening the case lets the same work through again;
-- ARCHIVED and PURGED refuse a destroying rejection, and the bytes and the
-  data key survive;
-- the service refuses too, including under the row lock a rejection
-  waits on, and a refusal the service makes is answered and audited as
-  the gate's;
+- ARCHIVED and PURGED refuse a destroying rejection, and the bytes and the data key survive, so one
+  analyst cannot bypass the retention purge's two people;
+- the service refuses too, including under the row lock a rejection waits on, and a refusal the
+  service makes is answered and audited as the gate's;
 - a caller who cannot see the sample still gets the 404, never the state;
-- the sample row says `case_read_only`, so the Lab card offers nothing
-  the server would refuse.
+- the sample row says `case_read_only`, so the Lab card offers nothing the server would refuse.
 
-**The email prefix is `ccl-` and must stay unique**: teardown deletes on
-it. Env-gated on DATABASE_URL.
+**The email prefix is `ccl-` and must stay unique**: teardown deletes on it. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

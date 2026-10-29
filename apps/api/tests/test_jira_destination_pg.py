@@ -1,9 +1,8 @@
-"""The Jira destination's configuration routes (F7,
-2026-09-24): drafting, Test, activation and its echo, widening, the sealed
-credential, retire, the links list, and the purge warning.
+"""The Jira destination's configuration routes: drafting, Test, activation and its echo, widening, the
+sealed credential, retire, the links list, and the purge warning.
 
-Nothing reaches Atlassian: the client is a fake and the route a fake.
-**The email prefix is `njdest-`.** Env-gated on DATABASE_URL.
+Nothing reaches Atlassian: the client and the route are fakes. The email prefix is `njdest-`.
+Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

@@ -1,35 +1,27 @@
-"""Registering an embedding index keeps its queueing barrier without a lock on
-the item tables (the first full run of the merged beta, 2026-10-03).
+"""Registering an embedding index keeps its queueing barrier without a lock on the item tables.
 
-`register_space` used to `LOCK TABLE collect.document, core.evidence,
-core.assertion IN SHARE MODE`. LOCK TABLE in that mode needs UPDATE, DELETE
-or TRUNCATE on the table, and 0135 took UPDATE and DELETE on `core.assertion`
-from the runtime roles (invariant 5), so the system role the registration
-runs as was refused with `permission denied for table assertion` and every
-registration (the console's, and the pass's own first index) failed with a
-500. The lock now sits on `core.embedding_pending`, which every item writer's
-queueing trigger inserts into and the role already writes.
+LOCK TABLE ... IN SHARE MODE needs UPDATE, DELETE or TRUNCATE on the table, and 0135 took UPDATE and
+DELETE on `core.assertion` from the runtime roles (invariant 5), so the system role the registration runs
+as would be refused. The lock sits on `core.embedding_pending` instead, which every item writer's queueing
+trigger inserts into and the role already writes.
 
-What the lock is for: an item is queued for a space either by the writer's
-own trigger, which reads the spaces that exist, or by the bulk queueing that
-follows registration, which reads the items that exist. An item inserted and
-not yet committed at the moment the space commits is in neither, and would
-never be queued for it. So the registration has to wait for such a writer,
-and a writer that arrives later has to see the space. Each test below proves
-one half on real concurrent connections, as the system role, so a barrier
-that is removed or that stops being reachable by the role fails here, not in
-production:
+What the lock is for: an item is queued for a space either by the writer's own trigger, which reads the
+spaces that exist, or by the bulk queueing that follows registration, which reads the items that exist. An
+item inserted and not yet committed at the moment the space commits is in neither, and would never be
+queued for it. So the registration has to wait for such a writer, and a writer that arrives later has to
+see the space. Each test below proves one half on real concurrent connections, as the system role, so a
+barrier that is removed or that stops being reachable by the role fails here, not in production:
 
-- a writer in flight holds the registration until it commits, and what it
-  wrote is queued for the new space afterwards;
-- a writer that arrives while the registration holds its lock waits at its
-  queueing statement, and that statement then queues for the new space, BEFORE
-  the bulk queueing has run (so it is the trigger that queued it);
-- the trigger's lock is taken whether or not it queues anything, which is
-  what lets the first registration, with no space yet, be a barrier at all.
+- a writer in flight holds the registration until it commits, and what it wrote is queued for the new
+  space afterwards;
+- a writer that arrives while the registration holds its lock waits at its queueing statement, and that
+  statement then queues for the new space, BEFORE the bulk queueing has run (so it is the trigger that
+  queued it);
+- the trigger's lock is taken whether or not it queues anything, which is what lets the first
+  registration, with no space yet, be a barrier at all.
 
-Gated like the other row-security tests. Account prefix `rlsbar-`; the
-similarity state is reset before and after, as the embeddings suites do.
+Gated like the other row-security tests. Account prefix `rlsbar-`; the similarity state is reset before
+and after, as the embeddings suites do.
 """
 from __future__ import annotations
 

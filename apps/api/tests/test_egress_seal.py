@@ -1,5 +1,4 @@
-"""Exits sealed for the egress proxy alone (S22-4 B,
-2026-09-24). Pure: no database and no socket."""
+"""Exits sealed for the egress proxy alone. Pure: no database and no socket."""
 from __future__ import annotations
 
 from uuid import uuid4

@@ -1,16 +1,11 @@
-"""The escrow error, cryptographically, on every path (F10b, comms,
-2026-09-24).
+"""A confirmation needs attribution, on every path.
 
-A good signature by the claimed key over text naming the identifier used
-to upgrade the binding it named, whoever held the key: a guarantor's
-signed vouch, checked with the guarantor's key and naming the vendor's
-binding, confirmed the vendor. Now a binding is confirmed only when a
-cited contact block lists the fingerprint as its publisher's own and ties
-that publisher to the binding (the same block lists the identifier as its
-own, or the block's publisher is the binding's identity), with no
-identity conflict. Otherwise the check is UNATTRIBUTED. The same rule is a
-trigger, so a writer that skips the service is refused; and the ledger
-behind a confirmation is never rewritten or deleted.
+A good signature by the claimed key over text naming the identifier is not enough: a guarantor's signed
+vouch naming the vendor's binding must not confirm the vendor. A binding is confirmed only when a cited
+contact block lists the fingerprint as its publisher's own and ties that publisher to the binding (the same
+block lists the identifier as its own, or the block's publisher is the binding's identity), with no identity
+conflict. Otherwise the check is UNATTRIBUTED. The same rule is a trigger, so a writer that skips the
+service is refused; and the ledger behind a confirmation is never rewritten or deleted.
 
 Rows are deleted at teardown (pgp_support.teardown).
 """

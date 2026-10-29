@@ -1,17 +1,14 @@
-"""F1 roles: the readiness row that says whether role analysis (CONCOR)
-runs on one BLAS thread per process (2026-09-24).
+"""The readiness row that says whether role analysis (CONCOR) runs on one BLAS thread per process.
 
-The row matters wherever the cap does not take: threadpoolctl
-is not pinned, so `blockmodel` caps through it when it is installed and
-otherwise through the OpenBLAS numpy bundles, and on a numpy with neither
-(Apple's Accelerate) nothing is capped. Four worker processes each running
-a worst case took about 50 s apiece uncapped against 6 s capped.
+The row matters wherever the cap does not take: threadpoolctl is not pinned, so `blockmodel` caps through
+it when it is installed and otherwise through the OpenBLAS numpy bundles, and on a numpy with neither
+(Apple's Accelerate) nothing is capped. Four worker processes each running a worst case took about 50 s
+apiece uncapped against 6 s capped.
 
 - the row is registered, never blocks and names no console target;
 - it passes in a fresh process on this host, where the cap took;
-- it fails, with an action, for every way the cap can be missing: no BLAS
-  to tell, a count read back above one, a count that cannot be read, and
-  threadpoolctl finding nothing it can cap;
+- it fails, with an action, for every way the cap can be missing: no BLAS to tell, a count read back above
+  one, a count that cannot be read, and threadpoolctl finding nothing it can cap;
 - a crash while loading the module is a failed row, never an exception.
 
 Pure: no database (the probe never touches its connection).

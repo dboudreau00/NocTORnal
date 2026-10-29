@@ -1,23 +1,20 @@
-"""The sociogram's chrome, its coverage chip, its caches, Space, the layout's
-last save, and the Evidence register's refresh, held to the Alpha 6
-release-candidate review (2026-09-24).
+"""The sociogram's chrome, its coverage chip, its caches, Space, the layout's last save, and the Evidence
+register's refresh.
 
-- c12: names were placed under the on-canvas chrome (the Pin button cut
-  'ember_owl29' down to 'ember'), and one hidden under the names pill was
-  counted in that pill.
-- c13: the Evidence register never re-read what each exhibit backs after
-  a link, a claim, a retraction or another analyst's change.
-- the coverage chip counted the whole projection during an ego or a
-  set focus while its title said it counted the canvas.
-- the metrics cache key left out a tie's evidence flag, so a cached
-  answer reported a server and canvas disagreement that did not exist.
-- Space re-pressed the rail's Graph tab instead of peeking.
-- closing a case with unsaved placements lit the unsaved dot on an
-  inert Save layout, then dropped the placements without a word.
+- names are not placed under the on-canvas chrome (the Pin button must not cut 'ember_owl29' down to
+  'ember'), and a name hidden under the names pill is not counted in that pill.
+- the Evidence register re-reads what each exhibit backs after a link, a claim, a retraction or another
+  analyst's change.
+- the coverage chip counts what its title says: the canvas, not the whole projection during an ego or a
+  set focus.
+- the metrics cache key includes a tie's evidence flag, so a cached answer does not report a server and
+  canvas disagreement that does not exist.
+- Space peeks instead of re-pressing the rail's Graph tab.
+- closing a case with unsaved placements does not light the unsaved dot on an inert Save layout and then
+  drop the placements without a word.
 
-Pure, like test_sociogram_canvas and test_sociogram_graph_pane: the
-functions are lifted out of app.js and RUN under node against stubs. No
-database, no browser. The node runs skip only where node is absent; the CI
+Pure, like test_sociogram_canvas and test_sociogram_graph_pane: the functions are lifted out of app.js and
+RUN under node against stubs. No database, no browser. The node runs skip only where node is absent; the CI
 runner image ships it.
 """
 from __future__ import annotations
@@ -199,10 +196,9 @@ console.log(JSON.stringify(out));
 
 
 def test_no_name_is_placed_under_the_canvas_chrome():
-    """c12: drawLabels rejected a spot only off the canvas or over a node,
-    bead, sign mark or name. Run over a crowd with rows along both chrome
-    bands, and over the three names the review saw cut: none is placed
-    under a plate, and the names pill counts every name placed."""
+    """drawLabels rejects a spot off the canvas or over a node, bead, sign mark, name or chrome plate.
+    Run over a crowd with rows along both chrome bands, and over three names that were once cut: none is
+    placed under a plate, and the names pill counts every name placed."""
     got = _run(_LABEL_HARNESS)
     crowd = got["crowd"]
     assert crowd["placed"] > 20, crowd
@@ -333,28 +329,23 @@ def test_a_chrome_change_redraws_once_and_can_never_loop():
     assert got["bounded"]["draws"] == 2 and got["bounded"]["pending"] == 0, got["bounded"]
     assert got["again"] == 1, "a frame the analyst caused did not re-arm the redraw"
     assert got["capped"] == 0 and got["soon"] == 0, got
-    # c12 verifier (2026-09-24): after two nudges only a pan or a hover
-    # re-armed it, so a chip that landed later stayed over a name.
+    # After two nudges a pan or a hover is not the only thing that re-arms it, so a chip that lands later
+    # does not stay over a name.
     assert got["later"] == 1, "a later chrome change waited for the next pan or hover"
     changed = _fn("chromeChanged")
     assert "CHROME_CHAIN_MS" in changed and "canvasChrome.nudgedAt = performance.now();" in changed
 
 
 # ---------------------------------------------------------------------------
-# c12 verifier: a top-level binding named like a browser global
+# A top-level binding named like a browser global
 # ---------------------------------------------------------------------------
 
-#: Own properties of the global object that are NOT configurable. A
-#: classic script whose top-level `let`, `const` or `class` takes one of
-#: these names is a SyntaxError before any of it runs, and a top-level
-#: `function` of one a TypeError. The first pass of c12 named its plate
-#: cache `const chrome`, and the whole console was dead in the bundled
-#: Chromium 151 (new headless), where window.chrome is non-configurable,
-#: while the headless shell (no window.chrome) and Chrome 153 (configurable)
-#: ran it (c12 verifier, 2026-09-24). Probed on 2026-09-24 in those three
-#: builds: window, document, location and top are unforgeable everywhere
-#: (the HTML standard's [LegacyUnforgeable]); chrome depends on the build;
-#: undefined, NaN and Infinity are the language's own.
+#: Own properties of the global object that are NOT configurable. A classic script whose top-level `let`,
+#: `const` or `class` takes one of these names is a SyntaxError before any of it runs, and a top-level
+#: `function` of one a TypeError. A plate cache named `const chrome` kills the whole console in a Chromium
+#: where window.chrome is non-configurable, while a build without window.chrome, or with it configurable,
+#: runs it. window, document, location and top are unforgeable everywhere (the HTML standard's
+#: [LegacyUnforgeable]); chrome depends on the build; undefined, NaN and Infinity are the language's own.
 _RESERVED_ON_WINDOW = ("window", "document", "location", "top", "chrome",
                        "undefined", "NaN", "Infinity")
 #: A dedicated worker's global keeps only the language's own.
@@ -680,8 +671,7 @@ def test_a_case_closed_with_placements_unsaved_keeps_them_and_says_so():
     assert saved["banner"].startswith("Layout of OP-A saved: 2 entities you moved or pinned "
                                       "were not saved yet, so they were saved before the "
                                       "change to CLOSED was sent."), saved["banner"]
-    # Said before the POST, so it may not claim the change happened (u10
-    # verifier, 2026-09-24).
+    # Said before the POST, so it may not claim the change happened.
     assert "Once the case is CLOSED, its layout is read-only." in saved["banner"]
     assert "which makes" not in saved["banner"]
     assert got["dormant"] == {"puts": 1, "dirty": 2}, got["dormant"]
@@ -712,8 +702,8 @@ def test_every_route_that_changes_what_an_exhibit_backs_rereads_the_register():
         "await reloadRegisterIfShown();")
     linker = _fn("renderEvidenceLinker")
     assert linker.index("refreshSociogram();") < linker.index("reloadRegisterIfShown();")
-    # Retire in the inspector re-reads the graph without reloadAll (c13
-    # verifier, 2026-09-24): a retired element no longer rests on anything.
+    # Retire in the inspector re-reads the graph without reloadAll: a retired element no longer rests on
+    # anything.
     actions = _fn("wireElementActions")
     retire = actions[actions.index("{ method: 'DELETE', json: { reason: reason.trim() } }"):]
     assert retire.index("await loadCaseGraph();") < retire.index("reloadRegisterIfShown();")

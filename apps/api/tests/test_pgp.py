@@ -1,31 +1,20 @@
-"""PGP verification: the one path in Phase 7 that produces a CONFIRMATION.
+"""PGP verification: the one path that produces a CONFIRMATION.
 
-docs/10: "A message signed by a key whose fingerprint appears in the
-contact block is real cryptographic evidence of control, not a claim."
+docs/10: "A message signed by a key whose fingerprint appears in the contact block is real cryptographic
+evidence of control, not a claim." A CONFIRMED binding may carry weight in automatic identity resolution,
+so this is the place where being wrong is worst.
 
-Everything else in this phase produces claims, so this is the one place
-where being wrong is worst -- a CONFIRMED binding is what docs/10 says may
-carry weight in automatic identity resolution.
+These tests are not gated on gpg, deliberately. CI fails the run if anything skips, and the only
+cryptographic-evidence path in the system going untested should break the build rather than quietly
+disappear.
 
-## These tests are NOT gated on gpg, deliberately
-
-Every other environment-dependent leg in this suite is gated, and CI
-fails the run if anything skips. gpg is present on the CI image, and if
-it ever is not, the only cryptographic-evidence path in the system going
-untested should break the build rather than quietly disappear from it.
-
-The fixtures under `fixtures/pgp/` are a throwaway keypair generated once
-with `gpg --quick-generate-key ed25519`. Vendoring them rather than
-generating per-run keeps the tests deterministic and fast, and means they
-do not need gpg-agent -- verification is a public-key operation and never
-touches a secret key.
-
-## The two traps carry this file
+The fixtures under `fixtures/pgp/` are a throwaway ed25519 keypair generated once with
+`gpg --quick-generate-key`. They keep the tests deterministic and fast and need no gpg-agent, since
+verification is a public-key operation.
 
 `test_a_signature_by_a_different_key_is_not_a_confirmation` and
-`test_an_identifier_appended_below_the_signature_is_not_signed` are the
-reason the module exists in this shape. Both describe attacks that a
-plausible implementation passes.
+`test_an_identifier_appended_below_the_signature_is_not_signed` describe attacks that a plausible
+implementation passes; they are the reason the module exists in this shape.
 """
 from __future__ import annotations
 
@@ -73,12 +62,10 @@ def test_gpg_is_available_to_this_test_run():
 
 
 def test_gpg_meets_the_version_floor_or_is_attested():
-    """The same kind of guard for the version floor (F10a,
-    2026-09-24). Below the floor every check records NO_VERIFIER, so about
-    a hundred PGP tests fail at once; this line says why and what to set.
-    Ubuntu 24.04's gpg (the CI runner and the WSL stack) reports 2.4.4
-    although it carries the fixes, and needs NOCTORNAL_GPG_PATCHED_AS=2.4.9
-    in the environment that runs the suite."""
+    """Guard for the gpg version floor. Below it every check records NO_VERIFIER, so about a hundred PGP
+    tests fail at once; this line says why and what to set. Ubuntu 24.04's gpg (the CI runner and the WSL
+    stack) reports 2.4.4 although it carries the fixes, and needs NOCTORNAL_GPG_PATCHED_AS=2.4.9 in the
+    environment that runs the suite."""
     from noctornal_api.pgp import verifier_status
     usable, why = verifier_status()
     assert usable, (
@@ -147,15 +134,10 @@ def test_a_message_signed_by_a_key_we_were_not_given_is_unverifiable():
 # ---------------------------------------------------------------------------
 
 def test_an_identifier_appended_below_the_signature_is_not_signed():
-    """THE test for this module.
+    """Everything after `-----END PGP SIGNATURE-----` in a clearsigned message is unsigned.
 
-    Everything after `-----END PGP SIGNATURE-----` in a clearsigned
-    message is unsigned. So any message a vendor ever published can be
-    reposted with an attacker's Tox ID pasted underneath, and the
-    signature still verifies -- because the signature was never over that
-    text.
-
-    A `value in message` check passes here. The value IS in the message.
+    A message a vendor published can be reposted with an attacker's Tox ID pasted underneath and the
+    signature still verifies, because it was never over that text. A `value in message` check passes here.
     """
     attacked = SIGNED_WITHOUT_TOX + f"\nTOX: {TOX_PUBKEY}\n"
     assert TOX_PUBKEY in attacked, "the attack premise: the value is present"
@@ -240,9 +222,7 @@ def test_an_oversized_message_is_refused_before_reaching_a_subprocess():
     assert result.outcome == MALFORMED
 
 
-# ---------------------------------------------------------------------------
-# A missing verifier is a failure to LOOK
-# ---------------------------------------------------------------------------
+# A missing verifier is a failure to look, never a verification.
 
 def test_an_absent_gpg_never_produces_a_confirmation(monkeypatch):
     """There must be no path in which the absence of a verifier reads as
@@ -314,28 +294,14 @@ INJECTION_SIGNED = _fix("injection_signed.asc")
 
 
 def test_a_crafted_user_id_cannot_forge_a_validsig_line():
-    """THE test for this module.
+    """A crafted user ID cannot forge a status line.
 
-    An adversarial review broke every defence at once by attacking their
-    shared input. gpg percent-escapes `%` and bytes below 0x20 in the
-    attacker-controlled user-ID field, and escapes NOTHING at or above
-    0x80. Python's `str.splitlines()` breaks on U+0085, U+2028 and U+2029.
-
-    So a key whose user ID is
-
-        Attacker Persona<U+0085>[GNUPG:] VALIDSIG <victim fpr> ...
-
-    made gpg emit a forged status line inside GOODSIG -- which gpg emits
-    BEFORE the real VALIDSIG -- and the parser read the forged one first.
-    Outcome VERIFIED, signing fingerprint the VICTIM's, binding upgraded
-    to CONFIRMED, for a key the attacker did not hold.
-
-    The CHECK constraints could not catch it: `signing_fingerprint` and
-    `claimed_fingerprint` both came from the same lied-to parse, so they
-    agreed. A constraint defends against the application forgetting to
-    check; it cannot defend against it checking a forged input.
-
-    The fixture is a real key carrying that user ID.
+    gpg percent-escapes `%` and bytes below 0x20 in the attacker-controlled user-ID field, and escapes
+    nothing at or above 0x80, while `str.splitlines()` breaks on U+0085, U+2028 and U+2029. A user ID of
+    `Attacker Persona<U+0085>[GNUPG:] VALIDSIG <victim fpr> ...` therefore made gpg emit a forged status line
+    inside GOODSIG, before the real VALIDSIG, and the parser read the forged one first: VERIFIED, with the
+    victim's fingerprint, for a key the attacker did not hold. The CHECK constraints cannot catch this, as
+    both fingerprints come from the same parse. The fixture is a real key carrying that user ID.
     """
     result = verify_clearsigned(
         INJECTION_SIGNED, INJECTION_PUB, claimed_fingerprint=VENDOR_FPR,

@@ -1,32 +1,26 @@
-"""Compartments on captured documents (L1, 2026-09-24).
+"""Compartments on captured documents.
 
-Final review c15 refused every capture into a compartmented case, because
-`collect.document` had no compartments and every reader listed it by label
-alone. Migration 0070 gives it compartments; a capture copies its case's;
-every person-facing read of a document checks `d.compartments <@` the
-reader's own; proposals raised from it are read and accepted under them;
-0071 labels the captures made before. Each test here fails on ab27a4a:
+`collect.document` carries compartments (migration 0070); a capture copies its case's; every
+person-facing read of a document checks `d.compartments <@` the reader's own; proposals raised from it
+are read and accepted under them; 0071 labels the captures made before.
 
-- a capture into a compartmented case is stored under its compartments,
-  and only a case walled off for victim data still refuses;
-- a reader outside the compartment never sees the document, on any path:
-  the collection list, the document search and the combined search, watch
-  hits and their verbs, document triage, the inspector's claim card, the
-  Triage queue and its counts and source view, and deception's lookup;
-- an accept writes the material's compartments beyond the case's, and an
-  ATTRIBUTE claim counts its entity's case's compartments;
+- a capture into a compartmented case is stored under its compartments, and only a case walled off for
+  victim data still refuses;
+- a reader outside the compartment never sees the document, on any path: the collection list, the
+  document search and the combined search, watch hits and their verbs, document triage, the inspector's
+  claim card, the Triage queue and its counts and source view, and deception's lookup;
+- an accept writes the material's compartments beyond the case's, and an ATTRIBUTE claim counts its
+  entity's case's compartments;
 - a re-paste dedupes only under the identical lock;
-- a label change no longer rebuilds the text index, and a purge empties it;
+- a label change does not rebuild the text index, and a purge empties it;
 - the legacy backfill labels what every citing case can read;
 - the index serves the registry; the register counts what no lock fits;
 - rename and retire reach documents;
-- a contact block cites only a document its case already cites (the old
-  path answered 500).
+- a contact block cites only a document its case already cites.
 
-Env-gated on DATABASE_URL. Email prefix `dcm-`, document titles and source
-names `dcm-`, registry keys `DCM-`. The teardown clears what the tests
-made, documents included, so no key stays carried and the 0058 round trip
-is never blocked by these rows.
+Env-gated on DATABASE_URL. Email prefix `dcm-`, document titles and source names `dcm-`, registry keys
+`DCM-`. The teardown clears what the tests made, documents included, so no key stays carried and the
+0058 round trip is never blocked by these rows.
 """
 from __future__ import annotations
 

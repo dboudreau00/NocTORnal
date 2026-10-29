@@ -1,17 +1,12 @@
-"""The retention panel's server half: a due list that looks forward and
-names what it lists, a dry run that says WHAT it would destroy, and the
-categories in live use that no rule governs.
+"""The retention panel's server half: a due list that looks forward and names what it lists, a dry run
+that says WHAT it would destroy, and the categories in live use that no rule governs.
 
-ux15-report:due-list-no-forward-view-no-names (2026-09-23). `/retention/due`
-was only ever asked for what had already expired, so an item first reached
-the screen at the moment it became destroyable; its rows were
-"evidence, id 3f2a91bc"; and the dry run returned counts alone. NIGHTJAR
+`/retention/due` looks ahead, so an item reaches the screen before it becomes destroyable; its rows carry
+names, not "evidence, id 3f2a91bc"; and the dry run returns more than counts. Without that, NIGHTJAR would
 read "Nothing is due." while its stealer logs expired in 85 days.
 
-ux15-report:unruled-categories-invisible (2026-09-23). The Rules list was
-`core.retention_rule` and nothing else, so NIGHTJAR's IOC_FEED and
-RANSOM_LEAK_POST records ran on ingest's 365-day fallback, a period nobody
-chose, on no screen at all.
+The Rules list covers more than `core.retention_rule`: otherwise NIGHTJAR's IOC_FEED and RANSOM_LEAK_POST
+records would run on ingest's 365-day fallback, a period nobody chose, on no screen at all.
 
 Email prefix `rdn-`, unique to this file. Env-gated on DATABASE_URL.
 """
@@ -208,10 +203,9 @@ def test_the_due_list_looks_forward_and_names_each_row(conn, client):
 
     body = _due(client, token, case_id, days=30)
     rows = {r["object_id"]: r for r in body["due"]}
-    # evidence-due-leaks-hold-reason (2026-10-03): the exhibit in a
-    # compartment the reader is not read into is not on the list at all, not
-    # even by id, and the counts leave it out; what the case lets be said
-    # about what is left out (its setting is PRESENCE here) is said once.
+    # The exhibit in a compartment the reader is not read into is not on the list at all, not even by id,
+    # and the counts leave it out; what the case lets be said about what is left out (its setting is
+    # PRESENCE here) is said once.
     assert set(rows) == {str(seen), str(record)}, body
     assert body["count"] == 2
     assert body["past_deadline"] == 0

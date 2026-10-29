@@ -1,12 +1,9 @@
-"""pinned_http.py, the one outbound HTTP client (2026-09-24;
-docs/00 decision 72, docs/20 section 5).
+"""pinned_http.py, the one outbound HTTP client (docs/00 decision 72, docs/20 section 5).
 
-What is held here is the client's shape rather than the collector's
-behaviour (test_collection_fetch_response.py and the collector's own suites
-hold that): nothing hands a name to the socket layer, the classifier seam
-is private, no call is retried, a pre-resolved hop is accepted only as
-resolve() issued it, and a DIRECT integration route reaches what its rules
-name and nothing else.
+What is held here is the client's shape rather than the collector's behaviour (test_collection_fetch_response.py
+and the collector's own suites hold that): nothing hands a name to the socket layer, the classifier seam is
+private, no call is retried, a pre-resolved hop is accepted only as resolve() issued it, and a DIRECT
+integration route reaches what its rules name and nothing else.
 
 Pure: no database, and no network beyond loopback.
 """
@@ -154,11 +151,9 @@ class _ChunkedHandler(http.server.BaseHTTPRequestHandler):
 
 
 def test_a_body_of_tiny_chunks_is_read_in_pieces(monkeypatch):
-    """`http.client` reads a chunked body into a list of one object per
-    chunk and joins it at the end, so one `read(max_bytes + 1)` of 16 MiB
-    served as two-byte chunks held about a gigabyte (measured in memory: 2
-    MiB of them peaked at 125 MiB, read in 64 KiB pieces at 6 MiB; 2026-10-07). No read asks
-    for more than a piece."""
+    """`http.client` reads a chunked body into a list of one object per chunk and joins it at the end, so
+    one `read(max_bytes + 1)` of 16 MiB served as two-byte chunks held about a gigabyte (2 MiB of them
+    peaked at 125 MiB; read in 64 KiB pieces, 6 MiB). No read asks for more than a piece."""
     import http.client
 
     asked: list[int | None] = []

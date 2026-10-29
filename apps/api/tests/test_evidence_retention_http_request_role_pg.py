@@ -1,19 +1,14 @@
-"""Over HTTP, as the request role (unit g44, 2026-10-03):
+"""Over HTTP, as the request role:
 
-- evidence-hold-lift-below-label: a lead cleared below an exhibit cannot lift
-  its hold, and a lift without a reason is refused for everybody.
-- evidence-case-hold-unreachable: `POST /retention/cases/{id}/legal-hold`
-  places and lifts a case-level hold, with a reason and a gate.
-- evidence-due-leaks-hold-reason: `/retention/due` shows nothing about an
-  exhibit above the caller, for any date, and the free text of a hold only
-  to a holder of retention.manage.
-- evidence-report-case-raise-leak: a report built below a raised case's
-  label excludes what predates the raise, and the egress gate sees the mark
-  of what is included.
-- evidence-report-release-in-app: a release goes to a destination outside
-  the platform or is refused.
-- the .eml, orphan and dedup fixes have their HTTP legs in
-  `test_g44_evidence_ingest_pg.py`.
+- a lead cleared below an exhibit cannot lift its hold, and a lift without a reason is refused for
+  everybody.
+- `POST /retention/cases/{id}/legal-hold` places and lifts a case-level hold, with a reason and a gate.
+- `/retention/due` shows nothing about an exhibit above the caller, for any date, and the free text of a
+  hold only to a holder of retention.manage.
+- a report built below a raised case's label excludes what predates the raise, and the egress gate sees
+  the mark of what is included.
+- a release goes to a destination outside the platform or is refused.
+- the .eml, orphan and dedup behaviours have their HTTP legs in `test_evidence_ingest_identity_integrity_pg.py`.
 
 Accounts `g44t-*`.
 """
@@ -24,7 +19,7 @@ from uuid import uuid4
 
 import pytest
 
-import g44_support as g
+import evidence_retention_support as g
 import rls_support as s
 
 pytestmark = g.GATED
@@ -44,9 +39,8 @@ def client():
     from dataclasses import replace
     app = create_app()
     limits = dict(LIMITS)
-    # The lift limit is a burst of three per account, and these tests
-    # place and lift holds more often than that (a lift has a meter of its
-    # own since 2026-10-08; it shared `retention.destroy` before).
+    # The lift limit is a burst of three per account, and these tests place and lift holds more often than
+    # that (a lift has a meter of its own, `retention.lift`).
     limits["retention.lift"] = replace(limits["retention.lift"],
                                        quota=1000, burst=1000)
     app.state.limiter = RateLimiter(InProcessBackend(), limits=limits)
@@ -98,11 +92,9 @@ def test_a_lead_cleared_below_an_exhibit_cannot_lift_its_hold(conn, client):
 
 
 def test_placing_holds_does_not_spend_the_destruction_meter(conn):
-    """2026-10-07: every hold route spent `retention.destroy` (a burst
-    of three, ten an hour), so the fourth hold an officer placed inside a few
-    minutes was refused. With the REAL limits: five placements in a row
-    succeed, and lifting still meets the tight meter (its own, `retention.lift`,
-    since 2026-10-08)."""
+    """A hold route must not spend `retention.destroy` (a burst of three, ten an hour), or the fourth hold
+    an officer placed inside a few minutes would be refused. With the REAL limits: five placements in a row
+    succeed, and lifting still meets the tight meter (its own, `retention.lift`)."""
     from fastapi.testclient import TestClient
 
     from noctornal_api.http.app import create_app
@@ -331,7 +323,7 @@ def test_the_due_list_leaves_out_a_compartmented_record_to_somebody_not_read_in(
 
 
 def test_the_due_list_leaves_out_a_sample_above_the_caller_as_well(conn, client, monkeypatch):
-    """Samples joined the sweep with lab-4, so they join the list's rule."""
+    """Samples are in the sweep, so they follow the list's rule."""
     from noctornal_api.cases import CaseService
     from noctornal_api.samples import DISPOSITION_ENV, SampleService
     monkeypatch.setenv("NOCTORNAL_PROHIBITED_CONTENT_POLICY", "POL-2026-014")
@@ -491,12 +483,12 @@ def test_every_release_destination_is_a_gate_destination_that_crosses_the_bounda
     assert Destination.IN_APP not in RELEASE_DESTINATIONS
 
 
-# --- 2026-10-07 ---------------------------------------
+# --- withheld disclosure ------------------------------------------------
 #
-# Two answers told a lead below some material that it exists, whatever the
-# case's withheld-disclosure setting (0030): a refused case-hold lift said the
-# lead was "not cleared for everything the case holds", and the purge dry run
-# counted the exhibits above the caller in its totals.
+# Two answers must not tell a lead below some material that it exists, whatever the case's
+# withheld-disclosure setting (0030): a refused case-hold lift must not say the lead is "not cleared for
+# everything the case holds", and the purge dry run must not count the exhibits above the caller in its
+# totals.
 
 def _set_disclosure(conn, case_id, mode):
     conn.execute('UPDATE core."case" SET withheld_disclosure = %s WHERE id = %s',
@@ -514,8 +506,8 @@ def test_a_refused_case_hold_lift_names_nothing_above_the_lead_under_none(conn, 
     assert "cleared" not in detail and "everything" not in detail, detail
     assert "stays" in detail and "Nothing was changed" in detail
     assert _case_held(conn, case_id)
-    # The same refusal, worded as it was, where the case says that it is
-    # incomplete to a reader below something.
+    # The same refusal, worded as it is where the case says that it is incomplete to a reader below
+    # something.
     _set_disclosure(conn, case_id, "PRESENCE")
     r = _case_hold(client, g.token(conn, lead), case_id, on=False,
                    reason="lifting this on my own authority")

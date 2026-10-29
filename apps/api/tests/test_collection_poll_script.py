@@ -1,36 +1,23 @@
 """The collection cron entry, and the lock that makes two of them safe.
 
-## Why this file exists
-
-Two separate things arrived on 2026-09-10 and neither could be tested the
-obvious way.
-
-`scripts/collection_poll.py` is a command, and nothing in the suite runs a
-command: they need a database, an object store and, for this one, a live
-site to fetch from. `test_script_invariants.py` already makes the argument
-for checking scripts STATICALLY instead -- three seed scripts died on their
-first line of real work while 1269 tests passed -- and the checks below are
-that same instinct applied to the properties this particular script has to
-have. They parse the source and assert a property, which is weaker than a
+`scripts/collection_poll.py` is a command, and nothing in the suite runs a command: they need a
+database, an object store and, for this one, a live site to fetch from. So, as in
+`test_script_invariants.py`, the checks parse the source and assert a property. That is weaker than a
 run and is the check that would actually fire.
 
-Two of them are worth naming, because they are the ones a plausible
-rewrite breaks:
+Two of them are the ones a plausible rewrite breaks:
 
-  * the exit code has to be derived from the failure count, and a
-    `return 0` that is not inside `--dry-run` is a cron entry that reports
-    a failing collector as a healthy one -- the exact defect
-    `notify_drain.py`'s docstring argues about;
-  * the runner must ask `due_sources()` what is ready and must own no SQL
-    of its own, because the moment it selects its own sources it is free
-    to impose its own rhythm, and docs/04 asks for "randomised intervals
-    with jitter, never a clean cron cadence".
+  * the exit code has to be derived from the failure count, and a `return 0` that is not inside
+    `--dry-run` is a cron entry that reports a failing collector as a healthy one (see
+    `notify_drain.py`'s docstring);
+  * the runner must ask `due_sources()` what is ready and must own no SQL of its own, because the
+    moment it selects its own sources it is free to impose its own rhythm, and docs/04 asks for
+    "randomised intervals with jitter, never a clean cron cadence".
 
-The second half of the file needs Postgres, because a lock is not a thing
-you can read off a syntax tree. `pg_try_advisory_lock` is SESSION-scoped
-and re-entrant, so the trap in the obvious test is that two acquisitions
-on ONE connection both succeed -- a test written that way passes against
-no lock at all. Every lock test below uses a second connection on purpose.
+The second half of the file needs Postgres, because a lock cannot be read off a syntax tree.
+`pg_try_advisory_lock` is SESSION-scoped and re-entrant, so two acquisitions on ONE connection both
+succeed and a test written that way passes against no lock at all. Every lock test uses a second
+connection on purpose.
 """
 from __future__ import annotations
 
@@ -140,8 +127,8 @@ def test_the_exit_code_is_the_return_value_of_main() -> None:
     returns, and the failure is invisible: the counters line still says
     `failed=3` and cron still reports success. Both scripts wire it the
     same way."""
-    # `main(sys.argv[1:])` is the same wiring for a script whose `main()`
-    # reads no arguments unless given them (notify_drain, 2026-10-07).
+    # `main(sys.argv[1:])` is the same wiring for a script whose `main()` reads no arguments unless
+    # given them (notify_drain).
     for path in (SCRIPT, MODEL):
         text = ast.unparse(_tree(path))
         assert ("raise SystemExit(main())" in text
@@ -179,15 +166,12 @@ def _zero_returns(body: list[ast.stmt],
 
 
 def test_a_pass_that_failed_something_cannot_exit_zero() -> None:
-    """The exit code is the one channel a cron job has back to its
-    operator, and a pass that failed every source and exited 0 is a
-    failure reported as nothing at all.
+    """The exit code is the one channel a cron job has back to its operator, and a pass that failed
+    every source and exited 0 is a failure reported as nothing at all.
 
-    Checked as a property rather than by running it: the LAST thing
-    `main()` does must be a return derived from the failure counter, and
-    the only unconditional `return 0` allowed anywhere in it is the one
-    inside `--dry-run` -- which polled nothing, so it can have failed
-    nothing.
+    Checked as a property rather than by running it: the LAST thing `main()` does must be a return
+    derived from the failure counter, and the only unconditional `return 0` allowed anywhere in it is
+    the one inside `--dry-run`, which polled nothing, so it can have failed nothing.
     """
     main = _function(_tree(SCRIPT), "main")
     last = main.body[-1]
@@ -240,15 +224,12 @@ def _load_script():
 
 
 def test_a_pass_that_runs_out_of_time_defers_the_rest(monkeypatch, capsys):
-    """c2 (2026-09-24): a pass had a count and no clock. Each fetch is now
-    held to its own allowance, but a pass of slow sources still ran for as
-    long as they added up to, and the compose loop's notification drain
-    waited behind it. Past `--max-seconds` a pass starts nothing new: the
-    rest are counted `deferred`, not failed, and are never attempted.
+    """A pass of slow sources must not run for as long as they add up to, or the compose loop's
+    notification drain waits behind it. Past `--max-seconds` a pass starts nothing new: the rest are
+    counted `deferred`, not failed, and are never attempted.
 
-    Run for real against stand-ins, with a clock that moves only when a
-    poll does, so the property is observed rather than read off the
-    source."""
+    Run for real against stand-ins, with a clock that moves only when a poll does, so the property is
+    observed rather than read off the source."""
     from types import SimpleNamespace
 
     module = _load_script()
@@ -325,15 +306,13 @@ def test_a_pass_marks_the_runs_an_earlier_pass_left_running(monkeypatch, capsys)
 
 
 def test_the_runner_owns_no_sql_and_asks_what_is_due() -> None:
-    """Hazard (b), enforced structurally rather than by comment.
+    """The runner's lack of its own query is enforced structurally rather than by comment.
 
-    A runner that selected its own sources would be free to impose its own
-    rhythm, and a fixed cadence is the operational-security failure docs/04
-    and docs/18 both name: it flattens every source's jitter onto the
-    cron's period and hands a forum admin an evenly spaced access log. With
-    no query of its own the script CANNOT do that -- `due_sources()` is the
-    only way it learns what to poll, and that reads the stored, jittered
-    `next_due_at`.
+    A runner that selected its own sources would be free to impose its own rhythm, and a fixed cadence
+    is the operational-security failure docs/04 and docs/18 both name: it flattens every source's
+    jitter onto the cron's period and hands a forum admin an evenly spaced access log. With no query of
+    its own the script CANNOT do that: `due_sources()` is the only way it learns what to poll, and that
+    reads the stored, jittered `next_due_at`.
     """
     tree = _tree(SCRIPT)
     calls = [node for node in ast.walk(tree)
@@ -346,17 +325,13 @@ def test_the_runner_owns_no_sql_and_asks_what_is_due() -> None:
 
 
 def test_the_log_line_never_names_a_source() -> None:
-    """The runner reads with no clearance ceiling; the log file has no
-    label at all.
+    """The runner reads with no clearance ceiling; the log file has no label at all.
 
-    A collector has no user, so `due_sources()` is called with
-    `clearance=None` and this process legitimately sees every source
-    including the RED ones. A cron log is the artefact that gets shipped to
-    an aggregator and pasted into a ticket, and a source's name and base
-    URL are precisely what its classification protects -- the clearance
-    pass of 2026-09-02 exists because a listing disclosed exactly those two
-    fields. So the id is what may be printed, and the rest stays in
-    `collect.collection_run` behind the API's own ceiling.
+    A collector has no user, so `due_sources()` is called with `clearance=None` and this process
+    legitimately sees every source including the RED ones. A cron log is shipped to an aggregator and
+    pasted into a ticket, and a source's name and base URL are precisely what its classification
+    protects. So the id is what may be printed, and the rest stays in `collect.collection_run` behind
+    the API's own ceiling.
     """
     printed = {node.slice.value
                for node in ast.walk(_tree(SCRIPT))
@@ -430,23 +405,14 @@ def conn():
 def _source(conn):
     """A source pointing at a name that cannot resolve.
 
-    Deliberate: every poll below FAILS at the fetch, which is what a test
-    that must not touch the network needs, and `run_once` treats a fetch
-    failure as an ordinary outcome -- it records the run and returns. What
-    is under test is whether the poll ran AT ALL, not whether it collected
-    anything.
+    Every poll below FAILS at the fetch, which a test that must not touch the network needs, and
+    `run_once` treats a fetch failure as an ordinary outcome: it records the run and returns. What is
+    under test is whether the poll ran AT ALL, not whether it collected anything.
 
-    `max_rps` is as high as the column will hold, so the durable rate
-    limiter never spaces anything here. Nothing in this file polls one
-    source twice, and `last_request_at` starts NULL, so it would not sleep
-    today in any case -- the value is what keeps that true of a test
-    somebody adds later, instead of handing them a silent five-second wait
-    from the column default of 0.2.
-
-    999 rather than a rounder 1000 because `max_rps` is numeric(6,3):
-    three integer digits, so 1000 is a field overflow and every test in
-    this file dies at the INSERT rather than at its assertion. The spacing
-    itself is `test_collection_schedule_pg.py`'s subject, not this file's.
+    `max_rps` is as high as the column will hold, so the durable rate limiter never spaces anything
+    here; the column default of 0.2 would otherwise hand a later test a silent five-second wait. It is
+    999 rather than 1000 because `max_rps` is numeric(6,3): three integer digits, so 1000 overflows the
+    field at the INSERT. The spacing itself is `test_collection_schedule_pg.py`'s subject.
     """
     return conn.execute(
         """INSERT INTO collect.source
@@ -464,19 +430,16 @@ def _lock_sql(op: str) -> str:
 
 @pg
 def test_a_second_runner_is_refused_while_the_first_holds_the_source(conn):
-    """Hazard (a): there was no lock here at all.
+    """A second runner is refused while the first holds the source.
 
-    Two concurrent polls of one source race in two places on an autocommit
-    connection -- `_store_document` reads the digest and the previous
-    version before it inserts, and `_match_watches` checks the suppression
-    window before it inserts a hit -- and neither table has a unique index
-    to fall back on. The overlap is the ordinary one: this script on a cron
-    against an analyst pressing Run on the Feeds pane.
+    Two concurrent polls of one source race in two places on an autocommit connection:
+    `_store_document` reads the digest and the previous version before it inserts, and
+    `_match_watches` checks the suppression window before it inserts a hit, and neither table has a
+    unique index to fall back on. The overlap is the ordinary one: this script on a cron against an
+    analyst pressing Run on the Feeds pane.
 
-    The lock key comes from `_poll_lock_key` rather than being spelled out
-    again here. A test that rebuilt the key from a literal would keep
-    passing after the two drifted apart, which is the failure this is
-    supposed to catch.
+    The lock key comes from `_poll_lock_key` rather than a literal here, so the test cannot keep
+    passing after the two drift apart.
     """
     from noctornal_api.collection import (
         CollectionBusy,
@@ -542,16 +505,13 @@ def test_two_different_sources_do_not_block_each_other(conn, invalid_names_fail_
 def test_the_lock_is_released_when_the_poll_fails(conn, invalid_names_fail_fast):
     """A session lock outlives the statement that took it.
 
-    So an exception escaping the poll would strand it for the life of the
-    connection -- and in the API process, which pools nothing today but
-    might, for the life of the pool. The source would then be unpollable
-    until that process exited, silently: every later pass would report it
-    as `skipped`, which reads as "somebody else is on it".
+    An exception escaping the poll would strand it for the life of the connection (or pool), leaving
+    the source unpollable and silently: every later pass would report it as `skipped`, which reads as
+    "somebody else is on it".
 
-    What this reaches is the ORDINARY way out. `run_once` treats a fetch
-    failure as an expected outcome -- it records the run and returns from
-    inside the `try` -- so nothing here unwinds, and the test below is the
-    one that makes an exception leave the poll.
+    This reaches the ORDINARY way out: `run_once` treats a fetch failure as an expected outcome, records
+    the run and returns from inside the `try`, so nothing unwinds. The next test makes an exception
+    leave the poll.
     """
     from noctornal_api.collection import CollectionService, _poll_lock_key
     from noctornal_api.db import connect
@@ -573,38 +533,21 @@ def test_the_lock_is_released_when_the_poll_fails(conn, invalid_names_fail_fast)
 
 @pg
 def test_the_lock_is_released_when_the_poll_unwinds(conn):
-    """The case the `finally` was written for, which nothing was reaching.
+    """The lock is released when the poll unwinds, which is what the `finally` is for.
 
-    A `finally` around a body that always returns normally is untested
-    scaffolding, and this one is load-bearing: `run_once` re-raises on
-    purpose when it cannot PERSIST what it fetched, on the reasoning that
-    a fetch failure is an outcome and a failure to store is a defect. That
-    re-raise is the only way an exception leaves the poll, and it is the
-    only thing that can strand a session lock.
+    `run_once` re-raises on purpose when it cannot PERSIST what it fetched (a fetch failure is an
+    outcome, a failure to store is a defect). That re-raise is the only way an exception leaves the
+    poll, and the only thing that can strand a session lock.
 
-    Staged with a REAL database error raised by the adapter's per-run
-    commit hook, which runs inside the persist transaction and outside
-    every item's savepoint (2026-09-24). This used to be a NUL byte
-    in a post body; since 2026-09-24 a NUL in a body is cleaned to U+FFFD and a
-    bad item is skipped inside its own savepoint, so a poison post no
-    longer escapes the poll at all (which is the point of that change),
-    and the unwind needs a failure the framework still re-raises.
-    Chosen over a dropped connection for the old
-    reason: the server refuses the statement with the connection still
-    healthy, so the unlock in the `finally` is a statement that really
-    runs. A poll killed by a dropped connection would have released the
-    lock by dying -- as that `finally`'s own comment says -- and would
-    leave this assertion passing against no unlock at all.
+    Staged with a REAL database error raised by the adapter's per-run commit hook, which runs inside
+    the persist transaction and outside every item's savepoint: a NUL in a post body is cleaned to
+    U+FFFD and a bad item is skipped inside its own savepoint, so it no longer escapes the poll. A real
+    error is chosen over a dropped connection because the server refuses the statement with the
+    connection still healthy, so the unlock in the `finally` really runs; a poll killed by a dropped
+    connection would release the lock by dying and pass against no unlock at all.
 
-    A REAL failure rather than an injected one, which is the difference
-    from `test_collection_pg`'s
-    `test_a_failure_after_the_fetch_does_not_strand_the_run_at_RUNNING`:
-    that one replaces `_store_document` with a function that raises and
-    owns the run row's half of this fix, so the run row is deliberately
-    not re-asserted here. What is only knowable from a real one is that a
-    NUL byte does escape the poll at all instead of being swallowed
-    somewhere between the adapter and the INSERT -- and it is the escape
-    that reaches the `finally`.
+    The run row's half is `test_collection_pg`'s
+    `test_a_failure_after_the_fetch_does_not_strand_the_run_at_RUNNING`, so it is not re-asserted here.
     """
     import psycopg
 

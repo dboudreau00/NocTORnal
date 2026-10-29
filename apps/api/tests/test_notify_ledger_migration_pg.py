@@ -1,8 +1,6 @@
-"""Migrations 0095 and 0096 (F8, 2026-09-24): the cause
-backfill classifies the stable detail sentences, the webhook address is
-withheld by SQL exactly as transports.redact_endpoint withholds it, and
-both revisions round-trip. Every schema change here runs inside a
-transaction that is rolled back (the test_roles_and_pii_pg.py pattern), so
+"""Migrations 0095 and 0096: the cause backfill classifies the stable detail sentences, the webhook address
+is withheld by SQL exactly as transports.redact_endpoint withholds it, and both revisions round-trip. Every
+schema change here runs inside a transaction that is rolled back (the test_roles_and_pii_pg.py pattern), so
 the database the rest of the suite uses never sees the intermediate state.
 
 Env-gated on DATABASE_URL. Seeds rows under the prefix `nmig-`.
@@ -44,9 +42,8 @@ def _migration(conn, stem: str):
     return module
 
 
-#: The revisions after 0095, newest first: each must go down before 0095.
-#: 0126 first (F51, 2026-10-02): the delivery's policy names jira_link_id
-#: and notify.jira_link, which 0097's downgrade drops.
+#: The revisions after 0095, newest first: each must go down before 0095. 0126 is first because the
+#: delivery's policy names jira_link_id and notify.jira_link, which 0097's downgrade drops.
 _LATER = ("0126", "0101", "0100", "0099", "0098", "0097", "0096")
 
 CORPUS = [

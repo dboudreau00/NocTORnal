@@ -1,21 +1,17 @@
-"""F2 against Postgres (2026-09-24): venues projected to entities over a
-real case written through GraphWriteService.
+"""One-mode projection against Postgres: venues projected to entities over a real case written through
+GraphWriteService.
 
-The world: personas A, B and C post on forum F; A controls wallet W1, B
-controls W2, and transaction T moves money from W1 to W2; A vouches for C.
+The world: personas A, B and C post on forum F; A controls wallet W1, B controls W2, and transaction T
+moves money from W1 to W2; A vouches for C.
 
-Held here: the forum family fetches POSTS_ON under a preset that does not
-hold it; with no family listed the rows are exactly today's; a poster the
-caller cannot see draws nothing and moves no denominator; the Financial
-suite names no wallet or transaction; a one-mode run is its own
-projection, cache entry and currency; retracting a membership dissolves
-its derived tie (decision 24); and the two cache-key cases the second
-design review found (a renamed oversized forum, and one raised above the
-caller's clearance, each served back with current: true before the
-coverage was hashed).
+Held here: the forum family fetches POSTS_ON under a preset that does not hold it; with no family listed
+the rows are exactly the plain ones; a poster the caller cannot see draws nothing and moves no denominator;
+the Financial suite names no wallet or transaction; a one-mode run is its own projection, cache entry and
+currency; retracting a membership dissolves its derived tie (decision 24); and the two cache-key cases (a
+renamed oversized forum, and one raised above the caller's clearance) are not served back with current: true
+because the coverage is hashed.
 
-Shares test_review_scope_pg's world and teardown. Env-gated on
-DATABASE_URL.
+Shares test_review_scope_pg's world and teardown. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

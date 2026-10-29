@@ -1,29 +1,24 @@
-"""The wire contract's cases against the REAL egress proxy (S2, 2026-09-24;
-docs/20 section 11).
+"""The wire contract's cases against the REAL egress proxy (docs/20 section 11).
 
-egress_contract_cases.py holds the client side of the wire contract; its
-own runner (test_egress_contract.py) runs it against a stub written to the
-letter of docs/20 section 8. This file runs the same cases against the proxy this
-build ships, in a child process (egress_proxy_child.py), so a case that
-counts the names the CLIENT resolves counts only the client's. The harness
-has the shape the cases module documents:
+egress_contract_cases.py holds the client side of the wire contract; its own runner
+(test_egress_contract.py) runs it against a stub written to the letter of docs/20 section 8. This file
+runs the same cases against the proxy this build ships, in a child process (egress_proxy_child.py), so a
+case that counts the names the CLIENT resolves counts only the client's. The harness has the shape the
+cases module documents:
 
-- `route()` hands out real routes: the passive route with a RUNNING feed
-  run behind it for a persona run context, and otherwise the webhook
-  integration route (a persona act on the passive route has no persona to
-  act as, so the python-socks case authenticates on the integration route,
-  which is what that case is about);
-- `origin(name, port)` adds the name to the child's resolver and an exact
-  NAME:PORT entry to the webhook route, so the real proxy resolves and
-  admits it with egress_policy;
-- `refusing(code)` makes the child refuse every authorisation with that
-  code, so each wire code travels the real reply writer;
+- `route()` hands out real routes: the passive route with a RUNNING feed run behind it for a persona run
+  context, and otherwise the webhook integration route (a persona act on the passive route has no persona
+  to act as, so the python-socks case authenticates on the integration route, which is what that case is
+  about);
+- `origin(name, port)` adds the name to the child's resolver and an exact NAME:PORT entry to the webhook
+  route, so the real proxy resolves and admits it with egress_policy;
+- `refusing(code)` makes the child refuse every authorisation with that code, so each wire code travels
+  the real reply writer;
 - `records` are rebuilt from the connection ledger the real proxy wrote.
 
-Two cases script the stub's reply bytes directly (a banner in the same
-segment as the 200, a 200 with an unusual reason); they test the client's
-head reader, not a server, and the real proxy's banner path has its own
-case below with a relay that speaks first.
+Two cases script the stub's reply bytes directly (a banner in the same segment as the 200, a 200 with an
+unusual reason); they test the client's head reader, not a server, and the real proxy's banner path has its
+own case below with a relay that speaks first.
 
 Env-gated on DATABASE_URL.
 """

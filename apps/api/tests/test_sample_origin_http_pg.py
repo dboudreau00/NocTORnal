@@ -1,34 +1,22 @@
-"""Invariant 10 over HTTP: the origin split is decided by configuration,
-the console can reach the origin the split names, and "unset" is reported
-as the control being off.
+"""Invariant 10 over HTTP: the origin split is decided by configuration, the console can reach the origin
+the split names, and "unset" is reported as the control being off.
 
-What was wrong until 2026-09-09, in one sentence each:
+- `POST /samples/{id}/download` must not compare `NOCTORNAL_SAMPLE_ORIGIN` against `request.url`: Starlette
+  builds it from the Host header, so the check would GRANT on a value the client sends;
+- the console's CSP `connect-src` must name the configured sample origin, or the Lab pane could only fetch
+  the application origin, and the download could work only with the sample origin BEING the application
+  origin, which the invariant forbids;
+- the readiness register must not pass on "the variable is set", and must say the control is off when it
+  is unset.
 
-- `POST /samples/{id}/download` compared `NOCTORNAL_SAMPLE_ORIGIN` against
-  `request.url`, which Starlette builds from the Host header -- so the
-  check GRANTED on a value the client sends, under a comment calling it
-  "the server's own view of the URL, never a header the client controls";
-- the console's CSP was `connect-src 'self'`, so the Lab pane could only
-  ever fetch the application origin, and the only configuration under
-  which its download button worked was the sample origin BEING the
-  application origin -- the configuration the invariant forbids -- while
-  every document said "invariant 10 holds";
-- the readiness register passed on "the variable is set", which the two
-  points above make worthless, and reported an unset variable without
-  saying the control was off.
+There are three configured origins (`samples.origin_split()`) and one verdict, read by the download, the
+CSP, the cross-origin answer, the policy endpoint and the register; a process configured as the sample
+origin serves the download and nothing else; the console fetches the sample origin across the split. The
+tests marked "both sides" read two files that must agree.
 
-The fix: three configured origins (`samples.origin_split()`), one verdict
-read by the download, the CSP, the cross-origin answer, the policy
-endpoint and the register; a process configured as the sample origin
-serves the download and nothing else; the console fetches the sample
-origin across the split. Every test here fails against the previous code,
-and the ones marked "both sides" read two files that must agree.
-
-The console's credential for that fetch changed on 2026-09-10 -- a
-one-shot ticket minted on the application origin (0061), not the session
-token as a Bearer, which is why the login response no longer carries one.
-The Bearer path the tests below drive is still routed, for a caller that
-is not a browser; `test_download_ticket_pg.py` drives the ticket.
+The console's credential for that fetch is a one-shot ticket minted on the application origin (0061), not
+the session token as a Bearer, so the login response carries no token. The Bearer path the tests below
+drive is still routed, for a caller that is not a browser; `test_download_ticket_pg.py` drives the ticket.
 
 Email prefix `so-`. Env-gated on DATABASE_URL.
 """
@@ -79,12 +67,9 @@ def conn():
     sub = "(SELECT id FROM iam.app_user WHERE email LIKE 'so-%@noctornal.test')"
     ssub = f"(SELECT id FROM lab.sample WHERE submitted_by IN {sub})"
     with c.transaction():
-        # Nothing in this file mints a download ticket, and this sweep is
-        # here so that stays true of the failure mode rather than of the
-        # cleanup: 0061's `sample_id` names `lab.sample` with no ON
-        # DELETE, so the first test that does mint one would fail its
-        # teardown on a table it had never heard of. Cheap now, opaque
-        # later.
+        # Nothing in this file mints a download ticket, and this sweep keeps that true of the failure
+        # mode rather than of the cleanup: 0061's `sample_id` names `lab.sample` with no ON DELETE, so
+        # the first test that does mint one would fail its teardown on a table it had never heard of.
         c.execute(f"DELETE FROM lab.download_ticket WHERE sample_id IN {ssub}")
         # The custody ledger is append-only by trigger (docs/11 wants
         # exactly that); the test rows are removed the way
@@ -118,9 +103,8 @@ class MemoryStore:
 
 @pytest.fixture
 def store(monkeypatch):
-    """One store shared by the service that submits and the router that
-    downloads: `_svc` builds `SampleStorage()` at call time, so the class
-    is replaced on the module rather than on an instance."""
+    """One store shared by the service that submits and the router that downloads: `_svc` builds
+    `SampleStorage()` at call time, so the class is replaced on the module rather than on an instance."""
     import noctornal_api.samples as samples
     memory = MemoryStore()
     monkeypatch.setattr(samples, "SampleStorage", lambda: memory)
@@ -158,18 +142,12 @@ def _user(conn, *, roles=(), clearance="RED"):
 
 
 def _session(conn, email) -> str:
-    """A session minted directly, the way `scripts/bootstrap.py session`
-    does, with `mfa_satisfied=True` as login passes -- `sample.download`
-    is step-up gated, and a session that never satisfied MFA would refuse
-    every download below for a reason that is not what is under test.
+    """A session minted directly, the way `scripts/bootstrap.py session` does, with `mfa_satisfied=True`
+    as login passes: `sample.download` is step-up gated, and a session that never satisfied MFA would
+    refuse every download below for a reason that is not what is under test.
 
-    Not `POST /auth/login`, and not only because it answers 204 with the
-    token in `__Host-session` since 2026-09-10: a process configured as
-    the sample origin serves no login route at all, which is the point of
-    this file. Signing in therefore meant lifting
-    NOCTORNAL_PUBLIC_ORIGIN, signing in against the application process
-    and putting it back -- three lines of environment choreography around
-    a request none of these tests are about.
+    Not `POST /auth/login`: it answers 204 with the token in `__Host-session`, and a process configured as
+    the sample origin serves no login route at all, which is the point of this file.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
@@ -208,16 +186,9 @@ def _is_archive(body: bytes) -> bool:
 
 
 def _readiness(conn, client) -> dict:
-    """The register as a fresh SYS_ADMIN sees it, read with whatever
-    NOCTORNAL_PUBLIC_ORIGIN the caller set -- /admin/readiness is one of
-    the four things a sample-role process still serves.
-
-    Until 2026-09-10 this lifted NOCTORNAL_PUBLIC_ORIGIN and put it back
-    around a `POST /auth/login`, because a sample-role process serves no
-    login route. `_session` mints without HTTP, so the choreography is
-    gone and the environment this reads under is exactly the one the test
-    configured -- which is what this file is about.
-    """
+    """The register as a fresh SYS_ADMIN sees it, read with whatever NOCTORNAL_PUBLIC_ORIGIN the caller
+    set: /admin/readiness is one of the four things a sample-role process still serves. `_session` mints
+    without HTTP, so the environment this reads under is exactly the one the test configured."""
     _, email, secret = _user(conn, roles=("SYS_ADMIN",))
     token = _session(conn, email)
     body = client.get(f"{API}/admin/readiness", headers=_auth(token)).json()
@@ -228,13 +199,10 @@ def _readiness(conn, client) -> dict:
 
 def test_the_download_grants_on_configuration_not_on_the_host_header(
         conn, client, store, monkeypatch):
-    """The finding, reproduced: with the sample origin configured, a
-    request to the APPLICATION process that merely says
-    `Host: samples.example` was served the archive, because the check
-    compared the configured origin against `request.url`, which is that
-    header. Now the process's own configuration decides, and a process
-    that has not been configured as the sample origin refuses whatever
-    the client writes in Host."""
+    """With the sample origin configured, a request to the APPLICATION process that merely says
+    `Host: samples.example` is not served the archive: the process's own configuration decides, and a
+    process that has not been configured as the sample origin refuses whatever the client writes in
+    Host."""
     monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", "http://samples.example")
     token, sample = _analyst(conn)
 
@@ -297,12 +265,9 @@ def test_the_application_process_refuses_and_names_the_sample_origin(
 
 def test_the_sample_origin_may_not_be_the_application_origin(
         conn, client, store, monkeypatch):
-    """The no-op configuration the review found: NOCTORNAL_SAMPLE_ORIGIN
-    equal to the application origin passed the old check (the console's
-    same-origin request arrived there) and served hostile bytes from the
-    origin the invariant forbids. It is refused now, and the register
-    fails on it, even on a request whose Host says the configured
-    origin."""
+    """NOCTORNAL_SAMPLE_ORIGIN equal to the application origin is a no-op configuration: it would serve
+    hostile bytes from the origin the invariant forbids. It is refused, and the register fails on it, even
+    on a request whose Host says the configured origin."""
     monkeypatch.setenv("NOCTORNAL_BASE_URL", "http://app.example")
     monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", "http://app.example")
     token, sample = _analyst(conn)
@@ -344,11 +309,9 @@ def test_readiness_reports_the_control_off_when_the_origin_is_unset(
 
 
 def test_readiness_says_which_origin_this_process_is(conn, client, monkeypatch):
-    """A passing register used to say only that the variable was set. It
-    now says whether THIS process is the application (and refuses) or the
-    sample origin (and serves), and hands the two facts it cannot see --
-    that something serves at the other origin, and that the split is not
-    a CNAME -- back to a human in so many words."""
+    """A passing register says whether THIS process is the application (and refuses) or the sample origin
+    (and serves), and hands the two facts it cannot see (that something serves at the other origin, and
+    that the split is not a CNAME) back to a human in so many words."""
     monkeypatch.setenv("NOCTORNAL_BASE_URL", APP)
     monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", SAMPLES)
 
@@ -370,12 +333,10 @@ def test_readiness_says_which_origin_this_process_is(conn, client, monkeypatch):
 
 def test_the_console_can_reach_the_origin_the_download_is_served_from(
         conn, client, store, monkeypatch):
-    """Reads three things that must name ONE origin: the CSP the console
-    is served under, the origin the policy endpoint hands the console,
-    and the origin the download compares against. Until 2026-09-09 the
-    CSP was `connect-src 'self'` whatever was configured, so the first
-    disagreed with the other two and the Lab pane could not download from
-    a correctly split deployment at all."""
+    """Reads three things that must name ONE origin: the CSP the console is served under, the origin the
+    policy endpoint hands the console, and the origin the download compares against. A CSP of
+    `connect-src 'self'` whatever was configured would leave the Lab pane unable to download from a
+    correctly split deployment."""
     from noctornal_api.http.app import _UI_CSP
     from noctornal_api.samples import origin_split
 
@@ -401,25 +362,17 @@ def test_the_console_can_reach_the_origin_the_download_is_served_from(
 def test_the_lab_pane_downloads_from_the_policys_sample_origin():
     """The console's half of the same contract, read from the file.
 
-    It is the one call in app.js that leaves the page's origin, under
-    its own name, exactly once. Until 2026-09-09 it was `fetch(API +
-    ...)` like every other call, which is the application origin, which
-    refuses every download by design.
+    It is the one call in app.js that leaves the page's origin, under its own name, exactly once. A
+    `fetch(API + ...)` like every other call would go to the application origin, which refuses every
+    download by design.
 
-    WHAT CHANGED IN WAVE 2, and why this test was rewritten rather than
-    relaxed. It used to assemble the URL itself, from
-    `smpPolicy.sample_origin` plus the API prefix, and this test pinned
-    that spelling. The console now sends the URL the MINT returned
-    (`download_url`), so the origin is named by the process that knows
-    the split rather than reassembled by the page. That is a better
-    arrangement and a different one, and a test that pins a spelling
-    fails on an improvement -- so what is pinned here now is the set of
-    properties that matter about a cross-origin request carrying a
-    credential, which is a longer list than the old single regex.
+    The console sends the URL the MINT returned (`download_url`), so the origin is named by the process
+    that knows the split rather than reassembled by the page. A test that pinned that spelling would fail
+    on an improvement, so what is pinned is the set of properties that matter about a cross-origin request
+    carrying a credential.
 
-    A URL taken from a response needs a bound, and the bound is the CSP:
-    `connect-src` names 'self' and the configured sample origin and
-    nothing else, which the test above this one asserts. The two halves
+    A URL taken from a response needs a bound, and the bound is the CSP: `connect-src` names 'self' and
+    the configured sample origin and nothing else, which the test above this one asserts. The two halves
     are deliberately in one file.
     """
     js = (STATIC / "app.js").read_text(encoding="utf-8")
@@ -444,19 +397,15 @@ def test_the_lab_pane_downloads_from_the_policys_sample_origin():
         "a ticket in a query string is a credential in every access log "
         "between here and the sample origin")
 
-    # No cookie crosses, and no bearer either -- the ticket is the whole
-    # credential. The forced Authorization header this replaced is the
-    # reason the login response used to carry a token at all.
+    # No cookie crosses, and no bearer either: the ticket is the whole credential.
     assert re.search(r"credentials:\s*'omit'", body), (
         "the sample origin reads no cookie and must be offered none")
     assert "Authorization" not in body and "Bearer" not in body, (
         "the cross-origin download carries no bearer since Wave 2")
 
-    # The mint is a POST on the ordinary path, which is what brings the
-    # CSRF double-submit with it. A GET would not. Since 2026-09-22 (F2)
-    # the mint PATH is a parameter defaulting to the download's, because
-    # the retrieval of a preserved sample rides the same two legs with
-    # its own mint; the POST through api() is what is held.
+    # The mint is a POST on the ordinary path, which is what brings the CSRF double-submit with it. A GET
+    # would not. The mint PATH is a parameter defaulting to the download's, because the retrieval of a
+    # preserved sample rides the same two legs with its own mint; the POST through api() is what is held.
     assert "async function downloadSample(s, msg, mint = '/download-ticket')" in body
     assert re.search(r"api\('/samples/' \+ encodeURIComponent\([^)]*\)\s*\n?"
                      r"\s*\+ mint, \{ method: 'POST' \}\)", body), (
@@ -464,10 +413,9 @@ def test_the_lab_pane_downloads_from_the_policys_sample_origin():
         "double-submit applies")
     assert "fetch(API + '/samples/'" not in body, (
         "a same-origin download is one the application process refuses")
-    # Two calls since 2026-09-24 (x-hostile-export): the Lab's download and
-    # the production of an exhibit of attacker markup, which docs/19
-    # section 1.1 sends out through the same origin. Named, so a third
-    # cross-origin call is a decision rather than an accident.
+    # Two calls: the Lab's download and the production of an exhibit of attacker markup, which docs/19
+    # section 1.1 sends out through the same origin. Named, so a third cross-origin call is a decision
+    # rather than an accident.
     assert js.count("fetchFromSampleOrigin(") == 2, (
         "exactly two calls leave the page's origin: the Lab's download and "
         "an exhibit's production")
@@ -475,8 +423,7 @@ def test_the_lab_pane_downloads_from_the_policys_sample_origin():
     assert "fetchFromSampleOrigin(minted.download_url" in produce[
         :produce.index("\n}\n")]
     assert "const fetchFromSampleOrigin = window.fetch.bind(window);" in js
-    # The button is enabled by the ORIGIN, not by a boolean that used to
-    # read true for a value the server refused.
+    # The button is enabled by the ORIGIN, not by a boolean.
     actions = js[js.index("function sampleActions("):js.index("async function downloadSample(")]
     assert "smpPolicy.sample_origin)" in actions
     assert "smpPolicy.sample_origin_configured" not in actions
@@ -533,13 +480,10 @@ def test_the_sample_process_answers_the_consoles_preflight_for_the_app_origin_on
 
 def test_the_sample_process_serves_downloads_and_nothing_else(
         conn, client, store, monkeypatch):
-    """The sample origin exists so that no page with an analyst's session
-    runs there. The process is the same codebase as the application, so
-    until 2026-09-09 it would have served the console, the login form and
-    every case route at the sample hostname -- and docs/16 C9 asked a
-    human to confirm a proxy allow-list nobody tests. Now the process
-    refuses everything but the download, its preflight, /healthz and the
-    readiness register."""
+    """The sample origin exists so that no page with an analyst's session runs there. The process is the
+    same codebase as the application, so it would otherwise serve the console, the login form and every
+    case route at the sample hostname. It refuses everything but the download, its preflight, /healthz
+    and the readiness register."""
     monkeypatch.setenv("NOCTORNAL_BASE_URL", APP)
     monkeypatch.setenv("NOCTORNAL_SAMPLE_ORIGIN", SAMPLES)
     token, sample = _analyst(conn)   # a session, minted without HTTP

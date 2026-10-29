@@ -1,8 +1,7 @@
-"""What an event puts on Jira (notify F7, 2026-09-24).
+"""What an event puts on Jira.
 
-Pure: no database and no network. The renderer reads the subject and the
-summary only (`Outgoing` carries no body), and at STUB exposure nothing,
-not even the grouping of work by case, carries case identity.
+Pure: no database and no network. The renderer reads the subject and the summary only (`Outgoing` carries
+no body), and at STUB exposure nothing, not even the grouping of work by case, carries case identity.
 """
 from __future__ import annotations
 

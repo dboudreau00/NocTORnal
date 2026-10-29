@@ -1,10 +1,9 @@
-"""lab-2 (review of 2026-10-03): a newly imported prohibited-content list
-did not bind the Lab until a screening pass reached the sample. With the
-import's own pass skipped (another pass held the lock), the download ticket
-was minted, the archive served, static triage claimed the run and a NONE
-sandbox accepted the send, for a sample the list named.
+"""A newly imported prohibited-content list binds the Lab at once, not when a screening pass reaches the
+sample.
 
-Fails on dc28ffa: the ticket is minted and the triage run is claimed.
+With the import's own pass skipped (another pass held the lock), the download ticket must not be minted,
+the archive served, static triage claim the run or a NONE sandbox accept the send, for a sample the list
+names.
 
 Email prefix `r46w-`. Env-gated on DATABASE_URL.
 """

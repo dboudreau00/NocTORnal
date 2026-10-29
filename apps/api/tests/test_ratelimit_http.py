@@ -1,12 +1,9 @@
-"""The HTTP half of rate limiting: subject derivation from a request, the
-status a refusal gets, and the middleware ordering that decides whether a
-refusal is served with security headers.
+"""The HTTP half of rate limiting: subject derivation from a request, the status a refusal gets, and the
+middleware ordering that decides whether a refusal is served with security headers.
 
-Deliberately database-free. The blanket middleware limit runs before
-session validation and needs no connection, which is what makes it able to
-brake an unauthenticated flood -- and what makes it testable here. The
-per-endpoint, per-user limits are exercised over a real login in
-`test_http_e2e.py`.
+Database-free by design. The blanket middleware limit runs before session validation and needs no
+connection, which is what lets it brake an unauthenticated flood and what makes it testable here. The
+per-endpoint, per-user limits are exercised over a real login in `test_http_e2e.py`.
 """
 from __future__ import annotations
 
@@ -304,17 +301,12 @@ def test_the_middleware_is_installed_on_a_default_app():
 
 
 # ---------------------------------------------------------------------------
-# Regressions from the adversarial review pass (2026-07-25)
-#
-# Each is a defect that shipped, was found by a reviewer trying to break the
-# limiter rather than to confirm it, and was reproduced against the running
-# app before being fixed.
+# Regressions: each is named for the defect it guards.
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
 def app_with_tiny_blanket_limits():
-    """Both blanket meters shrunk. The credential one alone was what shipped,
-    and what the review broke."""
+    """Both blanket meters shrunk: the credential one alone is not a ceiling."""
     from noctornal_api.http.app import create_app
     app = create_app()
     app.state.limiter = _tiny_limiter(
@@ -327,19 +319,15 @@ def app_with_tiny_blanket_limits():
 
 def test_rotating_the_bearer_token_does_not_escape_the_blanket_limit(
         app_with_tiny_blanket_limits):
-    """THE critical regression.
+    """A bearer token that is not a live session still must not mint a fresh bucket.
 
-    The blanket ceiling was keyed only on the presented credential, and
-    nothing validates that a bearer token is a live session, so a fresh
-    random token per request minted a fresh empty bucket per request. The
-    reviewer reproduced it against the real app: with the limit at 3, a
-    fixed token gave 27 refusals in 30 requests and a rotating one gave
-    zero. Worse, because the bearer branch returned early it suppressed the
-    address fallback, so sending one garbage header made a caller strictly
-    LESS limited than sending no credential at all. The control inverted.
+    The blanket ceiling keyed only on the presented credential would give a fresh random token per request
+    a fresh empty bucket per request (with the limit at 3, a fixed token gets 27 refusals in 30 requests and
+    a rotating one none). It would also suppress the address fallback, so sending one garbage header would
+    make a caller strictly LESS limited than sending no credential at all.
 
-    `request.source` is keyed on the peer address, which a caller cannot
-    mint, so a rotating token now only subdivides a budget it cannot leave.
+    `request.source` is keyed on the peer address, which a caller cannot mint, so a rotating token only
+    subdivides a budget it cannot leave.
     """
     import secrets
 
@@ -356,8 +344,7 @@ def test_rotating_the_bearer_token_does_not_escape_the_blanket_limit(
 
 def test_rotating_the_session_cookie_does_not_escape_it_either(
         app_with_tiny_blanket_limits):
-    """The cookie branch has the same shape and had the same hole. The
-    review found the bearer path; this one was a line below it."""
+    """The cookie branch has the same shape as the bearer branch and the same ceiling."""
     client = TestClient(app_with_tiny_blanket_limits)
     codes = []
     for i in range(30):
@@ -391,12 +378,10 @@ def test_x_forwarded_for_is_read_across_repeated_header_lines():
 
 
 def test_the_middleware_does_not_block_the_event_loop():
-    """`RedisBackend` drives the SYNCHRONOUS redis-py client. Called from an
-    `async def` middleware it would do blocking socket I/O on the loop
-    thread, serialising every request in the process behind one Redis round
-    trip -- and the 250ms socket timeout would cost 250ms of loop time per
-    request before it even raised. That defeats the fail-OPEN policy this
-    limit exists to have: a sick Redis must not become a sick API.
+    """`RedisBackend` drives the SYNCHRONOUS redis-py client. Called from an `async def` middleware it would
+    do blocking socket I/O on the loop thread, serialising every request in the process behind one Redis
+    round trip, and the 250ms socket timeout would cost 250ms of loop time per request before it raised.
+    That defeats the fail-OPEN policy: a sick Redis must not become a sick API.
 
     Asserted by having the backend record which thread it ran on.
     """
@@ -423,16 +408,13 @@ def test_the_middleware_does_not_block_the_event_loop():
 
 
 def test_a_response_returning_handler_still_advertises_its_own_limit():
-    """FastAPI discards `sub_response` entirely when a handler returns a
-    Response object directly -- which evidence export and download both do.
-    The endpoint's headers vanished, and the blanket middleware then filled
-    the gap with its own ceiling, so the client was not merely told nothing,
-    it was told the wrong number.
+    """FastAPI discards `sub_response` entirely when a handler returns a Response object directly, as
+    evidence export and download do. The endpoint's headers would vanish and the blanket middleware would
+    fill the gap with its own ceiling, telling the client the wrong number.
 
-    `enforce` now also stashes the decision on `request.state`, and the
-    middleware writes that onto the outgoing response. Reproduced here by
-    calling `enforce` from inside a Response-returning handler, which is
-    exactly the shape FastAPI throws the headers away for.
+    So `enforce` also stashes the decision on `request.state`, and the middleware writes that onto the
+    outgoing response. Reproduced by calling `enforce` from inside a Response-returning handler, the shape
+    FastAPI throws the headers away for.
     """
     from fastapi.responses import PlainTextResponse
 

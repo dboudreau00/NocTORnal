@@ -1,25 +1,21 @@
-"""`redis_limiter_isolated`: the limiter's Redis, to itself (docs/16 C8,
-sec-redis-isolation, 2026-09-23).
+"""`redis_limiter_isolated`: the limiter's Redis, to itself (docs/16 C8).
 
-`noeviction` was half of C8 and the register checked it. The other half,
-that nothing else lives in that Redis, the register called "a deployment
-fact the runtime cannot see". A co-tenant leaves keys, and its harm comes
-through the memory they hold: `maxmemory` is per instance, so under
-noeviction it fills the instance until every meter write fails and every
-limit that fails closed refuses everyone.
+`noeviction` is half of C8 and the register checks it. The other half is that nothing else lives in that
+Redis. A co-tenant leaves keys, and its harm comes through the memory they hold: `maxmemory` is per
+instance, so under noeviction it fills the instance until every meter write fails and every limit that
+fails closed refuses everyone.
 
-Held here, against a fake that fails the test on any command that returns
-a value:
+Held here, against a fake that fails the test on any command that returns a value:
 
-* keys outside the limiter's prefix in its own database fail the row, and
-  so do keys in any other database on the instance;
+* keys outside the limiter's prefix in its own database fail the row, and so do keys in any other database
+  on the instance;
 * the evidence carries counts, never a key name and never a value;
-* a Redis that will not answer SCAN or INFO, or a walk that cannot finish,
-  is NOT a pass: the register lists things confirmed;
+* a Redis that will not answer SCAN or INFO, or a walk that cannot finish, is NOT a pass: the register
+  lists things confirmed;
 * the prefix is the one the limiter writes with, read from `RateLimiter`.
 
-The last two tests run against a real Redis when REDIS_URL is set, in
-database 15, with keys that expire on their own if the test dies.
+The last two tests run against a real Redis when REDIS_URL is set, in database 15, with keys that expire on
+their own if the test dies.
 """
 from __future__ import annotations
 
@@ -94,11 +90,9 @@ class CensusRedis:
         return answer
 
     def execute_command(self, *args):
-        """ACL WHOAMI and ACL GETUSER, which the row reads since the
-        limiter's Redis ACL (2026-10-02): the rules of a user, never a key
-        or a value. Answered as a development Redis answers, where the
-        limiter is the open default user; test_redis_limiter_acl.py holds
-        the production verdicts."""
+        """ACL WHOAMI and ACL GETUSER, which the row reads for the limiter's Redis ACL: the rules of a user,
+        never a key or a value. Answered as a development Redis answers, where the limiter is the open
+        default user; test_redis_limiter_acl.py holds the production verdicts."""
         words = tuple(str(a).lower() for a in args[:2])
         self.calls.append(" ".join(words))
         if words == ("acl", "whoami"):
@@ -184,9 +178,8 @@ ELASTICACHE_KEY = b"ElastiCacheMasterReplicationTimestamp"
 
 
 def test_a_dedicated_elasticache_redis_is_not_reported_shared(served):
-    """c24 (2026-09-24): the service's own bookkeeping key made a limiter
-    alone on ElastiCache SHARED on every call, with an action nobody could
-    carry out. It is counted, said, and not held against the row."""
+    """The service's own bookkeeping key must not make a limiter alone on ElastiCache SHARED, with an
+    action nobody could carry out. It is counted, said, and not held against the row."""
     served(CensusRedis(LIMITER_KEYS + [ELASTICACHE_KEY]))
     check = _check()
     assert check.ok is True, check
@@ -313,8 +306,7 @@ def test_a_foreign_key_found_before_the_walk_stops_is_reported_as_at_least(
 
 
 def test_the_census_sends_only_counting_commands(served):
-    """Counting commands, and since 2026-10-02 the two that read the ACL's
-    rules; none of them returns a key's value."""
+    """Counting commands, and the two that read the ACL's rules; none of them returns a key's value."""
     fake = served(CensusRedis(LIMITER_KEYS + FOREIGN_KEYS))
     _check()
     assert set(fake.calls) <= {"dbsize", "scan", "info keyspace",
@@ -343,8 +335,7 @@ def test_the_row_is_registered_after_the_store_row_and_does_not_block():
 
 
 def test_the_store_row_no_longer_calls_isolation_invisible():
-    """Its passing evidence said whether the limiter had the instance to
-    itself was a fact the runtime cannot see. Part of it now can be."""
+    """The passing evidence must not call isolation a fact the runtime cannot see: part of it can be seen."""
     import inspect
     source = inspect.getsource(readiness._redis_limiter_store)
     assert "runtime cannot see" not in source

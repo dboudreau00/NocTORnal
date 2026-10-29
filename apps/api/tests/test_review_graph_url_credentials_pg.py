@@ -1,14 +1,11 @@
-"""A pasted link never carries its password onto the graph: the database
-half (graph-url-selector-keeps-credentials, review 2026-10-03; migration
-0137 for the rows already stored).
+"""A pasted link never carries its password onto the graph: the database half (migration 0137 for the rows
+already stored).
 
-`test_review_graph_url_credentials.py` holds the normaliser and the
-extractor. Here: a capture of a stealer line proposes the link without its
-password, in the label, the raw value, the rationale and the extraction row;
-accepting it puts none on the graph, in the index or in the claim; a
-proposal raised before the fix that still carries one is refused at accept;
-the create, check and correct paths refuse a link with a credential; and
-0137 removes what is already stored, leaving every other row byte for byte.
+`test_review_graph_url_credentials.py` holds the normaliser and the extractor. Here: a capture of a
+stealer line proposes the link without its password, in the label, the raw value, the rationale and the
+extraction row; accepting it puts none on the graph, in the index or in the claim; a proposal raised
+earlier that still carries one is refused at accept; the create, check and correct paths refuse a link
+with a credential; and 0137 removes what is already stored, leaving every other row byte for byte.
 
 Email prefix `g43d-`. Gated on DATABASE_URL and NOCTORNAL_APP_DB_ROLE.
 """
@@ -157,7 +154,7 @@ def test_the_extraction_row_does_not_keep_the_password_either(w):
     assert rows == [("https://REDACTED@h.example/x", "https://h.example/x")]
 
 
-# --- a proposal raised before the fix ---------------------------------------
+# --- a proposal raised under the earlier rules -----------------------------
 
 def test_an_old_proposal_that_carries_a_password_is_refused_at_accept(w):
     from noctornal_api.proposals import KIND_NODE, ProposalStore
@@ -242,8 +239,7 @@ def test_the_index_keeps_the_clean_form_whatever_it_is_given(w):
 # --- the rows already stored (0137) -----------------------------------------
 
 def _stored_world(owner):
-    """Rows as the code before the fix wrote them, in a transaction the
-    caller rolls back."""
+    """Rows as the earlier code wrote them, in a transaction the caller rolls back."""
     from psycopg.types.json import Json
 
     from noctornal_api.graph import AssertionInput, GraphWriteService
@@ -256,8 +252,8 @@ def _stored_world(owner):
             case_id=case_id, node_type=node_type, label=label, created_by=boss,
             assertion=AssertionInput(basis="DIRECT_OBSERVATION", created_by=boss))
         if attrs:
-            # As the code before the fix wrote it: the writer now refuses a
-            # raw value with a credential, so the old row is made directly.
+            # As the earlier code wrote it: the writer now refuses a raw value with a credential, so the
+            # old row is made directly.
             owner.execute("UPDATE core.node SET attrs = %s WHERE id = %s",
                           (Json(attrs), node_id))
         return node_id
@@ -336,8 +332,8 @@ def _stored_world(owner):
                                             "attrs": {"selector_type": "URL",
                                                       "raw_value": "https://example.org/a"}},
                        "Context: ...https://example.org/a...")
-    # a correction (0136) whose replaced label carried a credential, copied
-    # from the audit row, and one whose replaced label was clean
+    # a correction (0136) whose replaced label carried a credential, copied from the audit row, and one
+    # whose replaced label was clean
     prior_dirty = owner.execute(
         """INSERT INTO core.assertion (case_id, node_id, claim_path, claim_value,
                prior_value, basis, created_by, rationale)
@@ -493,11 +489,9 @@ def test_the_scrub_writes_audit_events_that_name_no_value(owner):
 
 
 def test_the_scrub_finds_a_credential_in_a_context_window_that_cut_its_link(owner):
-    """2026-10-07, on an Alpha 7a estate: the extractor's context
-    window (45 characters either side) cut links before their scheme, and what
-    was left in the rationale was no URL to the text redaction, so a token in
-    a query, a fragment or a path parameter, and a `//user:pass@` authority,
-    survived the upgrade in the triage queue."""
+    """The extractor's context window (45 characters either side) cut links before their scheme, and what
+    was left in the rationale was no URL to the text redaction, so a token in a query, a fragment or a path
+    parameter, and a `//user:pass@` authority, would survive the upgrade in the triage queue."""
     from psycopg.types.json import Json
     m = _migration("0137")
     try:
@@ -631,8 +625,8 @@ def test_a_stored_link_with_a_credential_is_listed_and_printed_without_it(owner,
 
 def test_a_stored_link_with_a_path_parameter_secret_is_listed_and_printed_without_it(
         owner, legacy_script):
-    """The verifier's round added `;jsessionid=` to what `url_norm` drops, so
-    the listing of rows the upgrade could not rewrite looks for a `;` too."""
+    """`url_norm` drops `;jsessionid=`, so the listing of rows the upgrade could not rewrite looks for a
+    `;` too."""
     from noctornal_api.legacy_records import url_identity_changes
     try:
         with owner.transaction():
@@ -654,7 +648,7 @@ def test_a_stored_link_with_a_path_parameter_secret_is_listed_and_printed_withou
         pass
 
 
-# --- the verifier's round: links that are not http or https ------------------
+# --- links that are not http or https ----------------------------------------
 
 #: Passwords of the shapes the round tried, in links of schemes the extractor
 #: did not read as URLs.
@@ -670,11 +664,10 @@ NON_HTTP_PASSWORD_PARTS = ("Secret123", "Sm7p!Pass", "pa)ss", "Wint3r2026", "ss@
 
 
 def test_a_captured_link_that_is_not_http_puts_no_password_on_the_graph(w):
-    """The verifier's reproduction: `mysql://root:Secret123@db.example/app`
-    gave an EMAIL proposal whose label, raw value, and (accepted) entity,
-    attributes and index row all held the password. Only http and https
-    links are URL selectors, so the userinfo of any other scheme was read as
-    an e-mail address (a password holding `!` as a partial local part)."""
+    """`mysql://root:Secret123@db.example/app` must not give an EMAIL proposal whose label, raw value, and
+    (accepted) entity, attributes and index row hold the password. Only http and https links are URL
+    selectors, so the userinfo of any other scheme must not be read as an e-mail address (a password
+    holding `!` as a partial local part)."""
     tag = uuid4().hex[:8]
     text = f"dump {tag}\n" + "\n".join(NON_HTTP_LINES) + "\nreal mail bob@real.example"
     r = w["client"].post(_url(w, "/proposals/capture"), headers=w["h"],
@@ -700,10 +693,9 @@ def test_a_captured_link_that_is_not_http_puts_no_password_on_the_graph(w):
 
 
 def test_a_pending_proposal_read_out_of_a_password_is_refused_at_accept(w):
-    """A proposal raised before the fix looks like any e-mail address; the
-    document it cites says it sat in a link's userinfo. It is refused with
-    the words of a credentialled label, writes nothing, and can be rejected.
-    A proposal found elsewhere in the same document is not touched."""
+    """A proposal raised earlier looks like any e-mail address; the document it cites says it sat in a
+    link's userinfo. It is refused with the words of a credentialled label, writes nothing, and can be
+    rejected. A proposal found elsewhere in the same document is not touched."""
     from noctornal_api.proposals import KIND_NODE, ProposalStore
     tag = uuid4().hex[:8]
     text = (f"dump {tag}: mysql://root:Secret123@db.internal.example/app "
@@ -777,8 +769,8 @@ def test_a_url_selector_with_a_userinfo_is_not_refused_by_the_span_rule(w):
 
 
 def test_a_stealer_log_line_with_a_login_and_password_after_the_link_keeps_neither(w):
-    """`url:login:password`, the combo-list layout: the whole tail used to
-    become the URL's path and so its label."""
+    """`url:login:password`, the combo-list layout: the whole tail must not become the URL's path and so
+    its label."""
     tag = uuid4().hex[:8]
     text = f"combo {tag} https://mail.bank.example/login:alice@example.com:Passw0rd{tag}"
     r = w["client"].post(_url(w, "/proposals/capture"), headers=w["h"],
@@ -797,8 +789,7 @@ def test_a_stealer_log_line_with_a_login_and_password_after_the_link_keeps_neith
 # --- the writer, and the rows of the new shapes (0137) ----------------------
 
 def test_a_stored_link_of_the_new_shapes_is_scrubbed(owner):
-    """The shapes the verifier's round added to the rules, in rows as the
-    code before it wrote them: a `;` parameter, a path parameter, an OAuth
+    """The newer shapes in rows as the earlier code wrote them: a `;` parameter, a path parameter, an OAuth
     code, a link inside a link, and the combo-list tail."""
     from noctornal_api.graph import AssertionInput, GraphWriteService
     m = _migration("0137")

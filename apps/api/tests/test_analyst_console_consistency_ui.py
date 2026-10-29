@@ -1,14 +1,11 @@
-"""The console's side of the 2026-10-07 sweep (2026-10-07).
+"""The console does not ask for what the role cannot have.
 
-A reader or a liaison opening a case had the console ask for three things
-their role cannot have, on every case open: the projection metrics
-(`analytics.run`), the Lab badge (`sample.read`) and the Feeds badge
-(`ingest.read`). Each refusal is a permanent AUTHZ_DENIED row in an
-append-only log, so ordinary browsing hummed denials and buried the probing
-signal the row exists for. The Feeds badge already stopped asking after one
-refusal; the other two now do as well: the metrics are not asked for when
-the case record says the role lacks the verb, and the Lab badge latches on
-its first 403 as the Feeds badge does.
+A reader or a liaison opening a case must not make the console ask for three things their role cannot have
+on every case open: the projection metrics (`analytics.run`), the Lab badge (`sample.read`) and the Feeds
+badge (`ingest.read`). Each refusal is a permanent AUTHZ_DENIED row in an append-only log, so ordinary
+browsing would hum denials and bury the probing signal the row exists for. The Feeds badge stops asking
+after one refusal; the metrics are not asked for when the case record says the role lacks the verb, and the
+Lab badge latches on its first 403 as the Feeds badge does.
 
 Pure: no database, no browser.
 """

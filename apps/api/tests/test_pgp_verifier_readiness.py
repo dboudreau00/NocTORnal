@@ -1,10 +1,8 @@
-"""The pgp_verifier readiness row (F10a, comms, 2026-09-24).
+"""The pgp_verifier readiness row.
 
-With no gpg, or one below the version floor, every signature check
-records NO_VERIFIER and no binding can be confirmed, and until this row
-nothing said so (the production image carried gpgv, not gpg). Not
-blocking: a deployment without it is honest about what it cannot check.
-Pure: the probe reads no table.
+With no gpg, or one below the version floor, every signature check records NO_VERIFIER and no binding can
+be confirmed (the production image carries gpgv, not gpg). Not blocking: a deployment without it is honest
+about what it cannot check. Pure: the probe reads no table.
 """
 from __future__ import annotations
 

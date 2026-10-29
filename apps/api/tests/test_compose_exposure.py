@@ -1,29 +1,23 @@
 """The development stack publishes its services on loopback only.
 
-`infra/docker-compose.yml` is the stack both installers start. Until the
-Alpha 6 pre-release check (2026-09-23) it published Postgres, Redis, MinIO
-and Mailpit on every interface. On a Linux host anyone on the network could
-then log in to Postgres as a superuser, or to MinIO as root, with the
-passwords written in that file. A host firewall did not help: Docker
-forwards a published port with its own NAT rules, before ufw's INPUT rules
-see the packet. The only control is the host address in `ports:`, and this
-file holds it at loopback.
+`infra/docker-compose.yml` is the stack both installers start. Published on every interface, Postgres,
+Redis, MinIO and Mailpit would let anyone on the network of a Linux host log in to Postgres as a
+superuser, or to MinIO as root, with the passwords written in that file. A host firewall does not help:
+Docker forwards a published port with its own NAT rules, before ufw's INPUT rules see the packet. The
+only control is the host address in `ports:`, and this file holds it at loopback.
 
-Three more checks cover the same file, because it is the stack a fresh
-install runs:
+Three more checks cover the same file, because it is the stack a fresh install runs:
 
-* the dev Redis runs a policy the rate limiter accepts, judged by the same
-  classifier that drives the API's startup warning and the readiness
-  register's `redis_limiter_store` row;
-* minio-init's wait for MinIO is quiet when MinIO comes up and loud when it
-  never does, proved by running the file's own script with a stub `mc`;
-* Mailpit greets without a reverse DNS lookup, which delayed its SMTP
-  greeting by up to the application's whole send timeout.
+* the dev Redis runs a policy the rate limiter accepts, judged by the same classifier that drives the
+  API's startup warning and the readiness register's `redis_limiter_store` row;
+* minio-init's wait for MinIO is quiet when MinIO comes up and loud when it never does, proved by
+  running the file's own script with a stub `mc`;
+* Mailpit greets without a reverse DNS lookup, which can delay its SMTP greeting by up to the
+  application's whole send timeout.
 
-Pure: no Docker and no services. PyYAML is not a dependency, so the compose
-file is read by a small reader for the YAML subset it uses. The reader fails
-closed: a `ports:` shape it does not understand is a test failure, never a
-silent pass.
+Pure: no Docker and no services. PyYAML is not a dependency, so the compose file is read by a small
+reader for the YAML subset it uses. The reader fails closed: a `ports:` shape it does not understand is
+a test failure, never a silent pass.
 """
 from __future__ import annotations
 
@@ -345,7 +339,7 @@ def _compose(ports_block: str, extra: str = "") -> str:
 
 
 @pytest.mark.parametrize("ports_block", [
-    # The exact shape infra/docker-compose.yml had before 2026-09-23.
+    # The shape that publishes a port on every interface.
     '    ports: ["5432:5432"]\n',
     '    ports: ["127.0.0.1:6379:6379", "9000:9000"]\n',
     '    ports: ["0.0.0.0:5432:5432"]\n',
@@ -394,8 +388,7 @@ def test_the_reader_fails_closed_on_shapes_it_cannot_read(text):
         violations(text)
 
 
-# ---------------------------------------------------------------------------
-# F8: the bundled Redis runs a policy the limiter accepts
+# The bundled Redis runs a policy the limiter accepts.
 
 
 def _service_command(service: str) -> str:
@@ -422,13 +415,11 @@ def test_dev_redis_does_not_evict_the_limiters_meters():
 
 
 def test_dev_mailpit_greets_without_a_reverse_dns_lookup():
-    # Measured on 2026-09-23: 1 to 10 seconds to the SMTP greeting with the
-    # lookup on, under 0.01 with it off. transports.send_smtp's timeout is 10.
+    # With the lookup on, the SMTP greeting takes 1 to 10 seconds; transports.send_smtp's timeout is 10.
     assert "--smtp-disable-rdns" in shlex.split(_service_command("mailpit"))
 
 
-# ---------------------------------------------------------------------------
-# F15: minio-init waits quietly, and fails loudly
+# minio-init waits quietly, and fails loudly.
 
 
 def _minio_init_script() -> str:

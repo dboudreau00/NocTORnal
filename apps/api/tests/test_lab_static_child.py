@@ -1,9 +1,7 @@
-"""The static-triage child: what it can see, what it can do, and how it
-fails (F11 F and G, 2026-09-24).
+"""The static-triage child: what it can see, what it can do, and how it fails.
 
-Every parser in the child reads attacker-supplied bytes, so each step runs
-in a process that bounds itself before it reads a payload byte, is fed
-over stdin only, reports failures by exception class and never by
+Every parser in the child reads attacker-supplied bytes, so each step runs in a process that bounds itself
+before it reads a payload byte, is fed over stdin only, reports failures by exception class and never by
 message, and is killed when it overruns its wall clock or its output cap.
 
 Pure: no database. The children are real processes.
@@ -224,9 +222,8 @@ def test_the_child_is_started_without_preexec_fn():
 
 
 def test_the_settings_have_one_reader_and_production_refuses_a_problem():
-    """F11 B: memory, the analysis and fuzzy maxima, the per-child timeout
-    and the deployment-wide concurrency, read once; a production boot
-    refuses a problem by the variable's name, never its value."""
+    """Memory, the analysis and fuzzy maxima, the per-child timeout and the deployment-wide concurrency are
+    read once; a production boot refuses a problem by the variable's name, never its value."""
     from noctornal_api.config import verify_environment
     s, problem = lab_triage.analysis_settings({})
     assert problem is None
@@ -267,9 +264,8 @@ def _fp(extra="", **kw):
 @pytest.mark.parametrize("flag", ["avx512vbmi", "avx512_bitalg", "avx512f",
                                   "avx512vl", "avx512dq", "avx512bw"])
 def test_hosts_differing_in_a_feature_wasmtime_checks_get_different_keys(flag):
-    """The verifier of 2026-09-24: hosts differing only in AVX-512 VBMI or
-    BITALG, CMPXCHG16B, or an aarch64 feature shared a build key, and each
-    refused the other's build in turn."""
+    """Hosts differing only in AVX-512 VBMI or BITALG, CMPXCHG16B, or an aarch64 feature must not share a
+    build key, or each refuses the other's build in turn."""
     assert _fp() != _fp(flag)
 
 

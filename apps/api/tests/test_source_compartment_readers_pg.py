@@ -1,18 +1,15 @@
-"""F43's remaining readers and writers honour a source's compartments (2026-10-03; Alembic 0163).
+"""The remaining readers and writers honour a source's compartments (Alembic 0163).
 
-The first F43 round converted the document and source readers. The verifier
-found the rest: the unhealthy and never-polled lists named a compartmented
-source to a reader without the key; the personas listing named the venue
-source and its address; a persona bound to a compartmented source could be
-locked or burnt by anyone cleared to its label; the separation check
-answered for a source the reader could not see; the key holder could not
-deactivate or rebind their own source; a persona-suspended notice carried no
-compartments; and an authority over a compartmented source showed its free
-text to a reader who saw only its targets array hidden. Each is held here at
-the service and, where a route was wrong, through the route.
+The document and source readers check a source's compartments; so must the rest. The unhealthy and
+never-polled lists must not name a compartmented source to a reader without the key; the personas listing
+must not name the venue source and its address; a persona bound to a compartmented source must not be
+locked or burnt by anyone cleared only to its label; the separation check must not answer for a source the
+reader cannot see; the key holder can deactivate and rebind their own source; a persona-suspended notice
+carries compartments; and an authority over a compartmented source does not show its free text to a reader
+who sees only its targets array hidden. Each is held here at the service and, where a route was wrong,
+through the route.
 
-DATABASE_URL-gated. Account and source prefix `test-srcc-` (the cleanup of
-test_source_compartments_pg).
+DATABASE_URL-gated. Account and source prefix `test-srcc-` (the cleanup of test_source_compartments_pg).
 """
 from __future__ import annotations
 

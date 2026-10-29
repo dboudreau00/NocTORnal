@@ -1,13 +1,11 @@
-"""The system role bypasses row security and holds nothing else (S1).
+"""The system role bypasses row security and holds nothing else.
 
-2026-09-25. `noctornal_worker` is what `db.connect_system` connects as: the
-work that must see every row. BYPASSRLS is the one power it has over
-`noctornal_app`; privilege for privilege it holds what the request role
-holds plus the IAM-plane writes 0109 took from the request role and the
-whole-table UPDATE 0155 narrowed to columns for the request role on the
-ingest records and credentials (F51, 2026-10-02), and in particular the
-same closed ledgers and insert-only records. A later migration that
-revokes something from one runtime role and forgets the other fails here.
+`noctornal_worker` is what `db.connect_system` connects as: the work that must see every row.
+BYPASSRLS is the one power it has over `noctornal_app`; privilege for privilege it holds what the
+request role holds plus the IAM-plane writes 0109 took from the request role and the whole-table UPDATE
+0155 narrowed to columns for the request role on the ingest records and credentials, and in particular
+the same closed ledgers and insert-only records. A later migration that revokes something from one
+runtime role and forgets the other fails here.
 
 Catalog reads over the owner's connection, gated like
 test_app_role_privileges_pg.py; CI creates both roles before migrating.
@@ -78,18 +76,16 @@ def test_it_owns_nothing_and_is_a_member_of_nothing_that_does(conn):
 def test_privilege_for_privilege_it_is_the_request_role_plus_the_iam_plane(conn):
     lockdown = _migration("0109")
     narrowed = _migration("0155")
-    # 0143, and 0177 (rls-6, Beta 1.1): the sessions' and the break-glass
-    # grants' sealed columns; 0180 (Beta 1.1), the others outside the
-    # accounts table.
+    # 0143 and 0177: the sessions' and the break-glass grants' sealed columns; 0180, the others outside
+    # the accounts table.
     sealed = {**_migration("0143").RUNTIME_COLUMN_SELECTS,
               **_migration("0177").RUNTIME_COLUMN_SELECTS,
               **_migration("0180").RUNTIME_COLUMN_SELECTS}
     vocabulary = (_migration("0172").RUNTIME_READ_ONLY_TABLES
                   + _migration("0179").RUNTIME_READ_ONLY_TABLES
                   + _migration("0182").RUNTIME_READ_ONLY_TABLES)
-    # 0178 (Beta 1.1): the request role writes only what a request writes on
-    # exhibits and cases, and deletes no case material it never deletes; the
-    # system role keeps both, for the purge, a hold and the sweeps.
+    # 0178: the request role writes only what a request writes on exhibits and cases, and deletes no
+    # case material it never deletes; the system role keeps both, for the purge, a hold and the sweeps.
     case_material = _migration("0178")
     keeps_update = {t.replace('"', "") for t in case_material.SYSTEM_KEEPS_UPDATE}
     keeps_delete = {t.replace('"', "") for t in case_material.NO_LONGER_DELETED}
@@ -101,10 +97,9 @@ def test_privilege_for_privilege_it_is_the_request_role_plus_the_iam_plane(conn)
     assert len(tables) >= 100
     differ = {}
     for table in tables:
-        # 0172 (2026-10-07) closed the reference vocabulary to the request
-        # role only, and 0179 and 0182 (Beta 1.1) the deployment
-        # configuration and a person's delivery settings; the system role
-        # keeps what it held.
+        # 0172 closed the reference vocabulary to the request role only, and 0179 and 0182 the
+        # deployment configuration and a person's delivery settings; the system role keeps what it
+        # held.
         read_only = (table.split(".", 1)[0] in lockdown.RUNTIME_READ_ONLY_SCHEMAS
                      or table in lockdown.RUNTIME_READ_ONLY_TABLES
                      or table in vocabulary)
@@ -118,13 +113,12 @@ def test_privilege_for_privilege_it_is_the_request_role_plus_the_iam_plane(conn)
                 # migration closed the table to both runtime roles.
                 continue
             if priv == "UPDATE" and table in narrowed.SYSTEM_KEEPS_UPDATE:
-                # 0155 (F51, 2026-10-02): the purge, a compartment rename,
-                # scoring and the re-wrap write columns no request does.
+                # 0155: the purge, a compartment rename, scoring and the re-wrap write columns no
+                # request does.
                 continue
             if priv == "SELECT" and table in sealed:
-                # 0143 (rls-6, 2026-10-03): the request role reads this
-                # table by column, never its sealed ones; the system role
-                # keeps the table.
+                # 0143: the request role reads this table by column, never its sealed ones; the
+                # system role keeps the table.
                 continue
             bare = table.replace('"', "")
             if (priv == "UPDATE" and bare in keeps_update) or (
@@ -144,12 +138,10 @@ def _column_updates(conn, role: str, table: str) -> set[str]:
 
 
 def test_on_the_ingest_records_it_keeps_only_what_a_system_path_writes(conn):
-    """0155 (F51, 2026-10-02). On the reveal authorisations no system
-    connection writes anything but the count, so the system role is the
-    request role exactly: query_count and nothing else. On the records and
-    the credentials it keeps table UPDATE, which the purge, a compartment
-    rename, scoring and the KEK re-wrap need, and so every column the
-    request role holds."""
+    """0155. On the reveal authorisations no system connection writes anything but the count, so the
+    system role is the request role exactly: query_count and nothing else. On the records and the
+    credentials it keeps table UPDATE, which the purge, a compartment rename, scoring and the KEK
+    re-wrap need, and so every column the request role holds."""
     narrowed = _migration("0155")
     for table, columns in narrowed.RUNTIME_COLUMN_UPDATES.items():
         app = _column_updates(conn, s.APP_ROLE, table)
@@ -164,11 +156,10 @@ def test_on_the_ingest_records_it_keeps_only_what_a_system_path_writes(conn):
 
 
 def test_ensure_replays_the_column_grants_after_the_blanket_ones(conn):
-    """`scripts/runtime_roles.py ensure` replays 0108's blanket grant, which
-    hands both roles table UPDATE on every table; without 0155's replay
-    after it, a role created after 0155 ran would get the authorisation's
-    window and a record's case back (F51, 2026-10-02). Run inside a
-    transaction that is rolled back, on this test database only."""
+    """`scripts/runtime_roles.py ensure` replays 0108's blanket grant, which hands both roles table
+    UPDATE on every table; without 0155's replay after it, a role created after 0155 ran would get the
+    authorisation's window and a record's case back. Run inside a transaction that is rolled back, on
+    this test database only."""
     import psycopg
 
     scripts = VERSIONS.parents[2] / "scripts"

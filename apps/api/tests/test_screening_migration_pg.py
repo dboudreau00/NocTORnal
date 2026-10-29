@@ -1,14 +1,10 @@
-"""Migrations 0102 (screening) and 0103 (sandbox detonation), F13 and
-F14, 2026-09-24.
+"""Migrations 0102 (screening) and 0103 (sandbox detonation).
 
-Each downgrade refuses on the one fact it states (a MATCH result; a SUBMIT
-detonation), naming the count; a database without either is not refused;
-the runtime role's grants are declared in GUARDED_TABLES and the REVOKE
-takes exactly each declaration's complement; every guarded table carries
-its TRUNCATE trigger; 0103 keeps the five legacy statuses legal for
-record-only rows. The real upgrade, downgrade and upgrade was run on a
-clone of a development database, and CI's head-base-head round trip
-covers the empty case.
+Each downgrade refuses on the one fact it states (a MATCH result; a SUBMIT detonation), naming the count;
+a database without either is not refused; the runtime role's grants are declared in GUARDED_TABLES and the
+REVOKE takes exactly each declaration's complement; every guarded table carries its TRUNCATE trigger; 0103
+keeps the five legacy statuses legal for record-only rows. CI's head-base-head round trip covers the
+empty case.
 
 Email prefix `scrm-`. Env-gated on DATABASE_URL.
 """

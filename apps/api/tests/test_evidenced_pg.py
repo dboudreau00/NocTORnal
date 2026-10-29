@@ -1,22 +1,12 @@
-"""One definition of "evidenced", held to it everywhere (2026-09-22).
+"""One definition of "evidenced", held to it everywhere.
 
-The review of 2026-09-22 found the product answering "is this claim
-evidenced?" two ways at once (ux07 two-evidence-paths-disagree, ux05
-linked-evidence-vs-evidenced). The canvas mark, the coverage figure and
-the report's "Evidenced" column counted only exhibits CARRIED BY a live
-assertion; the inspector listed only exhibits LINKED to the element. So
-an analyst who linked an exhibit saw the element stay hollow and the
-report print "NO", and an element evidenced at creation said "No exhibits
-linked." in its own inspector.
+The product must not answer "is this claim evidenced?" two ways at once. `projections.evidenced_sql` is the
+rule, and `routers/read.py` lists exhibits from the same `evidence_backing_sql`, so the canvas mark, the
+coverage figure, the report's "Evidenced" column and the inspector agree. Every test below checks the
+projection, the coverage figure and the inspector list AGAINST EACH OTHER (`_agree`), because two readings
+that each look plausible alone is the exact failure this file exists to prevent.
 
-`projections.evidenced_sql` is now the rule, and `routers/read.py` lists
-exhibits from the same `evidence_backing_sql`. Every test below checks the
-projection, the coverage figure and the inspector list AGAINST EACH OTHER
-(`_agree`), because two readings that each look plausible alone is the
-exact failure this file exists to prevent.
-
-Also here: the assertion endpoint now says what is claimed, from what and
-by whom (ux05 assertion-drops-claim-and-source).
+Also here: the assertion endpoint says what is claimed, from what and by whom.
 
 Env-gated on DATABASE_URL. No MinIO: exhibits are inserted as rows.
 """
@@ -309,9 +299,8 @@ def test_an_exhibit_above_the_readers_clearance_neither_counts_nor_shows(conn, w
 
 
 def test_an_exhibit_title_needs_the_permission_the_exhibit_list_needs(conn, world):
-    """The 2026-09-22 verifier: `evidence_title` came back from an endpoint
-    gated on `case.read`, while listing exhibits needs `evidence.read`. No
-    seeded role separates the two, so this builds one that does."""
+    """`evidence_title` must not come back from an endpoint gated only on `case.read`: listing exhibits
+    needs `evidence.read`. No seeded role separates the two, so this builds one that does."""
     from noctornal_api.http.routers.read import node_assertions
     case_id, uid, n1, _n2, _edge = world
     conn.execute(
@@ -351,11 +340,9 @@ def test_the_report_column_follows_the_same_rule(conn, world):
 
 
 def test_the_report_marks_a_purged_exhibit_it_does_not_count(conn, world):
-    """The 2026-09-22 verifier: the column ignored a purged exhibit, the
-    register listed it unmarked, and the sentence between them said an
-    exhibit "in the register below" was all it took. So an entity backed
-    only by a purged exhibit printed NO beside a register that seemed to
-    back it."""
+    """The report marks a purged exhibit it does not count. Otherwise the column ignores it, the register
+    lists it unmarked, and an entity backed only by a purged exhibit prints NO beside a register that seems
+    to back it."""
     from noctornal_api.reports import ReportBuilder, render_markdown
     case_id, uid, n1, _n2, _edge = world
     ev = _exhibit(conn, case_id, uid, title="wiped-ledger.pdf")
@@ -382,8 +369,7 @@ def test_the_report_marks_a_purged_exhibit_it_does_not_count(conn, world):
 # --- what an assertion claims, from what, by whom ------------------------
 
 def test_a_correction_says_what_it_changed_and_is_marked_as_one(conn, world):
-    """A label correction used to read "Direct observation · F6 · LOW",
-    indistinguishable from a sighting."""
+    """A correction says what it changed and is marked as one, so it is distinguishable from a sighting."""
     from noctornal_api.graph import AssertionInput, GraphWriteService
     from noctornal_api.http.routers.read import node_assertions
     case_id, uid, n1, _n2, _edge = world
@@ -462,11 +448,9 @@ def _doc_claim(conn, case_id, node_id, reader, doc):
 
 
 def test_a_claim_names_its_document_and_source_to_a_reader_of_collection(conn, world):
-    """ux05 assertion-drops-claim-and-source asked for the way back to the
-    captured document. The card now names it, under exactly the rule the
-    Collected documents list applies: global `collection.read`, and the
-    document's and the source's labels both within the reader's
-    clearance."""
+    """The card names the captured document a claim came from, under exactly the rule the Collected
+    documents list applies: global `collection.read`, and the document's and the source's labels both within
+    the reader's clearance."""
     case_id, uid, n1, _n2, _edge = world
     reader = _user(conn, name="Collection Reader", global_roles=("ANALYST",))
     _assign(conn, case_id, reader)
@@ -525,10 +509,9 @@ def test_a_document_name_is_withheld_wherever_the_document_list_withholds_it(con
 # --- the Relationships list reads the entity's own ties -------------------
 
 def test_the_tie_list_can_be_read_for_one_entity(conn, world):
-    """The 2026-09-22 verifier: the inspector's Relationships list took its
-    undrawn ties from the case-wide page (the first 1000), so in a larger
-    case it said "every tie" and silently was not. `/edges?node_id=` is
-    what it now reads: every tie at the entity, either end, and no other."""
+    """The inspector's Relationships list reads `/edges?node_id=`: every tie at the entity, either end, and
+    no other. Taking its undrawn ties from the case-wide page (the first 1000) would make it say "every tie"
+    in a larger case and silently not be."""
     from noctornal_api.graph import AssertionInput, GraphWriteService
     from noctornal_api.http.routers.read import list_edges
     case_id, uid, n1, n2, edge = world

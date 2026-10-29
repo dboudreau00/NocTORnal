@@ -1,12 +1,8 @@
-"""The gate record behind egress.can_egress (2026-09-24).
+"""The gate record behind egress.can_egress.
 
-Until this date `can_egress` returned "in_app" for any Destination member
-that was not in the explicit `_CROSSES_BOUNDARY` set, so a member appended
-without its line in that set failed OPEN, and a new destination is added
-by appending exactly such a line. Each
-destination now has one `GateRule`; a member without one is refused, IN_APP
-is the only early return, and a crossing gate that drops invariant 8's
-floor or allows compartments cannot be constructed at all.
+Each destination has one `GateRule`; a member without one is refused, so a destination appended without
+its rule fails closed. IN_APP is the only early return, and a crossing gate that drops invariant 8's floor
+or allows compartments cannot be constructed at all.
 
 Pure: the gate reads labels and returns a decision.
 """

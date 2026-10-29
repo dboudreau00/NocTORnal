@@ -1,23 +1,17 @@
-"""Evidence ingest, identity and integrity (unit g44, 2026-10-03).
+"""Evidence ingest, identity and integrity.
 
-One test or more per review finding, each failing without its fix:
+One test or more per behaviour, each failing without its fix:
 
-- rls-4 and evidence-ingest-dedup-oracle: the bytes of an exhibit the
-  uploader may not see are lodged as a new exhibit with an object of its
-  own, exactly as novel bytes are: no 500, no extra version on the hidden
-  object, no custody row on it.
-- evidence-reingest-after-purge-dropped: bytes whose exhibit was destroyed
-  are stored again.
-- http_ui-003 and evidence-orphan-locked-object: nothing the row would
-  refuse puts a byte in the bucket, and a put whose row never commits is
-  recorded.
-- evidence-integrity-anchors-mutable: the hashes cannot be rewritten by any
-  role, reads ask for the version that was lodged, a concealed object is an
-  alarm, and the hash-chained ACQUIRED row is compared.
-- http_ui-009: an .eml with a NUL in a parsed header is recorded.
+- the bytes of an exhibit the uploader may not see are lodged as a new exhibit with an object of its own,
+  exactly as novel bytes are: no 500, no extra version on the hidden object, no custody row on it;
+- bytes whose exhibit was destroyed are stored again;
+- nothing the row would refuse puts a byte in the bucket, and a put whose row never commits is recorded;
+- the hashes cannot be rewritten by any role, reads ask for the version that was lodged, a concealed
+  object is an alarm, and the hash-chained ACQUIRED row is compared;
+- an .eml with a NUL in a parsed header is recorded.
 
-Accounts `g44t-*`; the object store is `g44_support.VersionedStore`, so
-nothing is written to the dev bucket.
+Accounts `g44t-*`; the object store is `evidence_retention_support.VersionedStore`, so nothing is written to the dev
+bucket.
 """
 from __future__ import annotations
 
@@ -26,7 +20,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-import g44_support as g
+import evidence_retention_support as g
 import rls_support as s
 
 pytestmark = g.GATED
@@ -109,9 +103,8 @@ def test_the_bytes_of_a_hidden_exhibit_are_lodged_as_a_new_exhibit(conn, store, 
     assert len(rows) == 2
     assert {r[1] for r in rows} == {hidden_key, rows[1][1]} and rows[1][1] != hidden_key
     assert rows[1][2] == "AMBER"
-    # Beside the hidden exhibit's key, never under it (2026-10-07: the
-    # store does not list a key nested under another object, so the purge
-    # could not destroy it; test_evidence_lock_live_pg measures that).
+    # Beside the hidden exhibit's key, never under it: the store does not list a key nested under another
+    # object, so the purge could not destroy it (test_evidence_lock_live_pg measures that).
     from noctornal_api.evidence import own_key
     assert rows[1][1] == own_key(hidden_key, rows[1][0])
     assert not rows[1][1].startswith(hidden_key + "/")
@@ -157,10 +150,9 @@ def test_an_exhibit_the_uploader_may_see_is_still_deduplicated(conn, store, clie
 
 
 def test_the_same_bytes_at_other_labels_are_an_exhibit_of_their_own(conn, store, client):
-    """2026-10-07: the lookup ignored the labels the
-    uploader asked for, so AMBER bytes and then the same bytes as RED came
-    back 201 `deduplicated: true` with the AMBER exhibit, and the RED request
-    was dropped without a word. 0141 allows one exhibit per labels."""
+    """The lookup honours the labels the uploader asked for: AMBER bytes and then the same bytes as RED must
+    not come back 201 `deduplicated: true` with the AMBER exhibit, dropping the RED request without a word.
+    0141 allows one exhibit per labels."""
     boss = g.user(conn, "RED", roles=("CASE_OWNER",))
     case_id = g.case(conn, boss)
     headers = g.token(conn, boss)
@@ -279,8 +271,6 @@ def test_bytes_whose_exhibit_was_destroyed_are_stored_again(conn, store):
     assert [r[0] for r in live] == [again.evidence_id]
 
 
-# --- http_ui-003, evidence-orphan-locked-object --------------------------
-
 @pytest.mark.parametrize("field", ["title", "description", "source_url", "authority_ref"])
 def test_a_nul_in_a_text_field_is_refused_before_anything_is_stored(conn, store, field):
     from noctornal_api.evidence import EvidenceError
@@ -347,9 +337,8 @@ def test_a_failed_put_leaves_no_row(conn, store):
         raise ConnectionError("the object store went away")
 
     store.on_put = boom
-    # A store that did not answer is `StoreUnavailable` since 2026-10-08 (the
-    # HTTP layer's 503), with the store's own error kept as its cause; this
-    # test pinned the raw ConnectionError escaping.
+    # A store that does not answer is `StoreUnavailable` (the HTTP layer's 503), with the store's own error
+    # kept as its cause.
     from noctornal_api.evidence import StoreUnavailable
     with pytest.raises(StoreUnavailable) as raised:
         g.lodge(conn, store, case_id, boss, data=data)
@@ -392,9 +381,8 @@ def test_no_role_rewrites_an_exhibits_anchors(conn, store, column, value):
     _, raw = s.session(conn, boss)
     a = s.app_conn(raw)
     try:
-        # Since 0178 (Beta 1.1) the request role holds UPDATE of
-        # storage_version_id alone, so the privilege check refuses it before
-        # 0140's guard is reached; the guard still holds the system role.
+        # The request role holds UPDATE of storage_version_id alone (0178), so the privilege check refuses
+        # it before 0140's guard is reached; the guard still holds the system role.
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             with a.transaction():
                 a.execute(f"UPDATE core.evidence SET {column} = %s WHERE id = %s",
@@ -497,10 +485,9 @@ def test_a_concealed_key_does_not_hide_an_exhibit_whose_version_is_recorded(conn
 
 
 def test_rewritten_hashes_fail_against_the_acquired_custody_row(conn, store):
-    """The full attack of the review: the object replaced and the row's
-    hashes rewritten to match. Reads and verify compared the object with the
-    row only, so both stayed green; the hash-chained ACQUIRED row still
-    holds the original digest and is now compared."""
+    """The full attack: the object replaced and the row's hashes rewritten to match. Reads and verify
+    compare the object with the row, so both stay green; the hash-chained ACQUIRED row still holds the
+    original digest and is compared too."""
     import hashlib
 
     from noctornal_api.evidence import IntegrityError, _blake3d
@@ -541,12 +528,11 @@ def test_blake3_is_checked_on_every_read(conn, store):
     assert alarm and alarm[0][0]["blake3_ok"] is False
 
 
-# --- verify-destroyed-exhibit ------------------------------------------
+# --- a destroyed exhibit is not an integrity alarm ---------------------
 #
-# `a missing object is an integrity alarm` also fired for an exhibit retention
-# destroyed on purpose: a verify or a content read of it wrote a failed
-# HASH_VERIFIED custody row, an EVIDENCE_INTEGRITY_ALARM audit row and an
-# URGENT notification, for any evidence.read holder, as often as they liked.
+# A missing object is an integrity alarm, but not for an exhibit retention destroyed on purpose: a verify or
+# a content read of it must not write a failed HASH_VERIFIED custody row, an EVIDENCE_INTEGRITY_ALARM audit
+# row and an URGENT notification, for any evidence.read holder, as often as they like.
 
 def _destroyed_exhibit(conn, store):
     """(boss, case id, exhibit id) of an exhibit the retention sweep destroyed:
@@ -623,10 +609,9 @@ def test_verify_and_content_of_a_destroyed_exhibit_are_a_409_that_records_nothin
 
 
 def test_an_exhibit_a_purge_is_destroying_now_is_not_called_tampered_with(conn, store):
-    """The purge deletes the object and holds the row until it commits. A
-    read in that window finds the object gone and the row still live, and
-    used to alarm. It now gets the plain answer and writes nothing; once the
-    purge commits it gets the destroyed one."""
+    """The purge deletes the object and holds the row until it commits. A read in that window finds the
+    object gone and the row still live; it gets the plain answer and writes nothing, and once the purge
+    commits it gets the destroyed one."""
     from noctornal_api.evidence import (
         BEING_DESTROYED_DETAIL,
         PURGED_DETAIL,
@@ -672,8 +657,7 @@ def test_an_exhibit_a_purge_is_destroying_now_is_not_called_tampered_with(conn, 
     assert seen["row"] is True, "the fixture must read the exhibit as live mid-purge"
     assert seen["verify_integrity"] == BEING_DESTROYED_DETAIL
     assert seen["view"] == BEING_DESTROYED_DETAIL
-    # The reads wrote nothing; the purge itself ends the trail with its
-    # DESTROYED row (2026-10-07).
+    # The reads wrote nothing; the purge itself ends the trail with its DESTROYED row.
     after = (before[0], before[1], before[2] + 1)
     assert _alarm_state(conn, evidence_id) == after
     assert conn.execute(
@@ -707,9 +691,8 @@ def test_a_live_exhibit_whose_object_is_gone_is_still_an_alarm(conn, store):
 @pytest.mark.parametrize("error", [
     psycopg.errors.UniqueViolation, psycopg.errors.OperationalError, RuntimeError])
 def test_every_failure_after_the_put_is_recorded_as_an_orphan(conn, store, monkeypatch, error):
-    """The custody append fails after the object is stored under its lock. A
-    unique violation used to leave the first handler by re-raising and never
-    reached the sibling that records the orphan."""
+    """The custody append fails after the object is stored under its lock. Every failure, a unique
+    violation included, reaches the sibling handler that records the orphan."""
     from noctornal_api.evidence import EvidenceService
     boss = g.user(conn, "RED")
     case_id = g.case(conn, boss)
@@ -728,8 +711,6 @@ def test_every_failure_after_the_put_is_recorded_as_an_orphan(conn, store, monke
     assert rows[0][0]["storage_key"] == store.puts[0]
     assert rows[0][0]["reason"] == error.__name__
 
-
-# --- http_ui-009 ----------------------------------------------------------
 
 def _eml(subject_line: str, tag: str,
          from_line: str = "From: a@evil.example") -> bytes:

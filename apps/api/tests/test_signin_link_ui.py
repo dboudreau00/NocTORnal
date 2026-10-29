@@ -1,16 +1,14 @@
-"""A `#token=` link asks before it signs a browser in (http_ui-017; g45, 2026-10-03).
+"""A `#token=` link asks before it signs a browser in.
 
-When the browser held no usable session the console exchanged whatever bearer
-sat in the URL fragment for the cookie pair and opened the app, so a link
-made by anybody holding any session token signed a signed-out colleague in as
-the link's author, who can read everything the colleague then does. The page
-now names the account the link carries (`GET /auth/me` with the handed-over
-token, which signs nothing in) and signs in only on a yes.
+When the browser holds no usable session the console must not exchange whatever bearer sits in the URL
+fragment for the cookie pair and open the app: a link made by anybody holding any session token would sign
+a signed-out colleague in as the link's author, who can read everything the colleague then does. The page
+names the account the link carries (`GET /auth/me` with the handed-over token, which signs nothing in) and
+signs in only on a yes.
 
-The function is run under Node with its collaborators stubbed (skipped where
-Node is not installed): the question, the refusal, the stale link, and the
-cases that must NOT ask. The first-run card's setup token field
-(http_ui-010) is held here too, because it is the same file.
+The function is run under Node with its collaborators stubbed (skipped where Node is not installed): the
+question, the refusal, the stale link, and the cases that must NOT ask. The first-run card's setup token
+field is held here too, because it is the same file.
 """
 from __future__ import annotations
 
@@ -51,6 +49,7 @@ const state = { token: null, deepLinkTab: null, deepLinkCase: null };
 const SCENARIO = __SCENARIO__;
 function visibleText(s) { return s === null || s === undefined ? '' : String(s); }
 function halfSession() { return !!SCENARIO.half; }
+function csrfCookie() { return SCENARIO.csrf || null; }
 async function api(path, options) {
   const o = options || {};
   calls.push({ path, bearer: o.bearer || null, method: o.method || 'GET' });

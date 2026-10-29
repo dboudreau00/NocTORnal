@@ -1,14 +1,11 @@
-"""The lookup ledger reads its subject's labels as facts (S1, 2026-09-25).
+"""The lookup ledger reads its subject's labels as facts.
 
-`lookups.py` composes what a lookup may send, and at what label its ledger
-row is read, from the case's label, its entity's and its sample's. Those
-were LEFT JOINs to `core.node` and `lab.sample`. Under row-level security a
-RED entity an AMBER analyst cannot see read as no entity at all, so a
-selector on it resolved at the case's AMBER, cleared the exposure check at
-AMBER, and could be sent to a provider. Through `iam.element_facts` the
-entity's RED is read whatever the caller may see, and the subject is the
-same NotVisible a missing one is. Run as the request role, bound by a real
-session's proof.
+`lookups.py` composes what a lookup may send, and at what label its ledger row is read, from the case's
+label, its entity's and its sample's. A LEFT JOIN to `core.node` or `lab.sample` would read a RED entity an
+AMBER analyst cannot see as no entity at all, so a selector on it would resolve at the case's AMBER, clear
+the exposure check at AMBER, and could be sent to a provider. Through `iam.element_facts` the entity's RED
+is read whatever the caller may see, and the subject is the same NotVisible a missing one is. Run as the
+request role, bound by a real session's proof.
 
 Gated like the other row-security tests. Account prefix `rlslkp-`.
 """

@@ -1,14 +1,11 @@
-"""What reaches an image, what the production stack is allowed to do, and what
-is kept off command lines (infra-1, 2, 5, 6, 7, 8 and 10, 2026-10-03).
+"""What reaches an image, what the production stack is allowed to do, and what is kept off command lines.
 
-Static: the compose files, the Caddyfile, the Dockerfile, the ignore files,
-the init scripts and the README are read as text, and the two small shell
-files are run with a POSIX shell where one is installed. Nothing here needs
-Docker; the proofs that did (a real build context, a real Caddy, a real
-Postgres and MinIO under the dropped capabilities) are in the report.
+Static: the compose files, the Caddyfile, the Dockerfile, the ignore files, the init scripts and the README
+are read as text, and the two small shell files are run with a POSIX shell where one is installed. Nothing
+here needs Docker.
 
-The compose reader is `test_egress_topology.Reader`, which fails closed on a
-construct it does not understand.
+The compose reader is `test_egress_topology.Reader`, which fails closed on a construct it does not
+understand.
 """
 from __future__ import annotations
 
@@ -44,7 +41,7 @@ def _script(service: str, key: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# infra-1 and infra-2: what may reach the build context
+# What may reach the build context
 # ---------------------------------------------------------------------------
 
 class Dockerignore:
@@ -116,10 +113,9 @@ def _gitignored_secret_paths() -> list[str]:
 
 
 def test_every_gitignored_secret_under_infra_production_is_also_dockerignored():
-    """`.dockerignore` was written for the older layout and stopped at
-    secrets.env and tls/, so after S2 (2026-09-24) every image carried the
-    BYPASSRLS role's password and the egress proxy's seal key. A path added
-    to .gitignore without a line in .dockerignore fails here."""
+    """`.dockerignore` covers every gitignored secret under infra/production (including the BYPASSRLS
+    role's password and the egress proxy's seal key), so no image carries one. A path added to .gitignore
+    without a line in .dockerignore fails here."""
     paths = _gitignored_secret_paths()
     assert {"infra/production/secrets.env", "infra/production/egress-proxy.env",
             "infra/production/egress-client.env", "infra/production/postgres-init.env",
@@ -130,8 +126,8 @@ def test_every_gitignored_secret_under_infra_production_is_also_dockerignored():
 
 
 def test_a_secret_file_nobody_listed_is_excluded_too():
-    """The pattern, not only the names: the next file the directory gets (the
-    owner's password, when F52 moves it) is excluded before anyone remembers."""
+    """The pattern, not only the names: the next file the directory gets is excluded before anyone
+    remembers."""
     ignore = Dockerignore(_text(ROOT / ".dockerignore"))
     assert ignore.excluded("infra/production/migrate.env")
     assert ignore.excluded("infra/production/anything/else.key")
@@ -230,7 +226,7 @@ def test_no_documented_command_passes_the_minio_root_password_as_an_argument():
 
 
 # ---------------------------------------------------------------------------
-# infra-5: capabilities, and what Caddy holds
+# Capabilities, and what Caddy holds
 # ---------------------------------------------------------------------------
 
 #: service -> the capabilities it keeps after `cap_drop: [ALL]`, and why
@@ -239,9 +235,9 @@ _KEPT = {
     "caddy": {"NET_BIND_SERVICE"},
     "postgres": {"CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"},
     "redis": {"DAC_OVERRIDE"},
-    # The isolated analysis worker (docs/17 F42): root, so that it can give
-    # each child a user of its own and stop that user's processes. Held, with
-    # the rest of what makes it a sandbox, by test_analysis_worker_compose.
+    # The isolated analysis worker (docs/17): root, so that it can give each child a user of its own and
+    # stop that user's processes. Held, with the rest of what makes it a sandbox, by
+    # test_analysis_worker_compose.
     "analysis-worker": {"KILL", "SETGID", "SETUID"},
 }
 
@@ -256,12 +252,10 @@ def test_every_service_drops_all_capabilities_and_keeps_only_what_is_listed():
 
 
 def test_one_service_builds_the_application_image_and_none_pulls_it():
-    """2026-10-07: with a `build:` on every service
-    of the application image, Compose 2.40 on Docker 29's containerd image
-    store exported the one tag from several bake targets, and the first
-    `up -d --build` of a fresh host failed with `image ... already exists`.
-    One builder, and every other service of that image never pulls it (there
-    is no registry copy of a tag only this host builds)."""
+    """With a `build:` on every service of the application image, Compose 2.40 on Docker 29's containerd
+    image store exports the one tag from several bake targets, and the first `up -d --build` of a fresh host
+    fails with `image ... already exists`. So one service builds, and every other service of that image
+    never pulls it (there is no registry copy of a tag only this host builds)."""
     services = _services()
     builders = {name: s for name, s in services.items() if "build" in s}
     assert set(builders) == {"migrate"}, sorted(builders)
@@ -276,10 +270,8 @@ def test_one_service_builds_the_application_image_and_none_pulls_it():
 
 
 def test_every_container_log_is_bounded():
-    """2026-10-07: Docker's json-file driver keeps
-    a container's output without limit by default, and nothing on the host
-    set one, so a deployment left alone filled its disk with loop and slow
-    statement logs."""
+    """Docker's json-file driver keeps a container's output without limit by default, so each service sets
+    a bound, or a deployment left alone fills its disk with loop and slow statement logs."""
     for name, service in _services().items():
         logging = service.get("logging") or {}
         assert logging.get("driver") == "json-file", name
@@ -310,7 +302,7 @@ def test_caddy_holds_its_own_three_values_and_none_of_the_platforms():
 
 
 # ---------------------------------------------------------------------------
-# infra-6: HSTS and TLS 1.3 where the shipped terminator sends them
+# HSTS and TLS 1.3 where the shipped terminator sends them
 # ---------------------------------------------------------------------------
 
 def _site_blocks() -> dict[str, str]:
@@ -320,10 +312,9 @@ def _site_blocks() -> dict[str, str]:
 
 
 def test_caddy_keeps_the_csrf_and_setup_tokens_out_of_its_log():
-    """2026-10-07: on a 502 Caddy logs the request's
-    headers, redacting Cookie and Authorization alone, so X-Csrf-Token and
-    X-Setup-Token reached `docker logs` verbatim. The global block's log
-    filter deletes both (shown against the pinned Caddy, 2.11.4)."""
+    """On a 502 Caddy logs the request's headers, redacting Cookie and Authorization alone, so X-Csrf-Token
+    and X-Setup-Token would reach `docker logs` verbatim. The global block's log filter deletes both (shown
+    against the pinned Caddy, 2.11.4)."""
     text = _text(CADDYFILE)
     glob = re.match(r"(?ms)^\{\n(.*?)^\}", text[text.index("\n{\n") + 1:]).group(1)
     assert re.search(r"log \{\s*format filter \{\s*wrap json\s*fields \{", glob), glob
@@ -358,7 +349,7 @@ def test_the_application_still_leaves_hsts_to_the_terminator():
 
 
 # ---------------------------------------------------------------------------
-# infra-7: images are pinned by digest
+# Images are pinned by digest
 # ---------------------------------------------------------------------------
 
 _DIGEST = re.compile(r"^[a-z0-9./-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$")
@@ -378,7 +369,7 @@ def test_the_dockerfile_base_image_is_pinned_by_digest():
 
 
 # ---------------------------------------------------------------------------
-# infra-8: no role logs bind parameters
+# No role logs bind parameters
 # ---------------------------------------------------------------------------
 
 def _postgres_command(path: Path) -> str:
@@ -407,8 +398,8 @@ def test_the_cluster_keeps_bind_parameters_out_of_the_log_for_every_role(path):
 def test_the_redis_healthcheck_passes_the_password_in_the_environment():
     check = _services()["redis"]["healthcheck"]["test"]
     command = check[-1] if isinstance(check, list) else check
-    # The limiter's own user is named too (docs/17 F52's ACL switches `default` off), as
-    # an option and not a secret: redis-cli has no variable for the name.
+    # The limiter's own user is named too (the ACL switches `default` off), as an option and not a secret:
+    # redis-cli has no variable for the name.
     assert 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli --user noctornal_limiter ping' in command, command
     assert " -a " not in command
 
@@ -574,11 +565,9 @@ def _run_minio_init(tmp_path: Path, **extra: str):
 
 
 def test_minio_init_does_not_print_the_new_accounts_secret_key_into_its_log(tmp_path):
-    """`mc admin user svcacct add` echoes the account's secret key on stdout, so
-    the first run left it in `docker logs minio-init` for as long as the
-    container existed (2026-10-07). Both accounts, the
-    sample one and the preserve one, are created with stdout discarded; stderr
-    stays, so a warning still reaches the log."""
+    """`mc admin user svcacct add` echoes the account's secret key on stdout, so it would sit in
+    `docker logs minio-init` for as long as the container exists. Both accounts, the sample one and the
+    preserve one, are created with stdout discarded; stderr stays, so a warning still reaches the log."""
     done = _run_minio_init(tmp_path)
     assert done.returncode == 0, done.stderr
     seen = done.stdout + done.stderr
@@ -603,10 +592,9 @@ def test_minio_init_still_fails_and_says_why_when_an_account_cannot_be_created(t
     ("PRESERVE_ACCESS_KEY", "q" * 2),
 ])
 def test_minio_init_names_a_service_account_key_minio_would_refuse(tmp_path, name, value):
-    """2026-10-07: MinIO takes a service account's
-    access key at 3 to 20 characters and its secret key at 8 to 40, and its
-    refusal named neither variable. minio-init stops before any account is
-    asked for, names the variable and its length, and never prints it."""
+    """MinIO takes a service account's access key at 3 to 20 characters and its secret key at 8 to 40, and
+    its own refusal names neither variable. minio-init stops before any account is asked for, names the
+    variable and its length, and never prints it."""
     done = _run_minio_init(tmp_path, **{name: value})
     assert done.returncode != 0
     assert f"minio-init: {name} is {len(value)} characters" in done.stderr
@@ -623,12 +611,10 @@ def test_minio_init_accepts_service_account_keys_at_minios_bounds(tmp_path):
 
 
 def test_the_readme_has_the_egress_files_written_before_the_first_up_in_the_image():
-    """2026-10-07: followed in order, the README
-    reached `up` with no egress files (the API refused, the proxy restarted in
-    a loop, `up` exited 1), and its `python scripts/egress_setup.py keygen`
-    and `preflight` ran on a host python with none of the application's
-    libraries. Step 1 names both files before step 4, and both commands run in
-    the image, preflight told the host's Compose version."""
+    """Followed in order, the README must not reach `up` with no egress files (the API refuses, the proxy
+    restarts in a loop, `up` exits 1), and its `python scripts/egress_setup.py keygen` and `preflight` must
+    not run on a host python with none of the application's libraries. Step 1 names both files before step
+    4, and both commands run in the image, preflight told the host's Compose version."""
     text = _text(README)
     step1 = text.split("## 1. Write the secrets files", 1)[1].split("## 4. Start it", 1)[0]
     for name in ("egress-proxy.env", "egress-client.env", "collector.env"):
@@ -641,10 +627,9 @@ def test_the_readme_has_the_egress_files_written_before_the_first_up_in_the_imag
 
 
 def test_the_readme_makes_the_certificate_directory_before_the_first_compose_run():
-    """2026-10-12, on a fresh box: the first `docker compose run` (the egress keys, in step
-    1) mounts infra/production/tls, Docker creates a missing mount source as root, and step
-    3's openssl then answered "Permission denied" to the operator. Step 1 makes the
-    directory, as the operator and mode 755, before anything runs."""
+    """The first `docker compose run` (the egress keys, in step 1) mounts infra/production/tls, and Docker
+    creates a missing mount source as root, so step 3's openssl would answer "Permission denied" to the
+    operator. Step 1 makes the directory, as the operator and mode 755, before anything runs."""
     text = _text(README)
     made = text.index("mkdir -p -m 755 infra/production/tls")
     first = min(m.start() for m in re.finditer(r"compose\.yml\s*\\?\s*(?:run|up)\b", text))
@@ -652,10 +637,9 @@ def test_the_readme_makes_the_certificate_directory_before_the_first_compose_run
 
 
 def test_every_compose_command_in_the_readme_is_run_with_sudo():
-    """2026-10-12: step 1 makes the env files root's and mode 600, and `docker compose` reads
-    them as whoever runs it, so the README's commands, written without sudo, answered
-    "permission denied" to an operator in the docker group. The first gate ran every step
-    as root and never saw it."""
+    """Step 1 makes the env files root's and mode 600, and `docker compose` reads them as whoever runs it,
+    so the README's commands written without sudo would answer "permission denied" to an operator in the
+    docker group. A gate that runs every step as root never sees it."""
     bare = [line.strip()[:90] for block in _readme_sh_blocks() for line in block.splitlines()
             if line.lstrip().startswith("docker compose ")]
     assert not bare, bare
@@ -673,10 +657,9 @@ def test_the_readme_and_the_template_say_the_two_declarations_stop_the_api():
 
 
 def test_the_readme_takes_the_stack_down_before_the_network_upgrade_brings_it_up():
-    """2026-10-12, upgrading a Beta 1.2 stack in place: a plain `up -d --build` recreated the
-    network under the containers that stayed running, `migrate` could not resolve `postgres` and
-    exited 1, and the stack was left half started. The upgrade for the new address range takes
-    the stack down first and says why."""
+    """Upgrading a Beta 1.2 stack in place: a plain `up -d --build` recreates the network under the
+    containers that stayed running, `migrate` cannot resolve `postgres` and exits 1, and the stack is left
+    half started. The upgrade for the new address range takes the stack down first and says why."""
     text = _text(README)
     head = "### From Beta 1.2 or earlier: the internal network's address range"
     section = text.split(head, 1)[1].split("\n### ", 1)[0]
@@ -696,7 +679,7 @@ def test_every_svcacct_add_discards_its_stdout_and_keeps_stderr():
 
 
 # ---------------------------------------------------------------------------
-# infra-11, statically (the loops are run and signalled in test_g48_cron_sigterm.py)
+# infra-11, statically (the loops are run and signalled in test_cron_stops_on_sigterm.py)
 # ---------------------------------------------------------------------------
 
 _LOOPS = ("cron", "lab-triage", "lab-cron", "embed-pass")
@@ -737,8 +720,8 @@ def test_each_loop_stops_between_steps_not_only_between_passes(name):
 
 
 # ---------------------------------------------------------------------------
-# 2026-10-03: the README's umask, the modes the
-# capability-less containers read, and the ignore lists in both directions
+# The README's umask, the modes the capability-less containers read, and the ignore lists in both
+# directions
 # ---------------------------------------------------------------------------
 
 def _readme_sh_blocks() -> list[str]:
@@ -793,12 +776,10 @@ def test_scope_reader_tells_a_subshell_from_the_operators_own_shell():
 
 
 def test_no_readme_command_leaves_a_umask_or_shell_option_in_the_operators_shell():
-    """README step 1, the egress block and the backup block each ran
-    `umask 077` as a bare line in the operator's shell. Step 3 then made
-    `tls/` 0700 and `public.crt` 0600 under it: the application (uid 10001)
-    and MinIO (root, no DAC_OVERRIDE) could not read the certificate, and a
-    `git pull` in that shell wrote 0600 files the image copied with their
-    modes (2026-10-03). Scoped, the setting ends with the
+    """README step 1, the egress block and the backup block must not run `umask 077` as a bare line in the
+    operator's shell. Step 3 would then make `tls/` 0700 and `public.crt` 0600 under it: the application
+    (uid 10001) and MinIO (root, no DAC_OVERRIDE) could not read the certificate, and a `git pull` in that
+    shell would write 0600 files the image copies with their modes. Scoped, the setting ends with the
     command that needed it."""
     seen: list[tuple[str, str]] = []
     for block in _readme_sh_blocks():
@@ -895,9 +876,9 @@ def _run_readme_blocks(tmp_path: Path, operator_umask: str):
     script = [
         f"umask {operator_umask}", 'cd "$1"',
         "sudo() { \"$@\"; }; chown() { :; }",     # the operator is not root here
-        # Step 1's last command, the installer step, creates the two files only it knows
-        # (docs/17 F52) from their templates, private; scripts/production_secrets.py does it
-        # for real and test_production_secrets_script.py holds that. Here it is a stand-in.
+        # Step 1's last command, the installer step, creates the two files only it knows from their
+        # templates, private; scripts/production_secrets.py does it for real and
+        # test_production_secrets_script.py holds that. Here it is a stand-in.
         "installer() { ( umask 077; for f in postgres-init migrate; do [ -f infra/production/$f.env ]"
         " || cp infra/production/$f.env.example infra/production/$f.env; done ); }",
         "sudo() { if [ \"$1\" = bash ] && [ \"$2\" = release/install.sh ]; then installer; else \"$@\"; fi; }",
@@ -1103,10 +1084,9 @@ def test_no_tracked_file_is_hidden_by_the_wider_ignore_rules():
 # --- the owner role: wording that matches the boot refusal, and a way out ----
 
 def test_no_template_or_script_still_calls_connecting_as_the_owner_a_silent_supported_state():
-    """infra-4 made a production boot refuse a DATABASE_URL naming the owner
-    or a superuser, but the template's comment still said the deployment
-    'works' there 'silently', and the init script printed 'This deployment
-    will connect as the owner' (2026-10-03)."""
+    """A production boot refuses a DATABASE_URL naming the owner or a superuser, so the template's comment
+    must not say the deployment 'works' there 'silently', nor the init script print 'This deployment will
+    connect as the owner'."""
     template = _text(PRODUCTION / "secrets.env.example")
     comment = template[template.index("# What the API, the sample origin and the cron loop connect as."):
                        template.index("\nDATABASE_URL=")]
@@ -1131,9 +1111,9 @@ def test_the_readme_says_how_to_get_the_app_role_on_a_volume_that_was_initialise
     assert "\\password noctornal_app" in block and "\\password noctornal_worker" in block
     # The password is typed at a prompt, never an argument.
     assert "PASSWORD '" not in block and "--password" not in block
-    # It runs in the service compose already gives the owner DSN to, the same way that service does:
-    # the migrate service swaps the owner's DSN in as DATABASE_URL in a script now (docs/17 F52,
-    # scripts/migrate_job.py, which also refuses before it connects), where it was a line of shell.
+    # It runs in the service compose already gives the owner DSN to, the same way that service does: the
+    # migrate service swaps the owner's DSN in as DATABASE_URL in a script (scripts/migrate_job.py, which
+    # also refuses before it connects).
     migrate = _script("migrate", "command")
     assert migrate == "scripts/migrate_job.py"
     assert 'env["DATABASE_URL"] = dsn' in _text(ROOT / "scripts" / "migrate_job.py")
@@ -1142,7 +1122,7 @@ def test_the_readme_says_how_to_get_the_app_role_on_a_volume_that_was_initialise
     assert "--production" in _text(ROOT / "scripts" / "runtime_roles.py")
 
 
-# --- infra-7's residual, with the digests in the repository -------------------
+# --- Image digests in the repository ---------------------------------------------
 
 CI = ROOT / ".github" / "workflows" / "ci.yml"
 
@@ -1152,9 +1132,8 @@ def _image_refs(path: Path) -> list[str]:
 
 
 def _tag_only_images() -> dict[str, str]:
-    """image -> where, for every image CI's `image:` keys pull by tag. The
-    development stack's are pinned by digest since 2026-10-08 (below), and
-    CI's two service containers are still tags, which the README says."""
+    """image -> where, for every image CI's `image:` keys pull by tag. The development stack's are pinned by
+    digest (below), and CI's two service containers are tags, which the README says."""
     found: dict[str, str] = {}
     for image in _image_refs(CI):
         assert "@sha256:" not in image, f"{image} in {CI.name} is pinned now: update this test"
@@ -1176,9 +1155,8 @@ def _readme_digest_table() -> dict[str, str]:
 
 
 def test_every_image_the_development_stack_pulls_is_pinned_by_digest():
-    """docs/17 "unpinned inputs" (2026-10-08): the development compose file
-    named its five images by tag, where production names them by digest, so a
-    developer's `up` ran whatever the registry said that day."""
+    """docs/17 "unpinned inputs": the development compose file names its five images by digest, as
+    production does, so a developer's `up` does not run whatever the registry says that day."""
     images = _image_refs(DEV_COMPOSE)
     assert len(images) == 5, images
     unpinned = [i for i in images if not _DIGEST.match(i)]

@@ -1,20 +1,17 @@
-"""The report builder states each figure as the case's withheld-disclosure
-setting allows, and tells `Redaction` which setting it built under.
+"""The report builder states each figure as the case's withheld-disclosure setting allows, and tells
+`Redaction` which setting it built under.
 
-Beta 1.1 group C (2026-10-08), the report residuals:
+- the builder passes the setting on, so a statement can tell "nothing was above the ceiling" from "this
+  case says nothing about it";
+- under PRESENCE the entity count, the relationship count and the hypothesis matrix's evidence count are
+  not printed exactly;
+- under NONE a document that left entities, ties or exhibits out does not open with "nothing has been
+  withheld".
 
-- the builder did not pass the setting on, so a statement could not tell
-  "nothing was above the ceiling" from "this case says nothing about it";
-- under PRESENCE the entity count, the relationship count and the hypothesis
-  matrix's evidence count were still printed exactly;
-- under NONE a document that had left entities, ties or exhibits out opened
-  with "nothing has been withheld".
-
-The rules of the sentence itself are in `test_report_redaction_statement.py`; this
-file holds them to what the builder does with a real case. The case has 3
-entities, 4 ties and 2 exhibits above a GREEN ceiling, and one stance in the
-hypothesis matrix that rests on them, so every figure differs from every
-other and a number cannot be read from the wrong place.
+The rules of the sentence itself are in `test_report_redaction_statement.py`; this file holds them to what
+the builder does with a real case. The case has 3 entities, 4 ties and 2 exhibits above a GREEN ceiling,
+and one stance in the hypothesis matrix that rests on them, so every figure differs from every other and a
+number cannot be read from the wrong place.
 
 Env-gated on DATABASE_URL. Accounts `g79r-*`.
 """
@@ -209,8 +206,7 @@ def test_under_count_every_figure_is_the_number(conn, builder):
 
 
 def test_under_presence_every_figure_is_that_there_are_some(conn, builder):
-    """Before 2026-10-08 the exhibit figure was 'some' and the entity,
-    relationship and matrix figures were still 3, 4 and 1."""
+    """Under PRESENCE the exhibit, entity, relationship and matrix figures are all 'some', not 3, 4 and 1."""
     owner, _, case_id = _world(conn)
     _set(conn, case_id, "PRESENCE")
     report = _build(builder, case_id, owner)

@@ -1,18 +1,13 @@
-"""The archive-expansion child and the parent's reading of it (roadmap
-phase 8 "archive expansion", 2026-10-02).
+"""The archive-expansion child and the parent's reading of it.
 
-Hostile input, as docs/11 asks for: a zip bomb (by ratio, and as a
-compressed tar), a traversal name, an absolute path, a symbolic link, a
-hard link, a device, a duplicate and a case-colliding name, a truncated
-and a corrupt archive, a lying size field, an encrypted member with and
-without the archive-password convention, a member count over the cap, an
-unprintable name, an empty member, a gzip that is not a tar, and a child
-that lies. Each is refused by name, nothing is dropped silently, and
-nothing is ever extracted to a path.
+Hostile input, as docs/11 asks for: a zip bomb (by ratio, and as a compressed tar), a traversal name, an
+absolute path, a symbolic link, a hard link, a device, a duplicate and a case-colliding name, a truncated and
+a corrupt archive, a lying size field, an encrypted member with and without the archive-password convention,
+a member count over the cap, an unprintable name, an empty member, a gzip that is not a tar, and a child that
+lies. Each is refused by name, nothing is dropped silently, and nothing is ever extracted to a path.
 
-Pure: no database. The walk is driven in process through
-`lab_archive_child.expand` for the rules, and through the real child for
-the wire, the runner and the parent's checks.
+Pure: no database. The walk is driven in process through `lab_archive_child.expand` for the rules, and
+through the real child for the wire, the runner and the parent's checks.
 """
 from __future__ import annotations
 
@@ -169,7 +164,8 @@ def test_symbolic_links_hard_links_and_devices_are_refused():
     dev = zipfile.ZipInfo("dev")
     dev.external_attr = 0o020666 << 16
     dev.create_system = 3
-    report, _ = expand(zip_of([(link, b"/etc/passwd"), (dev, b""),
+    # A link-marked zip entry with bytes is read as a file; only an empty one is a link.
+    report, _ = expand(zip_of([(link, b""), (dev, b""),
                                ("plain", b"x" * 5)]))
     assert codes(report) == {"link": "symlink", "dev": "device"}
     assert [m["path"] for m in report["members"]] == ["plain"]

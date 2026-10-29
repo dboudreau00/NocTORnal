@@ -1,17 +1,13 @@
-"""The persona act queue and the collector, against the database (ROADMAP-
-REMAINING "A collector process", 2026-10-02). DATABASE_URL-gated.
+"""The persona act queue and the collector, against the database. DATABASE_URL-gated.
 
-The suite runs persona acts inline (conftest), as development does; every
-test here turns the inline mode OFF, so a route queues its act and answers
-202, and `persona_acts.drain` (what scripts/collector.py runs) does the
-work, with a fake Telegram and no network. What is held: the act carries no
-secret and runs nothing until the collector does; the collector asks again,
-as the person who asked, and runs the route's own code; a refusal is the
-route's own sentence; an act expires rather than runs late, and one a dead
-collector left is never repeated; the row is a record; another person, or
-the same one below the act's label now, cannot see it; the vault opens
-nothing without the persona key and refuses a credential sealed before the
-split by name, which the move then fixes.
+The suite runs persona acts inline (conftest), as development does; every test here turns the inline mode
+OFF, so a route queues its act and answers 202, and `persona_acts.drain` (what scripts/collector.py runs)
+does the work, with a fake Telegram and no network. What is held: the act carries no secret and runs nothing
+until the collector does; the collector asks again, as the person who asked, and runs the route's own code; a
+refusal is the route's own sentence; an act expires rather than runs late, and one a dead collector left is
+never repeated; the row is a record; another person, or the same one below the act's label now, cannot see
+it; the vault opens nothing without the persona key and refuses a credential sealed before the split by
+name, which the move then fixes.
 """
 from __future__ import annotations
 
@@ -654,7 +650,7 @@ def test_a_production_api_holding_the_key_is_red_on_the_register(conn, monkeypat
     assert os.environ["NOCTORNAL_PERSONA_KEK"] not in held.evidence + held.action
 
 
-# --- the idempotency key names the source (2026-10-03) ---------
+# --- the idempotency key names the source ---------
 
 def test_the_dedupe_key_names_the_source_the_kind_and_the_parameters():
     from noctornal_api.persona_acts import dedupe_key
@@ -674,9 +670,8 @@ def _acts_of(conn, world):
 
 
 def test_a_membership_check_of_another_chat_is_its_own_act(conn, api, world):
-    """Before the fix the second ask was answered with the FIRST act while it
-    was live: nothing was queued for chat B, and the console showed A's
-    outcome as B's."""
+    """A membership check of another chat is its own act: the second ask must not be answered with the first
+    act while it is live, or nothing is queued for chat B and the console shows A's outcome as B's."""
     a, first = _queue_membership(conn, api, world)
     b, second = _queue_membership(conn, api, world)
     assert first.status_code == 202 and second.status_code == 202
@@ -731,7 +726,7 @@ def test_poll_now_of_another_source_is_its_own_act(conn, api, world):
     assert again.json()["act"]["id"] == ids[0]
 
 
-# --- what is refused at the door and never queued (2026-10-03) ---------------
+# --- what is refused at the door and never queued ---------------
 
 INVITE = "AbCdEfGhIjKlMnOpQrSt"
 
@@ -825,7 +820,7 @@ def test_only_the_reference_as_understood_is_queued_and_asked_again_it_is_one_ac
         assert parse_chat_reference(normal_reference(parsed)) == parsed, typed
 
 
-# --- an act is its own twin only while it is live (2026-10-03) --------------
+# --- an act is its own twin only while it is live ---------------
 
 def test_an_expired_act_is_not_the_answer_to_the_same_ask_again(conn, api, world):
     from noctornal_api.persona_acts import dedupe_key
@@ -874,7 +869,7 @@ def test_a_double_click_while_the_first_act_is_live_is_still_one_act_in_a_race(
     assert one["id"] == two["id"]
 
 
-# --- what the collector asks again, once more (2026-10-03) ----------
+# --- what the collector asks again, once more ---------
 
 def test_an_act_for_a_session_idle_past_its_timeout_is_not_run(conn, api, world):
     from noctornal_api import persona_acts
@@ -969,7 +964,7 @@ def test_a_forged_future_dated_act_is_not_claimed_before_its_time(conn, api, wor
     assert _act(conn, ahead)["status"] == "PENDING"
 
 
-# --- the collector's loop, its stop and its heartbeat (2026-10-03) ----------------
+# --- the collector's loop, its stop and its heartbeat ----------------
 
 class _Child:
     """A poll child: never exits by itself; a stop terminates it, and one
@@ -1186,9 +1181,8 @@ def test_a_credential_under_the_totp_ring_is_never_opened_with_it(conn, world,
 
 def test_the_rewrap_script_without_the_totp_key_refuses_by_name_and_does_not_crash(
         conn, world, monkeypatch, capsys):
-    """2026-10-03: with a row still sealed before the split and no TOTP key,
-    --persona used to die in the inventory with a RuntimeError traceback
-    and exit 1; the refusal is exit 2 and names the ring."""
+    """With a row still sealed before the split and no TOTP key, --persona refuses with exit 2 and names the
+    ring, rather than dying in the inventory with a RuntimeError traceback and exit 1."""
     from noctornal_api.security import envelope
 
     sys.path.insert(0, str(ROOT / "scripts"))
@@ -1210,10 +1204,9 @@ def test_the_rewrap_script_without_the_totp_key_refuses_by_name_and_does_not_cra
 
 
 def test_an_act_the_sweep_already_failed_is_not_audited_finished_twice(conn, api, world):
-    """(2026-10-03): the stale sweep failed an act that was
-    still executing; when it came back, `_finish` matched no row yet wrote a
-    FINISHED event with the outcome it computed, so the log said DONE where
-    the row said FAILED."""
+    """The stale sweep can fail an act that is still executing; when it comes back, `_finish` matches no row
+    and must not write a FINISHED event with the outcome it computed, or the log says DONE where the row says
+    FAILED."""
     from noctornal_api import persona_acts
 
     _ch, r = _queue_membership(conn, api, world)
@@ -1332,11 +1325,10 @@ def test_a_stop_during_an_act_claims_no_second_one_in_the_collectors_own_pass(
     assert "PENDING" in states and len(states) == 2, states
 
 
-# --- mutants the earlier tests let live (2026-10-03) ----------
+# --- mutants the earlier tests let live ---
 #
-# Dropping the session ownership pin, and adding the parameters to what an
-# act shows, each left every test above green. These two, and the forged
-# label beside them, are the verifier's scratch tests adopted.
+# Dropping the session ownership pin, or adding the parameters to what an act shows, would leave every test
+# above green. These two, and the forged label beside them, close that.
 
 _FORGE = """
 INSERT INTO collect.persona_act
@@ -1386,10 +1378,9 @@ def test_an_acts_session_must_belong_to_the_person_who_asked(conn, api, world):
 
 def test_a_forged_second_factor_on_the_act_row_does_not_pass_the_step_up(
         conn, api, world):
-    """The request role writes the act row, `mfa_satisfied_at` included, and
-    nothing pins that copy. A join (a step-up act) queued with a fresh copy
-    for a session whose own second factor is stale is refused: the collector
-    reads the session's time, which only a sign-in writes (2026-10-07)."""
+    """The request role writes the act row, `mfa_satisfied_at` included, and nothing pins that copy. A join
+    (a step-up act) queued with a fresh copy for a session whose own second factor is stale is refused: the
+    collector reads the session's time, which only a sign-in writes."""
     ch = _member_chat(conn, world, peer_type="MEGAGROUP", username="auto",
                       access_hash=55)
     api.telegram(tp.fixture_for(ch["spec"], world["uid"]), allow_join=True)
@@ -1468,16 +1459,12 @@ _REPLACEMENT = chr(0xFFFD)
 
 
 def test_a_nul_in_free_text_is_a_422_and_never_a_500(conn, api, world):
-    """U+0000 in a join note or a member reason reached the act's INSERT and
-    raised UntranslatableCharacter, so the route answered 500 (2026-10-03
-    minor, 2026-10-03). Since the merge with the request-layer gate
-    (http_ui-014, 2026-10-03, `http/body_ceiling.py`) a JSON body carrying
-    one is refused with the same 422 every other route gives, before the
-    route parses it, so no act is queued and nothing reaches Telegram. The
-    route's own cleaning to U+FFFD (the model test below) is the second
-    wall, and the answer this test used to hold on its own: the gate's
-    refusal, which tells the analyst to remove the character, is better than
-    quietly changing what they typed."""
+    """U+0000 in a join note or a member reason would raise UntranslatableCharacter in the act's INSERT and
+    answer 500. The request-layer gate (`http/body_ceiling.py`) refuses a JSON body carrying one with the
+    same 422 every other route gives, before the route parses it, so no act is queued and nothing reaches
+    Telegram. The route's own cleaning to U+FFFD (the model test below) is the second wall; the gate's
+    refusal, which tells the analyst to remove the character, is better than quietly changing what they
+    typed."""
     from noctornal_api.http.body_ceiling import NUL_DETAIL
 
     ch = _member_chat(conn, world)
@@ -1500,9 +1487,8 @@ def test_a_nul_in_free_text_is_a_422_and_never_a_500(conn, api, world):
 
 
 def test_a_lone_surrogate_in_free_text_is_a_422_and_queues_nothing(conn, api, world):
-    """The verifier saw an error here, which was httpx failing to encode the
-    request; sent as the JSON escape a real client sends, the server answers
-    422 (pydantic refuses it) and no act is written."""
+    """A lone surrogate, sent as the JSON escape a real client sends, is refused with 422 (pydantic) and no
+    act is written."""
     ch = _member_chat(conn, world)
     api.telegram(tp.fixture_for(dict(ch["spec"], is_member=True), world["uid"]))
     before = conn.execute("SELECT count(*) FROM collect.persona_act WHERE "

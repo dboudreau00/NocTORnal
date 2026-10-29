@@ -1,9 +1,8 @@
-"""Rule bundle intake, a hostile-input parser in the API process (F12 C,
-2026-09-24).
+"""Rule bundle intake, a hostile-input parser in the API process.
 
 A .yar/.yara file or a .zip of them, read with the standard library under
 caps: the entry count and directory size are refused from the end record
-BEFORE zipfile builds an object per entry (2026-09-24); entries are read
+BEFORE zipfile builds an object per entry; entries are read
 through a bounded reader that does not trust header sizes; zip bombs,
 nested and encrypted archives, climbing, absolute, control-character and
 case-colliding paths are refused by name;
@@ -83,10 +82,9 @@ def _directory(n: int) -> bytes:
 
 def _lying_zip(n: int, *, zip64: bool, plain_total: int = 1,
                plain_size: int | None = None) -> bytes:
-    """A zip whose real directory holds `n` records. The plain end record
-    claims `plain_total` entries; with `zip64` a zip64 record and locator,
-    which zipfile honours whatever the plain record says, name the real
-    directory (a bypass found 2026-09-24)."""
+    """A zip whose real directory holds `n` records. The plain end record claims `plain_total`
+    entries; with `zip64` a zip64 record and locator, which zipfile honours whatever the plain record
+    says, name the real directory (a preflight bypass)."""
     body = b"PK\x03\x04" + b"\x00" * 26 + b"a"
     cd = _directory(n)
     cd_at = len(body)

@@ -1,14 +1,11 @@
-"""Routes that row-level security must not break, in production's shape
-(S1, 2026-09-25).
+"""Routes that row-level security must not break, in production's shape.
 
-NOCTORNAL_TEST_ASSUME_ROLE makes every request connection SET ROLE to the
-request role (bound by the session) and every system connection SET ROLE
-to the system role, while the fixtures seed as the owner. Each test is one
-such case, answered through the real route:
+NOCTORNAL_TEST_ASSUME_ROLE makes every request connection SET ROLE to the request role (bound by the
+session) and every system connection SET ROLE to the system role, while the fixtures seed as the owner.
+Each test is one such case, answered through the real route:
 
-- case-scoped break-glass: an AMBER analyst assigned to a RED case invokes
-  a RED grant on it and is told the case's code (the invoke's assignment
-  check can no longer read core."case" for a case above the caller);
+- case-scoped break-glass: an AMBER analyst assigned to a RED case invokes a RED grant on it and is told
+  the case's code (the invoke's assignment check cannot read core."case" for a case above the caller);
 - node retirement over a tie above the caller is refused, not half-done;
 - a legal hold on an exhibit above the officer is placed;
 - a session with no row-security binding is refused and audited.

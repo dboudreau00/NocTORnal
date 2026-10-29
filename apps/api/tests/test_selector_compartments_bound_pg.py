@@ -1,24 +1,20 @@
-"""Migration 0170: `core.selector.compartments` is bound to the compartment
-catalogue (the first full run of the merged beta, 2026-10-03).
+"""Migration 0170: `core.selector.compartments` is bound to the compartment catalogue.
 
-0134 gave `core.selector` a compartments column and left it unbound, which
-the two catalogue tests (test_compartment_binding_pg, test_compartment_contract_pg)
-caught. What is held here is what binding it must change, beyond those two:
+0134 gave `core.selector` a compartments column; 0170 binds it, as the two catalogue tests
+(test_compartment_binding_pg, test_compartment_contract_pg) require. What is held here is what binding it
+must change, beyond those two:
 
-- the database refuses a row filed under a key nobody registered, on insert
-  and on update, in the first line `http/errors.safe_detail` forwards;
-- the binding composes with 0134's owner-labels trigger: an owned row still
-  takes its owner's keys, and a key the writer names is still judged first;
-- `iam.compartment_in_use` sees the column, so a key a selector carries
-  cannot be retired;
+- the database refuses a row filed under a key nobody registered, on insert and on update, in the first
+  line `http/errors.safe_detail` forwards;
+- the binding composes with 0134's owner-labels trigger: an owned row still takes its owner's keys, and a
+  key the writer names is still judged first;
+- `iam.compartment_in_use` sees the column, so a key a selector carries cannot be retired;
 - a rename moves selector rows, owned and not, with the entity they follow;
-- the revision has a real downgrade, upgrade, downgrade, upgrade restores
-  the same catalogue, and the upgrade repairs and then refuses on the two
-  ways an existing row can already be wrong.
+- the revision has a real downgrade, upgrade, downgrade, upgrade restores the same catalogue, and the
+  upgrade repairs and then refuses on the two ways an existing row can already be wrong.
 
-Env-gated on the row security role, as every test that seeds a case is.
-Registry keys `SCB-T1-`. The alembic round trip is last because it moves
-the schema.
+Env-gated on the row security role, as every test that seeds a case is. Registry keys `SCB-T1-`. The
+alembic round trip is last because it moves the schema.
 """
 from __future__ import annotations
 
@@ -29,7 +25,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-import review_g42_support as g
+import graph_visibility_support as g
 import rls_support as s
 
 pytestmark = g.GATED
@@ -130,11 +126,10 @@ def test_a_selector_row_cannot_be_filed_under_an_unregistered_key(owner):
 
 
 def test_the_binding_and_the_owner_trigger_agree(owner):
-    """The binding sorts before 0134's `selector_labels_follow_owner`, so it
-    judges what the writer supplied and the owner trigger then replaces it
-    with a copy of `core.node.compartments`, a bound column (docs/05, rule
-    6). An owned row therefore ends under its owner's keys whatever
-    registered key was named, and an unregistered one is refused anyway."""
+    """The binding sorts before 0134's `selector_labels_follow_owner`, so it judges what the writer
+    supplied and the owner trigger then replaces it with a copy of `core.node.compartments`, a bound
+    column (docs/05, rule 6). An owned row therefore ends under its owner's keys whatever registered key
+    was named, and an unregistered one is refused anyway."""
     w = g.World(owner)
     kept, other, typo = _key(), _key(), _key()
     node = s.node(owner, w.case_id, w.boss, "scb holder", "AMBER", (kept,))
@@ -222,7 +217,7 @@ def test_the_release_names_the_column_and_what_its_rows_are_called():
 def test_up_down_up_restores_the_same_binding_and_the_upgrade_checks_first(
         owner):
     """The frozen SQL of the revision, in one transaction that is rolled
-    back (test_g44_migrations_pg's way). Down: the binding is gone and the
+    back (test_revisions_0139_to_0142_downgrade_pg's way). Down: the binding is gone and the
     hole is open again. Back up, the two ways an existing row can be wrong
     are met as the migration meets them: an owned row that drifted from its
     owner is repaired, and a row under a key nobody registered stops the
@@ -244,9 +239,8 @@ def test_up_down_up_restores_the_same_binding_and_the_upgrade_checks_first(
                              compartments=[orphan])
             assert _held(owner, hole) == [orphan]
 
-            # Drift 1: an owned row left under a key its owner no longer
-            # holds, which only a write that skipped 0134's trigger can do
-            # (the lifecycle's rename could not reach this column then).
+            # Drift 1: an owned row left under a key its owner no longer holds, which only a write that
+            # skipped 0134's trigger can do.
             owner.execute("ALTER TABLE core.selector "
                           "DISABLE TRIGGER selector_labels_follow_owner")
             drifted = _selector(owner, w.case_id, "i@example.org",

@@ -1,9 +1,8 @@
-"""Projections, graph queries and local metrics (Phase 2, docs/03).
+"""Projections, graph queries and local metrics (docs/03).
 
-The load-bearing property is that a projection CHANGES the answer: the trust
-picture and the financial picture name different leaders, which docs/03 says
-is itself a finding. If every preset returned the same graph the feature
-would be decoration.
+The load-bearing property is that a projection CHANGES the answer: the trust picture and the financial
+picture name different leaders, which docs/03 says is itself a finding. If every preset returned the same
+graph the feature would be decoration.
 
 Env-gated on DATABASE_URL.
 """

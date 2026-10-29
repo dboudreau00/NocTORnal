@@ -1,42 +1,30 @@
 """No em or en dash in anything the server says.
 
-The console renders a great deal of server text verbatim: an error's
-detail, a notice, a note, a projection preset's description (straight onto
-the sociogram), an audit verifier's caveat, and the whole report, which is
-markdown the Report pane shows as it would be saved. The owner treats an em
-or en dash in shipped copy as an unacceptable tell, and once the console's
-own copy was swept (test_ui_copy_no_dashes.py) 42 string literals under
-`noctornal_api` still carried one (README screenshot review, 2026-09-23).
+The console renders a great deal of server text verbatim: an error's detail, a notice, a note, a
+projection preset's description (straight onto the sociogram), an audit verifier's caveat, and the whole
+report, which is markdown the Report pane shows as it would be saved. An em or en dash in shipped copy is
+an unacceptable tell (test_ui_copy_no_dashes.py holds the console's own copy to the same rule).
 
-The rule: no string literal under `noctornal_api` holds U+2014 or U+2013,
-unless it is data rather than copy and the allow-list below says why. A
-string that stands as a statement of its own (a docstring, or a note
-written under an assignment) is never seen by a reader and is skipped, as
-comments are; everything else is checked, including the literal parts of
-an f-string.
+The rule: no string literal under `noctornal_api` holds U+2014 or U+2013, unless it is data rather than
+copy and the allow-list below says why. A string that stands as a statement of its own (a docstring, or a
+note written under an assignment) is never seen by a reader and is skipped, as comments are; everything
+else is checked, including the literal parts of an f-string.
 
-The allow-list has one entry: contact_blocks' `_DECORATION`, the character
-class of glyphs a vendor fences a contact block with. A forum rule drawn in
-em or en dashes has to keep matching, so those two dashes are the pattern
-working, not copy. The entry is keyed on the pattern's exact text, so a
-sentence cannot shelter under it, and it fails as stale once it is no
-longer needed.
+The allow-list has one entry: contact_blocks' `_DECORATION`, the character class of glyphs a vendor fences
+a contact block with. A forum rule drawn in em or en dashes has to keep matching, so those two dashes are
+the pattern working, not copy. The entry is keyed on the pattern's exact text, so a sentence cannot
+shelter under it, and it fails as stale once it is no longer needed.
 
-The same tell typed on a keyboard, two hyphens with a space either side,
-is refused as well, as the console's test refuses it. After the em dash
-sweep about 74 server literals still carried one, many of them shown
-(a purge's dry-run notice, the AMBIGUOUS reasons stored with a parsed
-contact block, operator refusals at boot). A flag such as `--apply` has no
-space after it and is not caught. Some of these are data, not copy, and
-their hyphens are syntax: a SQL comment, a Lua comment, the mail
-signature separator. Those are let off by an allow-list that names each
-one by module and the name its literal is assigned to, plus one rule for
-SQL handed straight to the driver (the first argument of `.execute()`).
-Each takes out only the syntax, so prose around it is still read, and
-each fails as stale once nothing it names needs it.
+The same tell typed on a keyboard, two hyphens with a space either side, is refused as well, as the
+console's test refuses it. A flag such as `--apply` has no space after it and is not caught. Some
+literals are data, not copy, and their hyphens are syntax: a SQL comment, a Lua comment, the mail
+signature separator. Those are let off by an allow-list that names each one by module and the name its
+literal is assigned to, plus one rule for SQL handed straight to the driver (the first argument of
+`.execute()`). Each takes out only the syntax, so prose around it is still read, and each fails as stale
+once nothing it names needs it.
 
-scripts/bootstrap.py, the first program an operator runs, is held to both
-rules with no allow-list: its messages are the product's first words.
+scripts/bootstrap.py, the first program an operator runs, is held to both rules with no allow-list: its
+messages are the product's first words.
 
 Pure: parses the source and imports two modules; no database.
 """
@@ -137,12 +125,10 @@ def without_signature_separator(text: str) -> str:
 
 Syntax = Callable[[str], str]
 
-#: The data a spaced pair of hyphens may stay in: (module under
-#: noctornal_api, the name its literal is assigned to) -> (what takes the
-#: syntax out, why). Keyed on the name rather than the exact text, because
-#: a query or a script is edited as code and a key on its text would go
-#: stale with every edit to it. The key still admits only that one
-#: assignment in that one module, and only its syntax.
+#: The data a spaced pair of hyphens may stay in: (module under noctornal_api, the name its literal is
+#: assigned to) -> (what takes the syntax out, why). Keyed on the name rather than the exact text, because
+#: a query or a script is edited as code and a key on its text would go stale with every edit to it. The
+#: key still admits only that one assignment in that one module, and only its syntax.
 _DATA_SYNTAX: dict[tuple[str, str], tuple[Syntax, str]] = {
     ("audit_verify.py", "sql"): (
         without_line_comments,
@@ -404,9 +390,8 @@ def _report():
 
 
 def test_the_report_carries_no_dash_and_says_a_missing_value_in_words():
-    """The heading joined the mark to the case with a dash, and a missing
-    authority reference or basis printed a lone dash where the console
-    now says "not recorded"."""
+    """The report's heading does not join the mark to the case with a dash, and a missing authority
+    reference or basis prints "not recorded" rather than a lone dash."""
     from noctornal_api.reports import render_markdown
     document = render_markdown(_report())
     assert not any(d in document for d in DASHES), document
@@ -424,8 +409,8 @@ def test_the_report_carries_no_dash_and_says_a_missing_value_in_words():
     second = [c.strip() for c in rows[1].split("|")[1:-1]]
     assert len(first) == len(second) == 5
     assert first[1] == "not recorded"
-    # The review note sits in brackets after its time, as "Made by" gives
-    # the time in brackets after the name.
+    # The review note sits in brackets after its time, as "Made by" gives the time in brackets after the
+    # name.
     assert first[4] == ("2026-09-02T11:00:00+00:00 "
                         "(checked against the forum ledger)"), first[4]
     assert second[1] == "ledger export"

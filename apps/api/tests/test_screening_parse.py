@@ -1,11 +1,10 @@
-"""Prohibited-content screening, the pure half (F13, 2026-09-24).
+"""Prohibited-content screening, the pure half.
 
-The list parser is a parser of operator-supplied files, so it is tested as
-hostile input: the length decides the algorithm, a prefix must agree with
-it, one bad line refuses the whole list (a partial list is a silent gap),
-and an error quotes at most sixteen printable characters. The derived gaps
-use F11's vocabulary; the submission disposition follows the deployment;
-the hash-set authority needs a real reference.
+The list parser is a parser of operator-supplied files, so it is tested as hostile input: the length
+decides the algorithm, a prefix must agree with it, one bad line refuses the whole list (a partial list
+is a silent gap), and an error quotes at most sixteen printable characters. The derived gaps use F11's
+vocabulary; the submission disposition follows the deployment; the hash-set authority needs a real
+reference.
 """
 from __future__ import annotations
 

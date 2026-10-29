@@ -1,27 +1,18 @@
-"""A merge, its reversal and its approval are visible only where both of the
-entities they name are (beta review, 2026-10-03).
+"""A merge, its reversal and its approval are visible only where both of the entities they name are.
 
-The findings, each held here by a test that fails without its fix:
+- The merge ledger does not serve every merge of the case, with both entity ids and the merger's free
+  reason, to every case reader, merges of entities above them included.
+- Merge and reverse resolve the entities they name, so a caller below an entity cannot merge it away, or
+  reverse the merge of it, by id, and a hidden id answers the same 409 as a random one. The survivor does
+  not keep its own lower labels, which would show a RED entity's AMBER ties at the survivor's label.
+- A node.merge approval is not listed, with both ids, the reason and the justification, to every case
+  reader, raised against any id, and signed by someone shown `subjects` of None.
+- A reversal that would duplicate a live tie is not a 500.
+- Retiring the surviving side of a live merge, then reversing it, does not say ties were restored that
+  stayed retired.
 
-- rls-1, graph-merge-ledger-and-approvals-leak: the merge ledger served every
-  merge of the case, with both entity ids and the merger's free reason, to
-  every case reader, merges of entities above them included.
-- graph-merge-no-element-label-gate, http_ui-001: merge and reverse never
-  resolved the entities they named, so a caller below an entity merged it
-  away, or reversed the merge of it, by id, and a hidden id answered 201
-  where a random one answered 409. The survivor also kept its own lower
-  labels, so a RED entity's AMBER ties were shown at the survivor's label.
-- http_ui-011: a node.merge approval was listed, with both ids, the reason
-  and the justification, to every case reader, raised against any id, and
-  signed by someone shown `subjects` of None.
-- graph-unmerge-500-and-ties-to-merged-nodes: a reversal that would
-  duplicate a live tie was a 500.
-- graph-unmerge-loses-ties-after-target-retired: retiring the surviving side
-  of a live merge, then reversing it, said ties were restored that stayed
-  retired.
-
-Everything runs through the real route as the request role, seeded as the
-owner. `core.node_merge`'s own policy (0132) is held at the database as well.
+Everything runs through the real route as the request role, seeded as the owner. `core.node_merge`'s own
+policy (0132) is held at the database as well.
 """
 from __future__ import annotations
 
@@ -31,7 +22,7 @@ from uuid import uuid4
 
 import pytest
 
-import review_g42_support as g
+import graph_visibility_support as g
 import rls_support as s
 
 pytestmark = g.GATED
@@ -162,7 +153,7 @@ def test_the_policy_shows_the_request_role_a_merge_only_when_both_ends_are_visib
             w.case_id, clearance="AMBER", compartments=frozenset()) == 2
 
 
-# --- merge and reverse (graph-merge-no-element-label-gate, http_ui-001) -----
+# --- merge and reverse -------------------------------------------------------
 
 def test_reversing_a_merge_the_caller_cannot_see_is_the_answer_for_no_such_merge(
         owner, client):
@@ -279,7 +270,7 @@ def test_a_merge_reports_only_the_ties_its_merger_can_see(owner, client):
     assert MergeService(owner).get(made.json()["id"]).edges_repointed == 2
 
 
-# --- approvals (http_ui-011) -------------------------------------------------
+# --- approvals ---------------------------------------------------------------
 
 def _payload(source, target, reason="g42 SECRET reason text"):
     return {"source_node_id": str(source), "target_node_id": str(target),
@@ -482,8 +473,8 @@ def test_spending_an_approval_needs_the_merger_to_still_read_both_entities(
                   (w.boss,))
     body = {"approval_request_id": request_id}
     refused = client.post(w.url("/merges"), headers=w.headers(w.boss), json=body)
-    # The sentence for an approval that is not there (2026-10-03): a
-    # request naming entities above the caller is not theirs to have seen.
+    # The sentence for an approval that is not there: a request naming entities above the caller is not
+    # theirs to have seen.
     assert g.answer(refused) == (404, "no such approval request in this case")
     assert owner.execute("SELECT state FROM core.approval_request WHERE id = %s",
                          (request_id,)).fetchone()[0] == "APPROVED"
@@ -498,10 +489,9 @@ def test_spending_an_approval_needs_the_merger_to_still_read_both_entities(
 
 def test_a_hidden_merge_requests_id_is_the_missing_requests_answer_whoever_asks(
         owner, client):
-    """graph-merge-approval-hidden (2026-10-03): a caller without the
-    signer permission was told 403 for a request naming entities above them
-    and 404 for a random id, and spending such a request answered
-    "no such node" where a random id answered "no such approval request"."""
+    """A caller without the signer permission gets the same answer for a request naming entities above
+    them as for a random id, and spending such a request answers "no such approval request", not "no such
+    node"."""
     w = g.World(owner)
     red1, red2 = w.node("g42 red one", "RED"), w.node("g42 red two", "RED")
     owner.execute('UPDATE core."case" SET dual_control_merge = true WHERE id = %s',
@@ -551,9 +541,8 @@ def _merged_into(client, w, uid, node):
 
 def test_the_survivor_of_a_merge_is_named_only_to_a_reader_who_may_read_it(
         owner, client):
-    """An AMBER entity folded into a RED survivor is an alias of it; the
-    ledger withholds the merge for exactly that, and the redirect pointer
-    was the one place it was still said."""
+    """An AMBER entity folded into a RED survivor is an alias of it; the ledger withholds the merge for
+    exactly that, and the redirect pointer must not say it either."""
     w = g.World(owner)
     amber_into_red, amber_into_amber = w.node("g42 amber a"), w.node("g42 amber b")
     red, amber_survivor = w.node("g42 red survivor", "RED"), w.node("g42 amber s")
@@ -589,10 +578,9 @@ def test_a_duplicate_tie_refusal_names_the_third_party_only_to_a_merger_who_may_
     assert "VOUCHED_FOR" in detail and "already exists" not in detail
     assert str(open_third) in detail and str(target) not in detail
 
-    # Ties to a third party the merger cannot read are theirs to see neither,
-    # so the merge is made as one with no such tie is and the duplicate is set
-    # aside (verification round three, A2, 2026-10-07). This block asserted the
-    # refusal, which told an AMBER lead that two ties to a RED entity existed.
+    # Ties to a third party the merger cannot read are theirs to see neither, so the merge is made as one
+    # with no such tie is and the duplicate is set aside. Refusing would tell an AMBER lead that two ties
+    # to a RED entity existed.
     source2, target2 = w.node("g42 source two"), w.node("g42 target two")
     red_third = w.node("g42 red third party", "RED")
     w.edge(source2, red_third, "AMBER")

@@ -1,5 +1,5 @@
 """The key ring against the database: the readiness check that proves
-the ring OPENS what is stored, the login that refuses by name, and the
+the ring OPENS what is stored, the login it refuses, and the
 rotation runbook run end to end -- and then run back.
 
 Env-gated on DATABASE_URL. The HOME key is whatever `NOCTORNAL_TOTP_KEK`
@@ -159,23 +159,25 @@ def test_the_register_sees_a_key_that_changed_under_its_id(conn, ring):
         assert "rewrap_secrets" in retired["evidence"], "rows under a retired id remain"
 
 
-def test_login_refuses_by_name_when_the_secret_cannot_be_opened(conn, client, ring):
-    """503, the readiness check named, the password NOT reported wrong,
-    and no lockout attempt burnt -- where there was a 500."""
+def test_login_refuses_as_invalid_credentials_when_the_secret_cannot_be_opened(
+        conn, client, ring):
+    """The answer a wrong password gets, and one lockout attempt spent: an
+    answer of its own would confirm the password. The cause is in the audit
+    row and the server log, where the operator reads it."""
     uid, email, secret = _enrolled(conn)
     assert _login(client, conn, uid, email, secret).status_code == 204
 
     ring(active=OTHER_KEK)
     r = _login(client, conn, uid, email, secret)
-    assert r.status_code == 503, r.text
-    assert CHECK in r.json()["detail"]
-    assert "credentials" in r.json()["detail"]
+    assert r.status_code == 401, r.text
+    assert r.json()["detail"] == "invalid credentials"
+    assert CHECK not in r.text
     assert conn.execute("SELECT failed_logins FROM iam.app_user WHERE id = %s",
-                        (uid,)).fetchone()[0] == 0
+                        (uid,)).fetchone()[0] == 1
     audited = conn.execute(
         """SELECT detail->>'reason' FROM audit.event
-            WHERE action = 'AUTH_FAILED' AND actor_id = %s
-            ORDER BY seq DESC LIMIT 1""", (uid,)).fetchone()
+            WHERE action = 'AUTH_FAILED' AND detail->>'email' = %s
+            ORDER BY seq DESC LIMIT 1""", (email,)).fetchone()
     assert audited and audited[0] == "totp_secret_unopenable"
 
 

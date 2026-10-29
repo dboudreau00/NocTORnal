@@ -1,27 +1,21 @@
 """The demo seed can be replayed without a database, and the replay is the seed.
 
-`scripts/seed_showcase.py --regrade` (fix round, 2026-09-22) repairs a demo
-estate seeded before migration 0064. The old seed graded every tie's claim
-MODERATE beside a confidence of its own; 0064's backfill sided with the
-claims and every NIGHTJAR and CORVID tie came out MODERATE, which hid the
-one encoding (confidence as opacity) the demo exists to show. The regrade
-replays the seed from its RNG, writing nothing, and supersedes each seed
-claim whose grade differs. That works only while two things hold, and
-these tests hold them:
+`scripts/seed_showcase.py --regrade` repairs a demo estate seeded before migration 0064. The old seed
+graded every tie's claim MODERATE beside a confidence of its own; 0064's backfill sided with the claims
+and every NIGHTJAR and CORVID tie came out MODERATE, which hid the one encoding (confidence as opacity)
+the demo exists to show. The regrade replays the seed from its RNG, writing nothing, and supersedes each
+seed claim whose grade differs. That works only while two things hold, and these tests hold them:
 
-- the replay touches nothing: `build_network` makes every RNG draw itself
-  and reaches the database only through the objects it is handed;
-- the replay IS the estate: the same ties, with the grades the seed gives
-  today, every time.
+- the replay touches nothing: `build_network` makes every RNG draw itself and reaches the database only
+  through the objects it is handed;
+- the replay IS the estate: the same ties, with the grades the seed gives today, every time.
 
-The expected counts were measured independently: on 2026-09-22 the fixed
-script seeded a throwaway database with NIGHTJAR at 86 HIGH, 301 MODERATE
-and 105 LOW, and the regrade of the g02 clone moved exactly the 259 ties
-the 0064 backfill had moved. The database side of the regrade is tested in
-`test_tie_confidence_pg.py`.
+The expected counts were measured independently: a throwaway database seeded by the script had NIGHTJAR at
+86 HIGH, 301 MODERATE and 105 LOW, and the regrade of a pre-0064 clone moved exactly the 259 ties the 0064
+backfill had moved. The database side of the regrade is tested in `test_tie_confidence_pg.py`.
 
-Pure: imports the script by path, which runs its module level (a sys.path
-insert and the `.env.local` loader, neither of which connects anywhere).
+Pure: imports the script by path, which runs its module level (a sys.path insert and the `.env.local`
+loader, neither of which connects anywhere).
 """
 from __future__ import annotations
 

@@ -1,27 +1,21 @@
-"""Migration 0062: the owner's role decisions of 2026-09-22, against a database.
+"""Migration 0062: the role decisions, against a database.
 
-"Keep the split": CASE_OWNER is the investigator who controls their case,
-displayed as "Lead investigator" with the key unchanged, and
-SECURITY_OFFICER stays the overseer who cannot read case content. From
-that, docs/17 F16 and F14 are decided:
+"Keep the split": CASE_OWNER is the investigator who controls their case, displayed as "Lead investigator"
+with the key unchanged, and SECURITY_OFFICER stays the overseer who cannot read case content. From that:
 
-- `victim_pii.reveal` is granted to CASE_OWNER and `victim_pii.authorise`
-  is REVOKED from it, so authorising is the Security Officer's alone and a
-  reveal is two different people by construction;
-- `break_glass.invoke` stays with CASE_OWNER and SYS_ADMIN, and
-  `break_glass.review` with SECURITY_OFFICER only;
-- `iam.separated_duty` names the pairs no single role may hold together,
-  and a trigger on `iam.role_permission` refuses the grant that would.
+- `victim_pii.reveal` is granted to CASE_OWNER and `victim_pii.authorise` is REVOKED from it, so
+  authorising is the Security Officer's alone and a reveal is two different people by construction;
+- `break_glass.invoke` stays with CASE_OWNER and SYS_ADMIN, and `break_glass.review` with SECURITY_OFFICER
+  only;
+- `iam.separated_duty` names the pairs no single role may hold together, and a trigger on
+  `iam.role_permission` refuses the grant that would.
 
-What these tests carry: the grants as they stand at head, the migration's
-own upgrade and downgrade run inside a transaction that is rolled back,
-the upgrade revoking the authorisations a Lead investigator granted before
-it (the verifier's transition hole of 2026-09-22), the guard judging an
-in-place UPDATE on the grant it becomes, the guard refusing each
-collapsing grant, the name reaching the console
-through `GET /admin/roles`, and the whole two-person reveal over HTTP,
-including the first-run operator who holds both roles and still cannot
-authorise their own reveal.
+What these tests carry: the grants as they stand at head, the migration's own upgrade and downgrade run
+inside a transaction that is rolled back, the upgrade revoking the authorisations a Lead investigator
+granted before it, the guard judging an in-place UPDATE on the grant it becomes, the guard refusing each
+collapsing grant, the name reaching the console through `GET /admin/roles`, and the whole two-person
+reveal over HTTP, including the first-run operator who holds both roles and still cannot authorise their
+own reveal.
 
 Email prefix `rpii-`, unique to this file. Env-gated on DATABASE_URL.
 """
@@ -194,15 +188,13 @@ def test_case_owner_is_displayed_as_lead_investigator(conn):
 
 
 def test_victim_pii_is_two_people_by_construction(conn):
-    """docs/17 F16. Until 0062 nothing held `reveal`, so the route refused
-    everyone, and CASE_OWNER held `authorise` alongside SECURITY_OFFICER."""
+    """Victim PII is two people by construction: `reveal` and `authorise` sit on different roles."""
     assert _holders(conn, "victim_pii.reveal") == {"CASE_OWNER"}
     assert _holders(conn, "victim_pii.authorise") == {"SECURITY_OFFICER"}
 
 
 def test_break_glass_holders_are_the_decided_ones(conn):
-    """docs/17 F14, decided 2026-09-22: unchanged from 0039, and now a
-    decision rather than a guess."""
+    """The break-glass holders are the decided ones, unchanged from 0039."""
     assert _holders(conn, "break_glass.invoke") == {"CASE_OWNER", "SYS_ADMIN"}
     assert _holders(conn, "break_glass.review") == {"SECURITY_OFFICER"}
 
@@ -280,10 +272,8 @@ def _migration(conn):
 
 
 def test_the_migration_downgrades_and_upgrades_what_it_says(conn):
-    """Both directions against the real schema, inside one transaction that
-    is rolled back, so the database the rest of the suite uses never sees
-    the intermediate state. `alembic downgrade 0061` / `upgrade head` was
-    also run by hand on 2026-09-22; this keeps it true."""
+    """Both directions against the real schema, inside one transaction that is rolled back, so the database
+    the rest of the suite uses never sees the intermediate state."""
     m = _migration(conn)
     with pytest.raises(_RollBack), conn.transaction():
         m.downgrade()
@@ -326,13 +316,11 @@ def _pii_authorisation(conn, case_id, by, to, *, days_ago=0,
 
 
 def test_the_upgrade_revokes_what_a_lead_investigator_authorised(conn):
-    """The transition hole the verifier reproduced on 2026-09-22. Before
-    0062 a CASE_OWNER held `authorise`, so a lead could authorise a co-lead
-    for up to 30 days; the row opened nothing while nobody held `reveal`.
-    After 0062 the co-lead holds `reveal`, and `_live_authorisation` never
-    asks who granted the row, so it would have opened a reveal no Security
-    Officer authorised. The upgrade revokes exactly the rows whose grantor
-    could not grant them today, records why, and leaves the officer's."""
+    """The upgrade revokes exactly the authorisations whose grantor could not grant them today. Before
+    0062 a CASE_OWNER held `authorise`, so a lead could authorise a co-lead for up to 30 days; the row
+    opened nothing while nobody held `reveal`. After 0062 the co-lead holds `reveal`, and
+    `_live_authorisation` never asks who granted the row, so it would open a reveal no Security Officer
+    authorised. The upgrade records why, and leaves the officer's."""
     from noctornal_api.cases import CaseService
     from noctornal_api.ingest import IngestService
     lead, _ = _user(conn, "CASE_OWNER")
@@ -385,11 +373,9 @@ def test_the_upgrade_revokes_what_a_lead_investigator_authorised(conn):
 
 
 def test_moving_a_grant_in_place_is_judged_on_the_grant_it_becomes(conn):
-    """The verifier's false positive of 2026-09-22: a BEFORE UPDATE trigger
-    still sees the row it is replacing, so turning CASE_OWNER's `reveal`
-    into `authorise` in place was refused over the very `reveal` it was
-    replacing. The guard now excludes the old row, and moving a half onto a
-    role that holds the other half is still refused."""
+    """An in-place grant move is judged on the grant it becomes: a BEFORE UPDATE trigger still sees the
+    row it is replacing, so the guard excludes the old row (turning CASE_OWNER's `reveal` into `authorise`
+    is allowed), and moving a half onto a role that holds the other half is still refused."""
     with pytest.raises(_RollBack), conn.transaction():
         conn.execute("UPDATE iam.role_permission "
                      "SET permission_key = 'victim_pii.authorise' "
@@ -452,10 +438,9 @@ def test_the_role_names_are_an_administrators_read(conn, client):
 
 def test_the_reveal_takes_a_lead_investigator_and_a_different_officer(
         conn, client):
-    """The whole of docs/17 F16 as the product performs it. The officer is
-    assigned to the case as SECURITY_OFFICER, which confers `authorise`
-    and no case content; the Lead investigator's own assignment confers
-    `reveal` and not `authorise`. Neither can do the other's half."""
+    """The two-person reveal as the product performs it. The officer is assigned to the case as
+    SECURITY_OFFICER, which confers `authorise` and no case content; the Lead investigator's own
+    assignment confers `reveal` and not `authorise`. Neither can do the other's half."""
     from noctornal_api.cases import CaseService
     lead, _ = _user(conn, "CASE_OWNER")
     officer, _ = _user(conn, "SECURITY_OFFICER")

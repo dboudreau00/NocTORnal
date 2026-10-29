@@ -1,15 +1,12 @@
-"""Row-level security on stored analysis runs and layouts (S1, 2026-09-25).
+"""Row-level security on stored analysis runs and layouts.
 
-0120 puts projections, runs, per-entity scores and the saved canvas under
-policy. Run as the request role, bound by a real session's proof:
+0120 puts projections, runs, per-entity scores and the saved canvas under policy. Run as the request role,
+bound by a real session's proof:
 
-- a run is visible only at a visibility within the reader's ceiling for
-  its case, so a run computed over a RED analyst's view never reaches an
-  AMBER one, and a grant on the case raises it there;
+- a run is visible only at a visibility within the reader's ceiling for its case, so a run computed over a
+  RED analyst's view never reaches an AMBER one, and a grant on the case raises it there;
 - a score on an entity the reader cannot see is hidden with the entity;
-- the saved canvas no longer hands a hidden entity's id and position to
-  every reader of the case (it did in owner mode: GET /graph/layout read
-  every position in the case);
+- the saved canvas does not hand a hidden entity's id and position to every reader of the case;
 - nothing calls a row-security helper per row.
 
 Gated like the other row-security tests. Account prefix `rlsana-`.

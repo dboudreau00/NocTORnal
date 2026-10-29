@@ -1,19 +1,16 @@
-"""Records written under a rule that has since changed, listed and never
-written (L2 and L5, 2026-09-24).
+"""Records written under a rule that has since changed, listed and never written.
 
-- Claims accepted from Triage before Alpha 6 carry no observation date.
-  They are listed with the date their document gives; invariant 5 keeps
-  every claim's own columns as they were recorded, so nothing fills it.
-- ATTRIBUTE claims accepted before c1 and C12 are readable below what they
-  were found in, or attached to an entity in another case. Listed by the
-  one rule the accept applies, with the ENTITY's case's compartments.
-- URLs whose identity `url_norm` now writes differently are listed, never
-  rewritten.
+- Claims accepted from Triage before the observation date was required carry none. They are listed with the
+  date their document gives; invariant 5 keeps every claim's own columns as they were recorded, so nothing
+  fills it.
+- ATTRIBUTE claims accepted under the earlier rule are readable below what they were found in, or attached
+  to an entity in another case. Listed by the one rule the accept applies, with the entity's case's
+  compartments.
+- URLs whose identity `url_norm` now writes differently are listed, never rewritten.
 
-Each test fails on ab27a4a (no listing existed). The listings, the script
-and the register rows change nothing: the tests hold every table they read
-to a checksum. Env-gated on DATABASE_URL. Email prefix `lgr-`, titles and
-sources `lgr-`, registry key `LGR-K1` (left registered).
+The listings, the script and the register rows change nothing: the tests hold every table they read to a
+checksum. Env-gated on DATABASE_URL. Email prefix `lgr-`, titles and sources `lgr-`, registry key `LGR-K1`
+(left registered).
 """
 from __future__ import annotations
 
@@ -149,9 +146,8 @@ def _checksum(conn) -> tuple:
 
 
 def _estate(conn):
-    """A case with three claims accepted from Triage, each then stripped of
-    its date as Alpha 5.2 wrote them: a NODE from a dated post, an EDGE and
-    an ATTRIBUTE from an undated capture."""
+    """A case with three claims accepted from Triage, each then stripped of its date: a NODE from a dated
+    post, an EDGE and an ATTRIBUTE from an undated capture."""
     owner = _user(conn)
     case = _case(conn, owner)
     posted = datetime(2026, 3, 1, 22, 30, tzinfo=timezone.utc)

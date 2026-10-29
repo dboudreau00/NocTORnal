@@ -1,12 +1,9 @@
-"""Similar samples (F11 J, 2026-09-24).
+"""Similar samples.
 
-Found in SQL under the Lab's one gate, so a sample the caller may not see
-is neither listed nor counted; the query sample is 404'd first; the
-ssdeep token filter and the TLSH bucket
-window are exact (they equal brute force); candidates are ordered before
-any cap; a capped or time-limited answer says so; a searched value is
-validated before any work, travels in the body and is never logged or
-audited.
+Found in SQL under the Lab's one gate, so a sample the caller may not see is neither listed nor counted;
+the query sample is 404'd first; the ssdeep token filter and the TLSH bucket window are exact (they equal
+brute force); candidates are ordered before any cap; a capped or time-limited answer says so; a searched
+value is validated before any work, travels in the body and is never logged or audited.
 
 Email prefix `ssm-`. Env-gated on DATABASE_URL.
 """

@@ -1,8 +1,8 @@
-"""Detached signatures and signing subkeys against Postgres and over HTTP
-(F10a, comms, 2026-09-24): what a verification row records about the
-signature, and the CHECK that a VERIFIED row names the key that signed or
-its primary, with the NULL trap held by name. Migration 0087's downgrade
-refusal is exercised inside a transaction that is always rolled back.
+"""Detached signatures and signing subkeys against Postgres and over HTTP.
+
+What a verification row records about the signature, and the CHECK that a VERIFIED row names the key that
+signed or its primary, with the NULL trap held by name. Migration 0087's downgrade refusal is exercised
+inside a transaction that is always rolled back.
 
 Rows are deleted at teardown (pgp_support.teardown).
 """

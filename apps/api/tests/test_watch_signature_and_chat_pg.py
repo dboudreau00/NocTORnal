@@ -1,9 +1,7 @@
-"""F47 (docs/17, 2026-10-02): watches match a forum post's signature, and can
-target a Telegram chat as such.
+"""Watches match a forum post's signature, and can target a Telegram chat as such (docs/17).
 
-A post's signature is kept beside it (`collect.forum_post.signature_text`),
-not in its text, so a watch on a contact address did not fire on a signature
-that carried it. It does now, and its reasons say so
+A post's signature is kept beside it (`collect.forum_post.signature_text`), not in its text, and a
+watch on a contact address fires on a signature that carries it; its reasons say so
 (`signature_keyword:`, `signature_selector:`, `signature_regex:`).
 
 A watch of target kind TELEGRAM_CHAT names its chat by the typed id in
@@ -436,8 +434,8 @@ def test_0130_goes_down_refuses_over_a_bad_row_and_comes_back_up(conn):
         assert "refusing to upgrade 0130: 2 watches target a Telegram chat" in text
         assert "typed chat id (c:<id> or g:<id>)" in text and "Correct each by hand" in text
         assert "(es)" not in text and "—" not in text and " -- " not in text
-        # The operator is told which rows, and that the run stopped at 0129
-        # (2026-10-07: the count alone sent them hunting).
+        # The operator is told which rows, and that the run stopped at 0129: the count alone sends them
+        # hunting.
         bad = [str(r[0]) for r in conn.execute(
             "SELECT id FROM collect.watch WHERE upper(target_kind) = 'TELEGRAM_CHAT' "
             "AND name = %s ORDER BY id", (f"{PF}chk",)).fetchall()]

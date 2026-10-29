@@ -1,13 +1,11 @@
-"""Recovery codes (docs/05, enhancement E4) — unit tests, no database.
+"""Recovery codes (docs/05): unit tests, no database.
 
-docs/05 asked for "10, single-use, Argon2id-hashed, regenerated as a set"
-and it was specified but never built, which left the TOTP lockout with no
-proper escape hatch on a host whose clock cannot agree with a phone.
+docs/05 asks for "10, single-use, Argon2id-hashed, regenerated as a set", the escape hatch from a TOTP
+lockout on a host whose clock cannot agree with a phone.
 
-The properties worth testing are the ones that make it a second factor
-rather than a second password: a code works exactly once, a set replaces
-rather than tops up, and the login path accepts one without becoming an
-oracle for anything.
+The properties worth testing are the ones that make it a second factor rather than a second password: a
+code works exactly once, a set replaces rather than tops up, and the login path accepts one without
+becoming an oracle for anything.
 """
 from __future__ import annotations
 

@@ -1,20 +1,16 @@
-"""REGE against Postgres (ROADMAP-REMAINING phase 3, 2026-10-02): regular-role
-runs, their cache, currency, clearance and persistence, held to CONCOR's
-pattern (test_concor_pg.py) point for point.
+"""REGE against Postgres: regular-role runs, their cache, currency, clearance and persistence, held to
+CONCOR's pattern (test_concor_pg.py) point for point.
 
-Held here: a regular-role run is cached on the graph hash, the number of
-roles and the weighting, and a different value of either is a different run
-that `latest_rege` tells apart; a cache hit is served exactly as computed;
-swapping an undirected tie for a directed one that hashes alike for the
-suite makes the run stale (direction is in its key); the suite, key-player
-and CONCOR keys are unchanged; a run never crosses a clearance boundary;
-roles land in community_assignment by block index; every refusal known
-before computing (a cap, the two-entity floor, a parameter) leaves no run
-behind, and an unexpected failure is recorded as FAILED with its audit
-event; currency reads the run's own roles and weighting back.
+Held here: a regular-role run is cached on the graph hash, the number of roles and the weighting, and a
+different value of either is a different run that `latest_rege` tells apart; a cache hit is served
+exactly as computed; swapping an undirected tie for a directed one that hashes alike for the suite makes
+the run stale (direction is in its key); the suite, key-player and CONCOR keys are unchanged; a run never
+crosses a clearance boundary; roles land in community_assignment by block index; every refusal known
+before computing (a cap, the two-entity floor, a parameter) leaves no run behind, and an unexpected
+failure is recorded as FAILED with its audit event; currency reads the run's own roles and weighting
+back.
 
-Shares test_review_scope_pg's world and teardown. Env-gated on
-DATABASE_URL.
+Shares test_review_scope_pg's world and teardown. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -156,13 +152,10 @@ def test_roles_are_persisted_to_community_assignment_by_block_index(world):
 
 
 def test_the_blocks_density_tied_and_regular_marks_are_stored_and_served(world):
-    """The role-to-role image a stored run carries, to the number: the two
-    hubs hold five of the six ties they could send to the three leaves (and
-    send both ways to each other), so against a view density of 7 in 20 both
-    blocks are tied, and every hub sends and every leaf receives, so both are
-    regular. Computed, served from the cache and read back as the latest run
-    all say the same (2026-10-02: no test outside the pure
-    file read a block)."""
+    """The role-to-role image a stored run carries, to the number: the two hubs hold five of the six ties
+    they could send to the three leaves (and send both ways to each other), so against a view density of 7
+    in 20 both blocks are tied, and every hub sends and every leaf receives, so both are regular.
+    Computed, served from the cache and read back as the latest run all say the same."""
     expected = {"alpha": {"positive": 0.35},
                 "density": {"positive": [[0.0, 0.0], [pytest.approx(5 / 6, abs=1e-6), 1.0]]},
                 "image": {"positive": [[0, 0], [1, 1]]},
@@ -180,11 +173,9 @@ def test_the_blocks_density_tied_and_regular_marks_are_stored_and_served(world):
 
 
 def test_tied_blocks_that_are_not_regular_are_stored_as_such(conn):
-    """The hubs' world above has only blocks that are both or neither. A
-    chain of five cut into interior, source and sink has three blocks holding
-    a third of the ties they could (more than the view's 0.2, so tied) and
-    none regular, whatever ids the database gave the entities: the cut does
-    not move here (2026-10-02)."""
+    """The hubs' world above has only blocks that are both or neither. A chain of five cut into interior,
+    source and sink has three blocks holding a third of the ties they could (more than the view's 0.2, so
+    tied) and none regular, whatever ids the database gave the entities: the cut does not move here."""
     w = World(conn)
     names = ["a", "b", "c", "d", "e"]
     for label in names:
@@ -207,10 +198,9 @@ def test_tied_blocks_that_are_not_regular_are_stored_as_such(conn):
 
 
 def test_a_block_exactly_as_dense_as_the_view_is_stored_as_tied(conn):
-    """A directed ring of four is one role holding a third of its ordered
-    pairs, which is the view's own density: tied counts the equal case, which
-    a strict comparison would drop, through the database as well as the pure
-    path (2026-10-02)."""
+    """A directed ring of four is one role holding a third of its ordered pairs, which is the view's own
+    density: tied counts the equal case, which a strict comparison would drop, through the database as
+    well as the pure path."""
     w = World(conn)
     ring = ["a", "b", "c", "d"]
     for label in ring:
@@ -225,9 +215,8 @@ def test_a_block_exactly_as_dense_as_the_view_is_stored_as_tied(conn):
 
 
 def test_a_rege_run_is_recorded_as_approximate_on_its_row_and_in_its_audit_event(world):
-    """The service reads the payload's top-level flag: REGE nested its own, so
-    the row and the ANALYTICS_RUN event both said exact for an analysis the
-    card calls an approximation (2026-10-02)."""
+    """The service reads the payload's top-level flag: with REGE's flag nested, the row and the
+    ANALYTICS_RUN event would both say exact for an analysis the card calls an approximation."""
     run = _rege(world)
     assert world.conn.execute(
         "SELECT is_approximate FROM analytics.metric_run WHERE id = %s",
@@ -337,12 +326,10 @@ def test_an_accepted_only_rege_run_counts_nothing_unaccepted(conn):
 
 
 def test_a_close_knit_crew_over_shared_forums_is_admitted_through_the_real_projection(conn):
-    """The view measured on 2026-10-03, end to end: every
-    identity posts on every forum and the one-mode projection makes one derived
-    tie per pair and forum, so the rows (and the old slot count, twice them)
-    far exceed the ties cap while the tie directions, the cells the matrices
-    hold, are a small fraction of it. The run is admitted, completes and stores
-    its row, and every derived tie is counted on the card."""
+    """End to end: every identity posts on every forum and the one-mode projection makes one derived tie
+    per pair and forum, so the rows far exceed the ties cap while the tie directions, the cells the
+    matrices hold, are a small fraction of it. The run is admitted, completes and stores its row, and
+    every derived tie is counted on the card."""
     from noctornal_api import rege
     from noctornal_api.affiliation import OneModeParams
     w = World(conn)

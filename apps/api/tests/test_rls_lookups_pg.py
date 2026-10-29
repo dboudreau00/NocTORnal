@@ -1,31 +1,26 @@
-"""Row-level security on the lookup ledger (F51, 2026-10-02).
+"""Row-level security on the lookup ledger.
 
-0128 puts the four lookup tables under policy. Run as the request role,
-bound by a real session's proof, and as the system role, with the fixtures
-seeded as the owner:
+0128 puts the four lookup tables under policy. Run as the request role, bound by a real session's proof,
+and as the system role, with the fixtures seeded as the owner:
 
-- each table keeps to its case and label: a lookup and its answer at their
-  own labels in a readable case, an attempt where its lookup is, a batch in
-  its case, a provider test's canary on nobody's request role; the system
-  role sees every row; unbound sees nothing; no policy calls a row-security
-  helper per row;
-- a request role below an answer, or outside its case, cannot read it,
-  change it, write one, or learn of a hidden attempt from a duplicate key;
-- an interactive request stores an answer above its requester, raises and
-  counts its proposals, and tells the requester only that there is an
-  answer above their clearance; an answer at their label they read in full;
-- the gates still see every row: a fresh answer above the requester is
-  served from the cache, a batch's cached row included, and nothing is sent
-  again; an attempt in a case the requester is not on fills the window; a
-  value looked up above the declarer's label is restricted;
-- a sign-off, a provider test, a provider's disable, move, lowering,
-  retirement and usage, and a batch's cancel run as LOOKUPS and reach
-  every case's rows; the cancel answers the canceller's own count and
+- each table keeps to its case and label: a lookup and its answer at their own labels in a readable case,
+  an attempt where its lookup is, a batch in its case, a provider test's canary on nobody's request role;
+  the system role sees every row; unbound sees nothing; no policy calls a row-security helper per row;
+- a request role below an answer, or outside its case, cannot read it, change it, write one, or learn of
+  a hidden attempt from a duplicate key;
+- an interactive request stores an answer above its requester, raises and counts its proposals, and tells
+  the requester only that there is an answer above their clearance; an answer at their label they read in
+  full;
+- the gates still see every row: a fresh answer above the requester is served from the cache, a batch's
+  cached row included, and nothing is sent again; an attempt in a case the requester is not on fills the
+  window; a value looked up above the declarer's label is restricted;
+- a sign-off, a provider test, a provider's disable, move, lowering, retirement and usage, and a batch's
+  cancel run as LOOKUPS and reach every case's rows; the cancel answers the canceller's own count and
   audits the full one;
 - Triage and the ledger read an answer's label as a fact.
 
-The fetcher and the routes are fakes; nothing reaches a provider. Gated
-like the other row-security tests. Account prefix `rlslkup-`.
+The fetcher and the routes are fakes; nothing reaches a provider. Gated like the other row-security
+tests. Account prefix `rlslkup-`.
 """
 from __future__ import annotations
 

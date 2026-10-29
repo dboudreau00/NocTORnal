@@ -1,16 +1,15 @@
-"""A poll killed where Python cannot unwind it leaves its run RUNNING; the next
-pass marks it (docs/17, "a poll killed by SIGTERM").
+"""A poll killed where Python cannot unwind it leaves its run RUNNING; the next pass marks it (docs/17,
+"a poll killed by SIGTERM").
 
-The collector stops its poll child with SIGTERM and `scripts/collection_poll.py`
-installs no handler for it, so the child ends at once: the `except BaseException`
-that finishes a run's row never runs, and the row, committed RUNNING before the
-first request, stayed RUNNING for good. `CollectionService.mark_interrupted_runs`
-finishes the runs whose source's poll lock nobody holds, and the cron entry calls
-it at the start of every pass.
+The collector stops its poll child with SIGTERM and `scripts/collection_poll.py` installs no handler
+for it, so the child ends at once: the `except BaseException` that finishes a run's row never runs, and
+the row, committed RUNNING before the first request, stays RUNNING. `CollectionService.
+mark_interrupted_runs` finishes the runs whose source's poll lock nobody holds, and the cron entry
+calls it at the start of every pass.
 
-Env-gated on DATABASE_URL. The kill test starts a real child process and ends it
-with `Popen.terminate()` (SIGTERM on POSIX, TerminateProcess on Windows), so it
-runs on both and needs no skip.
+Env-gated on DATABASE_URL. The kill test starts a real child process and ends it with
+`Popen.terminate()` (SIGTERM on POSIX, TerminateProcess on Windows), so it runs on both and needs no
+skip.
 """
 from __future__ import annotations
 

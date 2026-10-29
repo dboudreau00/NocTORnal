@@ -1,9 +1,7 @@
-"""The Telegram adapter against a fake transport, with no database and no
-network (roadmap F5.3, telegram, 2026-09-24).
+"""The Telegram adapter against a fake transport, with no database and no network.
 
-A poll's window and cursor, the recheck of edits and deletions, the
-outcomes Telegram gives, hostile messages, the session budget and its
-backstop, the pacing of a slow chat and the custody log of every RPC.
+A poll's window and cursor, the recheck of edits and deletions, the outcomes Telegram gives, hostile
+messages, the session budget and its backstop, the pacing of a slow chat and the custody log of every RPC.
 """
 from __future__ import annotations
 

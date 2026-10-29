@@ -1,11 +1,9 @@
-"""An SMTP relay that echoes the password in its refusal does not get it into
-the delivery ledger (2026-10-07).
+"""An SMTP relay that echoes the password in its refusal does not get it into the delivery ledger.
 
-`send_smtp` redacted its error text after `secret_in_scope` had ended, so the
-exact removal of the live password no longer applied, and a short password
-echoed by an AUTH reply (in clear or as its base64) went into the
-TransportError that `notify.delivery.detail` and the log keep. Pure: the
-relay is a stand-in.
+`send_smtp` must redact its error text while `secret_in_scope` is live: once it has ended the exact removal
+of the live password no longer applies, and a short password echoed by an AUTH reply (in clear or as its
+base64) would go into the TransportError that `notify.delivery.detail` and the log keep. Pure: the relay is
+a stand-in.
 """
 from __future__ import annotations
 

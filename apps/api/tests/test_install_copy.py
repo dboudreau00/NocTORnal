@@ -1,34 +1,19 @@
-"""What the installers, launchers and scripts print, and what the install
-documents say, held to what the software does.
+"""What the installers, launchers and scripts print, and what the install documents say, held to what the
+software does.
 
-## Why this file exists
+Wrong words do not stop an install, but they mislead: a suggested command that fails on Linux, a README
+asking for an account the installer already made, a legal gate counted differently in two places, a launcher
+naming the ports of removed services, install notes quoting a message the installer never prints. A new
+install's first account also holds no Security Officer role, which a blocking readiness check requires, and
+the copy says so. Each check holds one such claim to the tree, statically where the thing is a script
+nothing here can run, and by running it where that is safe (the Alembic refusal).
 
-The Alpha 6 pre-release check (2026-09-23) installed the release candidate
-on a clean Ubuntu machine, read every line the installer printed, and
-followed the README and `release/INSTALL.md` as written. Nothing stopped
-the install, and most of what it found was words: the first command the
-installer suggested failed on Linux, the README asked for an account the
-installer had already made, the legal gate was four items in one place and
-five in another, `--help` printed a line of code, a launcher named the
-ports of services removed months ago, the install notes quoted a
-port-in-use message the Linux installer never printed and a test total two
-releases old, and printed copy outside the server still carried the dash
-the server copy tests refuse. And nothing told a new install that its first
-account holds no Security Officer role, which a blocking readiness check
-requires.
+The dash rule is the server copy rule (`test_server_copy_no_dashes.py`), applied to what these programs
+print: every string literal a reader could meet in `scripts/*.py`, the part of a module docstring that
+`argparse` prints as `--help`, and every line of the two installers and two launchers that is not a comment.
 
-Each check below holds one of those to the tree, statically where the
-thing is a script nothing here can run, and by running it where that is
-safe (the Alembic refusal).
-
-The dash rule is the server copy rule (`test_server_copy_no_dashes.py`),
-applied to what these programs print: every string literal a reader could
-meet in `scripts/*.py`, the part of a module docstring that `argparse`
-prints as `--help`, and every line of the two installers and two launchers
-that is not a comment.
-
-Pure: no database, no object store. One test runs Alembic in a subprocess
-with no DATABASE_URL, which refuses before it connects to anything.
+Pure: no database, no object store. One test runs Alembic in a subprocess with no DATABASE_URL, which
+refuses before it connects to anything.
 """
 from __future__ import annotations
 
@@ -287,11 +272,10 @@ def test_help_prints_the_header_and_no_code(path: Path, usage: str):
 
 
 def test_nothing_tells_an_operator_to_run_the_secrets_step_through_the_executable_path():
-    """2026-10-12, on a fresh box: `sudo ./release/install.sh --production-secrets`, as the
-    production README said, answered "command not found" to an operator who had unzipped the
-    release, because a zip carries no execute bit (release/INSTALL.md says so). `bash
-    release/install.sh` works from a zip and from a checkout, so every instruction names it.
-    The changelog and the clean-machine record are history and keep what they said."""
+    """`sudo ./release/install.sh --production-secrets` answers "command not found" to an operator who
+    unzipped the release, because a zip carries no execute bit (release/INSTALL.md says so). `bash
+    release/install.sh` works from a zip and from a checkout, so every instruction names it. The changelog
+    and the clean-machine record are history and keep what they said."""
     history = {"CHANGELOG.md", "CLEAN-VM-INSTALL.md"}
     text_suffixes = {".md", ".py", ".sh", ".ps1", ".yml", ".example", ".txt"}
     hits = []
@@ -307,10 +291,9 @@ def test_nothing_tells_an_operator_to_run_the_secrets_step_through_the_executabl
 
 @pytest.mark.parametrize("path", [INSTALL_SH, INSTALL_PS1], ids=lambda p: p.name)
 def test_the_production_secrets_step_points_past_the_files_it_does_not_write(path):
-    """2026-10-12: the step ended with `next: docker compose ... up -d --build`, skipping the
-    egress files, the collector key and the MinIO certificate, which `up` needs and which
-    this step does not write. The README's steps 1 to 3 are named, and the start command
-    carries sudo, because the env files are root's."""
+    """The secrets step points past the files it does not write: the egress files, the collector key and the
+    MinIO certificate, which `up` needs. The README's steps 1 to 3 are named, and the start command carries
+    sudo, because the env files are root's."""
     text = _read(path)
     block = text[text.index("next: "):][:700]
     for needle in ("egress files", "collector", "MinIO certificate", "steps 1 to 3",
@@ -354,8 +337,8 @@ def _compose_host_ports() -> set[str]:
 
 @pytest.mark.parametrize("path", (LAUNCH_SH, LAUNCH_PS1), ids=lambda p: p.name)
 def test_the_launchers_name_the_ports_the_compose_file_publishes(path: Path):
-    """They named 8080 and 4222, OpenFGA's and NATS's, removed in R13, and
-    left out Mailpit's 1025."""
+    """The launchers name the ports the compose file publishes (Mailpit's 1025 included; OpenFGA's 8080 and
+    NATS's 4222 are gone)."""
     match = re.search(r"a port is already taken \(([\d, ]+)\)", _read(path))
     assert match, f"{path.name} no longer lists the ports"
     named = {p.strip() for p in match.group(1).split(",")}
@@ -418,10 +401,8 @@ def _bootstrap():
     return bootstrap
 
 
-#: security.officer@, not officer@: officer@example.org is the account the
-#: README's showcase seeder creates, so after the recipe the printed
-#: command exited 1 with "already exists" (Alpha 6 pre-release check,
-#: 2026-09-23).
+#: security.officer@, not officer@: officer@example.org is the account the README's showcase seeder
+#: creates, so the printed command would exit 1 with "already exists".
 _OFFICER_EMAIL = "security.officer@example.org"
 _OFFICER_ARGS = ["create-user", "--email", _OFFICER_EMAIL,
                  "--name", "Officer Name", "--roles", "SECURITY_OFFICER"]
@@ -565,11 +546,8 @@ _SETTING_GATES = {
 
 
 def test_install_md_says_a_loaded_setting_with_the_stack_down_errors():
-    """The skip table said the database tests skip when "the containers
-    are not up". They do not: they are gated on the setting alone, and the
-    recipe loads DATABASE_URL from .env.local, so with Postgres down they
-    error. The table now names settings only and says so (Alpha 6
-    pre-release check, 2026-09-23)."""
+    """The skip table names settings only: the database tests are gated on the setting alone, and the recipe
+    loads DATABASE_URL from .env.local, so with Postgres down they error rather than skip."""
     text = " ".join(_read(INSTALL_MD).split())
     assert "or the containers are not up" not in text
     assert "The table is about settings, not services." in text
@@ -642,9 +620,8 @@ def test_links_between_the_readme_and_install_md_land_on_headings():
 # ---------------------------------------------------------------------------
 
 def test_alembic_without_a_database_url_refuses_in_one_line():
-    """It ended in a traceback, `RuntimeError: DATABASE_URL is not set`,
-    followed by an em dash. It now says what to do and names .env.local,
-    without loading it: migrations refuse to guess a target."""
+    """Alembic without DATABASE_URL says what to do and names .env.local, without loading it: migrations
+    refuse to guess a target."""
     env = {k: v for k, v in os.environ.items() if k != "DATABASE_URL"}
     proc = subprocess.run(
         [sys.executable, "-m", "alembic", "current"], cwd=ROOT, env=env,

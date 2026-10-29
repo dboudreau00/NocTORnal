@@ -1,24 +1,17 @@
-"""The Analysis and ACH panes, held to the Alpha 6 release review
-(2026-09-24). Pure: no database. The node halves skip when node is not
-installed; the static checks still run.
+"""The Analysis and ACH panes. Pure: no database. The node halves skip when node is not installed;
+the static checks still run.
 
-- c11: a DISPUTED tie was counted nowhere, so a removal set resting on
-  ties a reviewer doubts read "All 58 ties have been reviewed" as a calm
-  note;
-- c17: moving the as-of time while a first Run (or a stored-run read) was
-  in flight drew the old instant's numbers under the new graph;
-- c18: with every hypothesis ruled out, the matrix said nothing had been
-  scored beside cards that counted the stances;
-- the "Score an assertion" picker kept the previous case's assertion
-  after a switch, with Score enabled;
-- the trend was not re-read after a run, so it left out the run just
-  computed;
-- x-ach-withheld: the ACH pane never said that evidence above the reader
-  had been left out.
+- A DISPUTED tie is counted, so a removal set resting on ties a reviewer doubts does not read as a
+  calm "All 58 ties have been reviewed".
+- Moving the as-of time while a first Run (or a stored-run read) is in flight does not draw the old
+  instant's numbers under the new graph.
+- With every hypothesis ruled out, the matrix does not say nothing has been scored.
+- The "Score an assertion" picker drops the previous case's assertion after a switch.
+- The trend is re-read after a run.
+- The ACH pane says when evidence above the reader has been left out.
 
-The server halves are in test_analytics_leads_and_coverage.py (c11, c16),
-test_ach.py (c18) and test_ach_release_review_pg.py (c18 over HTTP and
-x-ach-withheld).
+The server halves are in test_analytics_leads_and_coverage.py, test_ach.py and
+test_ach_read_pg.py.
 """
 from __future__ import annotations
 
@@ -258,9 +251,8 @@ console.log(JSON.stringify(out));
 # ---------------------------------------------------------------------------
 
 def test_disputed_ties_warn_and_are_named_beside_the_numbers():
-    """The verifier's reproduction: 58 ties, none proposed, 5 disputed. The
-    readout said "reviewed 58 of 58", the flag was a calm note and it read
-    "All 58 ties behind these numbers have been reviewed"."""
+    """58 ties, none proposed, 5 disputed: the readout says so, the flag is not a calm note, and it
+    does not read "All 58 ties behind these numbers have been reviewed"."""
     got = _run(_PRELUDE + _src("reviewCoverageText", "decayWords") + r"""
 out.disputed = reviewCoverageText({ ties: 58, proposed: 0, accepted: 53, disputed: 5,
   rejected: 0, evidenced: 40 });
@@ -297,11 +289,8 @@ console.log(JSON.stringify(out));
 
 
 def test_every_coverage_clause_agrees_with_its_own_count():
-    """The fix round's slip (2026-09-24): one proposal beside one dispute
-    closed with "until those ties are reviewed and the disputes settled",
-    because that branch was written for the plural and the first test only
-    tried five disputes. Swept over none, one and several of each count, so
-    no clause can be worded for one number and shown beside another."""
+    """Every coverage clause agrees with its own count. Swept over none, one and several of each count,
+    so no clause can be worded for one number and shown beside another."""
     got = _run(_PRELUDE + _src("reviewCoverageText", "decayWords") + r"""
 out.rows = [];
 for (const proposed of [0, 1, 2]) for (const disputed of [0, 1, 2])
@@ -317,7 +306,7 @@ out.single = reviewCoverageText({ ties: 1, proposed: 0, accepted: 1, disputed: 0
   rejected: 0, evidenced: 1 });
 console.log(JSON.stringify(out));
 """)
-    # The verifier's own case, word for word.
+    # The single-dispute case, word for word.
     assert got["verifier"].endswith(
         "until those ties are reviewed and the dispute settled."), got["verifier"]
     assert got["single"] == ("The one tie behind these numbers has been reviewed, "

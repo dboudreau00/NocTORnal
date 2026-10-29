@@ -1,21 +1,15 @@
-"""What an administrator-issued password opens, and what a refused sign-in
-spends (final review of Alpha 6, 2026-09-24).
+"""What an administrator-issued password opens, and what a refused sign-in spends.
 
-- c8: a password an administrator issues when CREATING an account is
-  known to the administrator, with the TOTP seed beside it, exactly as a
-  reset password is. It now has to be replaced at the account's first
-  sign-in; the first-run administrator, who made their own account, is
-  not asked to. `bootstrap.py create-user` follows the same line: the
-  first account on an empty database is the operator's own, and any later
-  one (the installers' Security Officer advice) is someone else's.
-- the must-change refusal (403) and the no-change-pending refusal
-  (409) came after `authenticate` had spent a single-use recovery code,
-  so finishing one reset cost two codes, and the last code could never
-  finish it. A recovery code is now spent only by a sign-in that mints a
-  session, and a concurrent spend of the same code still wins once.
-- `last_login_at`, which the Admin card calls "last password
-  sign-in", was stamped by the 403 and 409 refusals and by an Account
-  password change, none of which signs anyone in.
+- A password an administrator issues when creating an account is known to the administrator, with the TOTP
+  seed beside it, exactly as a reset password is, so it must be replaced at the account's first sign-in. The
+  first-run administrator, who made their own account, is not asked to. `bootstrap.py create-user` follows
+  the same line: the first account on an empty database is the operator's own, and any later one (the
+  installers' Security Officer advice) is someone else's.
+- The must-change refusal (403) and the no-change-pending refusal (409) do not spend a single-use recovery
+  code: it is spent only by a sign-in that mints a session, and a concurrent spend of the same code still
+  wins once.
+- `last_login_at`, which the Admin card calls "last password sign-in", is stamped only by a sign-in, not by
+  the 403 and 409 refusals or an Account password change.
 
 Email prefix `isp-`, unique to this file. Env-gated on DATABASE_URL.
 """
@@ -236,11 +230,10 @@ def _created_detail(conn, uid) -> dict:
 
 def test_bootstrap_create_user_flags_an_account_for_someone_else(
         conn, client, capsys):
-    """The verifier's case on c8: the installers advise `create-user ...
-    --roles SECURITY_OFFICER` once the operator's own account exists, and
-    that password opened the officer's sessions, under the officer's id,
-    for the operator who printed it. On a database that already has an
-    account, create-user now issues a password that must be replaced."""
+    """`create-user ... --roles SECURITY_OFFICER`, which the installers advise once the operator's own
+    account exists, must not issue a password that opens the officer's sessions, under the officer's id, for
+    the operator who printed it. On a database that already has an account, create-user issues a password
+    that must be replaced."""
     email = _email()
     out = _create_user(capsys, email, "SECURITY_OFFICER")
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
@@ -334,9 +327,8 @@ def test_the_no_change_pending_refusal_spends_no_recovery_code(conn, client):
 
 def test_a_recovery_code_spent_meanwhile_still_wins_once(
         conn, client, monkeypatch):
-    """Verifying a code no longer spends it, so the spend can race. The
-    atomic remove still decides: a code another sign-in spent between
-    this one's check and its spend is a 401, and nothing is changed."""
+    """Verifying a code does not spend it, so the spend can race. The atomic remove still decides: a code
+    another sign-in spent between this one's check and its spend is a 401, and nothing is changed."""
     from noctornal_api.security import passwords
     from noctornal_api.stores import PgUserStore
     admin, _, _ = _make_user(conn, global_roles=("SYS_ADMIN",))
@@ -399,9 +391,8 @@ def _row_email(conn, uid) -> str:
 
 
 def test_a_refused_sign_in_still_resets_the_failure_count(conn, client):
-    """Moving the sign-in stamp out of `clear_failed_logins` must not move
-    the reset with it: both factors were right, so the typos before this
-    sign-in no longer count toward a lockout."""
+    """The sign-in stamp is separate from `clear_failed_logins`, and the reset must not move with it: both
+    factors were right, so the typos before this sign-in no longer count toward a lockout."""
     admin, _, _ = _make_user(conn, global_roles=("SYS_ADMIN",))
     uid, email, secret = _make_user(conn)
     one_time = _svc(conn).reset_password(uid, actor_id=admin).password

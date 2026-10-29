@@ -1,35 +1,28 @@
-"""F2, decided by the owner on 2026-09-22: a rejected sample is PRESERVED,
-not destroyed, and getting it back out takes two people.
+"""A rejected sample is PRESERVED, not destroyed, and getting it back out takes two people.
 
 What these tests hold, and what each would catch:
 
-- the default disposition preserves: the ciphertext leaves the samples
-  bucket, lands in the object-locked preservation bucket under a legal
-  hold on the exact version written, the data key is KEPT, and the row
-  says where the copy went. Against the REAL dev MinIO, because a stub can
-  prove the code maps what it is told and cannot prove the store holds;
-- `destroy` is still exactly the old behaviour, and a legal hold still
-  refuses it; `preserve` is not blocked by a hold, because it deletes
-  nothing that is not first held elsewhere;
-- a failed copy changes nothing, a missing working copy is not recorded
-  as a preservation, and a disposition this build does not know refuses
-  and names the variable;
-- the schema refuses a preserved row that has lost its key, and refuses
-  to let an authorisation be rewritten, deleted or granted to oneself;
-- retrieval is refused without a live authorisation, is refused to the
-  Security Officer who granted one to somebody else, and with a live
-  authorisation returns the SAME encrypted archive a download produces,
-  leaves the hold in place, and is written to the custody ledger and the
-  audit chain. Refusals are audited too;
-- over HTTP: the retrieval crosses to the sample origin on a ticket
-  minted for it, and a download ticket cannot be minted for a preserved
-  sample; the queue answers each state filter and the case filter; the
+- the default disposition preserves: the ciphertext leaves the samples bucket, lands in the object-locked
+  preservation bucket under a legal hold on the exact version written, the data key is KEPT, and the row
+  says where the copy went. Against the REAL dev MinIO, because a stub can prove the code maps what it is
+  told and cannot prove the store holds;
+- `destroy` deletes, and a legal hold still refuses it; `preserve` is not blocked by a hold, because it
+  deletes nothing that is not first held elsewhere;
+- a failed copy changes nothing, a missing working copy is not recorded as a preservation, and a
+  disposition this build does not know refuses and names the variable;
+- the schema refuses a preserved row that has lost its key, and refuses to let an authorisation be
+  rewritten, deleted or granted to oneself;
+- retrieval is refused without a live authorisation, is refused to the Security Officer who granted one to
+  somebody else, and with a live authorisation returns the SAME encrypted archive a download produces,
+  leaves the hold in place, and is written to the custody ledger and the audit chain. Refusals are
+  audited too;
+- over HTTP: the retrieval crosses to the sample origin on a ticket minted for it, and a download ticket
+  cannot be minted for a preserved sample; the queue answers each state filter and the case filter; the
   detail records a look and names who acted.
 
-Gated on DATABASE_URL and MINIO_ENDPOINT, like test_evidence_lock_live_pg.
-Every object written to the preservation bucket is held; teardown lifts
-THIS FILE's holds and deletes THIS FILE's versions, which the product can
-never do (PreservationStorage has no method for either).
+Gated on DATABASE_URL and MINIO_ENDPOINT, like test_evidence_lock_live_pg. Every object written to the
+preservation bucket is held; teardown lifts THIS FILE's holds and deletes THIS FILE's versions, which the
+product can never do (PreservationStorage has no method for either).
 """
 from __future__ import annotations
 
@@ -292,8 +285,8 @@ def _preserve(conn, who, written, **kw):
 # --- the default: preserve ------------------------------------------------
 
 def test_reject_preserves_by_default(conn, written):
-    """F2's whole promise, measured against the real store: the bytes
-    moved, the hold is on, the key is kept, and the row says where."""
+    """The default promise, measured against the real store: the bytes moved, the hold is on, the key is
+    kept, and the row says where."""
     from minio.error import S3Error
 
     from noctornal_api.samples import (
@@ -430,11 +423,9 @@ def test_an_unknown_disposition_refuses_and_names_the_variable(conn, monkeypatch
 
 
 def test_a_rejection_waiting_on_another_copies_nothing(conn):
-    """Verifier on F2, 2026-09-22: two rejections of one sample used to
-    BOTH copy into the preservation bucket, and the loser left a held
-    version that no row named and nothing can delete. The row is now
-    locked before the copy, so the second waits, reads REJECTED, and
-    copies nothing. Here the "first" is another connection that rejects
+    """Two rejections of one sample must not BOTH copy into the preservation bucket: the loser would leave
+    a held version that no row names and nothing can delete. The row is locked before the copy, so the
+    second waits, reads REJECTED, and copies nothing. Here the "first" is another connection that rejects
     the row and commits while this rejection is waiting on its lock."""
     import threading
 
@@ -467,12 +458,11 @@ def test_a_rejection_waiting_on_another_copies_nothing(conn):
 @pytest.mark.parametrize("path", ["preserve", "record_only", "destroy"])
 def test_a_rejection_that_cannot_get_the_row_gives_up_cleanly(conn, monkeypatch,
                                                               path):
-    """If the other change outlasts the wait, the rejection stops with a
-    message a person can act on, before anything is copied.
+    """If the other change outlasts the wait, the rejection stops with a message a person can act on,
+    before anything is copied.
 
-    And that message is what the router's 409 carries: raised from the
-    LockNotAvailable, `safe_detail` replaced it with "the request could not
-    be completed (ref ...)" (2026-09-23)."""
+    That message is what the router's 409 carries: `safe_detail` must not replace it with "the request
+    could not be completed (ref ...)"."""
     from noctornal_api import samples
     from noctornal_api.db import connect
     from noctornal_api.http.errors import safe_detail
@@ -519,8 +509,8 @@ def test_a_failure_after_the_copy_names_the_held_copy(conn):
         svc.reject(sample.id, actor_id=who, reason="prohibited content")
     key = f"preserved/{sample.sha256[:2]}/{sample.sha256}"
     assert key in str(refused.value) and "version v1" in str(refused.value)
-    # A delete that raised may still have removed the object, so the
-    # refusal may not promise the working copy is there (2026-09-23).
+    # A delete that raised may still have removed the object, so the refusal may not promise the working
+    # copy is there.
     assert "did not confirm deleting" in str(refused.value)
     assert "still in place" not in str(refused.value)
     assert _key_row(conn, sample.id)[2] == QUARANTINED
@@ -543,10 +533,9 @@ def _chain_lock_free() -> bool:
 
 
 def test_the_working_copy_delete_does_not_hold_the_audit_chain(conn):
-    """Final review C7, 2026-09-23: the working-copy delete, a network
-    call, ran after the audit append, so the chain's global advisory lock
-    was held across it and a stalled store stalled every audited write in
-    the deployment. The delete now runs before the append."""
+    """The working-copy delete, a network call, runs before the audit append: after it, the chain's global
+    advisory lock would be held across it and a stalled store would stall every audited write in the
+    deployment."""
     from noctornal_api.samples import SampleService
     seen: list[bool] = []
 
@@ -567,9 +556,9 @@ def test_the_working_copy_delete_does_not_hold_the_audit_chain(conn):
 
 
 class _FakeLockedStore:
-    """A stand-in for the preservation store's S3 client, for the failures
-    a live MinIO will not produce on demand: a PUT whose answer is lost,
-    and a read-back that fails or disagrees after the held PUT returned."""
+    """A stand-in for the preservation store's S3 client, for the failures a live MinIO will not produce
+    on demand: a PUT whose answer is lost, and a read-back that fails or disagrees after the held PUT
+    returned."""
 
     def __init__(self, *, put_error=None, stat_error=None, size_delta=0,
                  held=True):
@@ -600,13 +589,10 @@ class _FakeLockedStore:
 @pytest.mark.parametrize("fault", ["read_back_raises", "size_disagrees",
                                    "hold_not_reported"])
 def test_a_read_back_failure_after_the_held_put_names_the_copy(conn, fault):
-    """Final review C8, 2026-09-23: once the held PUT returns, a held
-    version EXISTS and nothing in this product can delete it. A read-back
-    that raised (an S3 or transport error) answered a bare 500, and one that
-    disagreed said "Nothing has changed"; neither named the version, and
-    each retry wrote another. Now every such failure is a SampleError (the
-    router's 409) naming bucket, key and version, and an audit row records
-    it outside the rolled-back transaction."""
+    """Once the held PUT returns, a held version EXISTS and nothing in this product can delete it. A
+    read-back that raises (an S3 or transport error) or disagrees must not answer a bare 500 or "Nothing
+    has changed": every such failure is a SampleError (the router's 409) naming bucket, key and version,
+    and an audit row records it outside the rolled-back transaction, so a retry does not write another."""
     from noctornal_api.samples import (
         QUARANTINED,
         PreservationStorage,
@@ -645,8 +631,8 @@ def test_a_read_back_failure_after_the_held_put_names_the_copy(conn, fault):
 
 
 def test_a_held_put_that_was_never_answered_says_a_copy_may_exist(conn):
-    """C8's sibling: the PUT went out and no answer came back, so a held
-    version may exist and its version is unknown. A 500 said nothing."""
+    """The PUT went out and no answer came back, so a held version may exist and its version is unknown:
+    the error says a copy may exist."""
     from noctornal_api.samples import (
         QUARANTINED,
         PreservationStorage,
@@ -677,12 +663,10 @@ _PQ_TEXT = "DETAIL:  Key (sample_id)=(pq-secret-value) is not present"
 
 
 def _fail_the_audit_once(svc, action):
-    """Make the first append of `action` fail as it fails in production,
-    with a psycopg error: the append is an INSERT and only COMMIT follows
-    it, so nothing else can fail after the working-copy delete. A
-    RuntimeError stood in here until the final review's verifier found it
-    hid the real defect: `safe_detail` discards the whole message of an
-    error chained to a psycopg one (2026-09-23)."""
+    """Make the first append of `action` fail as it fails in production, with a psycopg error: the append
+    is an INSERT and only COMMIT follows it, so nothing else can fail after the working-copy delete. A
+    RuntimeError would hide the real defect: `safe_detail` discards the whole message of an error chained
+    to a psycopg one."""
     import psycopg
     real = svc._audit
     state = {"failed": False}
@@ -699,11 +683,10 @@ def _fail_the_audit_once(svc, action):
 
 def test_a_failure_after_the_delete_says_so_and_the_retry_adopts_the_copy(
         conn):
-    """2026-09-23. A failure after the working-copy delete
-    was reported as "the working copy is still in place"; the retry then
-    found nothing to read and pointed at a record-only rejection, which
-    left the held copy named by no row, for good. Now the refusal says the
-    held copy is the only copy, and the retry records THAT copy."""
+    """A failure after the working-copy delete must not be reported as "the working copy is still in
+    place": the retry would find nothing to read and point at a record-only rejection, leaving the held
+    copy named by no row. The refusal says the held copy is the only copy, and the retry records THAT
+    copy."""
     from noctornal_api.http.errors import safe_detail
     from noctornal_api.samples import QUARANTINED, SampleError, SampleService
     who, _ = _user(conn)
@@ -725,10 +708,9 @@ def test_a_failure_after_the_delete_says_so_and_the_retry_adopts_the_copy(
     [(_a, _o, detail)] = _audit(conn, "SAMPLE_PRESERVATION_INCOMPLETE",
                                 sample.id)
     assert detail["working_copy_gone"] is True
-    # What the analyst is shown: the router answers 409 with
-    # `safe_detail(exc)`, which returned "the request could not be completed
-    # (ref ...)" for this refusal while it was chained to the psycopg error.
-    # The database error is named by class and ref, never by its PQ text.
+    # What the analyst is shown: the router answers 409 with `safe_detail(exc)`, which must not return
+    # "the request could not be completed (ref ...)" for this refusal while it is chained to the psycopg
+    # error. The database error is named by class and ref, never by its PQ text.
     shown = safe_detail(refused.value)
     assert shown == text, shown
     assert "OperationalError" in shown and f"ref {detail['log_ref']}" in shown
@@ -745,12 +727,10 @@ def test_a_failure_after_the_delete_says_so_and_the_retry_adopts_the_copy(
 
 
 def test_a_dropped_connection_after_the_delete_still_names_the_copy(conn):
-    """The final review verifier's case, with a connection that really
-    dies between the working-copy delete and COMMIT (2026-09-23). The
-    audit row recording the failure cannot be written either, on the same
-    dead connection, so the refusal is the only record of where the one
-    remaining copy is, and it has to reach the analyst whole. A retry on a
-    live connection then adopts that copy."""
+    """A connection that really dies between the working-copy delete and COMMIT. The audit row recording
+    the failure cannot be written either, on the same dead connection, so the refusal is the only record
+    of where the one remaining copy is, and it has to reach the analyst whole. A retry on a live
+    connection then adopts that copy."""
     from noctornal_api.db import connect
     from noctornal_api.http.errors import safe_detail
     from noctornal_api.samples import QUARANTINED, SampleError, SampleService
@@ -791,11 +771,9 @@ def test_a_dropped_connection_after_the_delete_still_names_the_copy(conn):
 @pytest.mark.parametrize("fault", ["held_read_fails", "data_key_fails"])
 def test_an_adoption_that_cannot_check_the_copy_refuses_cleanly(
         conn, monkeypatch, fault):
-    """Adoption reads the held copy and opens it with the kept data key.
-    Either failing raised raw and answered a bare 500, where a missing
-    working object had always been a 409 (2026-09-23). Now it is a refusal that names the
-    held copy it found and
-    records nothing."""
+    """Adoption reads the held copy and opens it with the kept data key. Either failing is a refusal (a
+    409, like a missing working object) that names the held copy it found and records nothing, not a bare
+    500."""
     from noctornal_api import samples
     from noctornal_api.http.errors import safe_detail
 
@@ -904,12 +882,10 @@ def test_an_unreachable_working_store_is_not_read_as_a_missing_object(conn):
 @pytest.mark.parametrize("path", ["record_only", "destroy"])
 def test_a_rejection_waiting_on_another_changes_nothing(conn, monkeypatch,
                                                          path):
-    """2026-09-23: only the preserving path locked the
-    row, so a record-only (or destroy) rejection that started while
-    another was in flight passed the unlocked pre-check, waited on its
-    UPDATE, then overwrote the first one's reason and appended a second,
-    contradictory REJECTED custody row. Destroy also deleted the bytes
-    first. Every path now takes the row lock and reads REJECTED."""
+    """Every path takes the row lock and reads REJECTED. A record-only (or destroy) rejection that started
+    while another was in flight must not pass an unlocked pre-check, wait on its UPDATE, then overwrite
+    the first one's reason and append a second, contradictory REJECTED custody row (destroy would also
+    delete the bytes first)."""
     import threading
 
     from noctornal_api.db import connect
@@ -1022,13 +998,10 @@ def test_the_database_refuses_a_preserved_row_without_its_key(conn):
 
 
 def test_every_truncate_guarded_table_is_accounted_for(conn):
-    """The accounting `test_app_role_privileges_pg.py` does, without the
-    runtime role that file needs. That file runs only where
-    `noctornal_app` exists (CI creates it; no developer database has it),
-    so when 0063 first added a BEFORE TRUNCATE trigger that 0060 had never
-    heard of, CI went red and every local run was green (verifier,
-    2026-09-22). This reads only the catalog and the migrations, so it
-    fails where the change is made."""
+    """The accounting `test_app_role_privileges_pg.py` does, without the runtime role that file needs.
+    That file runs only where `noctornal_app` exists (CI creates it; no developer database has it), so a
+    BEFORE TRUNCATE trigger that 0060 had never heard of would turn CI red while every local run stayed
+    green. This reads only the catalog and the migrations, so it fails where the change is made."""
     import importlib.util
     from pathlib import Path
 
@@ -1319,12 +1292,10 @@ def test_a_retrieval_crosses_the_split_on_a_ticket_minted_for_it(
 
 def test_the_officer_reaches_preserved_samples_without_reading_content(
         conn, client):
-    """2026-09-23: authorising a retrieval was offered only
-    inside the Lab's sample card, under `sample.read`, which the Security
-    Officer does not hold (Security Officers read no case content). So the
-    only role allowed to authorise could never reach the form. The officer
-    now has a list of their own, gated on `sample.preserved.authorise`,
-    carrying identity and authorisations and none of the content."""
+    """Authorising a retrieval is not offered only inside the Lab's sample card, under `sample.read`,
+    which the Security Officer does not hold (Security Officers read no case content). The officer has a
+    list of their own, gated on `sample.preserved.authorise`, carrying identity and authorisations and
+    none of the content."""
     from noctornal_api.samples import SampleService
     officer, officer_email = _user(conn, roles=("SECURITY_OFFICER",))
     amber, amber_email = _user(conn, roles=("SECURITY_OFFICER",),
@@ -1382,9 +1353,8 @@ def test_the_officer_reaches_preserved_samples_without_reading_content(
 
 
 def test_the_queue_answers_every_state_and_the_case_filter(conn, client):
-    """ux13-lab:rejected-filter-always-empty and lab-not-case-scoped: the
-    route took neither a state nor a case, so three filters were always
-    empty and a case's Lab listed every case."""
+    """The route takes a state and a case: every state filter answers, and a case's Lab lists only that
+    case."""
     from noctornal_api.samples import SampleService
     owner, owner_email = _user(conn, roles=("CASE_OWNER",))
     case_a, case_b = _case(conn, owner), _case(conn, owner)
@@ -1417,8 +1387,7 @@ def test_the_queue_answers_every_state_and_the_case_filter(conn, client):
 
 
 def test_the_detail_records_a_look_and_names_who_acted(conn, client):
-    """ux13-lab:custody-ledger-hides-who-and-what: "every look is a row"
-    and no look was; the ledger named nobody."""
+    """Every look at a sample is a custody-ledger row, and the ledger names who acted and what."""
     from noctornal_api.samples import SampleService
     owner, owner_email = _user(conn, roles=("CASE_OWNER",), name="Olive Owner")
     sample = SampleService(conn, MemoryStore()).submit(

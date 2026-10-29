@@ -1,25 +1,19 @@
 """The install wizard and release/START-HERE.md, held to what they say.
 
-## Why this file exists
+The installers are a wizard of eight numbered steps: a look at the computer that changes nothing, the
+account made before the API starts on Windows as on Linux (so the one-time password does not scroll off
+under uvicorn's log), a fictional demo case, and a closing card. Nothing here runs the real installers: they
+bind ports 5432, 6379, 9000 and 1025. What can be held without running them is held here:
 
-The beta is "a usable product with a simple install, and simple instructions
-on how to install". The installers became a wizard of eight numbered steps:
-a look at the computer that changes nothing, the account made BEFORE the API
-starts on Windows as on Linux (the one-time password used to scroll off the
-screen under uvicorn's log, release finding R8), a fictional demo case, and a
-closing card. Nothing here runs the real installers: they bind ports 5432,
-6379, 9000 and 1025. What can be held without running them is held here:
-
-* the logic that decides, as pure functions of their arguments, run in bash
-  and (where PowerShell exists) in PowerShell, so that "never prompt when
-  stdin is not a terminal" is a result and not a promise;
-* the text of both installers: the step numbering, the flags, the order of
-  account, wait and start, the closing card;
+* the logic that decides, as pure functions of their arguments, run in bash and (where PowerShell exists)
+  in PowerShell, so that "never prompt when stdin is not a terminal" is a result and not a promise;
+* the text of both installers: the step numbering, the flags, the order of account, wait and start, the
+  closing card;
 * that both installers and both start scripts parse;
 * START-HERE.md: one page, no dashes, every command and message in it real.
 
-The older checks stay where they were (`test_install_copy.py`,
-`test_script_invariants.py`): this file adds, it does not relax.
+The older checks stay where they were (`test_install_copy.py`, `test_script_invariants.py`): this file adds,
+it does not relax.
 """
 from __future__ import annotations
 
@@ -30,7 +24,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from test_g48_install_env_data import ENV_PY, _bash, _powershell_lists
+from test_install_env_local_is_data import ENV_PY, _bash, _powershell_lists
 from test_install_copy import _printed_lines
 from test_server_copy_no_dashes import DASHES, FAKE_DASH
 from test_server_copy_no_lazy_plurals import HEDGE
@@ -158,10 +152,8 @@ def test_step_one_only_looks_and_reports_what_it_found_before_anything_changes()
 
 
 def test_the_preview_does_not_promise_new_keys_over_an_existing_env_local():
-    """Step 1's "Next it will" said "write .env.local with fresh random keys"
-    on every run, re-runs and updates included, where the person has just
-    copied their keys in (Beta 1 clean machine, 2026-10-07). Step 3 never
-    replaces them, and the preview now says so when the file is there."""
+    """Step 1's "Next it will" must not promise fresh random keys over an existing .env.local: step 3 never
+    replaces them, and the preview says so when the file is there."""
     keep = "keep your .env.local as it is (its keys are never replaced)"
     write = "write .env.local with fresh random keys (the file is yours to keep)"
     sh = _read(INSTALL_SH)
@@ -428,9 +420,7 @@ def test_the_demo_question_is_the_one_the_brief_words():
                 in _read(path)), path.name
 
 
-# ---------------------------------------------------------------------------
-# The account before the API, and a wait for the password (R8)
-# ---------------------------------------------------------------------------
+# The account before the API, and a wait for the password
 
 def test_install_ps1_makes_the_account_before_it_starts_the_api_and_waits():
     code = _code(INSTALL_PS1)
@@ -438,7 +428,7 @@ def test_install_ps1_makes_the_account_before_it_starts_the_api_and_waits():
     wait = code.index("Read-Line 'Press Enter when you have saved them'")
     api = code.index("-m uvicorn")
     assert account < wait < api
-    # And it no longer hands the whole job to launch.ps1, whose log was the R8 cause.
+    # install.ps1 does not hand the whole job to launch.ps1: its log would scroll the one-time password away.
     assert not re.search(r"&\s*powershell[^\n]*launch\.ps1", code), "install.ps1 hands off to launch.ps1 again"
     assert "-File (Join-Path $RepoRoot 'scripts\\launch.ps1')" not in code
 
@@ -453,10 +443,9 @@ def test_install_sh_makes_the_account_before_it_starts_the_api_and_waits():
 
 @pytest.mark.parametrize("path", (INSTALL_SH, INSTALL_PS1), ids=lambda p: p.name)
 def test_the_installers_leave_what_comes_next_to_their_closing_card(path: Path):
-    """bootstrap's own "Next" block, printed inside step 6, told a person to
-    sign in to an API that step 8 had not started and to load OP-SHOWCASE-26
-    just before step 7 offered Latticework (Beta 1 clean machine,
-    2026-10-07). The installers ask create-user to leave it out."""
+    """bootstrap's own "Next" block, printed inside step 6, would tell a person to sign in to an API that
+    step 8 has not started and to load OP-SHOWCASE-26 just before step 7 offers Latticework. The installers
+    ask create-user to leave it out."""
     code = _code(path)
     at = code.index('"$VENV_PY" scripts/bootstrap.py create-user' if path.suffix == ".sh"
                     else "& $VenvPython $bootstrap create-user")
@@ -512,10 +501,9 @@ def _demo_present_snippet() -> str:
 
 
 def test_a_demo_case_already_there_is_said_so_and_not_offered_again():
-    """A re-run with --demo printed bootstrap's "case code 'OP-LATTICEWORK-26'
-    is already in use", and the closing card then offered the same command to
-    load it later (Beta 1 clean machine, 2026-10-07). Both installers ask the
-    database first, and a demo that is there counts as loaded."""
+    """A demo case that is already there is said so and not offered again: both installers ask the database
+    first, and a present demo counts as loaded (bootstrap would otherwise print "case code
+    'OP-LATTICEWORK-26' is already in use")."""
     sh = _read(INSTALL_SH)
     assert 'if [[ "$DEMO_PRESENT" == "1" ]]; then DEMO_DECISION=present; DEMO_LOADED=1; fi' in sh
     assert sh.index("DEMO_DECISION=present") < sh.index('if [[ "$DEMO_DECISION" == "ask" ]]; then')
@@ -633,10 +621,9 @@ def test_start_ps1_runs_launch_ps1_and_nothing_else():
 
 
 def test_every_command_install_sh_prints_for_a_script_runs_it_through_bash():
-    """An unzipped release has no execute bit (measured on the clean machine,
-    2026-10-07: release/install.sh -rw-r--r--). --skip-launch printed "$0
-    --port", which after `bash release/install.sh` is "release/install.sh
-    --port 8000" and answers "Permission denied"."""
+    """An unzipped release has no execute bit, so every command install.sh prints for a script runs it
+    through bash: `$0 --port` after `bash release/install.sh` is "release/install.sh --port 8000" and
+    answers "Permission denied"."""
     printed = [ln for _, ln in _printed_lines(INSTALL_SH)]
     bare = [ln.strip() for ln in printed
             if re.search(r"(?<![\w/.-])(\./)?release/\w+\.sh\b", ln)
@@ -689,10 +676,9 @@ def _packager_zip_block() -> str:
 
 
 def test_the_packager_names_every_zip_entry_itself_and_refuses_a_backslash():
-    """ZipFile.CreateFromDirectory stores backslashes under Windows PowerShell
-    5.1: the clean-machine zip of 2026-10-07 had them in all 1108 entries, and
-    unzip on Linux warned and exited 1. The packager names each entry with
-    forward slashes and checks the stored names before it reports success."""
+    """ZipFile.CreateFromDirectory stores backslashes under Windows PowerShell 5.1, and unzip on Linux warns
+    and exits 1. The packager names each entry with forward slashes and checks the stored names before it
+    reports success."""
     text = _read(SCRIPTS / "package_release.ps1")
     assert "CreateFromDirectory(" not in _code(SCRIPTS / "package_release.ps1")
     block = _packager_zip_block()
@@ -768,10 +754,8 @@ def test_start_here_gives_the_real_install_commands():
 
 
 def test_start_here_sends_linux_to_the_engine_page_the_installer_names():
-    """The Docker row linked Docker Desktop alone while install.sh sends Linux
-    to the Engine page, and its check passed on a clean Ubuntu before the
-    docker group step, which the installer then stopped on (Beta 1 clean
-    machine, 2026-10-07). Unzip is not on a stock Ubuntu server either."""
+    """The Docker row links the Engine page that install.sh sends Linux to, not Docker Desktop alone. Unzip
+    is not on a stock Ubuntu server either."""
     text = _read(START_HERE)
     row = next(ln for ln in text.splitlines() if ln.startswith("| **Docker**"))
     assert "https://docs.docker.com/engine/install/" in row
@@ -781,9 +765,8 @@ def test_start_here_sends_linux_to_the_engine_page_the_installer_names():
 
 
 def test_start_here_says_the_analysis_has_to_be_run():
-    """"Open Analysis. It singles out oriel" met an empty pane on the clean
-    machine (2026-10-07): it says "Run the analysis to compute ..." until Run
-    analysis is chosen, and then lists mer_florin first and oriel second."""
+    """"Open Analysis" must also say to choose Run analysis: the pane is empty ("Run the analysis to compute
+    ...") until it is run, and then lists mer_florin first and oriel second."""
     text = _flat(_read(START_HERE))
     assert "Open **Analysis** and choose **Run analysis**." in text
     assert "singles out" not in text
@@ -856,9 +839,8 @@ def test_install_md_no_longer_says_windows_hands_off_or_prints_the_command():
 
 
 def test_install_md_says_how_to_reach_a_console_installed_over_ssh():
-    """The API answers on 127.0.0.1 only, so a server installed over SSH (the
-    clean machine of 2026-10-07 had no desktop) is reached through a tunnel,
-    as INSTALL.md already said for MinIO and Mailpit."""
+    """The API answers on 127.0.0.1 only, so a server installed over SSH is reached through a tunnel, as
+    INSTALL.md already says for MinIO and Mailpit."""
     text = _flat(_read(INSTALL_MD))
     assert "`ssh -L 8000:127.0.0.1:8000 you@the-host`" in text
 

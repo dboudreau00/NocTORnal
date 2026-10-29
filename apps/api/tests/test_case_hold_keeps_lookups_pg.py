@@ -1,14 +1,12 @@
-"""A case-level hold, placed through the product, keeps the case's lookups
-(evidence-case-hold-unreachable, unit g44, 2026-10-03), and the due list leaves
-out a lookup above the reader (due-labelled-records, same date).
+"""A case-level hold, placed through the product, keeps the case's lookups, and the due list leaves out a
+lookup above the reader.
 
-`test_lookup_ledger_pg.py` holds the lookup purge to the case's hold with a
-raw UPDATE, which is all there was until the product could place one. This
-places it with `RetentionService.set_case_legal_hold`, the call behind
-`POST /retention/cases/{id}/legal-hold`, and lifts it the same way.
+`test_lookup_ledger_pg.py` holds the lookup purge to the case's hold with a raw UPDATE. This places it with
+`RetentionService.set_case_legal_hold`, the call behind `POST /retention/cases/{id}/legal-hold`, and lifts
+it the same way.
 
-The fetcher is a fake; nothing reaches a provider. **The email prefix is
-`g44lk-`.** Env-gated on DATABASE_URL.
+The fetcher is a fake; nothing reaches a provider. **The email prefix is `g44lk-`.** Env-gated on
+DATABASE_URL.
 """
 from __future__ import annotations
 

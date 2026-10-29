@@ -893,7 +893,7 @@ def test_an_approval_names_who_asked(conn, client):
     case_id, _ = _case(client, auth)
     # Two real entities the requester can read. A merge request is listed only to a viewer who sees
     # both nodes it names, and random ids name nothing, so the listing would hide this request as it
-    # hides any it cannot show. That hidden case is covered by test_review_g42_merge_visibility_pg;
+    # hides any it cannot show. That hidden case is covered by test_merge_visibility_pg;
     # this test is about the names on a request the viewer may see.
     graph = GraphWriteService(conn)
     source, target = (

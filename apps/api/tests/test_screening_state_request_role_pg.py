@@ -1,14 +1,14 @@
-"""The screening state and the blocking readiness probes, read as the request role (Beta 1.3).
+"""The screening state and the blocking readiness probes, read as the request role.
 
-`readiness.blocking_failures` and `blocking_state` run the four blocking probes on the CALLER's connection, which on
-a route is the request role. `prohibited_content_policy` adds a clause from `screening.state`, which counted the
-samples waiting to be preserved with `octet_length(s.data_key_ciphertext) > 0`, and that column has been sealed
-against the request role since 0180. The role was refused, `_guarded` turned the crash into a failing check, and a
-production console listed the policy as a blocking failure with the declaration set (`GET /admin/access`) and refused
-every manual poll with a 409 (`refuse_unready`). Found on a fresh production box on 2026-10-12, in Postgres's own log:
-"permission denied for table sample". In development and in the test suite the request connection is the owner, so
-nothing saw it. These read as the real role. The generated column the other readers use, `data_key_destroyed`, says the
-same thing. Account prefix `rlsscr-`.
+`readiness.blocking_failures` and `blocking_state` run the four blocking probes on the CALLER's
+connection, which on a route is the request role. `prohibited_content_policy` adds a clause from
+`screening.state`, which counts the samples waiting to be preserved; the column it reads is sealed against
+the request role (0180), so a count over `octet_length(s.data_key_ciphertext)` would be refused, `_guarded`
+would turn the crash into a failing check, and a production console would list the policy as a blocking
+failure with the declaration set (`GET /admin/access`) and refuse every manual poll with a 409
+(`refuse_unready`). In development and in the test suite the request connection is the owner, so nothing
+would show it: these read as the real role. The generated column the other readers use,
+`data_key_destroyed`, says the same thing. Account prefix `rlsscr-`.
 """
 from __future__ import annotations
 

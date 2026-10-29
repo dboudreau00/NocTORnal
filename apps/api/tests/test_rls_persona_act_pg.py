@@ -1,11 +1,9 @@
-"""Row-level security on the persona act queue (0156, A collector process,
-2026-10-02): the CUSTOM_ACT template.
+"""Row-level security on the persona act queue (0156): the CUSTOM_ACT template.
 
-The request role, bound to a user, sees an act only when that user asked for
-it and its label is within their case-less ceiling; may enqueue only their
-own PENDING act within that ceiling; and can claim, finish, forge or delete
-nothing, because it has no UPDATE or DELETE policy. Gated as every row
-security test is: the owner seeds, a SET ROLE connection is under test.
+The request role, bound to a user, sees an act only when that user asked for it and its label is within
+their case-less ceiling; may enqueue only their own PENDING act within that ceiling; and can claim,
+finish, forge or delete nothing, because it has no UPDATE or DELETE policy. Gated as every row security
+test is: the owner seeds, a SET ROLE connection is under test.
 """
 from __future__ import annotations
 
@@ -101,11 +99,9 @@ def test_the_request_role_enqueues_only_its_own_pending_act_within_its_ceiling(c
 
 
 def test_the_request_role_cannot_queue_an_act_that_never_expires(conn):
-    """(2026-10-03): the INSERT policy pinned the requester,
-    the label and PENDING, and left expires_at to the request role, so a
-    compromised API could queue an act the collector would run in ten
-    years. persona_act_window caps it at an hour from requested_at,
-    whatever the inserting role writes."""
+    """The INSERT policy pins the requester, the label and PENDING, and persona_act_window caps
+    expires_at at an hour from requested_at whatever the inserting role writes, so a compromised API
+    cannot queue an act the collector would run in ten years."""
     from noctornal_api.persona_acts import MAX_TTL_S, dedupe_key
 
     me = s.user(conn, "AMBER", prefix=PREFIX)
@@ -131,8 +127,7 @@ def test_the_request_role_cannot_queue_an_act_that_never_expires(conn):
 
 
 def test_the_request_role_queues_a_fresh_act_and_cannot_pre_fill_the_collectors_columns(conn):
-    """(2026-10-03): the request role could also write
-    attempts, claimed_by, claimed_at and result on its own PENDING row."""
+    """The request role cannot write attempts, claimed_by, claimed_at or result on its own PENDING row."""
     from psycopg.types.json import Jsonb
 
     from noctornal_api.persona_acts import dedupe_key

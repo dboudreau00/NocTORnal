@@ -1,25 +1,17 @@
 """The rate limiter's Redis must not evict its own meters.
 
-A GCRA meter is one key with a TTL. Under `allkeys-*` or `volatile-*`
-eviction, memory pressure removes keys the limiter still needs, and a
-removed meter is a meter that reads as empty: the next request from a
-subject that was being refused is admitted with a full burst. Nothing
-errors, nothing logs, the limiter just stops limiting whoever the cache
-happened to evict. `infra/docker-compose.yml` ran Redis with
-`allkeys-lru` until the Alpha 6 pre-release check (2026-09-23) and runs
-`noeviction` now, but an operator's own Redis can still evict (docs/16
-C8), and until 2026-09-02 nothing in the process checked: the operator
-had to know to look.
+A GCRA meter is one key with a TTL. Under `allkeys-*` or `volatile-*` eviction, memory pressure removes
+keys the limiter still needs, and a removed meter reads as empty: the next request from a subject that was
+being refused is admitted with a full burst. Nothing errors, nothing logs, the limiter just stops limiting
+whoever the cache happened to evict. `infra/docker-compose.yml` runs Redis with `noeviction`, but an
+operator's own Redis can still evict (docs/16 C8), so the process checks.
 
-`build_limiter` now reads `CONFIG GET maxmemory-policy` once at startup
-and warns in the same voice as the existing "RATE LIMITING IS DISABLED"
-line. A Redis that refuses CONFIG (most managed offerings disable it) is
-tolerated: the probe reports "unknown", never crashes, and never turns a
-startup into an outage.
+`build_limiter` reads `CONFIG GET maxmemory-policy` once at startup and warns in the same voice as the
+"RATE LIMITING IS DISABLED" line. A Redis that refuses CONFIG (most managed offerings disable it) is
+tolerated: the probe reports "unknown", never crashes, and never turns a startup into an outage.
 
-Pure: every test drives `RedisBackend` and `build_limiter` with a fake
-client, so the verdict is about the code and not about whichever Redis
-happens to be running.
+Pure: every test drives `RedisBackend` and `build_limiter` with a fake client, so the verdict is about the
+code and not about whichever Redis happens to be running.
 """
 from __future__ import annotations
 
@@ -32,15 +24,10 @@ from noctornal_api.ratelimit_redis import RedisBackend, is_evicting_policy
 
 LOGGER = "noctornal.ratelimit"
 
-# EVICTION_WARNING is IMPORTED from the module that emits it, not restated
-# here. Until 2026-09-02 this file kept its own copy of the literal. The
-# positive assertion below would still have caught a reworded warning, but
-# the three `EVICTION_WARNING not in text` assertions would not have: once
-# the copy and the emitter drifted, "the warning was not emitted" would be
-# satisfied by a warning that WAS emitted under its new wording. A negative
-# assertion against a stale literal is an assertion about nothing, which is
-# the quieter half of this codebase's "two internally consistent halves"
-# defect -- consistent with itself, and no longer about the product.
+# EVICTION_WARNING is IMPORTED from the module that emits it, not restated here. With a private copy of the
+# literal, the three `EVICTION_WARNING not in text` assertions would be satisfied by a warning that WAS
+# emitted under its new wording once the copy and the emitter drifted: a negative assertion against a
+# stale literal is an assertion about nothing.
 
 
 class FakeRedis:
@@ -188,8 +175,8 @@ def test_build_limiter_tolerates_a_redis_that_refuses_config(
 
 def test_build_limiter_does_not_probe_a_redis_that_did_not_answer_ping(
         monkeypatch, caplog, redis_env):
-    """The existing PING failure path is left exactly as it was: one error
-    line, no second probe against a backend already known to be down."""
+    """The PING failure path gives one error line and no second probe against a backend already known to
+    be down."""
     caplog.set_level(logging.INFO, logger=LOGGER)
     fake = FakeRedis("allkeys-lru", ping_ok=False)
     _build_with(monkeypatch, fake)

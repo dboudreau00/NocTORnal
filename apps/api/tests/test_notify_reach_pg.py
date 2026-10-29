@@ -1,24 +1,18 @@
-"""N1 (2026-09-02): a four-eyes request that reached nobody must say so,
-and a notify failure after the primary write must not turn a completed
-action into a 500.
+"""A four-eyes request that reached nobody must say so, and a notify failure after the primary write must
+not turn a completed action into a 500.
 
-Two defects of the same family -- a failure reported as the wrong thing:
+Two defects of the same family, a failure reported as the wrong thing:
 
-1. `notify_events.approval_requested` counted how many approvers it
-   reached and returned it; `ApprovalService.request` called it as a bare
-   statement and threw the count away, and `ApprovalOut` had no field for
-   it. A request nobody was told about was a 201 like any other, and dual
-   control was "just a merge button that does not work" -- the exact
-   failure the notification exists to prevent.
-2. `request()`, `decide()` and `BreakGlassService._alert` are notify
-   writes on an autocommit connection AFTER the primary row committed. A
-   failure there surfaced as a 500, which reads as "the request was not
-   made" when it was -- so the analyst raises it again (409: identical
-   request pending), or the break-glass analyst believes they were refused
-   access they in fact hold.
+1. `notify_events.approval_requested` counts how many approvers it reached; `ApprovalService.request`
+   returns it and `ApprovalOut` carries it. A request nobody was told about must not be a 201 like any
+   other, or dual control is "just a merge button that does not work".
+2. `request()`, `decide()` and `BreakGlassService._alert` are notify writes on an autocommit connection
+   after the primary row committed. A failure there must not surface as a 500, which reads as "the request
+   was not made" when it was, so the analyst raises it again (409: identical request pending), or the
+   break-glass analyst believes they were refused access they in fact hold.
 
-**The email prefix is `nreach-` and must stay unique** -- every fixture in
-this suite cleans up on an email pattern.
+The email prefix is `nreach-` and must stay unique: every fixture in this suite cleans up on an email
+pattern.
 
 Env-gated on DATABASE_URL.
 """
@@ -56,7 +50,7 @@ def conn():
         c.execute(f"DELETE FROM iam.break_glass WHERE user_id IN {sub}")
         c.execute(f"DELETE FROM core.approval_request WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM iam.case_assignment WHERE case_id IN {csub}")
-        # The entities a merge request names (2026-10-03), with their claims.
+        # The entities a merge request names, with their claims.
         c.execute("ALTER TABLE core.assertion DISABLE TRIGGER USER")
         try:
             c.execute(f"DELETE FROM core.assertion WHERE case_id IN {csub}")
@@ -99,29 +93,18 @@ def _make_user(conn, *, clearance="AMBER", global_roles=()):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
-    is off in these tests.
+    """A signed-in caller, minted as `scripts/bootstrap.py session` does: the account by email, then
+    `SessionService` against the store the API validates against.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Unbound (no address, no User-Agent); only `NOCTORNAL_SESSION_STRICT_BINDING` refuses that, and it is off
+    here. It skips `POST /auth/login`, which answers 204 with the token only in `__Host-session`, and
+    TOTP codes are single-use within a 30-second step.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as the real mint sites pass: step-up gated routes refuse a session without it.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token
@@ -162,9 +145,8 @@ def _payload(source: str, target: str) -> dict:
 
 
 def _request(client, token, case_id):
-    # Two entities of the case the requester may merge: a request naming an
-    # id that is missing or above the requester is refused since the beta
-    # review (http_ui-011, 2026-10-03), so these tests name real ones.
+    # Two entities of the case the requester may merge: a request naming an id that is missing or above the
+    # requester is refused, so these tests name real ones.
     a = _node(client, token, case_id, f"reach-{uuid4().hex[:6]}-a")
     b = _node(client, token, case_id, f"reach-{uuid4().hex[:6]}-b")
     return client.post(f"/api/v1/cases/{case_id}/approvals", headers=_auth(token),
@@ -177,10 +159,8 @@ def _request(client, token, case_id):
 # ---------------------------------------------------------------------------
 
 def test_a_request_that_reached_nobody_is_201_with_zero_reach_and_a_warning(conn, client):
-    """The only other assignee holds graph.merge but is cleared BELOW the
-    case, so suppression 2 drops the notification at write time. Before
-    N1 that was a 201 indistinguishable from one that reached three
-    approvers."""
+    """The only other assignee holds graph.merge but is cleared below the case, so suppression 2 drops the
+    notification at write time. The request is still a 201, but the response says it reached nobody."""
     owner, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
     token = _session(conn, email)
     case_id = _create_case(client, token)
@@ -284,12 +264,10 @@ def test_a_failed_decision_notification_is_200_not_500(conn, client, monkeypatch
 # ---------------------------------------------------------------------------
 
 def test_a_failed_break_glass_alert_does_not_unmake_the_grant(conn, monkeypatch):
-    """Since 2026-09-01 a live grant RAISES the caller's effective
-    clearance. A 500 after the grant row committed tells the analyst they
-    were refused access they now hold -- at 3am, in the incident the
-    control exists for. The grant is still in the unreviewed queue, which
-    is the durable half of the control; the alert is the loud half, and a
-    failure to be loud is logged, not converted into a lie."""
+    """A live grant raises the caller's effective clearance. A 500 after the grant row committed tells the
+    analyst they were refused access they now hold, at 3am, in the incident the control exists for. The grant
+    is still in the unreviewed queue, which is the durable half of the control; the alert is the loud half,
+    and a failure to be loud is logged, not converted into a lie."""
     from noctornal_api.break_glass import BreakGlassService
 
     officer, _, _ = _make_user(conn, global_roles=("SECURITY_OFFICER",))

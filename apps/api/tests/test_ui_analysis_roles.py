@@ -1,12 +1,10 @@
-"""The Analysis pane's Roles card: CONCOR positions (F1, 2026-09-24).
+"""The Analysis pane's Roles card: CONCOR positions.
 
-Behavioural where it matters: the shipped loader and renderer run under
-node with the fake DOM of `test_ui_analysis_pane.py`, whose prelude and
-extractors this file imports. The rule `test_ui_case_switch_and_dates.py`
-holds for every loader (a case token, and a reply for a case left is
-dropped) is asserted here for `loadConcor` rather than by editing that
-file's list. The server halves are `test_blockmodel.py`,
-`test_concor_pg.py` and `test_concor_http_pg.py`.
+Behavioural where it matters: the shipped loader and renderer run under node with the fake DOM of
+`test_ui_analysis_pane.py`, whose prelude and extractors this file imports. The rule
+`test_ui_case_switch_and_dates.py` holds for every loader (a case token, and a reply for a case left is
+dropped) is asserted here for `loadConcor` rather than by editing that file's list. The server halves
+are `test_blockmodel.py`, `test_concor_pg.py` and `test_concor_http_pg.py`.
 
 Pure: no database. The node halves skip when node is not installed.
 """

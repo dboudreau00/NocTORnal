@@ -1,30 +1,24 @@
-"""The ingest and collection routes behind the Feeds review (ux12-feeds,
-2026-09-22, fixed 2026-09-23).
+"""The ingest and collection routes behind the Feeds review.
 
-The console half is `test_feeds_review_ui.py`. This file holds the server
-to what the pane now relies on, and to the refusals that come with it:
+The console half is `test_feeds_review_ui.py`. This file holds the server to what the pane relies on, and
+to the refusals that come with it:
 
-- a record scores against ITS case's watches, names the selector and the
-  watch that earned each term, and hides a watch on a case the caller is
-  not on;
-- a parse scores what it stores and tells the case owner about a new
-  watched-selector hit without putting the selector in the summary;
-- the queue's facets count the whole queue whatever the filter, and carry
-  the badge count;
-- triage decisions are the record's state, audited, refused on a closed
-  case; the operator attaches a quarantined record into a case its team
-  works; a category correction keeps the classifier's output and never
-  brings an expiry forward;
-- folded copies say which feeds sent them, counted per feed, with the
-  copies the caller cannot see left unnamed;
-- the queue picks its page before any per-row lookup, and a scoring pass
-  reads each case's watch list once;
-- dead letters narrow to one case, carry their key, and a replay is gated
-  by what the dead letter is, audited, and refuses bad JSON as a 400; the
-  listing says per row whether a replay would be taken, and the operator
-  replays an unattached fragment into quarantine and nowhere else;
-- keys revoke once, with a 404 for nothing to revoke, and the high-risk
-  categories need a compartment at issue;
+- a record scores against ITS case's watches, names the selector and the watch that earned each term, and
+  hides a watch on a case the caller is not on;
+- a parse scores what it stores and tells the case owner about a new watched-selector hit without putting
+  the selector in the summary;
+- the queue's facets count the whole queue whatever the filter, and carry the badge count;
+- triage decisions are the record's state, audited, refused on a closed case; the operator attaches a
+  quarantined record into a case its team works; a category correction keeps the classifier's output and
+  never brings an expiry forward;
+- folded copies say which feeds sent them, counted per feed, with the copies the caller cannot see left
+  unnamed;
+- the queue picks its page before any per-row lookup, and a scoring pass reads each case's watch list once;
+- dead letters narrow to one case, carry their key, and a replay is gated by what the dead letter is,
+  audited, and refuses bad JSON as a 400; the listing says per row whether a replay would be taken, and the
+  operator replays an unattached fragment into quarantine and nowhere else;
+- keys revoke once, with a 404 for nothing to revoke, and the high-risk categories need a compartment at
+  issue;
 - the due list says whether Poll now would be refused.
 
 **The email prefix is `frv-` and must stay unique.**
@@ -247,8 +241,7 @@ def test_a_parse_tells_the_owner_about_a_new_hit_without_the_selector_in_the_sum
         "a selector reached a line that may leave the building by email")
     assert "notify-me.example" in body and "notify-watch" in body
     assert "1 feed record matches" in subject
-    # Counts agree in every line, the pronoun included (fix round,
-    # 2026-09-23: the summary said "1 feed record ... see them").
+    # Counts agree in every line, the pronoun included.
     assert "see it at the top" in summary and "see them" not in summary
     assert "and is at the top" in body
 
@@ -264,10 +257,9 @@ def test_a_parse_tells_the_owner_about_a_new_hit_without_the_selector_in_the_sum
 
 
 def test_a_scoring_pass_reads_each_cases_watch_list_once(conn, client):
-    """Fix round (2026-09-23): `parse_batch` scores every record it stores,
-    and the first version read the case's watch list again for each one,
-    so a stealer log of thousands of records asked the same question
-    thousands of times. A pass now reads it once per case."""
+    """`parse_batch` scores every record it stores and reads the case's watch list once per case, not once
+    per record: a stealer log of thousands of records would otherwise ask the same question thousands of
+    times."""
     from noctornal_api.ingest import IngestService
     owner, auth = _user(conn, roles=("CASE_OWNER",))
     case_id = _case(client, auth)
@@ -318,13 +310,11 @@ def _plan_filters(node) -> list[str]:
 
 
 def test_the_queue_picks_its_page_before_it_looks_anything_up(conn):
-    """Fix round (2026-09-23). The first version joined the folded-copy
-    lookup to every record in scope before the LIMIT, and `ingest.record`
-    has no index on `duplicate_of`, so each record's copies were a scan of
-    the whole table: a case of 50,000 records had not answered after 212
-    seconds. The page is now chosen first and the copies of the whole page
-    are counted in one pass, so no plan node filters `ingest.record` by
-    `duplicate_of = r.id` (one scan per row) any more."""
+    """The queue picks its page before any per-row lookup. `ingest.record` has no index on `duplicate_of`,
+    so joining the folded-copy lookup to every record in scope before the LIMIT scans the whole table per
+    record (a case of 50,000 records had not answered after 212 seconds). The page is chosen first and the
+    copies of the whole page are counted in one pass, so no plan node filters `ingest.record` by
+    `duplicate_of = r.id` (one scan per row)."""
     from noctornal_api.http.routers.ingest import (
         _PAGE_TAIL,
         _TRIAGE_STATE,
@@ -448,8 +438,8 @@ def test_a_closed_case_refuses_a_triage_write(conn, client):
     r = client.post(f"/api/v1/ingest/records/{_records(conn, batch)[0]}/triage",
                     headers=auth, json={"state": "TRIAGED"})
     assert r.status_code == 409, r.text
-    # g13's one refusal, not a second copy of it: the title the console
-    # turns read-only on, and an audit row (merged 2026-09-24).
+    # The same refusal as every other case write, not a second copy of it: the title the console turns
+    # read-only on, and an audit row.
     assert r.json()["title"] == "Case is read-only", r.json()
     row = conn.execute(
         """SELECT outcome, detail FROM audit.event
@@ -568,12 +558,10 @@ def test_folded_copies_say_which_feeds_sent_them(conn, client):
 
 def test_copies_are_counted_per_feed_and_unseen_ones_are_left_unnamed(
         conn, client):
-    """The fix round (2026-09-23): the console called copies "all from
-    this feed: a resend, not a second source" whenever the READABLE ones
-    shared the row's feed. The server now counts readable copies per feed
-    and marks the row's own, so resends, other feeds and unseen copies can
-    be said apart; a copy in a case the reader is not on is counted in the
-    total and named nowhere."""
+    """The server counts readable copies per feed and marks the row's own, so resends, other feeds and
+    unseen copies can be said apart: the console must not call copies "all from this feed: a resend, not a
+    second source" merely because the readable ones share the row's feed. A copy in a case the reader is not
+    on is counted in the total and named nowhere."""
     owner, auth = _user(conn, roles=("CASE_OWNER",))
     case_id = _case(client, auth)
     nonce = uuid4().hex
@@ -752,13 +740,11 @@ def test_a_watch_notification_kind_is_registered():
 
 
 def test_replay_is_offered_only_where_the_route_would_take_it(conn, client):
-    """Fix round (2026-09-23). Every reader was offered Repair and replay
-    and a REVIEWER met a 403 inside the form; and an unattached dead
-    letter, listed only to the operator, could be replayed only by an
-    account holding the analyst's verb as well, so on a deployment that
-    keeps those duties apart nobody could replay it. The listing now says
-    per row whether the route would take a replay, and the operator
-    replays an unattached fragment into quarantine and nowhere else."""
+    """Replay is offered only where the route would take it. A REVIEWER must not be offered Repair and
+    replay and then meet a 403 inside the form; and an unattached dead letter, listed only to the operator,
+    must be replayable without the operator also holding the analyst's verb, or on a deployment that keeps
+    those duties apart nobody could replay it. The listing says per row whether the route would take a
+    replay, and the operator replays an unattached fragment into quarantine and nowhere else."""
     owner, auth = _user(conn, roles=("CASE_OWNER",))
     case_id = _case(client, auth)
     _ingest(conn, owner, None, case_id=case_id,

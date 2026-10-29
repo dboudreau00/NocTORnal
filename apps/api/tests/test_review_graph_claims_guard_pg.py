@@ -1,25 +1,22 @@
-"""Invariant 5 at the database: a recorded claim is never rewritten, never
-un-retracted and never deleted by the runtime roles
-(graph-assertion-claims-mutable-by-request-role, review 2026-10-03,
-migration 0135).
+"""Invariant 5 at the database: a recorded claim is never rewritten, never un-retracted and never deleted
+by the runtime roles (migration 0135).
 
-Until 0135 the request role held UPDATE and DELETE on `core.assertion`
-(0060, and 0108 for the system role), so one statement on its connection
-could re-grade a claim, rewrite its rationale, un-retract a withdrawn
-source or delete a claim that was not an element's last, with no audit row.
-"Stamps `retracted_at` once from NULL" was a convention of `graph.py`.
+The request role held UPDATE and DELETE on `core.assertion` (0060, and 0108 for the system role), so one
+statement on its connection could re-grade a claim, rewrite its rationale, un-retract a withdrawn source or
+delete a claim that was not an element's last, with no audit row. "Stamps `retracted_at` once from NULL"
+was a convention of `graph.py`; 0135 makes it a privilege and a trigger.
 
 What these tests hold, in both directions:
 
-- the runtime roles cannot UPDATE any claim column and cannot DELETE, by
-  privilege, whatever the statement;
-- the five mark columns still take their one write from NULL, for both
-  roles, and nothing takes it back (a trigger, which holds the owner too);
-- every legitimate write path still works as the request role and as the
-  system role: create, add a claim, correct, retract once, supersede once;
+- the runtime roles cannot UPDATE any claim column and cannot DELETE, by privilege, whatever the
+  statement;
+- the five mark columns still take their one write from NULL, for both roles, and nothing takes it back (a
+  trigger, which holds the owner too);
+- every legitimate write path still works as the request role and as the system role: create, add a
+  claim, correct, retract once, supersede once;
 - TRUNCATE is refused;
-- the migration's grant text is idempotent and replayed by
-  `scripts/runtime_roles.py ensure`, and the migration round-trips.
+- the migration's grant text is idempotent and replayed by `scripts/runtime_roles.py ensure`, and the
+  migration round-trips.
 
 Email prefix `g43a-`. Gated on DATABASE_URL and NOCTORNAL_APP_DB_ROLE.
 """
@@ -123,8 +120,8 @@ def test_a_runtime_role_can_write_only_the_mark_columns_of_a_claim(owner, role):
 
 
 def test_the_request_role_cannot_rewrite_any_claim_column(owner, world):
-    """The review's reproduction, column by column. `SET c = c` is enough:
-    the privilege is checked on the column named, not on the value."""
+    """Column by column. `SET c = c` is enough: the privilege is checked on the column named, not on the
+    value."""
     app = g.bound(owner, world["analyst"])
     try:
         assert app.execute("SELECT current_user").fetchone()[0] == s.APP_ROLE
@@ -137,7 +134,7 @@ def test_the_request_role_cannot_rewrite_any_claim_column(owner, world):
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 app.execute(f"UPDATE core.assertion SET {column} = {column} "
                             f"WHERE id = %s", (world["retracted"],))
-        # The review's own statement, whole.
+        # Un-retracting, in one statement.
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             app.execute(
                 """UPDATE core.assertion
@@ -286,7 +283,7 @@ def test_an_update_that_leaves_the_marks_alone_is_not_refused(owner, world):
                   "WHERE id = %s", (world["retracted"],))
 
 
-# --- the marks: coherent, for a runtime role (the verifier's round) ----------
+# --- the marks: coherent, for a runtime role ----------------------------------
 
 def _runtime(owner, world, who):
     return (g.bound(owner, world["analyst"]) if who == "app" else g.worker())
@@ -294,9 +291,8 @@ def _runtime(owner, world, who):
 
 @pytest.mark.parametrize("who", ["app", "system"])
 def test_a_runtime_role_cannot_retract_without_its_author_and_its_reason(owner, world, who):
-    """The verifier's reproduction: `UPDATE core.assertion SET retracted_at =
-    now() WHERE id = <live claim>` stamped a retraction with no author and no
-    reason, and nothing in the audit log. The time alone no longer passes."""
+    """`UPDATE core.assertion SET retracted_at = now() WHERE id = <live claim>` must not stamp a
+    retraction with no author and no reason, and nothing in the audit log. The time alone does not pass."""
     conn = _runtime(owner, world, who)
     try:
         live = _live_claim(owner, world)
@@ -357,10 +353,9 @@ def test_a_request_role_retracts_as_the_person_signed_in_and_nobody_else(owner, 
 
 @pytest.mark.parametrize("who", ["app", "system"])
 def test_a_runtime_role_cannot_supersede_a_claim_with_one_that_does_not_replace_it(owner, world, who):
-    """The verifier's reproduction: `superseded_by` could name a claim on
-    another element, the claim itself, or any other claim, hiding a live
-    claim with no replacement. It must name the claim whose `supersedes_id`
-    points back at this one."""
+    """`superseded_by` cannot name a claim on another element, the claim itself, or any other claim,
+    hiding a live claim with no replacement. It must name the claim whose `supersedes_id` points back at
+    this one."""
     from noctornal_api.graph import AssertionInput, GraphWriteService
     conn = _runtime(owner, world, who)
     try:
@@ -530,8 +525,7 @@ def test_the_http_retract_still_returns_204_for_a_member_and_409_the_second_time
 
 def test_the_migration_names_what_the_runtime_role_keeps():
     m = _migration("0135")
-    # follows whatever precedes it in the final chain (0131 when it was
-    # written), and 0136 and 0137 follow it
+    # follows whatever precedes it in the final chain, and 0136 and 0137 follow it
     assert m.down_revision < "0135"
     assert (_migration("0136").down_revision, _migration("0137").down_revision) == (
         "0135", "0136")
@@ -588,10 +582,8 @@ def test_runtime_roles_ensure_replays_the_grant(owner):
 
 
 def test_runtime_roles_finds_the_guard_by_name_so_a_renumbering_cannot_break_the_replay():
-    """The verifier's observation: `ensure` named revision 0135 twice, so
-    renumbering it when the branches are merged would have broken the
-    replay. It loads the guard by its file name and reads the revision
-    from it."""
+    """`ensure` must not name revision 0135 twice, or renumbering it when branches are merged would break
+    the replay. It loads the guard by its file name and reads the revision from it."""
     import sys
     sys.path.insert(0, str(SCRIPTS))
     try:

@@ -1,18 +1,14 @@
-"""A hostile or broken model endpoint cannot wedge the pass (F6.2,
-2026-09-25).
+"""A hostile or broken model endpoint cannot wedge the pass.
 
-The probe: an answer carrying a 400-digit integer raised
-OverflowError in the parser, and a body nested 100,000 deep raised
-RecursionError in the JSON decoder. Neither was caught, so the pass ended
-after EMBED_BATCH_SENT with no FAILED row and no backoff: every pass sent
-and audited the same newest-first batch again and never reached the rest
-of the queue, and /similar answered 500. Now such an answer fails its
-batch like any bad response (FAILED endpoint_bad_response, backoff,
-EMBED_BATCH_FAILED), anything else that escapes the embedder fails the
-batch as embed_error, and a route answers with a sentence.
+An answer carrying a 400-digit integer (OverflowError in the parser) or a body nested 100,000 deep
+(RecursionError in the JSON decoder) must not escape uncaught: the pass would end after EMBED_BATCH_SENT
+with no FAILED row and no backoff, every pass would send and audit the same newest-first batch again and
+never reach the rest of the queue, and /similar would answer 500. Such an answer fails its batch like any
+bad response (FAILED endpoint_bad_response, backoff, EMBED_BATCH_FAILED), anything else that escapes the
+embedder fails the batch as embed_error, and a route answers with a sentence.
 
-Against a stub model server on loopback, through the real development
-route. Env-gated on DATABASE_URL. Prefix `eha-`.
+Against a stub model server on loopback, through the real development route. Env-gated on DATABASE_URL.
+Prefix `eha-`.
 """
 from __future__ import annotations
 

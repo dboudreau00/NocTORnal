@@ -1,17 +1,14 @@
-"""Revisions 0139 to 0142 (unit g44, 2026-10-03): each has a real downgrade, and
-upgrade, downgrade, upgrade restores the same catalogue.
+"""Revisions 0139 to 0142: each has a real downgrade, and upgrade, downgrade, upgrade restores the same
+catalogue.
 
-The frozen SQL of each revision is run inside ONE transaction that is rolled
-back, so the suite's own database is never left half way and a round trip
-does not depend on the data other suites left behind. Where a downgrade
-stops by design (0141 restores a UNIQUE key over exhibits that the revision
-exists to allow two of, and a database holding two exhibits of one file in
-one case cannot take it back), that refusal is asserted and the round trip
-carries on without it.
+The frozen SQL of each revision is run inside ONE transaction that is rolled back, so the suite's own
+database is never left half way and a round trip does not depend on the data other suites left behind.
+Where a downgrade stops by design (0141 restores a UNIQUE key over exhibits that the revision exists to
+allow two of, and a database holding two exhibits of one file in one case cannot take it back), that
+refusal is asserted and the round trip carries on without it.
 
-A real `alembic downgrade` to below 0139 then `upgrade head` is the job of
-`test_exhibit_production_pg.py`'s round trips and of CI's head, base, head
-step; this file covers what is specific to these four.
+A real `alembic downgrade` to below 0139 then `upgrade head` is the job of `test_exhibit_production_pg.py`'s
+round trips and of CI's head, base, head step; this file covers what is specific to these four.
 """
 from __future__ import annotations
 
@@ -21,7 +18,7 @@ from pathlib import Path
 import psycopg
 import pytest
 
-import g44_support as g
+import evidence_retention_support as g
 
 pytestmark = g.GATED
 

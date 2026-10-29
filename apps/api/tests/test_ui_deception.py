@@ -1,17 +1,13 @@
-"""The Deception pane's console invariants (docs/19, review of 2026-09-22).
+"""The Deception pane's console invariants (docs/19).
 
-Pure, like `test_ui_invariants.py` beside it: these read the shipped static
-assets and the service source, with no database and no browser. They live
-in their own file so the pane's rules sit together and read as one account
-of what the review found:
+Pure, like `test_ui_invariants.py` beside it: these read the shipped static assets and the service
+source, with no database and no browser. They live in their own file so the pane's rules sit together:
 
-  * detail-cards-invisible: both detail cards rested at opacity 0 and waited
-    for a class nothing on their path added;
-  * body-url-not-defanged: the email body showed the sender's live URL;
-  * notes-never-rendered: capture and call notes were returned and dropped;
-  * stale-detail-on-case-switch: an open card survived a case switch;
-  * email-durable-origin-missing: the BEC row showed only headers the
-    sender typed.
+  * both detail cards are visible: they must not rest at opacity 0 waiting for a class nothing adds;
+  * the email body shows the sender's URL defanged;
+  * capture and call notes are rendered;
+  * an open card does not survive a case switch;
+  * the BEC row shows the durable origin, not only headers the sender typed.
 """
 from __future__ import annotations
 
@@ -175,11 +171,9 @@ def test_the_email_body_is_drawn_only_from_the_defanged_runs():
 
 
 def test_no_free_text_is_read_in_its_fanged_form():
-    """Every string a person typed that the pane shows (the body, an
-    analyst's note, the subject, the page title, the display name) is read
-    in the server's defanged form. The verifier of the 2026-09-22 notes fix
-    put "Victim clicked https://..." in a note and got it on screen live,
-    under help text promising every URL in the pane is defanged."""
+    """Every string a person typed that the pane shows (the body, an analyst's note, the subject, the
+    page title, the display name) is read in the server's defanged form, so a URL typed into a note is
+    not shown live under help text promising every URL in the pane is defanged."""
     code = _code(_region())
     raw = re.findall(r"\.(?:body_text|note|subject|page_title"
                      r"|header_from_display)\b(?!_)", code)
@@ -236,9 +230,8 @@ def test_an_open_deception_card_is_closed_and_emptied_on_a_case_switch():
 
 
 def test_the_deception_lists_are_emptied_on_a_case_switch():
-    """The verifier of the 2026-09-22 fix found the LISTS survived: selecting
-    Deception on case B reloads only the subtab on screen, so A's rows and
-    notes sat under B's header until B's read returned, and on the other two
+    """The LISTS are emptied too: selecting Deception on case B reloads only the subtab on screen, so
+    A's rows and notes would sit under B's header until B's read returned, and on the other two
     subtabs until somebody opened them."""
     region = _code(_region())
     m = re.search(r"onCaseSwitch\(\(\) => \{(.*?)\}\);", region, re.S)
@@ -267,8 +260,7 @@ def test_a_refusal_does_not_become_the_next_cases_empty_state():
     js = _js()
     for kind, empty in (("cap", "dcp-cap-empty"), ("eml", "dcp-eml-empty"),
                         ("call", "dcp-call-empty")):
-        # `hidden` since ux17-failure:loading-shows-empty-claims
-        # (2026-09-23): the line is shown only after a read has answered.
+        # `hidden`: the line is shown only after a read has answered.
         text = re.search(r'<p id="' + empty
                          + r'" class="empty" hidden>([^<]*)</p>', html)
         assert text, f"#{empty} changed shape"
@@ -324,10 +316,8 @@ def test_the_email_row_puts_the_proven_origin_beside_the_chosen_headers():
         assert f"m.{key}" in proved, f"the proven block lost {key}"
     # Unknown is said as unknown, never promoted to confirmed.
     assert "boundary_confirmed !== true" in proved
-    # The envelope sender sits in the proven block because the relay
-    # recorded it, but the sender chose it: without a passing SPF check the
-    # block says so on its face, not only in a tooltip (the verifier of the
-    # 2026-09-22 fix).
+    # The envelope sender sits in the proven block because the relay recorded it, but the sender chose
+    # it: without a passing SPF check the block says so on its face, not only in a tooltip.
     assert "m.spf_result !== 'PASS'" in proved
     assert "'envelope unauthenticated: SPF '" in proved
 

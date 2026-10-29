@@ -1,22 +1,17 @@
-"""A production boot refuses a request DSN that names the schema owner or a
-superuser (infra-4, 2026-10-03).
+"""A production boot refuses a request DSN that names the schema owner or a superuser.
 
-Row-level security does not bind the owner, and an owner may ALTER TABLE ...
-DISABLE TRIGGER on the audit and custody chains, so a request connection that
-carries either role switches both off for every analyst request while the
-register shows a running deployment. The system connection already refused
-exactly that role (`db.connect_system`); the request one accepted it, and the
-only signal was a readiness row that is not blocking. These are the boot half,
-which reads names from the environment. The half that reads the catalog is in
-`test_g48_request_role_pg.py`.
+Row-level security does not bind the owner, and an owner may ALTER TABLE ... DISABLE TRIGGER on the audit
+and custody chains, so a request connection that carries either role switches both off for every analyst
+request while the register shows a running deployment. The system connection refuses exactly that role
+(`db.connect_system`); the request one must too, since a readiness row that is not blocking is the only
+other signal. These are the boot half, which reads names from the environment. The half that reads the
+catalog is in `test_request_role_production_refusals_pg.py`.
 
 Pure: every rule reads a dictionary, as test_config_boot.py does.
 
-Merged with docs/17 F52: several of these put the owner's DSN in the process's
-environment to say who the owner is, which is the layout from before F52. A
-runtime process holding that DSN is now refused on its own account (held in
-test_owner_credential_separation.py), so these read the problems about the
-request role with that one set aside.
+Several of these put the owner's DSN in the process's environment to say who the owner is. A runtime
+process holding that DSN is refused on its own account (held in test_owner_credential_separation.py), so
+these read the problems about the request role with that one set aside.
 """
 from __future__ import annotations
 
@@ -44,9 +39,9 @@ def test_a_request_dsn_naming_the_migration_dsns_role_is_refused():
 
 
 def test_the_refusal_says_what_to_do_when_the_least_privilege_role_does_not_exist_yet():
-    """It used to say only 'point it at noctornal_app', which on a volume
-    initialised without NOCTORNAL_APP_DB_PASSWORD is a role that does not
-    exist, with nothing in the refusal or the README to say what then (2026-10-03)."""
+    """The refusal says what to do when the least-privilege role does not exist yet: pointing at
+    'noctornal_app' is not enough on a volume initialised without NOCTORNAL_APP_DB_PASSWORD, where that role
+    does not exist."""
     env = _production()
     env["NOCTORNAL_MIGRATION_DATABASE_URL"] = OWNER_DSN
     env["DATABASE_URL"] = OWNER_DSN
@@ -76,11 +71,9 @@ def test_the_owner_and_the_cluster_superuser_by_their_usual_names_are_refused(ro
 
 
 def test_the_least_privilege_role_boots():
-    """The other direction, and the one that matters: the role this
-    repository's own compose file names starts, with the owner's DSN blank
-    as compose leaves it on a runtime service (docs/17 F52). With the owner's
-    DSN beside it, as the layout from before F52 had it, the only refusal is
-    that one, and nothing is said about the request role."""
+    """The other direction, and the one that matters: the role this repository's own compose file names
+    starts, with the owner's DSN blank as compose leaves it on a runtime service (docs/17). With the owner's
+    DSN beside it, the only refusal is that one, and nothing is said about the request role."""
     env = _production()
     env["NOCTORNAL_MIGRATION_DATABASE_URL"] = ""
     env["POSTGRES_USER"] = "noctornal"
@@ -108,8 +101,7 @@ def test_none_of_it_applies_outside_production():
 
 
 def test_the_verifier_reproduction_from_the_review_is_closed():
-    """scratchpad/review/verify_env_probe.py: a valid production environment
-    with DATABASE_URL set to the owner DSN had 0 refusals."""
+    """A valid production environment with DATABASE_URL set to the owner DSN gets one refusal, not zero."""
     env = _production()
     env["NOCTORNAL_MIGRATION_DATABASE_URL"] = "postgresql+psycopg://noctornal:Zq8wLm@db:5432/noctornal"
     env["DATABASE_URL"] = env["NOCTORNAL_MIGRATION_DATABASE_URL"]

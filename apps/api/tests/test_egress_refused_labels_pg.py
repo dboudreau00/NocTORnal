@@ -1,14 +1,10 @@
-"""Refused persona rows carry what the reader labels them by (S2,
-2026-09-25).
+"""Refused persona rows carry what the reader labels them by.
 
-A refusal raised after the proxy had tied the destination to a source
-(above_route_ceiling, port_not_allowed, onion_not_allowed, a passive feed's
-port) once wrote the host in clear with no source, run or profile, so the
-connection log kept showing it at its insert-time label after the source was
-raised, and to people without the source's compartments. Every persona
-refusal now carries the decision so far, the reader takes a row's source
-from its run when the row names none, and a persona row with nothing to be
-labelled by never shows a host.
+A refusal raised after the proxy had tied the destination to a source (above_route_ceiling,
+port_not_allowed, onion_not_allowed, a passive feed's port) carries the decision so far. Otherwise the
+connection log would show the host at its insert-time label after the source was raised, and to people
+without the source's compartments. The reader takes a row's source from its run when the row names none,
+and a persona row with nothing to be labelled by never shows a host.
 
 A real proxy on an ephemeral loopback port. Env-gated on DATABASE_URL.
 """

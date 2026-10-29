@@ -1,25 +1,19 @@
-"""The selector index follows the graph (graph-selector-index-drift, review
-2026-10-03).
+"""The selector index follows the graph.
 
-`core.selector` is the join key of entity resolution (invariant 9): a
-selector search finds the entity that carries a value, and a strong value
-held by two entities is surfaced as a merge lead. Only `create_node` wrote
-it, so after that:
+`core.selector` is the join key of entity resolution (invariant 9): a selector search finds the entity
+that carries a value, and a strong value held by two entities is surfaced as a merge lead. Every write
+that changes a selector must keep it current:
 
-1. correcting the label of a SELECTOR, COMMS_ACCOUNT or WALLET entity left
-   the index on the old value and the new value unindexed;
-2. a retired entity kept its selector row, so recreating the entity
-   recorded nothing against the live one and answered `selector_owner_id`
-   null;
-3. accepting a NODE proposal that named a selector type never indexed it:
-   the index stayed empty, selector search returned null, and a strong
-   duplicate was never a lead.
+1. correcting the label of a SELECTOR, COMMS_ACCOUNT or WALLET entity moves the index to the new value;
+2. a retired entity does not keep its selector row, so recreating the entity records against the live one
+   and answers a `selector_owner_id`;
+3. accepting a NODE proposal that names a selector type indexes it, so selector search finds it and a
+   strong duplicate is a lead.
 
-Both directions are held: the index follows each of those writes, and
-nothing the caller could not do before is widened. A merge lead names only
-an entity the caller can see, and a hidden one reads exactly as no owner
-(status, body, wording); an index row owned by a retired entity the caller
-cannot see is never taken over.
+Both directions are held: the index follows each of those writes, and nothing the caller could not do
+before is widened. A merge lead names only an entity the caller can see, and a hidden one reads exactly as
+no owner (status, body, wording); an index row owned by a retired entity the caller cannot see is never
+taken over.
 
 Email prefix `g43c-`. Gated on DATABASE_URL and NOCTORNAL_APP_DB_ROLE.
 """
@@ -94,7 +88,6 @@ def _digits() -> str:
 # --- 1. a corrected label ----------------------------------------------------
 
 def test_a_corrected_selector_label_moves_the_index_with_it(w):
-    """graph_poc3 C4."""
     old, new = _digits(), _digits()
     node = _create(w, old)["id"]
     assert _held(w, node) == [("DISCORD_ID", old)]
@@ -195,8 +188,8 @@ def test_correcting_an_entity_that_is_not_a_selector_writes_no_index(w):
 
 
 def test_an_accepted_selector_entity_is_indexed_when_its_label_is_corrected(w):
-    """A Triage entity whose value was never indexed (accepted before this
-    fix): correcting its label records the new value against it."""
+    """A Triage entity whose value was never indexed: correcting its label records the new value against
+    it."""
     from noctornal_api.graph import AssertionInput, GraphWriteService
     node = GraphWriteService(w["owner"]).create_node(
         case_id=w["case"], node_type="SELECTOR", label="old.mail@example.org",
@@ -233,8 +226,8 @@ def test_a_retired_entity_lets_go_of_its_selector_and_the_new_one_holds_it(w):
 
 
 def test_a_row_still_owned_by_a_retired_entity_is_taken_over(w):
-    """Data from before the fix: the owner is retired, the index row names
-    it. A live entity recording the same value takes the row."""
+    """The owner is retired, the index row still names it. A live entity recording the same value takes
+    the row."""
     from noctornal_api.selectors import SelectorStore
     value = _digits()
     first = _create(w, value)["id"]
@@ -276,8 +269,7 @@ def test_a_retired_owner_the_caller_cannot_see_is_not_taken_over(owner, w):
         row = SelectorStore(app).record(
             case_id=w["case"], selector_type="DISCORD_ID", raw_value=value,
             node_id=mine)
-        # keys are per labels since the selector-key fix (2026-10-03): the
-        # analyst's sighting is its own row at its own labels, and the hidden
+        # Keys are per labels: the analyst's sighting is its own row at its own labels, and the hidden
         # retired RED owner keeps the row it has, untouched and unread
         assert str(row.node_id) == str(mine)
     finally:
@@ -449,16 +441,15 @@ def test_a_restored_label_the_ontology_no_longer_accepts_is_still_restored(w):
     assert _held(w, node) == []
 
 
-# --- the verifier's round: a duplicate, and a retired owner ------------------
+# --- a duplicate, and a retired owner ----------------------------------------
 #
-# The index keeps its first owner and reports a second entity holding the same
-# value as a lead, so a duplicate owns no row. Three orders of events then
-# left the index, or the correction rules, behind the graph.
+# The index keeps its first owner and reports a second entity holding the same value as a lead, so a
+# duplicate owns no row. Three orders of events must not leave the index, or the correction rules, behind
+# the graph.
 
 def test_a_duplicate_is_validated_and_followed_like_the_entity_that_owns_the_row(w):
-    """The verifier's reproduction. E1 owns the row, E2 was created while E1
-    held the value. A label that is not a value of the type was refused for
-    E1 and accepted for E2, and E2's new value was never indexed."""
+    """E1 owns the row, E2 was created while E1 held the value. A label that is not a value of the type is
+    refused for E2 as for E1, and E2's new value is indexed."""
     value, new = _digits(), _digits()
     first = _create(w, value)["id"]
     again = _create(w, value)
@@ -491,8 +482,8 @@ def test_a_duplicate_that_is_corrected_to_a_value_another_entity_holds_names_it(
 
 
 def test_retiring_the_owner_hands_the_row_to_the_live_duplicate(w):
-    """The verifier's second order: E3 owns, E4 is its duplicate, E3 is
-    retired. The row went ownerless and E4 stayed unindexed."""
+    """E3 owns, E4 is its duplicate, E3 is retired. The row must not go ownerless and leave E4
+    unindexed."""
     value = _digits()
     first = _create(w, value)["id"]
     second = _create(w, value)["id"]
@@ -579,8 +570,8 @@ def _migration_named(stem: str):
 
 
 def test_0138_releases_the_rows_a_retired_entity_still_owns_and_nothing_else(w):
-    """Data from before the fix: a retired owner is still named. The
-    migration lets those go, and changes no value, count or live owner."""
+    """A retired owner is still named by an old row. The migration lets those go, and changes no value,
+    count or live owner."""
     m = _migration_named("release_retired_selector_owners")
     retired_value, live_value = _digits(), _digits()
     retired = _create(w, retired_value)["id"]

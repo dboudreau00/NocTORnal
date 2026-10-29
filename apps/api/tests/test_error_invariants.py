@@ -2,28 +2,21 @@
 
     **Never stringify a database exception into a client-visible message.**
 
-That rule was written after an adversarial pass, and it was enforced only
-for exceptions that reached the registered handlers. A router that CAUGHT
-a service error and re-raised `Problem(400, ..., str(exc))` bypassed all
-of it — and on 2026-08-07 that was **71 sites across 15 routers**.
-
-It leaked, and not in a theoretical way. Six services (`cases`, `graph`,
-`proposals`, `retention`, `samples`, `contact_blocks`) wrap psycopg errors
-as `XError(str(exc)) from exc`, so the message the router handed back
-already contained the raw PQ text. Reproduced against the live database:
+Enforcing it only for exceptions that reach the registered handlers is not enough: a router that CATCHES a
+service error and re-raises `Problem(400, ..., str(exc))` bypasses all of it. Six services (`cases`,
+`graph`, `proposals`, `retention`, `samples`, `contact_blocks`) wrap psycopg errors as
+`XError(str(exc)) from exc`, so the message the router hands back already contains the raw PQ text:
 
     RAW        insert or update on table "node" violates foreign key
                constraint "node_case_id_fkey"
-               DETAIL: Key (case_id)=(0000…0001) is not present in "case".
+               DETAIL: Key (case_id)=(0000...0001) is not present in "case".
     SANITISED  a referenced record does not exist (ref 825fdc707847)
 
-The constraint name describes the schema; `DETAIL` echoes the offending
-column VALUE, which on a real deployment is case data.
+The constraint name describes the schema; `DETAIL` echoes the offending column VALUE, which on a real
+deployment is case data.
 
-Static, because the alternative is a live test per endpoint and there are
-141 of them. This reads the source and asserts the shape — weaker than
-exercising every path, and it is the check that would have caught all 71
-at once.
+Static, because the alternative is a live test per endpoint. This reads the source and asserts the shape:
+weaker than exercising every path, but it covers every router at once.
 
 Pure: no database, no app import.
 """
@@ -91,17 +84,16 @@ def test_the_sanitiser_is_actually_imported_where_it_is_used() -> None:
 # --- safe_detail must unwrap however deep the chain goes -----------------
 
 def test_safe_detail_unwraps_a_nested_service_chain():
-    """One level was not enough, and the gap was reachable.
+    """`safe_detail` unwraps however deep the chain goes.
 
-    `proposals.py:327` wraps a GraphWriteError:
+    `proposals.py` wraps a GraphWriteError:
 
         except GraphWriteError as exc:
             raise ProposalError(f"could not apply proposal: {exc}") from exc
 
-    so accepting a proposal produced ProposalError -> GraphWriteError ->
-    psycopg. The original one-level check found a GraphWriteError, decided
-    there was no database cause, and returned `str(exc)` — which by then
-    had the raw PQ text interpolated into it twice.
+    so accepting a proposal produces ProposalError -> GraphWriteError -> psycopg. A one-level check would
+    find a GraphWriteError, decide there was no database cause, and return `str(exc)`, which by then has
+    the raw PQ text interpolated into it twice.
     """
     import psycopg
 
@@ -160,33 +152,25 @@ _SRC = Path(__file__).resolve().parents[1] / "src" / "noctornal_api"
 
 
 def test_break_glass_publishes_a_use_count_only_if_something_counts_uses():
-    """`action_count` and `used_at` are written by exactly one function,
-    `BreakGlassService.record_use`. From 2026-08-10 to 2026-09-01 it had
-    no caller outside its own test, so both were constant on every grant
-    that had ever existed -- zero, and NULL -- and were deliberately NOT
-    published: a zero to the security officer's review queue answers "was
-    this grant used?" with a fact about the wiring, in the direction that
-    CLOSES the question.
+    """`action_count` and `used_at` are written by exactly one function, `BreakGlassService.record_use`.
+    If nothing on the access path called it, both would be constant on every grant (zero, and NULL), and
+    publishing a zero to the security officer's review queue would answer "was this grant used?" with a fact
+    about the wiring, in the direction that CLOSES the question.
 
-    Since 2026-09-01 the ACCESS PATH counts uses: `PgAccessResolver.resolve`
-    (stores.py) calls `record_use()` whenever a live grant is what made an
-    access possible, and the fields are published again. The two must
-    still move together: either something on the access path counts uses,
-    or the count is not published. This test fails whichever one is
-    reintroduced without the other.
+    `PgAccessResolver.resolve` (stores.py) calls `record_use()` whenever a live grant is what made an access
+    possible, so the fields are published. The two must move together: either something on the access path
+    counts uses, or the count is not published. This test fails whichever one is introduced without the
+    other.
     """
     router = (_SRC / "http" / "routers" / "governance.py").read_text(
         encoding="utf-8")
     published = '"action_count"' in router or '"used_at"' in router
 
-    # Parsed, not grepped, and over the ACCESS PATH as well as the service:
-    # break_glass.py's own docstring names `record_use()` several times
-    # while explaining its history, so a text scan would count the
-    # explanation as an implementation. An AST walk sees calls and nothing
-    # else. stores.py is where the call legitimately lives -- the single
-    # construction site of the five-part gate's context -- and break_glass
-    # .py is kept in the walk so that a future move back into the service
-    # is still seen.
+    # Parsed, not grepped, and over the ACCESS PATH as well as the service: break_glass.py's own docstring
+    # names `record_use()` while explaining it, so a text scan would count the explanation as an
+    # implementation. An AST walk sees calls and nothing else. stores.py is where the call lives (the single
+    # construction site of the five-part gate's context); break_glass.py stays in the walk so that a move
+    # back into the service is still seen.
     counted = False
     for name in ("stores.py", "break_glass.py"):
         source = (_SRC / name).read_text(encoding="utf-8")
@@ -204,15 +188,12 @@ def test_break_glass_publishes_a_use_count_only_if_something_counts_uses():
 
 
 def test_break_glass_does_not_promise_an_elevation_it_does_not_perform():
-    """`invoke()` writes a grant carrying `granted_classification`, audits
-    it, alerts the officer and queues the review -- and no access decision
-    reads that row. Effective clearance comes from `iam.app_user`.
+    """The invoke response says what the elevation does. `invoke()` writes a grant carrying
+    `granted_classification`, audits it, alerts the officer and queues the review.
 
-    An analyst who believes the elevation worked stops looking for another
-    way in, at 3am, during the incident the control exists for. So the
-    response says what it does; if the elevation is ever implemented, the
-    grant will be read somewhere outside this module and this test should
-    be updated in the same change.
+    An analyst misled about whether the elevation applied either stops looking for another way in, at 3am,
+    during the incident the control exists for, or is sent looking while the door is open. So the notice
+    must match whether the access path reads the grant.
     """
     stores = (_SRC / "stores.py").read_text(encoding="utf-8")
     deps = (_SRC / "http" / "deps.py").read_text(encoding="utf-8")
@@ -226,17 +207,14 @@ def test_break_glass_does_not_promise_an_elevation_it_does_not_perform():
             "does not say so -- an analyst will believe the elevation "
             "applied")
     else:
-        # The elevation IS implemented (2026-09-01: PgAccessResolver.resolve
-        # reads iam.break_glass). Now the opposite claim is the dangerous
-        # one: a notice that still says the grant raises nothing would send
-        # the analyst looking for another way in while the door is open.
+        # The elevation is implemented (PgAccessResolver.resolve reads iam.break_glass), so the opposite
+        # claim is the dangerous one: a notice that still says the grant raises nothing would send the
+        # analyst looking for another way in while the door is open.
         assert "does NOT currently raise your clearance" not in router, (
             "the access path reads the break-glass grant, but the invoke "
             "response still tells the analyst the elevation did not apply")
-        # Since 2026-09-22 the notice is computed per grant (ux15
-        # breakglass-grant-raises-nothing): it names the level raised FROM
-        # and TO when the grant raises, and says "raises nothing" when it
-        # does not, rather than one sentence conditional on the reader.
+        # The notice is computed per grant: it names the level raised FROM and TO when the grant raises,
+        # and says "raises nothing" when it does not, rather than one sentence conditional on the reader.
         assert "Your clearance is raised from" in router, (
             "the invoke response must say the clearance is raised, and to "
             "what, now that it is")

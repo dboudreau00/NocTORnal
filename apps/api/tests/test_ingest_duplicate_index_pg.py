@@ -1,16 +1,13 @@
-"""An index on ingest.record(duplicate_of) (L4, 2026-09-24, migration 0072).
+"""An index on ingest.record(duplicate_of) (migration 0072).
 
-The ingest queue counts each page's folded copies in one pass, and a
-record's detail lists its copies; with no index on `duplicate_of` both
-scanned the table. 0072 adds a partial btree (`WHERE duplicate_of IS NOT
-NULL`), turns a failed concurrent build of that name into a rebuild rather
-than accepting an INVALID index, and refuses a different index under the
-name. Each test fails on ab27a4a, where no such index existed.
+The ingest queue counts each page's folded copies in one pass, and a record's detail lists its copies;
+without an index on `duplicate_of` both scan the table. 0072 adds a partial btree (`WHERE duplicate_of IS
+NOT NULL`), turns a failed concurrent build of that name into a rebuild rather than accepting an INVALID
+index, and refuses a different index under the name.
 
-The EXPLAIN tests run the route's own text (`_queue_sql` with
-`_queue_params`, and `_COPIES_SQL`), with sequential scans off in a
-rolled-back transaction: a small test table would otherwise be scanned
-whatever indexes exist, and the test would lie either way.
+The EXPLAIN tests run the route's own text (`_queue_sql` with `_queue_params`, and `_COPIES_SQL`), with
+sequential scans off in a rolled-back transaction: a small test table would otherwise be scanned whatever
+indexes exist.
 
 Env-gated on DATABASE_URL.
 """
@@ -107,9 +104,8 @@ def test_the_queue_and_the_record_copies_use_it():
     tx = psycopg.connect(_dsn())
     try:
         seeded = _seed(tx)
-        # A realistic table, analysed: on a near-empty one every path costs
-        # the same and the planner's choice says nothing about the index.
-        # Rolled back with the rest (L4, 2026-09-24).
+        # A realistic table, analysed: on a near-empty one every path costs the same and the planner's choice
+        # says nothing about the index. Rolled back with the rest.
         tx.execute(
             """INSERT INTO ingest.record (batch_id, payload, content_sha256)
                SELECT %s, '{}'::jsonb, gen_random_bytes(32)

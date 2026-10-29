@@ -1,21 +1,16 @@
-"""The live change socket (Phase 2's last gap).
+"""The live change socket.
 
 Two properties carry the weight, and neither is about latency:
 
-1. **The event carries no case content.** It says "case X changed, kind
-   node" and nothing else, so the client refetches through the ordinary
-   gated endpoints. That is why this layer never has to re-implement
-   classification and compartment filtering — filtering this codebase has
-   got wrong in five separate places (docs/17 F19).
+1. **The event carries no case content.** It says "case X changed, kind node" and nothing else, so the
+   client refetches through the ordinary gated endpoints. This layer never has to re-implement
+   classification and compartment filtering (docs/17).
 
-2. **Authorisation is re-checked on every delivery.** A socket is
-   long-lived and an assignment is not. F19's headline finding was a
-   notification centre that checked once and never again; a socket
-   authorised only at connect is that defect with a longer half-life.
+2. **Authorisation is re-checked on every delivery.** A socket is long-lived and an assignment is not; a
+   socket authorised only at connect would be a notification centre that checks once and never again.
 
-Env-gated on DATABASE_URL. The end-to-end WebSocket handshake is exercised
-by `scripts/` against a running server; these test the pieces that decide
-things.
+Env-gated on DATABASE_URL. The end-to-end WebSocket handshake is exercised by `scripts/` against a running
+server; these test the pieces that decide things.
 """
 from __future__ import annotations
 
@@ -67,10 +62,7 @@ def _user(conn, clearance="RED", compartments=()):
     from noctornal_api.stores import PgUserStore
     uid = PgUserStore(conn).create_user(
         f"live-{uuid4().hex[:8]}@noctornal.test", "Live", "x" * 20)
-    # Since 0059 every compartment column is bound to iam.compartment. This
-    # helper writes whatever it is handed, so it registers it first rather
-    # than trusting the caller to have done so -- two helpers of this shape
-    # were refused on CI's fresh database on 2026-09-09 while passing here.
+    # Every compartment column is bound to iam.compartment, so the helper registers each key first.
     for key in compartments:
         conn.execute(
             "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
@@ -105,10 +97,8 @@ def _node(conn, case_id, owner, label):
 
 
 def _listener() -> list[dict]:
-    """LISTEN on the change channel in a thread of its own, returning the
-    list it fills once the LISTEN is registered. It used to be a 0.8 second
-    sleep, which a loaded machine could outrun and so miss the write (beta
-    gate, 2026-10-07)."""
+    """LISTEN on the change channel in a thread of its own, returning the list it fills once the LISTEN is
+    registered; a fixed sleep could be outrun by a loaded machine, which would miss the write."""
     from noctornal_api.db import connect
     from noctornal_api.http.routers.live import CHANNEL
 
@@ -157,12 +147,10 @@ def test_a_change_event_carries_no_case_content(conn):
     _node(conn, case_id, owner, "a handle")
     events = _case_events(heard, "node", case_id, settle=0)
     assert events, "no change event was published for a node write"
-    # Since 0146 (http_ui-012, 2026-10-03) the NOTIFY payload also names the
-    # labels of what was written, FOR THE SERVER: the socket decides per
-    # subscriber whether the hint is about anything they may read, and what
-    # it forwards is still only the kind and the operation. The safety
-    # argument above moved from "the payload says nothing" to "the message
-    # a client receives says nothing", and that half is asserted here.
+    # The NOTIFY payload (0146) also names the labels of what was written, for the server: the socket decides
+    # per subscriber whether the hint is about anything they may read, and what it forwards is still only the
+    # kind and the operation. The safety argument is that the message a client receives says nothing, and
+    # that is asserted here.
     assert set(events[0]) == {"case_id", "kind", "op", "labels"}, (
         f"the event carries more than an id, a kind, an operation and the "
         f"labels the server filters on: {events[0]}")
@@ -258,8 +246,7 @@ def test_the_gate_needs_a_real_classification(conn):
     from noctornal_api.http.routers import live
     body = inspect.getsource(live._may_read)
     assert "object_classification=None" not in body
-    # The case's labels as lock facts since row-level security (S1,
-    # 2026-09-25): the re-check runs unbound, and a plain read of
+    # The case's labels as lock facts (row-level security): the re-check runs unbound, and a plain read of
     # core."case" would find no row there.
     assert "iam.case_facts" in body
 
@@ -358,16 +345,12 @@ def test_a_burst_is_coalesced(conn):
 
 # --- the pending budget: sockets are counted from before accept() --------
 #
-# Until 2026-09-09 `_MAX_SOCKETS` was compared against the number of
-# AUTHENTICATED subscribers, and nothing counted a socket between
-# `accept()` and its hello frame: the rate-limit middleware is an
-# `@app.middleware("http")` and never runs for a websocket scope. A peer
-# with no session could open sockets until the process ran out of
-# descriptors and hold each for the whole ten-second hello deadline while
-# the ceiling reported zero. These tests drive the real app through
-# Starlette's TestClient: `with TestClient(...)` shares one event loop
-# across every socket it opens, which is what lets several sit open at
-# once the way an attacker's would.
+# `_MAX_SOCKETS` bounds authenticated subscribers, and the pending budget counts a socket between `accept()`
+# and its hello frame: the rate-limit middleware is an `@app.middleware("http")` and never runs for a
+# websocket scope. Without the budget a peer with no session could open sockets until the process ran out of
+# descriptors and hold each for the whole ten-second hello deadline while the ceiling reported zero. These
+# tests drive the real app through Starlette's TestClient: `with TestClient(...)` shares one event loop
+# across every socket it opens, which lets several sit open at once as an attacker's would.
 
 def _app():
     """The real app with the limiter swapped for an in-process one, so two
@@ -400,13 +383,9 @@ def _token(conn, user_id) -> str:
 
 def _budget(monkeypatch, *, pending: int, per_peer: int = 8,
             hello: float = 20.0):
-    """Shrink the budget for a test. `raising=False` so that the SAME test
-    runs against the pre-2026-09-09 module, where these names did not
-    exist, and reaches its behavioural assertion -- the N+1th socket being
-    parked for the deadline and closing with "no credentials" -- before
-    any line that reads the counter fails on the missing attribute. Run
-    that way on 2026-09-09: the three regression tests below fail on
-    behaviour first, the hub-ceiling test on the attribute."""
+    """Shrink the budget for a test. `raising=False` so a module without these names fails on behaviour (the
+    N+1th socket being parked for the deadline and closing with "no credentials") before any line that reads
+    the counter fails on the missing attribute."""
     from noctornal_api.http.routers import live
     monkeypatch.delenv(STRICT, raising=False)
     monkeypatch.setattr(live, "_MAX_PENDING", pending, raising=False)
@@ -457,12 +436,8 @@ def test_pending_sockets_are_budgeted_from_accept(conn, monkeypatch):
 
 
 def test_a_slow_hello_past_the_deadline_frees_its_slot(conn, monkeypatch):
-    """A socket that runs out the hello deadline is closed on the
-    CONFIGURED deadline and its slot comes back, so a budget that was full
-    of silent sockets empties itself. Before the change the deadline was a
-    literal ten seconds the environment could not shorten, and the socket
-    was not counted anywhere while it waited -- so there was nothing to
-    free and this assertion on timing could not have been written."""
+    """A socket that runs out the hello deadline is closed on the configured deadline and its slot comes
+    back, so a budget full of silent sockets empties itself."""
     from starlette.websockets import WebSocketDisconnect
     live = _budget(monkeypatch, pending=2, hello=0.5)
     token = _token(conn, _user(conn))
@@ -496,17 +471,12 @@ def test_a_slow_hello_past_the_deadline_frees_its_slot(conn, monkeypatch):
 def test_the_per_peer_budget_is_keyed_on_the_address_http_uses(conn, monkeypatch):
     """The contract crosses two files, so this test reads both.
 
-    The per-peer bucket is keyed on `limits.client_ip`, the same function
-    that keys a 429 and the session binding, trusted-hop counting
-    included. Two consequences, both asserted: a second peer is a second
-    bucket, so one address filling its own budget does not touch another
-    analyst's socket; and behind ONE trusted proxy hop the key is the
-    forwarded address, not the proxy's, so sockets from different clients
-    behind the same proxy are not made to share a bucket -- and the key
-    the socket used is exactly what `client_ip` computes for an HTTP
-    request carrying the same headers. Before the change there was no
-    per-peer accounting at all, so the second socket from one peer was
-    simply accepted.
+    The per-peer bucket is keyed on `limits.client_ip`, the same function that keys a 429 and the session
+    binding, trusted-hop counting included. Two consequences, both asserted: a second peer is a second
+    bucket, so one address filling its own budget does not touch another analyst's socket; and behind one
+    trusted proxy hop the key is the forwarded address, not the proxy's, so sockets from different clients
+    behind the same proxy do not share a bucket. The key the socket used is exactly what `client_ip`
+    computes for an HTTP request carrying the same headers.
     """
     from starlette.requests import Request
     from starlette.websockets import WebSocketDisconnect
@@ -555,12 +525,9 @@ def test_the_per_peer_budget_is_keyed_on_the_address_http_uses(conn, monkeypatch
 
 
 def test_a_full_hub_refuses_before_the_hello(conn, monkeypatch):
-    """The subscriber ceiling, exercised end to end for the first time. NOT
-    a regression for 2026-09-09 -- this check predates it -- but nothing
-    had ever driven it, and the pending budget was written on the claim
-    that this ceiling holds for authenticated sockets. A second subscriber
-    past the ceiling is refused with 1013 without being asked for a hello,
-    while the first keeps streaming."""
+    """The subscriber ceiling, exercised end to end: a second subscriber past the ceiling is refused with
+    1013 without being asked for a hello, while the first keeps streaming. The pending budget relies on this
+    ceiling holding for authenticated sockets."""
     from starlette.websockets import WebSocketDisconnect
     live = _budget(monkeypatch, pending=10)
     monkeypatch.setattr(live, "_MAX_SOCKETS", 1)

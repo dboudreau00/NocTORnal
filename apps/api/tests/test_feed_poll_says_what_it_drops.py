@@ -1,9 +1,8 @@
-"""What a feed poll does not keep is said, never dropped (2026-10-07; invariant 12).
+"""What a feed poll does not keep is said, never dropped (invariant 12).
 
-An item with no guid, id, link or title was skipped without a word, and a
-feed had no cap on its items: a 16 MiB feed of bare items was some 600,000
-documents in one transaction, every poll. Both are now a run warning, and
-a poll reads at most `MAX_FEED_ITEMS`. Pure: the fetch is replaced.
+An item with no guid, id, link or title is a run warning, not skipped without a word, and a poll reads at
+most `MAX_FEED_ITEMS`: a 16 MiB feed of bare items would otherwise be some 600,000 documents in one
+transaction, every poll. Pure: the fetch is replaced.
 """
 from __future__ import annotations
 

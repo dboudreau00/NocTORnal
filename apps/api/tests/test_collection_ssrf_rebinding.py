@@ -1,22 +1,17 @@
-"""sec-ssrf-rebinding (2026-09-23): the check and the connect are one lookup.
+"""The check and the connect are one lookup.
 
-`collection.fetch()` resolved a watch target's name once to check it, and
-`urlopen` resolved it again inside `socket.create_connection` to connect.
-A resolver answering a public address to the first lookup and an internal
-one to the second (DNS rebinding) walked straight through the check. These
-tests stand in a resolver that does exactly that and prove the internal
-address is never CONNECTED to: not refused after the fact, never dialled.
+A resolver answering a public address to the first lookup and an internal one to the second (DNS
+rebinding) must not walk through the check. These tests stand in a resolver that does exactly that and
+prove the internal address is never CONNECTED to: not refused after the fact, never dialled.
 
-The stand-ins. 127.0.0.1 plays the public address: the classifier is told
-so about that one address and no other. 127.0.0.2 plays the internal one
-and is judged by the real classifier. A listener on 127.0.0.2 records every
-TCP connection it accepts, so "never connected" is an observation rather
-than an inference.
+The stand-ins. 127.0.0.1 plays the public address: the classifier is told so about that one address
+and no other. 127.0.0.2 plays the internal one and is judged by the real classifier. A listener on
+127.0.0.2 records every TCP connection it accepts, so "never connected" is an observation rather than
+an inference.
 
-The fake resolver replaces `socket.getaddrinfo` itself, not a name inside
-`collection`, because the second lookup this defect was made of happened
-inside the standard library. Anything short of the real function would
-have let the old code pass.
+The fake resolver replaces `socket.getaddrinfo` itself, not a name inside `collection`, because a
+second lookup inside the standard library (`socket.create_connection`) is what the defect is made of.
+Anything short of the real function would let a double lookup pass.
 
 Pure: no database, and no network beyond loopback.
 """
@@ -136,9 +131,9 @@ def _stop(server: _Server) -> None:
 
 
 class _Rebinder:
-    """A resolver for NAME that answers `first` to the first lookup and
-    `later` to every lookup after it, with the port it was asked for, as
-    a real resolver would. Any other name goes to the real resolver."""
+    """A resolver for NAME that answers `first` to the first lookup and `later` to every lookup after
+    it, with the port it was asked for, as a real resolver would. Any other name goes to the real
+    resolver."""
 
     def __init__(self, first: list[str], later: list[str]):
         self.first = first

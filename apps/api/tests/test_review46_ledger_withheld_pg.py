@@ -1,17 +1,13 @@
-"""egress-ledger-withheld-oracle (review of 2026-10-03).
+"""The connection log's `withheld` count is not an oracle.
 
-The connection log returns `withheld`, how many rows the caller's clearance
-hides. It was counted under the caller's own route, event and `since`
-filters, and the overview returns a hidden profile's id, so a reader below a
-profile's label could read the timing and volume of its (RED) activity
-exactly: `?route_id=persona:<id>&since=T`, then move T.
+The connection log returns `withheld`, how many rows the caller's clearance hides. Counted under the
+caller's own route, event and `since` filters, and with the overview returning a hidden profile's id, a
+reader below a profile's label could read the timing and volume of its (RED) activity exactly:
+`?route_id=persona:<id>&since=T`, then move T. So the count for the hidden route is the number of its rows,
+and a far-future `since` does not empty it.
 
-Fails on dc28ffa: the count for the hidden route is the number of its rows,
-and a far-future `since` empties it.
-
-Every row is written inside a transaction that is rolled back (the ledger is
-append-only, so nothing could remove them afterwards). Env-gated on
-DATABASE_URL.
+Every row is written inside a transaction that is rolled back (the ledger is append-only, so nothing could
+remove them afterwards). Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

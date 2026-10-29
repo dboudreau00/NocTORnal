@@ -1,17 +1,12 @@
-"""The case dialogs, the tab title, the tag picker and Share's end time,
-held from the shipped files (final review of the Alpha 6 candidate,
-2026-09-24).
+"""The case dialogs, the tab title, the tag picker and Share's end time, held from the shipped files.
 
-- c22: the Case record, Status and Share dialogs said `aria-modal` and held
-  only Tab and Escape, so Ctrl+K, ? and Alt+digit acted on the page behind
-  them and one Escape closed the palette and the dialog together, taking a
-  typed correction with it;
-- the tab title carried the case code and its TLP marking into the
-  browser's history, which Log out cannot clear;
-- the tag picker's prompt had no value, so Tag posted the prompt's
-  text as a tag id;
-- Share's "Access ends" was typed and read in the browser's zone, the
-  one time in the console that was not UTC.
+- The Case record, Status and Share dialogs say `aria-modal`, so Ctrl+K, ? and Alt+digit must not act
+  on the page behind them, and one Escape must not close the palette and the dialog together, taking a
+  typed correction with it.
+- The tab title does not carry the case code and its TLP marking into the browser's history, which
+  Log out cannot clear.
+- The tag picker's prompt has a value, so Tag does not post the prompt's text as a tag id.
+- Share's "Access ends" is typed and read in UTC, like the rest of the console.
 
 Pure, like test_ui_invariants.py beside it: static assets, and the real
 functions run under Node against stubs where the claim is about behaviour

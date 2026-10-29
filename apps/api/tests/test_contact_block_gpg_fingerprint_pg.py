@@ -1,16 +1,13 @@
-"""F37 (docs/17, 2026-10-02) against Postgres: what a stored contact block
-holds when its fingerprint line was copied from gpg, and what happens to a
-block stored before the change.
+"""Against Postgres: what a stored contact block holds when its fingerprint line was copied from gpg
+(docs/17), and what happens to a block stored under an earlier parser version.
 
-- a gpg-copied line is stored with all forty hex characters, and that value
-  passes the same normalisation and test the key registry applies before it
-  lets a block line confirm a key (it used to read NOT_A_FINGERPRINT);
-- a block copied under another publisher is found by
-  `impersonation_candidates` whichever way the fingerprint was written;
-- nothing re-reads a stored block: a block stored under cb-1 keeps its
-  truncated reading when its text is parsed again in the same case, which is
-  why the decision names the blocks parsed before (`parser_version`) and does
-  not claim to have repaired them.
+- a gpg-copied line is stored with all forty hex characters, and that value passes the same
+  normalisation and test the key registry applies before it lets a block line confirm a key;
+- a block copied under another publisher is found by `impersonation_candidates` whichever way the
+  fingerprint was written;
+- nothing re-reads a stored block: a block stored under cb-1 keeps its truncated reading when its text
+  is parsed again in the same case, which is why the decision names the blocks parsed before
+  (`parser_version`) and does not claim to have repaired them.
 
 Env-gated on DATABASE_URL; users `cbg-`.
 """

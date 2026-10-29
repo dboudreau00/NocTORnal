@@ -1,21 +1,17 @@
-"""The session plane after the 2026-10-03 review (g45): a dead session stays
-dead, and the request role cannot read credentials, forge step-up freshness
-or write a notification as somebody else.
+"""The session plane: a dead session stays dead, and the request role cannot read credentials, forge
+step-up freshness or write a notification as somebody else.
 
-- authz-session-revoke-bypass: `current_user` read a session, then slid its
-  idle window by rewriting the WHOLE row from what it had read, so a logout,
-  a password change, a deactivation or a TOTP re-enrolment committed in the
-  gap was written back to NULL and the token kept working.
-- rls-6: the request role could SELECT every account's password hash, TOTP
-  ciphertext and recovery hashes (0143).
-- rls-7: the request role could stamp `mfa_satisfied_at` on its own session
-  and push `last_seen_at` into the future (0144).
-- rls-8: `notify.enqueue` ran for an unbound caller, stored a caller-supplied
-  actor and wrote any delivery state (0145).
+- `current_user` slides a session's idle window without rewriting the WHOLE row from what it read: a
+  logout, a password change, a deactivation or a TOTP re-enrolment committed in the gap must not be written
+  back to NULL, leaving the token working.
+- the request role cannot SELECT any account's password hash, TOTP ciphertext or recovery hashes (0143).
+- the request role cannot stamp `mfa_satisfied_at` on its own session or push `last_seen_at` into the
+  future (0144).
+- `notify.enqueue` refuses an unbound caller, a caller-supplied actor and any delivery state (0145).
 
-Every assertion that a refusal happens is paired with one that the
-legitimate act still works, because a fix that closes the door for everyone
-is not a fix. Accounts carry the prefix `g45ses-`, unique to this file.
+Every assertion that a refusal happens is paired with one that the legitimate act still works, because a
+fix that closes the door for everyone is not a fix. Accounts carry the prefix `g45ses-`, unique to this
+file.
 """
 from __future__ import annotations
 
@@ -261,9 +257,8 @@ def test_the_request_role_holds_no_privilege_on_a_credential_column(owner):
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
 def test_a_request_role_connection_cannot_read_a_credential(owner, bound):
-    """The review's reproduction: an unbound request-role connection read
-    every account's hash, sealed TOTP secret and recovery hashes. Bound or
-    not, each is now refused, and so is a `SELECT *`."""
+    """An unbound request-role connection must not read any account's hash, sealed TOTP secret or recovery
+    hashes. Bound or not, each is refused, and so is a `SELECT *`."""
     m = _migration("0143")
     uid = s.user(owner, prefix=PREFIX)
     _sid, raw = s.session(owner, uid)
@@ -503,8 +498,8 @@ def test_a_bound_caller_cannot_sign_a_notice_as_somebody_else(owner):
         with pytest.raises(psycopg.errors.InsufficientPrivilege,
                            match="actor of a notice is the account that raises it"):
             _enqueue_rolled_back(app, victim, impersonated, _plan(IN_APP_SENT))
-        # Its own id is fine. No actor at all was fine until 0181: a
-        # request's notice now always names the account that raises it.
+        # Its own id is fine. No actor at all is refused (0181): a request's notice always names the account
+        # that raises it.
         outcome, stored = _enqueue_rolled_back(app, victim, caller, _plan(IN_APP_SENT),
                                                read_back=True)
         assert outcome == "WRITTEN" and stored[0] == caller

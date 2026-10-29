@@ -1,30 +1,19 @@
-"""A persona's run, act and stop contexts through the REAL egress listener,
-from the persona gate and the shipped route provider (F31 part A, docs/17
-F31; written 2026-10-03).
+"""A persona's run, act and stop contexts through the real egress listener (docs/17).
 
-test_egress_proxy_pg.py drives the real listener with raw CONNECTs whose user
-names the TEST builds, and test_forum_member.py drives the real adapter and
-the real pinned client against the egress contract's stub proxy. Neither
-goes from the code that decides a persona may be used, through
-`egress.route_for` and the shipped provider (`egress_routes.route_parts`),
-into the listener that decides again. So a bypass of `route_for`, a route
-whose token the listener would not accept, a context the gate forgot to name
-or a persona the listener does not withdraw would have passed every suite.
-This one holds the whole path:
+test_egress_proxy_pg.py drives the listener with raw CONNECTs, and test_forum_member.py drives the adapter
+against the egress contract's stub proxy. Neither goes from the persona gate, through `egress.route_for`
+and the shipped provider (`egress_routes.route_parts`), into the listener that decides again. This one holds
+the whole path:
 
-- a RUN through `CollectionService.run_once` with a stub authority adapter
-  that reads through `RunContext.fetch`: the tunnel opens as that run, the
-  exit is handed the NAME and nothing here resolved it, and the ledger
-  records the open and the close against the run;
-- an ACT through `collection.persona_session` (the gate's six steps) and a
-  STOP through `PersonaGate(stopping=True)`, a stop needing no authority;
-- a destination the run's source does not own is refused by the listener and
-  reported by its code;
-- a persona withdrawn mid-tunnel (burnt) closes the open run tunnel after the
-  proxy's recheck, with the ledger saying why.
+- a RUN through `CollectionService.run_once` with a stub adapter that reads through `RunContext.fetch`: the
+  tunnel opens as that run, the exit is handed the NAME, and the ledger records the open and close;
+- an ACT through `collection.persona_session` and a STOP through `PersonaGate(stopping=True)`, which needs
+  no authority;
+- a destination the run's source does not own is refused by the listener and reported by its code;
+- a persona burnt mid-tunnel closes the open run tunnel after the proxy's recheck, with the ledger saying why.
 
-The exit is a fake SOCKS5 chain that, once told which NAME to reach, answers
-as the forum. DATABASE_URL-gated; nothing leaves the loopback.
+The exit is a fake SOCKS5 chain that answers as the forum once told which NAME to reach. DATABASE_URL-gated;
+nothing leaves the loopback.
 """
 from __future__ import annotations
 

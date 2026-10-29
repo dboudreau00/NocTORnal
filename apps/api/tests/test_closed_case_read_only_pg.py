@@ -1,31 +1,22 @@
 """A CLOSED or ARCHIVED case is read-only for content, over HTTP.
 
-gap-closed-case-writes (2026-09-23). Until this, a closed case accepted
-every write the five-part gate allowed: an entity, a claim, an exhibit
-link, a tag, an ACH hypothesis, all landing after `closed_at`, which
-matters for disclosure. The console said "not taking new material" in a
-strip and the server did nothing about it.
+A closed case accepts no write that lands after `closed_at`, which matters for disclosure. Against the
+real gate and a real database:
 
-What this file holds, against the real gate and a real database:
-
-- content writes on a CLOSED case are refused with a 409 titled "Case is
-  read-only" that names the state, on every kind of content, including the
-  routes whose verb also gates reads (`report.generate` on ACH,
-  `case.update` on the assumptions register);
+- content writes on a CLOSED case are refused with a 409 titled "Case is read-only" that names the
+  state, on every kind of content, including the routes whose verb also gates reads (`report.generate`
+  on ACH, `case.update` on the assumptions register);
 - reads still answer, and the case record says `read_only`;
-- governance still works: the metadata PATCH, the approval policy, sharing,
-  a legal hold on and off, a report build, and the status move back to
-  ACTIVE, after which writes are accepted again;
+- governance still works: the metadata PATCH, the approval policy, sharing, a legal hold on and off, a
+  report build, and the status move back to ACTIVE, after which writes are accepted again;
 - ARCHIVED refuses content the same way and says it cannot be reopened;
-- the refusal comes AFTER the access decision: an outsider gets the gate's
-  404 and an assignee without the verb its 403, never the 409 that names
-  the state, and every refusal leaves an audit row.
+- the refusal comes AFTER the access decision: an outsider gets the gate's 404 and an assignee without
+  the verb its 403, never the 409 that names the state, and every refusal leaves an audit row.
 
-The route-by-route inventory (every unsafe case route either guarded or
-named as governance) is the pure half, `test_closed_case_read_only.py`.
+The route-by-route inventory (every unsafe case route either guarded or named as governance) is the
+pure half, `test_closed_case_read_only.py`.
 
-**The email prefix is `ccro-` and must stay unique**: teardown deletes on
-it. Env-gated on DATABASE_URL.
+**The email prefix is `ccro-` and must stay unique**: teardown deletes on it. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -339,7 +330,7 @@ def test_an_archived_case_refuses_content_and_says_it_cannot_be_reopened(
     _refused(r, "ARCHIVED")
     assert "cannot be reopened" in r.json()["detail"]
     assert "Reopen it" not in r.json()["detail"]
-    # Its governance record stays correctable, as it was before.
+    # Its governance record stays correctable.
     r = client.patch(f"/api/v1/cases/{case_id}", headers=_auth(token),
                      json={"authority_ref": "warrant 2026-0101"})
     assert r.status_code == 200, r.text

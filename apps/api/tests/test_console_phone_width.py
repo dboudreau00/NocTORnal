@@ -1,23 +1,15 @@
-"""The case list does not scroll the page sideways on a phone (2026-10-08).
+"""The case list does not scroll the page sideways on a phone.
 
-docs/17 "the case list at 375 px": the page scrolled sideways by 280 to 390px
-on a phone-width window while the panes inside a case did not, and the cause
-was not isolated. It was measured in a browser (headless Chromium at 320, 375,
-414, 600 and 768px, the page's `scrollWidth` against the window's): the
-document was 741px wide at 375px. The one element that reached that far is
-`<span class="sr-only">Open</span>`, the visually hidden heading of the last
-column of the case table. `.sr-only` is `position: absolute`, the table sits in
-a `.scroll-x` box whose `overflow-x: auto` is meant to hold it, and an
-absolutely positioned element is clipped by an overflow box only when the box
-is, or sits inside, its containing block. `.scroll-x` was not positioned, so
-nothing was: the span (at the table's 740th pixel) was laid out against the
-page and grew the page itself. `.scroll-x { position: relative }` makes the
-box the containing block, and the page is the window's width at every width
-measured.
+docs/17 "the case list at 375 px". Measured in a browser (headless Chromium at 320, 375, 414, 600 and
+768px, the page's `scrollWidth` against the window's), the one element that can reach past the window is
+`<span class="sr-only">Open</span>`, the visually hidden heading of the last column of the case table.
+`.sr-only` is `position: absolute`, the table sits in a `.scroll-x` box whose `overflow-x: auto` is
+meant to hold it, and an absolutely positioned element is clipped by an overflow box only when the box
+is, or sits inside, its containing block. Without `.scroll-x { position: relative }` the span is laid
+out against the page and grows the page itself.
 
-A stylesheet cannot be laid out here, so these pin the three facts the fix
-rests on: what is hidden is absolutely positioned, the case list's table is
-inside a `.scroll-x` box, and that box is positioned.
+A stylesheet cannot be laid out here, so these pin the three facts that rest on: what is hidden is
+absolutely positioned, the case list's table is inside a `.scroll-x` box, and that box is positioned.
 """
 from __future__ import annotations
 

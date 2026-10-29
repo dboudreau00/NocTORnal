@@ -219,7 +219,7 @@ def test_a_fork_written_since_0149_is_reported_AND_is_tampering(tamperable):
     0149 draws `seq` inside the chaining trigger's advisory lock, so a fork written since cannot come
     from honest traffic and is the dead-end row an owner can delete without orphaning anything. The
     legacy half (a fork with a claimant at or below the boundary is listed, not a break) is
-    `test_ledger_chain_g49_pg.py`.
+    `test_ledger_chain_pg.py`.
     """
     from noctornal_api.audit_verify import verify_chain
 
@@ -343,7 +343,7 @@ def test_the_chaining_lock_serialises_concurrent_writers(tamperable):
     blocks until commit.
 
     This proves the lock itself holds. The choice of tail is a separate matter: 0149 draws `seq` inside
-    the lock (see `test_ledger_chain_g49_pg.py` for the concurrency proof).
+    the lock (see `test_ledger_chain_pg.py` for the concurrency proof).
     """
     import psycopg
 

@@ -1,10 +1,7 @@
-"""The delivery ledger as an administrator surface (F8, 2026-09-24):
-causes, exposure, paging, the per-channel summary, retry and the manual
-drain, the webhook address withheld, and the audit of every channel
-switched on or off.
+"""The delivery ledger as an administrator surface: causes, exposure, paging, the per-channel summary, retry
+and the manual drain, the webhook address withheld, and the audit of every channel switched on or off.
 
-**The email prefix is `nled-` and must stay unique.** Env-gated on
-DATABASE_URL.
+The email prefix is `nled-` and must stay unique. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

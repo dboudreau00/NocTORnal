@@ -1,11 +1,8 @@
 """Analyst account administration (`iam_admin.py`).
 
-The tests that carry this file are the REFUSALS: the three ways an
-administrator could lock the building — deactivating themselves,
-deactivating the last SYS_ADMIN, removing the last SECURITY_OFFICER — and
-the clearance change that would strand a case owner below their own case.
-A green create path with broken guards is an admin panel that works right
-up until it matters.
+The tests that matter are the refusals: the three ways an administrator could lock the building
+(deactivating themselves, deactivating the last SYS_ADMIN, removing the last SECURITY_OFFICER) and the
+clearance change that would strand a case owner below their own case.
 
 Env-gated on DATABASE_URL. NOCTORNAL_TOTP_KEK comes from conftest/env.
 """
@@ -121,16 +118,12 @@ def test_you_cannot_deactivate_yourself(conn):
 
 
 def test_the_last_active_sys_admin_cannot_be_deactivated(conn):
-    """A deployment with zero user-managers can only be repaired from the
-    database shell, which is the situation this module exists to end.
+    """A deployment with zero user-managers can only be repaired from the database shell, which is the
+    situation this module exists to end.
 
-    The state is created and then ROLLED BACK rather than skipped: this
-    database has other SYS_ADMINs, and the first version of this test
-    skipped when it did — but CI fails the build on any skip at all, and
-    a guard that only runs on an empty database is a guard nobody runs.
-    Deactivating the others inside a transaction and raising
-    `psycopg.Rollback` exercises the real code path and leaves not one
-    row changed.
+    The state is created and then rolled back rather than skipped (CI fails on any skip, and a guard that
+    only runs on an empty database is never run): the other SYS_ADMINs are deactivated inside a transaction
+    that raises `psycopg.Rollback`, leaving no row changed.
     """
     import psycopg
 
@@ -186,10 +179,8 @@ def test_two_concurrent_deactivations_cannot_zero_the_admins(conn):
 
 
 def test_revoking_the_last_officer_role_is_refused_when_last(conn):
-    """Break-glass refuses to grant when nobody can review it, so removing
-    the last SECURITY_OFFICER quietly disables emergency access. On a
-    populated database the guard is exercised via count: revoking from a
-    user who is NOT the last holder must succeed."""
+    """Break-glass refuses to grant when nobody can review it, so removing the last SECURITY_OFFICER quietly
+    disables emergency access. Revoking from a user who is not the last holder must succeed."""
     officer = _mk(conn, "SECURITY_OFFICER", "ANALYST")
     others = conn.execute(
         """SELECT count(*) FROM iam.user_role ur
@@ -304,10 +295,6 @@ def test_first_run_is_closed_on_a_populated_deployment(conn):
                                display_name="X")
 
 
-# ---------------------------------------------------------------------------
-# From the 2026-08-25 hostile pass over this surface
-# ---------------------------------------------------------------------------
-
 def test_a_deputy_is_not_stranded_either(conn):
     """The first version checked owners only. `cases.py` checks a DEPUTY's
     clearance at creation for the same reason it checks the owner's: a
@@ -346,11 +333,8 @@ def test_role_changes_on_a_nonexistent_user_are_refused_not_faked(conn):
 
 
 def test_reenrolling_totp_evicts_the_stolen_device(conn):
-    """The scenario IS a lost phone. A new secret alone does not evict
-    whoever holds the old one: an existing session carries its own token
-    and never re-presents TOTP, so the panel's promise that the old
-    authenticator "stops working immediately" was false for exactly the
-    person it was protecting against."""
+    """Re-enrolling TOTP evicts the old device. A new secret alone does not: an existing session carries its
+    own token and never re-presents TOTP, so the old authenticator must stop working immediately."""
     admin = _mk(conn, "SYS_ADMIN")
     target = _mk(conn, "ANALYST")
     conn.execute(

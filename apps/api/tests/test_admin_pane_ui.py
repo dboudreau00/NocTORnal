@@ -51,7 +51,7 @@ function text(n) {
 }
 function fmtTime(iso, s) { return 'T(' + iso + (s ? ',s' : '') + ')'; }
 // The pane's step-up gate (final review u20, 2026-09-24), open here: these
-// tests are about what is drawn, and test_ui_accounts_final_review drives
+// tests are about what is drawn, and test_ui_accounts_and_signin_sheet drives
 // the gate itself.
 function admStepUp(call) { return call(); }
 function admStepUpRefused() { return false; }

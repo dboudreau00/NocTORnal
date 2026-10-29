@@ -1,17 +1,14 @@
-"""Row-level security on the rest of the case record (S1, 2026-09-25).
+"""Row-level security on the rest of the case record.
 
-0123 puts selectors, the claim and exhibit vectors, a merge's record of
-the ties it re-pointed, tombstones, tags and their assignments, and the
-two-person requests under policy. Run as the request role, bound by a real
-session's proof, with the fixtures seeded as the owner:
+0123 puts selectors, the claim and exhibit vectors, a merge's record of the ties it re-pointed,
+tombstones, tags and their assignments, and the two-person requests under policy. Run as the request role,
+bound by a real session's proof, with the fixtures seeded as the owner:
 
-- a merge re-points every tie, a tie above the person merging included, and
-  answers, and lists in the history, only the ties its reader can see
-  (the conservative reading of a count of hidden ties: withheld, never
-  announced);
-- a tag assignment on an entity above the reader is hidden, and a case's
-  tags and tombstones stay in their case, while the global taxonomy and a
-  deployment-wide two-person request are read by every bound user;
+- a merge re-points every tie, a tie above the person merging included, and answers, and lists in the
+  history, only the ties its reader can see (a count of hidden ties is withheld, never announced);
+- a tag assignment on an entity above the reader is hidden, and a case's tags and tombstones stay in
+  their case, while the global taxonomy and a deployment-wide two-person request are read by every bound
+  user;
 - a write of a tombstone by the request role is refused (read only).
 
 Gated like the other row-security tests. Account prefix `rlsleft-`.

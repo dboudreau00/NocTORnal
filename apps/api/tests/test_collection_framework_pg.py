@@ -1,14 +1,13 @@
-"""The collection framework end to end (2026-09-24).
+"""The collection framework end to end.
 
-run_once around an adapter: the refusals before any lock or run row, the
-cursor round trip, the run row's start, requester and exit, raw markup per
-item, the identity fields, drift, login walls, deletions, the request log
-on every outcome, per-item savepoints, BLOCKED and RATE_LIMITED, the held
-list, and RSS polled exactly as before, through the passive route.
+run_once around an adapter: the refusals before any lock or run row, the cursor round trip, the run
+row's start, requester and exit, raw markup per item, the identity fields, drift, login walls,
+deletions, the request log on every outcome, per-item savepoints, BLOCKED and RATE_LIMITED, the held
+list, and RSS polled through the passive route.
 
-No test touches the network: authority adapters are stubs (collection_helpers)
-whose requests go to an injected fetcher, and every other connection but
-loopback raises. DATABASE_URL-gated like test_collection_pg.py.
+No test touches the network: authority adapters are stubs (collection_helpers) whose requests go to an
+injected fetcher, and every other connection but loopback raises. DATABASE_URL-gated like
+test_collection_pg.py.
 """
 from __future__ import annotations
 
@@ -897,9 +896,8 @@ def test_rss_polls_through_the_passive_route_once_a_proxy_is_configured(
 
 
 def test_the_source_listing_says_a_parserless_source_is_never_polled(conn):
-    """The listing's refusal for a source with no parser is a sentence, not
-    'No parser in this build is called None.' (screenshot review of the
-    Sources pane, 2026-09-24)."""
+    """The listing's refusal for a source with no parser is a sentence, not 'No parser in this build
+    is called None.'"""
     from noctornal_api.collection import CollectionService
 
     manual = h.source(conn, P, kind="MANUAL", parser=None, base_url=None)

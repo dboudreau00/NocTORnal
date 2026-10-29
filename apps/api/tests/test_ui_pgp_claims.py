@@ -1,11 +1,9 @@
-"""The verification queue in the console (F10-fix, comms, 2026-09-24).
+"""The verification queue in the console (comms).
 
-The queue read `c.attempted` and `c.last_outcome`, names the API never
-sent, and fell back to `c.id`, which does not exist: every card said
-"never checked", including claims that were checked and failed, which is
-the split the endpoint exists for. The Verify form could not name the
-binding it confirms, so CONFIRMED was reachable from the API only. Pure:
-reads the shipped static assets.
+The queue reads the fields the API sends, not `c.attempted` and `c.last_outcome`, and does not fall
+back to `c.id`, which does not exist: every card would say "never checked", including claims that were
+checked and failed, which is the split the endpoint exists for. The Verify form names the binding it
+confirms, so CONFIRMED is reachable from the console. Pure: reads the shipped static assets.
 """
 from __future__ import annotations
 

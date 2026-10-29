@@ -1,5 +1,4 @@
-"""The console's static triage and similar-sample views (F11 M,
-2026-09-24), held by reading the shipped console.
+"""The console's static triage and similar-sample views, held by reading the shipped console.
 
 Pure: no database, no browser.
 """
@@ -78,8 +77,8 @@ def test_the_hash_search_posts_the_value_in_the_body():
 
 def test_the_analysis_list_omits_machine_static_and_yara_rows():
     card = _fn("openSample")
-    # The machine ARCHIVE row (phase 8, 2026-10-02) is drawn by the archive
-    # panel, as STATIC and YARA are drawn by the triage panel.
+    # The machine ARCHIVE row is drawn by the archive panel, as STATIC and YARA are drawn by the triage
+    # panel.
     assert ("!(a.origin === 'machine'\n    && (a.kind === 'STATIC' || "
             "a.kind === 'YARA' || a.kind === 'ARCHIVE'))") in card
 
@@ -101,9 +100,8 @@ def test_no_inline_style_and_no_style_from_script():
 
 
 def test_the_handling_pane_says_what_runs_and_calls_nothing_unbuilt():
-    """The pane told analysts that archive expansion, screening and the
-    sandbox were "not built yet" below the bullets describing two of them;
-    all three ship (2026-10-07)."""
+    """The pane says what runs and calls nothing unbuilt: archive expansion, screening and the sandbox all
+    ship."""
     html = _html()
     pane = html[html.index('id="smp-handling-pane"'):html.index('id="smp-rules-pane"')]
     flat = " ".join(pane.split())

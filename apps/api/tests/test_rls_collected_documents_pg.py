@@ -1,25 +1,22 @@
-"""Row-level security on collected documents and proposals (S1, 2026-09-25).
+"""Row-level security on collected documents and proposals.
 
-0118 puts `collect.document`, what hangs off it (extractions, forum and
-Telegram side rows, vectors) and `collect.proposal` under policy. Each test
-runs the policy, a service or a route as the request role, bound by a real
-session's proof, with the fixtures seeded as the owner (rls_support):
+0118 puts `collect.document`, what hangs off it (extractions, forum and Telegram side rows, vectors) and
+`collect.proposal` under policy. Each test runs the policy, a service or a route as the request role,
+bound by a real session's proof, with the fixtures seeded as the owner (rls_support):
 
-- a document is held to the reader's CASE-LESS ceiling and compartments:
-  a grant scoped to a case never raises it, a global one does; its
-  children follow it; an unbound connection sees and writes nothing;
-- a proposal is visible in a readable case only, and its label never
-  reads LOW because its document is hidden (the fact read, not a join);
-- the cross-case document search runs as the definer and is narrowed to
-  the bound reader, never widened by the caller's own arguments;
-- the work that must see every document still does: a pasted capture
-  dedupes onto a document above the capturer, the readiness register
-  counts documents its reader cannot see, and a source's reclassification
-  requeues every document of it;
+- a document is held to the reader's CASE-LESS ceiling and compartments: a grant scoped to a case never
+  raises it, a global one does; its children follow it; an unbound connection sees and writes nothing;
+- a proposal is visible in a readable case only, and its label never reads LOW because its document is
+  hidden (the fact read, not a join);
+- the cross-case document search runs as the definer and is narrowed to the bound reader, never widened
+  by the caller's own arguments;
+- the work that must see every document still does: a pasted capture dedupes onto a document above the
+  capturer, the readiness register counts documents its reader cannot see, and a source's
+  reclassification requeues every document of it;
 - the document policy is initplans only, never a per-row definer call.
 
-Gated like the other row-security tests (NOCTORNAL_APP_DB_ROLE). Account
-prefix `rlsdoc-`, source names `rlsdoc-`.
+Gated like the other row-security tests (NOCTORNAL_APP_DB_ROLE). Account prefix `rlsdoc-`, source names
+`rlsdoc-`.
 """
 from __future__ import annotations
 
@@ -141,8 +138,7 @@ def test_a_document_is_held_to_the_case_less_ceiling_and_its_children_follow(own
         assert _ids(app, mine) == {amber}
         assert _ids(app, "SELECT id FROM collect.extraction WHERE id = ANY(%s)",
                     ([amber_x, red_x],)) == {amber_x}
-        # A grant scoped to a case never raises a row that belongs to no
-        # case (final review C11); a global one does.
+        # A grant scoped to a case never raises a row that belongs to no case; a global one does.
         s.break_glass(owner, analyst, "RED", red_case)
         assert _ids(app, mine) == {amber}
         s.break_glass(owner, analyst, "RED")
@@ -380,10 +376,9 @@ def test_the_readiness_register_counts_what_its_reader_cannot_see(owner):
 
 
 def test_a_source_reclassification_requeues_every_document_of_it(owner):
-    """`collect.source_vectors_follow` is SECURITY DEFINER (0118): run as
-    the writer it requeued only the documents the writer could see. Since
-    0179 (Beta 1.1) the request role writes no source at all, so the writer
-    is the system role, and the requeue still reaches every document."""
+    """`collect.source_vectors_follow` is SECURITY DEFINER (0118): run as the writer it would requeue only
+    the documents the writer could see. The request role writes no source at all (0179), so the writer is
+    the system role, and the requeue reaches every document."""
     import embedding_pg as H
     from noctornal_api.db import connect
     from noctornal_api.embeddings import EmbeddingService

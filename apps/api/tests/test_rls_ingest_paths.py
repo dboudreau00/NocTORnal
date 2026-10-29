@@ -1,22 +1,20 @@
-"""The ingest readers, converted for row-level security (F51, 2026-10-02).
+"""The ingest readers, converted for row-level security.
 
-Static: no database. Each conversion is pinned by the code that carries it,
-so a later edit cannot quietly undo one:
+Static: no database. Each conversion is pinned by the code that carries it, so a later edit cannot
+quietly undo one:
 
-- the work that must see every record runs as `SystemPurpose.INGEST`: a
-  batch's parse, a dead letter's replay, every scoring pass and the
-  fingerprint correlation; the queue's copy total is a WITHHELD count and
-  the retention counts are RETENTION's;
-- the routes read a record's labels and a batch's cases as facts
-  (`iam.ingest_record_facts`, `iam.ingest_batch_reach`), never through a
-  join to a row the reader may not see (decision 146's anti-join trap);
-- the selector-hit notice is raised from the scoring pass alone, so it
-  runs on the INGEST connection, which is what lets an operator off the
-  case tell its owner (its behaviour is in test_rls_ingest_pg.py);
+- the work that must see every record runs as `SystemPurpose.INGEST`: a batch's parse, a dead letter's
+  replay, every scoring pass and the fingerprint correlation; the queue's copy total is a WITHHELD count
+  and the retention counts are RETENTION's;
+- the routes read a record's labels and a batch's cases as facts (`iam.ingest_record_facts`,
+  `iam.ingest_batch_reach`), never through a join to a row the reader may not see (decision 146's
+  anti-join trap);
+- the selector-hit notice is raised from the scoring pass alone, so it runs on the INGEST connection,
+  which is what lets an operator off the case tell its owner (its behaviour is in test_rls_ingest_pg.py);
 - the unauthenticated submit opens no system connection;
-- a category correction and a reveal refuse a write that changed no row,
-  and the correction decides the expiry in its statement;
-- the four tables are under policy in the registry and no longer deferred.
+- a category correction and a reveal refuse a write that changed no row, and the correction decides the
+  expiry in its statement;
+- the four tables are under policy in the registry and not deferred.
 """
 from __future__ import annotations
 
@@ -89,10 +87,9 @@ def test_the_gate_reads_a_record_and_a_batch_as_facts():
 
 
 def test_the_selector_hit_notice_is_raised_from_the_scoring_pass_alone():
-    """2026-10-02: the notice reads the record and its
-    case on whatever connection it is handed, and only the INGEST one
-    `score_records` opens sees them for a scorer off the case. So it is
-    called from `_score_records` and from nowhere else."""
+    """The notice reads the record and its case on whatever connection it is handed, and only the INGEST
+    one `score_records` opens sees them for a scorer off the case. So it is called from `_score_records`
+    and from nowhere else."""
     tree = ast.parse((SRC / "ingest.py").read_text(encoding="utf-8"))
     callers = {fn.name for fn in ast.walk(tree)
                if isinstance(fn, ast.FunctionDef)
@@ -118,10 +115,9 @@ def test_a_write_that_changed_no_row_is_refused():
 
 
 def test_a_correction_decides_the_expiry_in_its_statement_and_the_console_says_so():
-    """2026-10-03: the correction writes the greater of
-    the stored expiry and its rule's, in the statement, and leaves a NULL one
-    NULL (greatest() skips NULL and would date the record); the console must
-    not print 'The expiry stays not recorded' for a record with none."""
+    """The correction writes the greater of the stored expiry and its rule's, in the statement, and leaves
+    a NULL one NULL (greatest() skips NULL and would date the record); the console must not print 'The
+    expiry stays not recorded' for a record with none."""
     correct = _function("ingest.py", "correct_category")
     assert "greatest(retain_until, %s)" in correct
     assert "WHEN retain_until IS NULL THEN NULL" in correct

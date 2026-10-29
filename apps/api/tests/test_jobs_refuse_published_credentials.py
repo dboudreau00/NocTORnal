@@ -1,22 +1,16 @@
-"""The jobs that are not the API refuse a credential the repository publishes
-(infra-12, 2026-10-03; ROADMAP-REMAINING.md, "The cron jobs and a published
-credential").
+"""The jobs that are not the API refuse a credential the repository publishes.
 
-`config.verify_environment` stops the API on every published value, but the
-cron scripts, the similarity pass and the migration job start without it and
-did not look: with the template's placeholders they ran beside an API that
-refused. `config.refuse_unsafe_job_environment` is the one helper each of them
-calls first (merged with docs/17 F52's: it was `config.refuse_published` here,
-which asked for the published half alone, and now asks for the schema owner's
-credential as well; test_job_environment_refusals.py holds that half). It is
-held here three ways: the helper alone, each script (refuses in production
-before connecting to anything, and leaves development alone), and the migration
-job through the real `alembic` command. The egress proxy, whose own database
-password in the template is `replace-me`, and the preflight of its env files are
-held at the bottom.
+`config.verify_environment` stops the API on every published value, but the cron scripts, the similarity
+pass and the migration job start without it, so with the template's placeholders they would run beside an
+API that refused. `config.refuse_unsafe_job_environment` is the one helper each of them calls first: it
+asks for the published half and for the schema owner's credential as well (test_job_environment_refusals.py
+holds that half). It is held here three ways: the helper alone, each script (refuses in production before
+connecting to anything, and leaves development alone), and the migration job through the real `alembic`
+command. The egress proxy, whose own database password in the template is `replace-me`, and the preflight
+of its env files are held at the bottom.
 
-Pure: no database is reached (a refusal returns before any connection, and
-the tests make a connection an error).
+Pure: no database is reached (a refusal returns before any connection, and the tests make a connection an
+error).
 """
 from __future__ import annotations
 

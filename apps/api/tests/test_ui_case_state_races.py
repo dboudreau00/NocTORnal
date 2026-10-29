@@ -1,23 +1,19 @@
 """Case state that outlived its case, and a grant whose end went unseen.
 
-The adversarial review of the merged 2026-09-23 console (group g06,
-console-case-state) found each of these with a reply or a value that
-belonged to one case, or one ceiling, drawn under another:
+Each of these is a reply or a value that belonged to one case, or one ceiling, drawn under another:
 
-- C3: the Analysis pane kept NIGHTJAR's ranked, named actors under
-  KESTREL's header, and a Run still out at the switch stopped KESTREL
-  from ever loading its own stored run.
-- C16: a NIGHTJAR /graph reply still out at the switch repainted the
-  cleared canvas, because the switch never moved `state.graphSeq`.
-- U15: NIGHTJAR's saved layout could replace KESTREL's for the visit, and
-  the next Save layout overwrote KESTREL's stored placement.
-- C18: a capture paste, an exhibit file and title, and ACH and assumption
-  wording typed on one case were written into the next.
-- U14: a Lab sample submitted with the Case field blank landed unattached
-  and vanished from the case-scoped queue.
-- C13 and C17: the header chip saw a grant end through one timer that was
-  never re-armed, and a grant change re-read the lists but left the Search
-  pane read under the other ceiling.
+- The Analysis pane must not keep one case's ranked, named actors under another's header, and a Run
+  still out at the switch must not stop the new case from loading its own stored run.
+- A /graph reply still out at the switch must not repaint the cleared canvas: the switch moves
+  `state.graphSeq`.
+- One case's saved layout must not replace another's for the visit, and Save layout must not overwrite
+  the other's stored placement.
+- A capture paste, an exhibit file and title, and ACH and assumption wording typed on one case must not
+  be written into the next.
+- A Lab sample submitted with the Case field blank must not land unattached and vanish from the
+  case-scoped queue.
+- The header chip sees a grant end through a timer that is re-armed, and a grant change re-reads the
+  Search pane under the new ceiling.
 
 Behavioural where it matters: the shipped functions run under node with a
 fake DOM and an `api` held open, so a test decides when each reply lands
@@ -157,9 +153,7 @@ const out = {};
 """
 
 
-# ---------------------------------------------------------------------------
-# C3: the Analysis pane
-# ---------------------------------------------------------------------------
+# The Analysis pane
 
 def _analysis_harness() -> str:
     js = _js()
@@ -202,9 +196,9 @@ function snap() {
 
 
 def test_a_switch_empties_the_analysis_pane_and_a_404_leaves_it_empty():
-    """The verifier's deterministic path: NIGHTJAR's latest run is on
-    screen, KESTREL was never analysed, so its /analytics/latest is a 404
-    that returns quietly. NIGHTJAR's table stayed under KESTREL's header."""
+    """One case's latest run is on screen, the next case was never analysed, so its
+    /analytics/latest is a 404 that returns quietly. The first case's table must not stay under the
+    second's header."""
     script = _analysis_harness() + r"""
 (async () => {
   $('an-empty').textContent = 'markup text';
@@ -344,9 +338,7 @@ def test_the_reset_text_is_the_markup_text():
     assert markup("an-hist-empty") == hist
 
 
-# ---------------------------------------------------------------------------
-# C16: the sociogram
-# ---------------------------------------------------------------------------
+# The sociogram
 
 def _canvas_harness() -> str:
     return _PRELUDE + r"""
@@ -442,9 +434,7 @@ def test_a_layout_or_presets_reply_for_the_case_left_behind_writes_nothing():
     assert got["afterFailure"] == ["b1"] and got["failed"] == [], got
 
 
-# ---------------------------------------------------------------------------
-# C18 and U14: what was typed for one case, written into the next
-# ---------------------------------------------------------------------------
+# What was typed for one case, written into the next
 
 def _writes_harness(*names: str) -> str:
     return _PRELUDE + r"""
@@ -467,11 +457,9 @@ $('smp-compartments').querySelectorAll = () => [];
 
 
 def test_a_write_answered_after_a_switch_is_said_where_it_went_not_drawn_here():
-    # countOf is in the harness because runCapture counts through it
-    # (README screenshot set review, 2026-09-23). Without it the success
-    # banner threw, the catch drew the FAILURE banner, and "OP-A" in its
-    # title passed this test for the wrong reason; the title and detail
-    # are now held exactly.
+    # countOf is in the harness because runCapture counts through it. Without it the success banner
+    # throws, the catch draws the FAILURE banner, and "OP-A" in its title passes for the wrong reason;
+    # the title and detail are held exactly.
     script = _writes_harness("countOf", "runCapture", "uploadEvidence") + r"""
 (async () => {
   $('cap-text').value = 'forum dump'; $('cap-class').value = 'AMBER';
@@ -504,8 +492,8 @@ def test_a_write_answered_after_a_switch_is_said_where_it_went_not_drawn_here():
 
 
 def test_a_lab_sample_goes_to_the_open_case_unless_no_case_is_chosen():
-    """U14: the Case field was a blank uuid box, so the default submit landed
-    a sample the case-scoped queue does not list."""
+    """A sample goes to the open case by default: a blank Case field would land a sample the
+    case-scoped queue does not list."""
     script = _writes_harness("submitSample", "fillSampleCase") + r"""
 (async () => {
   fillSampleCase();
@@ -547,9 +535,8 @@ def test_the_typed_forms_are_emptied_by_the_resets_they_belong_to():
     triage = _reset("'triage-list'")
     for field in ("cap-text", "cap-title", "cap-url", "cap-result", "cap-error"):
         assert f"'{field}'" in triage, f"the triage reset leaves #{field}"
-    # The classification select is rebuilt for no case, not only set, since
-    # the capture form is fitted to each case's floor (g01, final review
-    # c15, 2026-09-24).
+    # The classification select is rebuilt for no case, not only set, since the capture form is fitted
+    # to each case's floor.
     assert "syncCaptureForm(null, '');" in triage, "the triage reset leaves #cap-class"
     assert "$('cap-class')" in _fn("syncCaptureForm")
     case_file = _reset("'ent-body'")
@@ -561,9 +548,7 @@ def test_the_typed_forms_are_emptied_by_the_resets_they_belong_to():
         assert f"'{field}'" in lab, f"the Lab reset leaves #{field}"
 
 
-# ---------------------------------------------------------------------------
-# C17 and C13: the break-glass chip
-# ---------------------------------------------------------------------------
+# The break-glass chip
 
 def _glass_harness() -> str:
     js = _js()
@@ -603,9 +588,8 @@ function grant(id, fromNowMs) {
 
 
 def test_a_grant_the_server_still_lists_is_asked_about_again_then_stops():
-    """The verifier's reproduction: a workstation clock 3 s fast. The expiry
-    timer fires while the server still lists the grant, the wait comes out
-    below zero, and nothing was ever asked again."""
+    """A workstation clock 3 s fast: the expiry timer fires while the server still lists the grant, the
+    wait comes out below zero, and the grant must still be asked about again, then stop."""
     script = _glass_harness() + r"""
 (async () => {
   const body = (ms) => ({ clearance: 'AMBER', grants: [grant(7, ms)] });
@@ -697,9 +681,8 @@ def test_a_revoke_is_seen_on_the_analysts_next_action_not_by_polling():
 
 
 def test_a_grant_change_asks_the_search_pane_again():
-    """C13. The graph and exhibits were re-read when the grant that raises
-    the open case changed; the Search pane kept what it had read under the
-    other ceiling."""
+    """The graph and exhibits are re-read when the grant that raises the open case changes; the Search
+    pane is re-read too, so it does not keep what it read under the other ceiling."""
     script = _glass_harness() + r"""
 (async () => {
   const live = { clearance: 'AMBER', grants: [grant(7, 3600000)] };
@@ -725,7 +708,7 @@ def test_a_grant_change_asks_the_search_pane_again():
     began = got["began"]
     assert began["seq"] == 2 and "runSearch" not in began["effects"]
     assert began["nodes"] == 0
-    # The Search pane's deception block goes with its columns (2026-09-23).
+    # The Search pane's deception block goes with its columns.
     assert "clearDeceptionSearch" in began["effects"]
 
 

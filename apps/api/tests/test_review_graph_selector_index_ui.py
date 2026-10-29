@@ -1,12 +1,9 @@
-"""The console says when a selector it just wrote is already held
-(graph-selector-index-drift, review 2026-10-03).
+"""The console says when a selector it just wrote is already held.
 
-The server now returns `selector_owner_id` from a correction of a selector
-entity (`PATCH /graph/nodes/{id}`) and from the accept of a proposal that
-names a selector type, as `POST /nodes` already did. The create form says
-"already recorded against X ... a merge lead"; a correction and an accept
-said nothing, so the lead the server found was never seen. These tests hold
-the two new lines and the words they use. Server half:
+The server returns `selector_owner_id` from a correction of a selector entity (`PATCH /graph/nodes/{id}`)
+and from the accept of a proposal that names a selector type, as `POST /nodes` does. The create form says
+"already recorded against X ... a merge lead"; a correction and an accept must say it too, or the lead
+the server found is never seen. These tests hold the two lines and the words they use. Server half:
 `test_review_graph_selector_index_pg.py`.
 """
 from __future__ import annotations

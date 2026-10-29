@@ -1,14 +1,11 @@
-"""The gate reads facts; content reads go through row security (S1).
+"""The gate reads facts; content reads go through row security.
 
-Static: no database. The gate (`deps.authorize_object`, `evaluate()`)
-must decide and audit exactly as it did before a case or element row could
-be hidden from the caller: an assigned analyst asking for a RED node gets
-the gate's 403 and its AUTHZ_DENIED row, not row-level security's silent
-404. So everything that FEEDS the gate reads labels and lock facts through
-the definer fact functions (`iam.case_facts`, `iam.case_code`,
-`iam.element_facts` via `deps.element_labels`), and never `core."case"`
-or the element tables directly. The reads most easily missed (break-glass
-invoke and the officer's queue, the exhibit production ticket,
+Static: no database. The gate (`deps.authorize_object`, `evaluate()`) must decide and audit as if no case
+or element row could be hidden from the caller: an assigned analyst asking for a RED node gets the gate's
+403 and its AUTHZ_DENIED row, not row-level security's silent 404. So everything that FEEDS the gate reads
+labels and lock facts through the definer fact functions (`iam.case_facts`, `iam.case_code`,
+`iam.element_facts` via `deps.element_labels`), and never `core."case"` or the element tables directly. The
+reads most easily missed (break-glass invoke and the officer's queue, the exhibit production ticket,
 notify_events) are each pinned here by name.
 """
 from __future__ import annotations
@@ -32,8 +29,8 @@ _FACT_READERS = {
     ("projections.py", "_disclosure_mode"): "iam.case_facts",
     ("http/routers/ach.py", "_withheld"): "iam.case_facts",
     ("evidence.py", "redeem_production_ticket"): "iam.element_facts",
-    # Since 0180 (Beta 1.1) the refusal reads the ticket through its
-    # definer, which takes the exhibit's case from iam.element_facts.
+    # The refusal reads the ticket through its definer (0180), which takes the exhibit's case from
+    # iam.element_facts.
     ("evidence.py", "_production_refusal"): "lab.ticket_by_hash",
     ("http/routers/graph.py", "_element_labels"): "element_labels",
     ("http/routers/graph.py", "_gate_for_change"): "element_labels",
@@ -42,10 +39,8 @@ _FACT_READERS = {
     ("http/routers/evidence.py", "_authorize_exhibit"): "element_labels",
     ("http/routers/proposals.py", "_check_accept_labels"): "element_labels",
     ("http/routers/evidence.py", "_authorize_export"): "element_labels",
-    # S1, 2026-09-25: comms under policy (0122). The conversation's case
-    # is found as a fact before the gate's work proceeds; since A3
-    # (2026-10-07) through `element_gate.gate_element`, which reads it with
-    # `element_labels`.
+    # Comms are under policy (0122). The conversation's case is found as a fact before the gate's work
+    # proceeds, through `element_gate.gate_element`, which reads it with `element_labels`.
     ("http/routers/comms.py", "_own_conversation"): "gate_element",
 }
 
@@ -88,9 +83,8 @@ def test_an_element_pre_read_happens_before_its_content_read():
     for rel, fn in (("http/routers/graph.py", "_gate_for_change"),
                     ("http/routers/curation.py", "_node_for_write")):
         code = _code(_function(rel, fn))
-        # The element gate is `element_gate.authorize_element` since the beta
-        # review (2026-10-03), which is `authorize_object` with a refusal at
-        # the element's labels answered as its absence.
+        # The element gate is `element_gate.authorize_element`: `authorize_object` with a refusal at the
+        # element's labels answered as its absence.
         assert code.index("element_labels(") < code.index("authorize_element(") \
             < code.index("FROM core."), f"{rel}::{fn}"
     assert "authorize_object(" in _code(

@@ -1,11 +1,9 @@
-"""The egress proxy's database role holds exactly EGRESS_GRANTS (S2, 2026-09-24).
+"""The egress proxy's database role holds exactly EGRESS_GRANTS.
 
-Gated like test_app_role_privileges_pg.py: DATABASE_URL, and
-NOCTORNAL_EGRESS_DB_ROLE naming the role, which exists only where initdb ran
-db/init/20-egress-role.sh with NOCTORNAL_EGRESS_DB_PASSWORD set (CI creates
-it before migrating). The attack cases connect AS the role, with
-NOCTORNAL_EGRESS_DB_PASSWORD; the catalogue cases read over the owner's
-connection.
+Gated like test_app_role_privileges_pg.py: DATABASE_URL, and NOCTORNAL_EGRESS_DB_ROLE naming the role,
+which exists only where initdb ran db/init/20-egress-role.sh with NOCTORNAL_EGRESS_DB_PASSWORD set (CI
+creates it before migrating). The attack cases connect AS the role, with NOCTORNAL_EGRESS_DB_PASSWORD; the
+catalogue cases read over the owner's connection.
 """
 from __future__ import annotations
 

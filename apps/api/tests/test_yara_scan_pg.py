@@ -1,4 +1,4 @@
-"""YARA scanning inside static triage (F12 F, G, H, 2026-09-24).
+"""YARA scanning inside static triage.
 
 A match is a machine finding with qualified rule names, offsets and
 counts, never matched bytes; a scan with no match is a finding too; a
@@ -47,8 +47,7 @@ def test_ci_still_installs_the_yara_extra():
     if not ci.exists():
         pytest.skip("no CI workflow in this tree")
     text = ci.read_text(encoding="utf-8")
-    # CI installs the extra (2026-09-24), so its absence is a failure, not
-    # an expected one.
+    # CI installs the extra, so its absence is a failure, not an expected one.
     assert "yara" in text, "CI must install noctornal-api[yara]"
 
 
@@ -347,11 +346,11 @@ def test_a_tampered_build_never_reaches_a_child_and_a_new_one_is_used(conn, stor
 
 @pg
 def test_listings_never_read_a_blob_and_never_write(conn, store, monkeypatch):
-    """The verifier of 2026-09-24: every GET of the listing, a version or
-    the officer's pending list loaded and SHA-256'd each version's whole
-    compiled blob (up to 256 MiB) and verified it, and on a mismatch wrote
-    rejection rows and compile jobs from a GET. A read now checks the seal
-    over the recorded digest only and writes nothing; the writer's path
+    """Listings never read a blob and never write.
+
+    A GET of the listing, a version or the officer's pending list must not load and SHA-256 each
+    version's whole compiled blob (up to 256 MiB) or, on a mismatch, write rejection rows and compile
+    jobs. A read checks the seal over the recorded digest only and writes nothing; the writer's path
     (activation, scan) still rejects the build and queues the rebuild."""
     from noctornal_api import yara_rules
     lab, officer = _people(conn)

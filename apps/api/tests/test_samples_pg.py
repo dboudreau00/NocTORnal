@@ -1,11 +1,9 @@
-"""Phase 8 -- sample handling. The tests that matter are the refusals.
+"""Sample handling. The tests that matter are the refusals.
 
-Invariant 10: samples never render, never execute; the binary is only ever
-an encrypted archive download from a separate origin. Most of this file
-asserts that the system says NO -- to ingest before a policy is declared,
-to serving bytes from the app origin, to a second copy of the same binary,
-to a family attribution with no confidence, and to a public detonation with
-nobody's name on it.
+Invariant 10: samples never render, never execute; the binary is only ever an encrypted archive download
+from a separate origin. Most of this file asserts that the system says NO: to ingest before a policy is
+declared, to serving bytes from the app origin, to a second copy of the same binary, to a family
+attribution with no confidence, and to a public detonation with nobody's name on it.
 
 Env-gated on DATABASE_URL.
 """
@@ -84,9 +82,8 @@ class MemoryStore:
         self.objects.pop(key, None)
 
 
-#: `download()` refuses without a clearance (docs/17 F18). These tests are
-#: about the origin split, the tamper check and the state machine, so they
-#: pass a cleared caller and let the dedicated gate tests in
+#: `download()` refuses without a clearance. These tests are about the origin split, the tamper check and
+#: the state machine, so they pass a cleared caller and let the dedicated gate tests in
 #: `test_samples_hardening_pg.py` cover the label check itself.
 CLEARED = dict(clearance="RED")
 
@@ -122,10 +119,7 @@ def svc(conn, store):
 def destroying(monkeypatch):
     """The `destroy` disposition, stated by the tests that are about it.
 
-    Since F2 (2026-09-22) a rejection PRESERVES by default. The tests in
-    this file that assert destruction were written when destruction was
-    the only disposition, and they still describe what `destroy` does, so
-    they ask for it rather than rely on a default that changed.
+    A rejection PRESERVES by default, so the tests that assert destruction ask for `destroy` explicitly.
     test_sample_preservation_pg.py covers the default."""
     from noctornal_api.samples import DESTROY, DISPOSITION_ENV
     monkeypatch.setenv(DISPOSITION_ENV, DESTROY)
@@ -135,19 +129,16 @@ def _unique(seed: str) -> bytes:
     return FAKE_PE + seed.encode()
 
 
-# --- the block that was lifted, and the refusal that replaced it --------
+# --- ingest is refused until a policy is declared ---------------------
 
 def test_ingest_is_refused_until_a_policy_is_declared(conn, store, monkeypatch):
-    """decision 36 blocked this phase because a store of attacker-supplied
-    binaries will eventually receive material whose possession alone is an
-    offence. The operator lifted the block; the refusal that replaced it is
-    that nothing ingests until somebody has DECLARED a policy exists and
+    """decision 36: a store of attacker-supplied binaries will eventually receive material whose
+    possession alone is an offence, so nothing ingests until somebody has DECLARED a policy exists and
     named the person material is escalated to.
 
-    A declaration, not a verification. The software cannot check that the
-    referenced policy exists or that anyone has read it -- what it can do is
-    stop ingest being a one-click accident and put the operator's own
-    reference in the audit trail, so "nobody knew" is not available later.
+    A declaration, not a verification. The software cannot check that the referenced policy exists or
+    that anyone has read it; what it can do is stop ingest being a one-click accident and put the
+    operator's own reference in the audit trail, so "nobody knew" is not available later.
     """
     from noctornal_api.samples import PolicyNotDeclared, SampleService
 
@@ -223,15 +214,13 @@ def test_nothing_is_stored_as_an_executable(conn, svc, store):
 
 
 def test_the_same_binary_is_not_stored_twice(conn, svc):
-    """Two analysts finding the same binary is a finding about the actors,
-    not a reason for two copies of live malware.
+    """Two analysts finding the same binary is a finding about the actors, not a reason for two copies of
+    live malware.
 
-    The refusal names the hash only for a caller who could have seen the
-    existing row anyway. `submit()` without `visible_to_clearance` says
-    nothing, and that default is the point: uploading a hash you suspect
-    and reading the error back is a cheap probe for "is anybody else
-    working this intrusion", which in a compartmented case is the answer
-    the access gate exists to withhold (docs/17 F19).
+    The refusal names the hash only for a caller who could have seen the existing row anyway. `submit()`
+    without `visible_to_clearance` says nothing, and that default is the point: uploading a hash you
+    suspect and reading the error back is a cheap probe for "is anybody else working this intrusion",
+    which in a compartmented case is the answer the access gate exists to withhold (docs/17 F19).
     """
     from noctornal_api.samples import SampleError
     alice = _user(conn)
@@ -429,14 +418,11 @@ def test_a_destroyed_data_key_is_not_read_as_a_sealed_row(conn, svc,
                                                           destroying):
     """The key ring must not mistake a purge for a broken key.
 
-    `data_key_ciphertext` is NOT NULL, so "the key is gone" is recorded
-    as zero bytes. Until 2026-09-16 `sealed.inventory` counted those rows
-    and handed them to the envelope, which answered `ValueError: Nonce
-    must be between 8 and 128 bytes` -- outside `UNOPENABLE`, so it
-    escaped and took the whole `kek_ring_opens_stored_secrets` check with
-    it. One rejected sample was enough, and the register then said
-    nothing about the key ring at all. `rewrap_secrets.py --apply` hit
-    the same rows in its `--legacy-key-file` mode and aborted mid-pass.
+    `data_key_ciphertext` is NOT NULL, so "the key is gone" is recorded as zero bytes. `sealed.inventory`
+    must not count those rows and hand them to the envelope, which answers `ValueError: Nonce must be
+    between 8 and 128 bytes`: outside `UNOPENABLE`, it would escape and take the whole
+    `kek_ring_opens_stored_secrets` check with it. `rewrap_secrets.py --apply` meets the same rows in its
+    `--legacy-key-file` mode.
     """
     from noctornal_api import readiness
     from noctornal_api.security.sealed import inventory
@@ -468,16 +454,13 @@ def test_a_rejection_with_no_store_refuses_rather_than_claiming_destruction(
         conn, store, destroying):
     """`bytes_purged: true` with nothing behind it is a FALSE record.
 
-    Found 2026-08-07, and it is the third instance of one shape: a
-    destruction that reports success while the object store was never
-    touched (`retention._purge_evidence`, `ingest._with_raw`, here). The
-    row goes into `lab.sample_access`, which raises on DELETE — so an
-    auditor asking "was this destroyed" is shown a permanent yes for a
-    destruction that never happened.
+    A destruction that reports success while the object store was never touched (the same shape as
+    `retention._purge_evidence` and `ingest._with_raw`) goes into `lab.sample_access`, which raises on
+    DELETE, so an auditor asking "was this destroyed" would be shown a permanent yes for a destruction
+    that never happened.
 
-    The state machine is still testable without MinIO; what is refused is
-    the specific combination of "destroy the bytes" and "there is nowhere
-    to destroy them from".
+    The state machine is still testable without MinIO; what is refused is the specific combination of
+    "destroy the bytes" and "there is nowhere to destroy them from".
     """
     from noctornal_api.samples import REJECTED, SampleError, SampleService
 
@@ -608,9 +591,8 @@ def test_the_database_refuses_an_unauthorised_exposure(conn, svc):
 
 
 def test_a_record_only_request_is_never_sent(conn, svc):
-    """docs/11: do not build a sandbox, integrate with one. A request
-    recorded through this path is RECORD_ONLY (F14): the sandbox worker
-    sends SUBMIT rows alone, and 0103's guard refuses any change to this
+    """docs/11: do not build a sandbox, integrate with one. A request recorded through this path is
+    RECORD_ONLY: the sandbox worker sends SUBMIT rows alone, and 0103's guard refuses any change to this
     one, so it can never be sent."""
     alice = _user(conn)
     s = svc.submit(_unique("norun"), submitted_by=alice)
@@ -673,12 +655,9 @@ def test_the_queue_is_filtered_by_the_callers_own_clearance(conn, svc):
 
 def test_a_compartmented_sample_is_invisible_without_the_compartment(conn, svc):
     alice = _user(conn)
-    # Registered before the sample is filed under it. Since 2026-09-09
-    # (migration 0059) `lab.sample.compartments` is bound to
-    # `iam.compartment`, so `submit` with a key nobody registered is
-    # refused by the database rather than silently filed, and this test
-    # failed on that refusal. ON CONFLICT and never deleted: the registry
-    # refuses to drop a key while any row still carries it.
+    # Registered before the sample is filed under it: `lab.sample.compartments` is bound to
+    # `iam.compartment` (0059), so `submit` with a key nobody registered is refused by the database.
+    # ON CONFLICT and never deleted: the registry refuses to drop a key while any row still carries it.
     conn.execute(
         "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
         "ON CONFLICT (key) DO NOTHING", ("OPERATION-X", "OPERATION-X (lab test)"))

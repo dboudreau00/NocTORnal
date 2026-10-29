@@ -1,12 +1,10 @@
-"""Console defects the README screenshots exposed (2026-09-23).
+"""Console defects the README screenshots exposed.
 
-Round 1 of the README screenshot work put sixteen panes in front of eight
-adversarial critics, and several of the problems they found were in the
-product rather than in the data or the framing: copy that contradicted the
-drawing beside it, a preview that broke the one value it exists to show,
-a form row that wrapped every channel onto three lines, notes to the
-developer shown to the analyst, and a matrix whose own marker could never
-render. Each is held here so the next capture cannot show it again.
+Several problems found in the screenshots were in the product rather than in the data or the framing:
+copy that contradicted the drawing beside it, a preview that broke the one value it exists to show, a
+form row that wrapped every channel onto three lines, notes to the developer shown to the analyst, and
+a matrix whose own marker could never render. Each is held here so the next capture cannot show it
+again.
 
 Pure, like `test_ui_invariants.py` beside it: these read the shipped static
 assets and the service source, with no database and no browser. The checks
@@ -210,8 +208,7 @@ def test_a_delivery_preference_select_is_sized_to_its_options():
     assert "width: 100%" in _rule("select")
     assert "width: auto" in _rule(".pref-row select")
     prefs = _fn("loadInboxPreferences")
-    # Named by a visible <label> since ux08-triage:prefs-unlabelled-and-
-    # opaque (2026-09-23), which is also the name a screen reader reads.
+    # Named by a visible <label>, which is also the name a screen reader reads.
     assert "prefField('Minimum priority', priority)" in prefs
     assert "prefField('Quiet from', from)" in prefs
 
@@ -230,13 +227,12 @@ def test_the_inbox_help_names_every_half_of_the_read_time_filter():
 # ---------------------------------------------------------------------------
 
 def test_the_inspector_does_not_call_brokerage_unbuilt():
-    """"is Phase 3 and is not computed here" sat beside a computed
-    key-player card; Phase 3 shipped."""
+    """The inspector does not call brokerage unbuilt: "is Phase 3 and is not computed here" sat beside
+    a computed key-player card."""
     text = " ".join(_visible(_html()).split())
     assert "is Phase 3" not in text
     assert "not computed here" not in text
-    # An instruction since the ux19-copy stale-phase3-claim fix
-    # (2026-09-23): it says where to run brokerage, not only where it is.
+    # An instruction: it says where to run brokerage, not only where it is.
     assert "Run Analysis for brokerage." in text
     assert '<span class="rail-cap">Analysis</span>' in _html()
 
@@ -251,19 +247,15 @@ def test_no_design_document_is_cited_to_the_analyst():
     strings = re.findall(r"'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`", code)
     cited = [s for s in strings if re.search(r"docs/\d\d", s)]
     assert not cited, cited
-    # True to onTriageKey, which acts only inside the list since
-    # ux18-a11y:triage-letter-keys-global and only on a card or the list,
-    # never a button, a field or a chord, since ux08-triage:triage-keys-
-    # fire-on-browser-chords (2026-09-23).
+    # True to onTriageKey, which acts only inside the list, and only on a card or the list, never a
+    # button, a field or a chord.
     assert "list.contains(target)" in _fn("onTriageKey")
     assert "triageKeyTarget(target)" in _fn("onTriageKey")
     assert "The keys work when the list has focus." in " ".join(visible.split())
 
 
-# ---------------------------------------------------------------------------
-# ACH: the "refute first" marker could never render, and the ranking drew
-# its losers in the winner's colour
-# ---------------------------------------------------------------------------
+# ACH: the "refute first" marker renders, and the ranking does not draw its losers in the winner's
+# colour
 
 def test_refute_first_is_compared_with_evidence_not_with_hypotheses():
     """ach.py: `refute_first` is the ASSERTION id of the most diagnostic
@@ -288,9 +280,8 @@ def _ach_consts() -> str:
     return "\n".join(found)
 
 
-#: The helpers the ACH renderers call since the ux11-ach pass (2026-09-23):
-#: the stable column key and order, the labelled score, the card, and the
-#: row's subject, claim and evidence cell.
+#: The helpers the ACH renderers call: the stable column key and order, the labelled score, the card,
+#: and the row's subject, claim and evidence cell.
 _ACH_HELPERS = ("achKey", "achColumns", "achNum", "achAnd", "achCard",
                 "achSubject", "achClaim", "achEvidenceCell")
 
@@ -370,10 +361,8 @@ const body = {
 
 @needs_node
 def test_the_next_test_marker_renders_on_its_evidence_row(tmp_path):
-    """Executes the shipped ranking and matrix renderers: the marker the
-    old comparison could never draw now lands on the row `refute_first`
-    names, the dash on that row says why it is unknown, and the ranking
-    names the blank column."""
+    """Executes the shipped ranking and matrix renderers: the marker lands on the row `refute_first`
+    names, the dash on that row says why it is unknown, and the ranking names the blank column."""
     got = _run([*_ach_sources(), _fn("achNextTest"), _fn("achUnknownWhy"),
                 _fn("renderAchRanking"), _fn("renderAchMatrix"),
                 _MATRIX_STUBS], """
@@ -501,9 +490,9 @@ def test_the_report_and_retention_sections_are_spaced():
 # ---------------------------------------------------------------------------
 
 def test_showing_the_results_sizes_the_trend_canvas():
-    """`resizeHistory` ran only on tab entry, and on entry to a case with no
-    run the results are hidden, so the canvas kept its 300x150 bitmap and
-    the chart was a blurred strip."""
+    """`resizeHistory` must also run when the results are shown: on entry to a case with no run the
+    results are hidden, so the canvas would keep its 300x150 bitmap and the chart would be a blurred
+    strip."""
     render = _code(_fn("renderAnalytics"))
     shown = render.index("show($('an-results'), true)")
     assert "resizeHistory();" in render[shown:], (
@@ -568,10 +557,7 @@ def test_a_styled_select_draws_its_chevron_even_when_focused():
         rule = _rule(selector)
         assert "linear-gradient" in rule and "no-repeat" in rule, selector
     assert "url(" not in _rule("select.select")
-    # A listbox has nothing to drop down. Admin's roles picker was the
-    # console's one listbox until it became checkboxes (ux16-admin:
-    # create-roles-multiselect, 2026-09-23); the rule stays, so the next
-    # listbox does not grow a chevron.
+    # A listbox has nothing to drop down. The rule stays so a future listbox does not grow a chevron.
     assert "background-image: none" in _rule("select.select[multiple]")
 
 
@@ -625,15 +611,12 @@ class ApiError extends Error {
 
 @needs_node
 def test_a_refusal_detail_is_closed_before_the_sentence_after_it(tmp_path):
-    """The Break-glass subtab printed "missing global permission
-    break_glass.review The review belongs to the security officer", the
-    server's clause and the console's sentence run together as one."""
-    # With no role table read from the server (`permissionRoles` null) a
-    # refusal reads as it always did; the role-named form is held by
-    # test_a_refusal_names_the_roles_and_who_can_give_one in
-    # test_search_palette_copy_ui.py, and every context against the real
-    # grant table by test_every_refusal_reads_as_a_sentence_against_the_
-    # real_grant_table in test_search_columns_pg.py.
+    """The Break-glass subtab must not print "missing global permission break_glass.review The review
+    belongs to the security officer": the server's clause is closed before the console's sentence."""
+    # With no role table read from the server (`permissionRoles` null) a refusal reads plainly. The
+    # role-named form is held by test_a_refusal_names_the_roles_and_who_can_give_one in
+    # test_search_palette_copy_ui.py, and every context against the real grant table by
+    # test_every_refusal_reads_as_a_sentence_against_the_real_grant_table in test_search_columns_pg.py.
     got = _run([_API_ERROR, _fn("refusalText"), _fn("closeClause"),
                 _fn("permissionRefusal"), _fn("roleWords"), _fn("rolesFor"),
                 _fn("listWords"), "let permissionRoles = null;"], """

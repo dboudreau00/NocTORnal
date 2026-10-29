@@ -1,41 +1,30 @@
 """The curation router over HTTP: tags and node sets, and what they refuse.
 
-`TagService` and `NodeSetService` have been green since Phase 1 and had no
-router, no endpoint and no caller outside their own tests -- the dead
-subsystem the 2026-07-26 call-site audit found. `test_curation_pg.py`
-covers the services; nothing there touches authorisation, because a service
-has none. This file covers the half that only the router holds:
+`test_curation_pg.py` covers the services; nothing there touches authorisation, because a service has
+none. This file covers the half that only the router holds:
 
-- a `tag_id`, `set_id`, `node_id` or `parent_id` from ANOTHER case is 404,
-  never 403 and never 200 -- the route gate authorises against the
-  `case_id` in the PATH, so an id from elsewhere would be operated on under
-  an authorisation that never covered it;
-- 404 and not 403, so none of these endpoints is an existence oracle: the
-  answer for a foreign id and for a random UUID is asserted to be
-  BYTE-IDENTICAL, not merely both-4xx;
-- `curation.manage` is held by CASE_OWNER and ANALYST only (migration
-  0053), so a CONTRIBUTOR or READ_ONLY assignee reads the overlay and
-  cannot write it;
-- the five-part gate is re-run against the NODE's own labels, because a RED
-  node can live in an AMBER case and attaching an overlay to it is a write
-  against the node;
-- nothing here writes `core.assertion` or `core.edge` (invariants 1 and
-  docs/01's reason for keeping working sets out of the graph);
-- a member the caller cannot see is REPORTED as withheld, never silently
-  dropped (invariant 12);
-- every removal reaches `audit.event`, because `core.tag_assignment` and
-  `core.node_set_member` record nothing about who removed a row.
+- a `tag_id`, `set_id`, `node_id` or `parent_id` from ANOTHER case is 404, never 403 and never 200:
+  the route gate authorises against the `case_id` in the PATH, so an id from elsewhere would be
+  operated on under an authorisation that never covered it;
+- 404 and not 403, so none of these endpoints is an existence oracle: the answer for a foreign id and
+  for a random UUID is asserted to be BYTE-IDENTICAL, not merely both-4xx;
+- `curation.manage` is held by CASE_OWNER and ANALYST only (migration 0053), so a CONTRIBUTOR or
+  READ_ONLY assignee reads the overlay and cannot write it;
+- the five-part gate is re-run against the NODE's own labels, because a RED node can live in an AMBER
+  case and attaching an overlay to it is a write against the node;
+- nothing here writes `core.assertion` or `core.edge` (invariant 1 and docs/01's reason for keeping
+  working sets out of the graph);
+- a member the caller cannot see is REPORTED as withheld, never silently dropped (invariant 12);
+- every removal reaches `audit.event`, because `core.tag_assignment` and `core.node_set_member` record
+  nothing about who removed a row.
 
-**The email prefix is `curh-` and must stay unique.** Every `_pg` fixture
-in this tree tears down by deleting on an email pattern, so two files
-sharing a prefix delete each other's rows -- which surfaces as a foreign-key
-error in whichever file tears down second, pointing at a table neither test
-touched. `test_curation_pg.py` owns `cur-`, and `LIKE 'cur-%'` does not
-match `curh-...` (the hyphen is literal), so the two coexist.
+**The email prefix is `curh-` and must stay unique.** Every `_pg` fixture in this tree tears down by
+deleting on an email pattern, so two files sharing a prefix delete each other's rows, which surfaces as
+a foreign-key error in whichever file tears down second. `test_curation_pg.py` owns `cur-`, and
+`LIKE 'cur-%'` does not match `curh-...` (the hyphen is literal), so the two coexist.
 
-Global tags are the other shared-state trap: `core.tag.case_id IS NULL` is
-outside any case-scoped sweep, so the ones created here carry a `curh-`
-NAMESPACE and the teardown removes them by it.
+Global tags are the other shared-state trap: `core.tag.case_id IS NULL` is outside any case-scoped
+sweep, so the ones created here carry a `curh-` NAMESPACE and the teardown removes them by it.
 
 Env-gated on DATABASE_URL.
 """
@@ -149,29 +138,21 @@ def _make_user(conn, *, clearance="RED", global_roles=()):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    """A signed-in caller, minted the way `scripts/bootstrap.py session` mints one: the account looked
+    up by email, then `SessionService` against the same store the API validates against. Unbound (no
+    address, no User-Agent), which 0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
     is off in these tests.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Not `POST /auth/login`, which answers 204 and leaves the token only in `__Host-session`. TOTP codes
+    are single-use, so two sign-ins for one account inside one 30-second step would fail on the code,
+    not on the thing under test.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as both real mint sites pass: a session that never satisfied MFA is refused
+    # by every step-up gated route.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token
@@ -188,11 +169,9 @@ def _create_case(client, token) -> str:
         "retention_until": str(date(2028, 1, 1)),
         "review_due": str(date(2027, 1, 1))})
     assert r.status_code == 201, r.text
-    # These tests are about the COUNT a set withholds. A new case discloses
-    # PRESENCE only (0030's default), and the member list says only what the
-    # case allows since 2026-10-03 (beta review rls-9), so the case under test
-    # discloses counts. The other two modes are
-    # `test_review_g42_disclosure_pg`'s.
+    # These tests are about the COUNT a set withholds. A new case discloses PRESENCE only (0030's
+    # default), so the case under test discloses counts. The other two modes are
+    # `test_disclosure_of_hidden_items_pg`'s.
     from noctornal_api.db import connect
     with connect() as db:
         db.execute("UPDATE core.\"case\" SET withheld_disclosure = 'COUNT' "
@@ -275,21 +254,15 @@ def owner(conn, client):
 # ---------------------------------------------------------------------------
 
 def test_the_curation_router_is_mounted():
-    """Asserted against the route table rather than by probing for a
-    non-404, because "no such route" and "404 by design" are the two answers
-    every other test in this file has to tell apart. If app.py forgets the
-    include_router, this fails on its own and unambiguously.
+    """Asserted against the route table rather than by probing for a non-404, because "no such route"
+    and "404 by design" are the two answers every other test in this file has to tell apart. If app.py
+    forgets the include_router, this fails on its own and unambiguously.
 
-    Reads the application directly rather than `client.app`, which is a
-    TestClient implementation detail.
-
-    THE ROUTE TABLE IS THE OPENAPI SCHEMA, NOT `app.routes`. This app wraps
-    every `include_router` call in a `_IncludedRouter`, of which there are
-    26 and NONE exposes a `.path`. Reading `app.routes` returns exactly
-    three usable entries — `/`, `/healthz` and the `/ui` Mount — so a
-    membership check against it fails for every API path in the tree,
-    including ones that have shipped for months. The generated schema is
-    the only view that enumerates them.
+    Reads the application directly rather than `client.app`, which is a TestClient implementation
+    detail. The route table is the OPENAPI SCHEMA, not `app.routes`: this app wraps every
+    `include_router` call in a `_IncludedRouter`, none of which exposes a `.path`, so `app.routes`
+    holds only `/`, `/healthz` and the `/ui` Mount. The generated schema is the only view that
+    enumerates the API paths.
     """
     from noctornal_api.http.app import create_app
     paths = set(create_app().openapi()["paths"])
@@ -843,22 +816,17 @@ def test_an_unassigned_caller_gets_404_not_403(conn, client, owner):
                        ).status_code == 404
 
 
-# ---------------------------------------------------------------------------
-# Element labels, not just the case's. A RED node can live in an AMBER case
-# (the TLP trigger enforces a FLOOR, not a ceiling), so passing the case
-# gate is not permission to curate every node in the case.
-# ---------------------------------------------------------------------------
+# Element labels, not just the case's. A RED node can live in an AMBER case (the TLP trigger enforces a
+# FLOOR, not a ceiling), so passing the case gate is not permission to curate every node in the case.
 
 def test_an_amber_analyst_cannot_tag_a_red_node(conn, client):
-    """`require("curation.manage")` on the route authorised against the
-    CASE. Attaching an overlay to a node is a write against the NODE, so the
-    gate is re-run with the element's own labels -- the CR7 pattern
+    """`require("curation.manage")` on the route authorises against the CASE. Attaching an overlay to a
+    node is a write against the NODE, so the gate is re-run with the element's own labels, the pattern
     `graph.py` uses for assertions.
 
-    The refusal was a 403 "missing permission" until 2026-10-03, which told
-    a caller holding a leaked node id that it named something in the case
-    above their clearance (beta review http_ui-016). It is the missing
-    node's own 404 now, with the AUTHZ_DENIED row kept.
+    The refusal is the missing node's own 404, with the AUTHZ_DENIED row kept: a 403 "missing
+    permission" would tell a caller holding a leaked node id that it names something in the case above
+    their clearance.
     """
     _, owner_email, owner_secret = _make_user(conn, clearance="RED",
                                               global_roles=("CASE_OWNER",))
@@ -1279,10 +1247,7 @@ def test_an_assignment_reports_its_actor_by_durable_id(client, owner, conn):
     assert "Curation" not in r.text
 
 
-# ---------------------------------------------------------------------------
-# The 2026-08-07 pass: a merged-away node is not a member, and a
-# double-assign is not a 500
-# ---------------------------------------------------------------------------
+# A merged-away node is not a member, and a double-assign is not a 500.
 
 def _merge(conn, case_id, source_id, target_id, actor_id):
     """Merge through the real service, so the node carries `merged_into_id`
@@ -1295,17 +1260,16 @@ def _merge(conn, case_id, source_id, target_id, actor_id):
 
 def test_a_merged_away_node_is_listed_separately_not_counted_as_a_member(
         conn, client):
-    """`list_tags` filtered `merged_into_id IS NULL` and `list_sets` and
-    `list_members` did not, so the losing side of a merge went on counting
+    """A merged-away node is listed separately, not counted as a member.
+
+    Every list must filter `merged_into_id IS NULL`, or the losing side of a merge goes on counting
     towards a working set that no graph read path would return.
 
-    It is broken out rather than folded into `withheld`, which means "you
-    may not see this" -- a merge is not a clearance fact, and reporting it
-    as one tells an analyst they lack access to their own set. The ids are
-    returned so the entry can be REMOVED: `_node_for_write` passes
-    `require_live=False` on the removal paths precisely so these can be
-    cleared, and hiding them outright leaves the overlay accumulating rows
-    nobody can reach.
+    It is broken out rather than folded into `withheld`, which means "you may not see this": a merge is
+    not a clearance fact, and reporting it as one tells an analyst they lack access to their own set.
+    The ids are returned so the entry can be REMOVED: `_node_for_write` passes `require_live=False` on
+    the removal paths precisely so these can be cleared, and hiding them outright leaves the overlay
+    accumulating rows nobody can reach.
     """
     owner_id, owner_email, owner_secret = _make_user(
         conn, global_roles=("CASE_OWNER",), clearance="RED")
@@ -1355,18 +1319,16 @@ def test_a_merged_away_node_is_listed_separately_not_counted_as_a_member(
 
 
 def test_assigning_the_same_tag_twice_is_a_no_op_not_a_conflict(conn, client):
-    """0054 gave `tag_assignment` the unique index, and `TagService.assign`
-    was never given the matching `ON CONFLICT`.
+    """`TagService.assign` is idempotent: it carries the `ON CONFLICT` matching `tag_assignment`'s
+    unique index.
 
-    The router pre-checks, which handles the double-click and not the race:
-    two concurrent requests both SELECT, both find nothing, and the second
-    INSERT raises. This asserts the SERVICE is idempotent, so the pre-check
-    is an optimisation rather than the only thing standing between a
-    double-click and a 500.
+    The router pre-checks, which handles the double-click and not the race: two concurrent requests both
+    SELECT, both find nothing, and the second INSERT raises. This asserts the SERVICE is idempotent, so
+    the pre-check is an optimisation rather than the only thing standing between a double-click and a
+    500.
 
-    The conflict target has to restate the index's WHERE clause -- 0054
-    created four PARTIAL indexes on purpose, and a partial index is not
-    usable as a conflict target without its predicate.
+    The conflict target has to restate the index's WHERE clause: the indexes are PARTIAL on purpose
+    (0054), and a partial index is not usable as a conflict target without its predicate.
     """
     from noctornal_api.curation import TagService
 

@@ -1,15 +1,12 @@
-"""The egress suites leave a database's live egress configuration as they
-found it (S2, 2026-09-25).
+"""The egress suites leave a database's live egress configuration as they found it.
 
-Several suites need no live route of a name, or their own passive default,
-and retirement is terminal to the application, so they once retired a
-developer's own profiles and routes (the demo configuration included) for
-good. egress_support.preserved snapshots the live configuration and brings
-it back exactly afterwards; a run killed half way is repaired by the next
-one from the snapshot file.
+Several suites need no live route of a name, or their own passive default, and retirement is terminal to
+the application, so they would retire a developer's own profiles and routes (the demo configuration
+included) for good. egress_support.preserved snapshots the live configuration and brings it back exactly
+afterwards; a run killed half way is repaired by the next one from the snapshot file.
 
-Everything here runs inside one transaction that is rolled back, so this
-suite changes nothing either. Env-gated on DATABASE_URL.
+Everything here runs inside one transaction that is rolled back, so this suite changes nothing either.
+Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

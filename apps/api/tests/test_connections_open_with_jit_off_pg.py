@@ -1,12 +1,9 @@
-"""Application connections are opened with JIT off (2026-10-07,
-`db.SESSION_OPTIONS`).
+"""Application connections are opened with JIT off (`db.SESSION_OPTIONS`).
 
-On a 1,000,000-claim database the request role's reads paid for JIT
-compilation they never repaid: row security's policies push the planner's
-cost estimate past `jit_above_cost`, so node search spent 2.37 s of its
-2.83 s compiling, the triage queue 1.2 s of 1.97 s, the graph view 1.5 s.
-With JIT off the same reads took 0.50 s, 0.78 s. JIT never changes an
-answer. Each DB test fails on 8585a5c, where the server default (on) held.
+On a 1,000,000-claim database the request role's reads paid for JIT compilation they never repaid: row
+security's policies push the planner's cost estimate past `jit_above_cost`, so node search spent 2.37 s of
+its 2.83 s compiling, the triage queue 1.2 s of 1.97 s, the graph view 1.5 s. With JIT off the same reads
+took 0.50 s and 0.78 s. JIT never changes an answer. Each DB test fails with the server default (on).
 
 Env-gated on DATABASE_URL.
 """

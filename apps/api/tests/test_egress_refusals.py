@@ -1,7 +1,6 @@
-"""The production refusals of the egress proxy (S2,
-2026-09-24): the API's key checks, the start refusal on outbound uses with
-no proxy, and the egress proxy's own environment check. Pure: the
-environments are dictionaries and the database is a stand-in."""
+"""The production refusals of the egress proxy: the API's key checks, the start refusal on outbound uses
+with no proxy, and the egress proxy's own environment check. Pure: the environments are dictionaries and
+the database is a stand-in."""
 from __future__ import annotations
 
 import pytest

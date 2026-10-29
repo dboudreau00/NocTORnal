@@ -1,20 +1,15 @@
-"""Selectors and ties against entities above the caller (beta review,
-2026-10-03).
+"""Selectors and ties against entities above the caller.
 
-- graph-selector-record-oracle, http_ui-002, rls-2: POST /selectors upserted
-  the same (case, type, value) row GET /selectors withholds and handed back
-  its owner, its stored spelling and its count, and bumped the count of a
-  row owned by an entity the caller cannot read.
-- graph-edge-endpoints-not-gated: a tie could be made to an entity above the
-  caller, and the retirement guard compared only a tie's own labels, so a
-  retirement cascaded through (and counted) a tie to such an entity.
-- rls-3: edge_uniq_active spanned labels, so making a tie between two
-  entities the caller can see answered 400 "already exists" exactly when a
-  tie of that type, above them, already joined the pair.
-- graph-unmerge-500-and-ties-to-merged-nodes: a tie could be made to a
-  merged-away or retired entity.
+- POST /selectors must not upsert the same (case, type, value) row GET /selectors withholds and hand back
+  its owner, its stored spelling and its count, nor bump the count of a row owned by an entity the caller
+  cannot read.
+- A tie cannot be made to an entity above the caller, and the retirement guard compares more than a tie's
+  own labels, so a retirement does not cascade through (and count) a tie to such an entity.
+- `edge_uniq_active` does not span labels, so making a tie between two entities the caller can see does
+  not answer 400 "already exists" exactly when a tie of that type, above them, already joins the pair.
+- A tie cannot be made to a merged-away or retired entity.
 
-Through the real route as the request role (`review_g42_support`).
+Through the real route as the request role (`graph_visibility_support`).
 """
 from __future__ import annotations
 
@@ -24,7 +19,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-import review_g42_support as g
+import graph_visibility_support as g
 import rls_support as s
 
 pytestmark = g.GATED
@@ -72,7 +67,7 @@ def _post_selector(client, w, uid, **body):
     return client.post(w.url("/selectors"), headers=w.headers(uid), json=body)
 
 
-# --- POST /selectors (graph-selector-record-oracle, http_ui-002, rls-2) -----
+# --- POST /selectors -------------------------------------------------------------
 
 def test_posting_a_selector_a_hidden_entity_holds_answers_as_a_first_sighting(
         owner, client):
@@ -153,12 +148,10 @@ def test_creating_an_entity_with_a_value_a_hidden_entity_holds_leaves_it_alone(
 
 # --- the membership oracle (0134) ----------------------------------------------
 #
-# The first fix stopped POST /selectors handing back and bumping a row owned above
-# the caller by answering such a value as a first sighting and storing
-# nothing. A repeat post, a read after a post, a
-# second entity and the id as a merge's basis each still told a held value
-# from an unheld one. The index is keyed by labels now, so the caller's own
-# sighting is a row of their own.
+# POST /selectors must not hand back or bump a row owned above the caller: it answers such a value as a
+# first sighting and stores nothing. A repeat post, a read after a post, a second entity and the id as a
+# merge's basis must not still tell a held value from an unheld one. The index is keyed by labels, so the
+# caller's own sighting is a row of their own.
 
 def _shape(client, w, uid, value):
     """What a caller can tell about a value from two posts and a read."""

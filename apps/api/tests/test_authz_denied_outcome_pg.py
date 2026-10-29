@@ -16,7 +16,7 @@ from uuid import uuid4
 
 import pytest
 
-import review_g42_support as g
+import graph_visibility_support as g
 import rls_support as s
 
 pytestmark = g.GATED

@@ -1,5 +1,4 @@
-"""Administration, Two-person controls and the case's merge switch, as the
-console ships them (F9, F9b, 2026-09-24).
+"""Administration, Two-person controls and the case's merge switch, as the console ships them.
 
 Pure: no database. The markup and constants are read from the shipped
 source, beside test_ui_invariants.py; the functions marked `needs_node`

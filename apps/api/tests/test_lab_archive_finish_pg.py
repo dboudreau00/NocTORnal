@@ -1,16 +1,12 @@
-"""Archive expansion, the verifier's blockers and majors closed (2026-10-03).
+"""Archive expansion: an isolation that meets a busy sibling is finished, not lost.
 
-What these hold: an isolation that meets a busy sibling is FINISHED, not
-lost (the cascade runs on every call, goes on past the sample it cannot
-take, and the screening pass completes any tree found half isolated from
-the database alone); a member found by hash in a row outside the tree still
-isolates the archive; an expansion that stopped part way is resumed by the
-next run and never declared complete (and a refused resume does not clear
-the gap); and the derived "members were not compared" gap is dropped only on
-the record of a finished expansion that left nothing uncompared.
+The cascade runs on every call, goes on past the sample it cannot take, and the screening pass completes any
+tree found half isolated from the database alone. A member found by hash in a row outside the tree still
+isolates the archive. An expansion that stopped part way is resumed by the next run and never declared
+complete (a refused resume does not clear the gap). The derived "members were not compared" gap is dropped
+only on the record of a finished expansion that left nothing uncompared.
 
-Email prefix `arch-` (the cleanup of test_lab_archive_pg). Env-gated on
-DATABASE_URL.
+Email prefix `arch-` (the cleanup of test_lab_archive_pg). Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -79,8 +75,7 @@ def _state(conn, sid):
 
 
 class _Lock:
-    """Another session holding one sample row, for as long as the block
-    stands: the busy sibling of the verifier's reproduction."""
+    """Another session holding one sample row, for as long as the block stands: a busy sibling."""
 
     def __init__(self, sample_id):
         self.sample_id = sample_id
@@ -143,9 +138,8 @@ def test_a_busy_sibling_does_not_leave_the_tree_half_isolated_for_good(
 
 def test_a_second_rejection_of_a_matched_member_finishes_the_cascade(
         conn, store, monkeypatch):
-    """The first call committed the member and lost its cascade (a busy
-    sibling); calling again must finish it, where it used to answer
-    ALREADY_ISOLATED and stop."""
+    """The first call committed the member and lost its cascade (a busy sibling); calling again must finish
+    it rather than answer ALREADY_ISOLATED and stop."""
     import hashlib
 
     from noctornal_api.screening import MATCH, screen_digests
@@ -240,9 +234,8 @@ def test_the_pass_finishes_a_tree_isolated_in_part_whatever_stopped_it(
 
 def test_a_member_equal_to_an_upload_held_elsewhere_still_isolates_the_archive(
         conn, store):
-    """The row found by hash is an earlier upload OUTSIDE this tree; the
-    cascade used to root there and leave the archive that carried the
-    material visible."""
+    """The row found by hash is an earlier upload outside this tree; the cascade must not root there and
+    leave the archive that carried the material visible."""
     officer = make_user(conn, PREFIX, roles=("SECURITY_OFFICER",))
     owner = make_user(conn, PREFIX, roles=("CASE_OWNER",))
     listed_bytes = member_bytes("listed")
@@ -372,7 +365,8 @@ def test_a_clean_expansion_drops_the_gap_and_a_link_does_not_keep_it(conn, store
         info = zipfile.ZipInfo("link")
         info.create_system = 3
         info.external_attr = 0o120777 << 16
-        zf.writestr(info, "a.exe")
+        # Empty: a link-marked zip entry that holds bytes is read as a member.
+        zf.writestr(info, "")
         zf.writestr(zipfile.ZipInfo("dir/"), "")
     parent = _submit(conn, store, owner, buf.getvalue())
     _run_parent(conn, store, parent)

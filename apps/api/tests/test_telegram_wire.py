@@ -1,12 +1,10 @@
-"""The Telethon wire: the checked connection, the proxy on the persona's
-route, the reply byte read before Telethon hides it, the error table and
-the log scrub (roadmap F5.2 and F5.3, 2026-09-24).
+"""The Telethon wire: the checked connection, the proxy on the persona's route, the reply byte read before
+Telethon hides it, the error table and the log scrub.
 
-Needs the optional `telegram` extra; without it every test here skips and
-says so, which is the gap the telegram_collection readiness row names. No
-test reaches Telegram: the SOCKS5 tests talk to the egress contract's stub
-proxy on loopback, and the stub's dial to a data centre is refused by the
-socket guard, which is what a REP 0x05 is.
+Needs the optional `telegram` extra; without it every test here skips and says so, which is the gap the
+telegram_collection readiness row names. No test reaches Telegram: the SOCKS5 tests talk to the egress
+contract's stub proxy on loopback, and the stub's dial to a data centre is refused by the socket guard,
+which is what a REP 0x05 is.
 """
 from __future__ import annotations
 

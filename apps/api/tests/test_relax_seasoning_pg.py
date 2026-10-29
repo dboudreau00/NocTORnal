@@ -1,27 +1,20 @@
-"""The second person on a case's merge switch must have held `case.update`
-on the case for the seasoning window (F9b, docs/17 F39 and docs/00 open
-question 12, settled by the owner 2026-10-02).
+"""The second person on a case's merge switch must have held `case.update` on the case for the seasoning
+window (docs/17 F39 and docs/00 open question 12).
 
-The hole: turning a case's merge requirement off takes a second holder of
-`case.update` on the case, so an account holding SYS_ADMIN and CASE_OWNER
-could create a second Lead investigator, assign it to the case and approve
-its own relax within the minute. The rule, modelled on the deployment-wide
-policy's seven-day countersigner rule: the second person has held the
-permission on that case for at least `NOCTORNAL_RELAX_SEASONING_DAYS` days
-(default 7, 0 off), read from the assignment's `granted_at` by the database
-clock, and the refusal names the rule and the date they become eligible.
+The hole: turning a case's merge requirement off takes a second holder of `case.update` on the case, so an
+account holding SYS_ADMIN and CASE_OWNER could create a second Lead investigator, assign it to the case and
+approve its own relax within the minute. The rule, modelled on the deployment-wide policy's seven-day
+countersigner rule: the second person has held the permission on that case for at least
+`NOCTORNAL_RELAX_SEASONING_DAYS` days (default 7, 0 off), read from the assignment's `granted_at` by the
+database clock, and the refusal names the rule and the date they become eligible.
 
-The existing relax tests (test_case_merge_relax_pg.py and the audit test in
-test_http_e2e.py) relied on a deputy assigned a moment ago deciding at once,
-which is exactly what the rule now refuses; each of them ages the deputy
-first (`season`), and this file holds the rule itself. Every test that
-states the rule fails on 718f92d, where a deputy assigned a moment ago
-approved; the two that state what the rule leaves alone (rejecting, and a
-merge's second person) pass there too and hold it so.
+The relax tests (test_case_merge_relax_pg.py and the audit test in test_http_e2e.py) each age the deputy
+first (`season`), since a deputy assigned a moment ago is exactly what the rule refuses; this file holds
+the rule itself. The two tests that state what the rule leaves alone (rejecting, and a merge's second
+person) hold it so.
 
-Database tests run on the autocommit fixture, so the refusals the service
-writes out of band survive and can be read back. Email prefix `rsn-`.
-Env-gated on DATABASE_URL.
+Database tests run on the autocommit fixture, so the refusals the service writes out of band survive and
+can be read back. Email prefix `rsn-`. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -139,12 +132,10 @@ def _refusals(conn, request_id, action="DUAL_CONTROL_COUNTERSIGN_REFUSED"):
 
 def test_an_account_cannot_create_its_own_second_person_and_approve_at_once(
         conn, client):
-    """The finding as a story, over the routes. One account holding
-    SYS_ADMIN and CASE_OWNER makes a new account, gives it the Lead
-    investigator role on its case through the sharing route, raises a relax
-    and has the new account approve it. The sharing body even offers a
-    `granted_at` from long ago, which the route ignores: the request never
-    supplies the time that counts."""
+    """The attack as a story, over the routes. One account holding SYS_ADMIN and CASE_OWNER makes a new
+    account, gives it the Lead investigator role on its case through the sharing route, raises a relax and
+    has the new account approve it. The sharing body even offers a `granted_at` from long ago, which the
+    route ignores: the request never supplies the time that counts."""
     from noctornal_api.approvals import ApprovalService
     boss_id = user(conn, "CASE_OWNER", "SYS_ADMIN")
     sock_id = user(conn)
@@ -300,8 +291,7 @@ def test_a_window_of_one_day_is_said_in_the_singular(conn, monkeypatch):
 
 
 def test_zero_turns_the_rule_off_and_a_fresh_colleague_approves(conn, monkeypatch):
-    """0 is the whole of the off switch, and it is the behaviour of every
-    release before this one."""
+    """0 is the whole of the off switch."""
     monkeypatch.setenv(ENV, "0")
     lead, deputy = user(conn, "CASE_OWNER"), user(conn)
     case_id = _case(conn, lead, deputy)
@@ -494,13 +484,10 @@ def test_an_approval_is_refused_when_the_colleague_has_left_the_case(
 @pytest.mark.parametrize("posture", ["owner", "request role"])
 def test_a_second_person_who_presents_the_approval_is_named_in_the_apply_refusal(
         conn, client, monkeypatch, posture):
-    """g49v-apply-refusal-row-lost (2026-10-03). The lead raised the request
-    and the deputy decided it, and it is the DEPUTY who presents the approval
-    to spend it. The refusal row is about that attempt: it names the deputy,
-    keeps the requester in its detail, and exists under the request role too.
-    It used to name the requester, who did not act; under the request role the
-    database refuses an actor the connection is not bound to, so the row was
-    lost and the log was the only place the refusal appeared."""
+    """The lead raised the request and the deputy decided it, and it is the DEPUTY who presents the
+    approval to spend it. The refusal row is about that attempt: it names the deputy, keeps the requester
+    in its detail, and exists under the request role too (under that role the database refuses an actor
+    the connection is not bound to, so naming anyone else would lose the row)."""
     from noctornal_api.approvals import ApprovalService
     from noctornal_api.db import ASSUME_ROLE_ENV
     if posture == "request role":

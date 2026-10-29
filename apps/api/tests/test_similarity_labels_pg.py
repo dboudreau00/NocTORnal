@@ -1,13 +1,11 @@
-"""Similarity reads never cross a label (F6.3, embeddings, 2026-09-24).
+"""Similarity reads never cross a label (embeddings).
 
-The invariant: a reader is never given, never answered about and never
-counted a document above their clearance, of a source above it, or in a
-compartment they do not hold, in either mode; and rows the reader may not
-read can neither be returned nor DISPLACE rows the reader may read. The
-displacement test has power: the same rows in one unpartitioned HNSW
-index with a filter after it return fewer of the reader's rows, and the
-per-level partial indexes return them all. The plan names exactly the
-indexes of the levels at or below the reader.
+The invariant: a reader is never given, never answered about and never counted a document above their
+clearance, of a source above it, or in a compartment they do not hold, in either mode; and rows the reader
+may not read can neither be returned nor DISPLACE rows the reader may read. The displacement test has
+power: the same rows in one unpartitioned HNSW index with a filter after it return fewer of the reader's
+rows, and the per-level partial indexes return them all. The plan names exactly the indexes of the levels
+at or below the reader.
 
 Env-gated on DATABASE_URL. Prefix `esl-`.
 """
@@ -123,7 +121,7 @@ def test_rows_above_the_reader_neither_appear_nor_displace(conn, svc):
 
 
 def test_one_unpartitioned_index_with_a_filter_after_it_loses_the_readers_rows(conn, svc):
-    """The power of the test above: the index layout it replaces fails it."""
+    """The power of the test above: a single unpartitioned index fails it."""
     src = H.source(conn, PREFIX)
     amber = [H.document(conn, PREFIX, src=src, body=_variant(i)) for i in range(10)]
     red = [H.document(conn, PREFIX, src=src, body=BASE + f" copy {i}",
@@ -155,11 +153,10 @@ def test_the_plan_walks_only_the_readers_partitions(conn, svc):
     space = svc.active("WORDING")
     statement = svc.candidate_sql(slot=space.slot, clearance="AMBER", held=frozenset())
     with conn.transaction():
-        # A table of five rows is cheaper to scan exactly, and after the
-        # churn of the tests before this one the planner may well say so;
-        # these hold it to the plan a real estate gets, the ordered HNSW
-        # scan of each partition. Correctness does not depend on the plan:
-        # every branch carries its partition's predicate either way.
+        # A table of five rows is cheaper to scan exactly, and after the churn of the tests before this
+        # one the planner may well say so; these hold it to the plan a real estate gets, the ordered HNSW
+        # scan of each partition. Correctness does not depend on the plan: every branch carries its
+        # partition's predicate either way.
         conn.execute("SET LOCAL enable_seqscan = off")
         conn.execute("SET LOCAL enable_bitmapscan = off")
         conn.execute("SET LOCAL enable_sort = off")
@@ -236,10 +233,9 @@ def test_a_reader_gets_only_what_they_may_read_on_every_route(conn, estate, mode
     assert r.status_code == 200, r.text
     assert not {h["id"] for h in r.json()["hits"]} & hidden
     coverage = r.json()["coverage"]
-    # Collected documents are the deployment's, not the case's: count what
-    # other suites left at the reader's labels (AMBER, no compartment), so
-    # the figure proves this estate's hidden three are not in it
-    # (2026-09-25).
+    # Collected documents are the deployment's, not the case's: count what other suites left at the
+    # reader's labels (AMBER, no compartment), so the figure proves this estate's hidden three are not in
+    # it.
     others = conn.execute(
         """SELECT count(*) FROM collect.document d
              JOIN collect.source s ON s.id = d.source_id

@@ -1,13 +1,9 @@
-"""The job scripts read what they are given and refuse what every job
-refuses (2026-10-07).
+"""The job scripts read what they are given and refuse what every job refuses.
 
-- `notify_drain.py --help` and `sandbox_dispatch.py --help` used to run the
-  job: neither read its arguments, so asking for help sent the outbox, or the
-  queued detonations. They take no options now, and say so.
-- `retention_sweep.py` asked only for a published credential, and only on
-  `--apply`: a dry run, or a real run holding the schema owner's DSN or the
-  persona key, started where every other job refused. It makes the one
-  refusal every job makes, first.
+- `notify_drain.py --help` and `sandbox_dispatch.py --help` must not run the job (asking for help would send
+  the outbox, or the queued detonations). They take no options, and say so.
+- `retention_sweep.py` makes the one refusal every job makes, first: a dry run, or a real run holding the
+  schema owner's DSN or the persona key, must not start where every other job refuses.
 
 Pure: a connection is an error.
 """
@@ -65,9 +61,8 @@ def test_sandbox_dispatch_help_is_help_and_sends_nothing(monkeypatch, capsys):
 
 
 def test_collection_poll_refuses_a_persona_key_boundary_with_exit_two(monkeypatch, capsys):
-    """Production with no collector mark: the pass is refused with this job's
-    sentence and code 2, where it was a traceback and 1, the code of a pass
-    that ran and failed."""
+    """Production with no collector mark: the pass is refused with this job's sentence and code 2, not a
+    traceback and 1, the code of a pass that ran and failed."""
     import sys
 
     from noctornal_api import egress_routes

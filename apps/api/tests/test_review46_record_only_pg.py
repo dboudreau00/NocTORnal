@@ -1,9 +1,5 @@
-"""lab-3 (review of 2026-10-03): a record-only VENDOR or PUBLIC detonation
-was stored AUTHORISED, naming a lead investigator who never acted, was never
-asked and was never told.
-
-Fails on dc28ffa: the row read AUTHORISED and no notice reached the named
-person.
+"""A record-only VENDOR or PUBLIC detonation must not be stored AUTHORISED, naming a lead investigator who
+never acted, was never asked and was never told.
 
 Email prefix `r46r-`. Env-gated on DATABASE_URL.
 """

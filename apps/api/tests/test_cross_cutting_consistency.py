@@ -1,5 +1,4 @@
-"""Cross-cutting consistency fixes (2026-10-07),
-each pinned here where no existing test covered it."""
+"""Cross-cutting consistency fixes, each pinned here where no existing test covered it."""
 from __future__ import annotations
 
 import importlib.util

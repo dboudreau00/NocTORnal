@@ -1,20 +1,19 @@
-"""What an upload answers when it cannot be accepted (2026-10-08).
+"""What an upload answers when it cannot be accepted.
 
-- An unknown classification is the caller's mistake and is a 400 that names
-  the ones there are, before anything else is read. It reached
-  `check_writable_labels`, whose refusal to resolve a label is a 403, so a
-  typo read as a missing permission.
-- The object store gets a pool that gives up in seconds. minio-py's own waits
-  five minutes on a connect and retries five times: a store that was down
-  held an upload for about 18 seconds and answered a raw 500.
-- A store that did not answer is a 503 with a `Retry-After`, the caller may
-  try again, and the exhibit was not lodged.
-- No "orphaned" audit row when nothing was stored. A put that never reached
-  the store (refused, timed out opening, no such name) stored nothing and
-  records nothing; one that was sent and not answered may have landed and does.
+- An unknown classification is the caller's mistake and is a 400 that names the ones there are, before
+  anything else is read. `check_writable_labels` refuses to resolve a label with a 403, so a typo must
+  not reach it and read as a missing permission.
+- The object store gets a pool that gives up in seconds. minio-py's own waits five minutes on a connect
+  and retries five times, so a store that is down would hold an upload for about 18 seconds and answer
+  a raw 500.
+- A store that did not answer is a 503 with a `Retry-After`, the caller may try again, and the exhibit
+  was not lodged.
+- No "orphaned" audit row when nothing was stored. A put that never reached the store (refused, timed
+  out opening, no such name) stored nothing and records nothing; one that was sent and not answered
+  may have landed and does.
 
 Accounts `g44t-*`. Nothing is written to the dev bucket: the service is given
-`g44_support.VersionedStore`, and the one test that uses the real storage
+`evidence_retention_support.VersionedStore`, and the one test that uses the real storage
 class points it at a socket on this host that never answers.
 """
 from __future__ import annotations
@@ -25,7 +24,7 @@ from uuid import uuid4
 
 import pytest
 
-import g44_support as g
+import evidence_retention_support as g
 
 pytestmark = g.GATED
 

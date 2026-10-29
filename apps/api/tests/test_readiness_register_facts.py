@@ -1,24 +1,16 @@
-"""What the readiness register says about a failing row, beyond pass or
-fail (2026-09-23, the ux16-admin review of the Admin pane).
+"""What the readiness register says about a failing row, beyond pass or fail.
 
-- `consequence`: what the product refuses while a BLOCKING check fails.
-  The banner's headline was hard-coded to "the collection poll route is
-  refused" while its own items said ingest, every download and
-  break-glass were refused too (blocking-headline-understates-impact).
-- `ui_target`: where in the console a check is settled, so the pane can
-  link there instead of printing a path template for curl
-  (readiness-actions-speak-api).
-- `checked_at`: when the report was taken, so a report from before a fix
-  can be told from a fresh one (readiness-stale-after-fix).
-- the security officer's evidence names who holds the role, and its
-  `caveat` says when the only one can invoke break-glass, which is then
-  refused to them, because nobody reviews their own
-  (security-officer-false-green). A caveat and not evidence, because the
-  console folds passing rows away and a warning in their evidence was
-  never read.
+- `consequence`: what the product refuses while a BLOCKING check fails, so the banner's headline does not
+  understate it (ingest, every download and break-glass are refused as well as the collection poll).
+- `ui_target`: where in the console a check is settled, so the pane can link there instead of printing a
+  path template for curl.
+- `checked_at`: when the report was taken, so a report from before a fix can be told from a fresh one.
+- the security officer's evidence names who holds the role, and its `caveat` says when the only one can
+  invoke break-glass, which is then refused to them, because nobody reviews their own. A caveat and not
+  evidence, because the console folds passing rows away and a warning in their evidence is never read.
 
-The first half is pure. The database half is gated and runs inside
-transactions it rolls back, because it has to change who is an officer.
+The first half is pure. The database half is gated and runs inside transactions it rolls back, because it
+has to change who is an officer.
 """
 from __future__ import annotations
 
@@ -86,8 +78,7 @@ def test_the_retention_action_names_the_console_first_and_keeps_the_route():
     src = (Path(readiness.__file__)).read_text(encoding="utf-8")
     body = src[src.index("def _retention_rules_confirmed("):]
     body = body[:body.index("\ndef ")]
-    # "under Records, ": the rail tab's name since ux19. It said Lifecycle,
-    # a name that leads nowhere (2026-09-24).
+    # "under Records, ": the rail tab's name. Lifecycle leads nowhere.
     assert body.index("under Records, ") < body.index("POST"), (
         "the retention action leads with curl again")
     assert "/retention/rules" in body

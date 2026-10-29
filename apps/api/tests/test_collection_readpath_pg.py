@@ -1,44 +1,19 @@
-"""Phase 4's read path: what the collector collected, readable by a human.
+"""The collection read path: what the collector collected, readable by a human.
 
-## Why this file exists
+`collect.document` and `collect.watch_hit` are read through endpoints and the UI, and
+`document.search_tsv`'s GIN index backs the search. The lifecycle columns (`notified_at`,
+`suppressed`, `acknowledged_by`, `acknowledged_at`, and the partial index for the unnotified set) are
+what the pane drives.
 
-`collect.document` and `collect.watch_hit` were written by the collector
-from the day Phase 4 landed and read by NOTHING. No endpoint, no UI, no
-search reach -- `SearchService` covers `core.node` and `core.evidence`
-only, and `document.search_tsv`'s GIN index was used by no query in the
-tree. The only observable trace of a poll was three integers on a run
-card. A watch could fire four hundred times and an analyst saw the number
-400 and could not open one of them.
+`suppressed`, `suppress_reason` and `triage_state` must be writable as well as visible: the Collected
+pane shows suppressed hits with their reason and offers a triage filter over
+NEW/TRIAGED/LINKED/DISCARDED. `_match_watches` drops a suppressed match before the row is written, so
+`suppressed = true` is only ever set by `suppress_hit`. `suppress_hit`, `unsuppress_hit` and
+`set_document_triage` are the writers, and the tests at the bottom read both sides, service and
+router.
 
-That is the tags/node-sets defect one layer up: not a service with no
-caller, an entire phase with no caller. `collection.py` is 1,236 lines
-with SSRF hardening, XXE refusal, an envelope-encrypted persona vault and
-PARTIAL run status for dead watch patterns -- all of it landing in two
-tables nobody could open.
-
-The lifecycle columns show the intent was never finished rather than
-decided against: `notified_at`, `suppressed`, `acknowledged_by`,
-`acknowledged_at` and a partial index for the unnotified set, none of them
-written or read by anything before this.
-
-## The second half (2026-09-02)
-
-The read path made `suppressed`, `suppress_reason` and `triage_state`
-VISIBLE and left them unwritable. The Collected pane said "suppressed hits
-are shown with their reason" and offered a triage filter over
-NEW/TRIAGED/LINKED/DISCARDED, and no production path ever set any of
-them: `_match_watches` drops a suppressed match before the row is written
-(so `suppressed = true` was never stored), and nothing touched
-`triage_state` after the INSERT default. The UI was describing rows that
-could only be created by a test. `suppress_hit`, `unsuppress_hit` and
-`set_document_triage` are the writers, and the tests at the bottom of
-this file read both sides -- service and router -- so the pane's claim is
-finally true of something.
-
-`notified_at` is still written by nothing, deliberately: there is no
-notification kind for a watch hit, and inventing one here would be a
-registry decision that belongs with the notifications work, not with
-this.
+`notified_at` is written by nothing, deliberately: there is no notification kind for a watch hit, and
+inventing one is a registry decision that belongs with the notifications work.
 """
 from __future__ import annotations
 
@@ -64,19 +39,16 @@ os.environ.setdefault("NOCTORNAL_TOTP_KEK", "A" * 43 + "=")
 def conn():
     """Its own connection and teardown, matching `test_collection_pg`'s.
 
-    The helpers are imported from that module but the FIXTURE is not --
-    a pytest fixture is not importable, and depending on one defined in
-    another test module would bind these tests to that file's collection
-    order. Teardown follows the foreign keys, not the reading order:
-    hits before documents, documents before sources, assignments before
-    cases.
+    The helpers are imported from that module but the FIXTURE is not: a pytest fixture is not
+    importable, and depending on one defined in another test module would bind these tests to that
+    file's collection order. Teardown follows the foreign keys: hits before documents, documents before
+    sources, assignments before cases.
 
-    Two email prefixes. `col-` is shared with `test_collection_pg` (the
-    imported `_user` helper mints it); `colh-` is this file's own, for
-    the users the HTTP tests log in as. Those carry sessions and global
-    roles that `test_collection_pg`'s teardown does not know to delete
-    first, and `LIKE 'col-%'` does not match `colh-` (the hyphen is
-    literal), so the two sweeps cannot trip over each other.
+    Two email prefixes. `col-` is shared with `test_collection_pg` (the imported `_user` helper mints
+    it); `colh-` is this file's own, for the users the HTTP tests log in as. Those carry sessions and
+    global roles that `test_collection_pg`'s teardown does not know to delete first, and
+    `LIKE 'col-%'` does not match `colh-` (the hyphen is literal), so the two sweeps cannot trip over
+    each other.
     """
     from noctornal_api.db import connect
     c = connect()
@@ -136,29 +108,21 @@ def _http_user(conn, *, clearance="RED", roles=("CASE_OWNER",)):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
+    """A signed-in caller, minted the way `scripts/bootstrap.py session` mints one: the account looked
+    up by email, then `SessionService` against the same store the API validates against. Unbound (no
+    address, no User-Agent), which 0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
     is off in these tests.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Not `POST /auth/login`, which answers 204 and leaves the token only in `__Host-session`. TOTP codes
+    are single-use, so two sign-ins for one account inside one 30-second step would fail on the code,
+    not on the thing under test.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as both real mint sites pass: a session that never satisfied MFA is refused
+    # by every step-up gated route.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token
@@ -279,7 +243,7 @@ def test_documents_can_be_filtered_by_triage_state(conn):
 # --- watch hits ---------------------------------------------------------
 
 def test_a_watch_hit_can_be_opened(conn):
-    """The whole point. Before this, a watch firing was an integer."""
+    """A watch hit can be opened from the list, not only counted."""
     from noctornal_api.collection import CollectionService
 
     owner = _user(conn)
@@ -293,11 +257,8 @@ def test_a_watch_hit_can_be_opened(conn):
     assert len(hits) == 1
     assert hits[0]["title"] == "Ransom thread"
     assert hits[0]["watch_name"] == "watch-1"
-    # A LIST, because that is what the collector writes (collection.py
-    # `matched.append(f"regex:{pattern}")`, asserted by test_collection_pg).
-    # This fixture fabricated a dict for three weeks, the UI rendered
-    # Object.keys() of whatever arrived, and both were green while every
-    # real hit on screen said it fired on "0, 1".
+    # A LIST, because that is what the collector writes (collection.py `matched.append(f"regex:{pattern}")`,
+    # asserted by test_collection_pg); the UI renders Object.keys() of whatever arrives.
     assert hits[0]["matched_on"] == ["selector:ransom"]
     assert hits[0]["external_url"]
 
@@ -393,10 +354,8 @@ def _audit_rows(conn, action, object_id):
 
 
 def test_suppressing_a_hit_lists_it_with_its_reason(conn):
-    """Before this, the only way a hit could list as suppressed was a test
-    inserting the row that way. Now an analyst can say "this thread is
-    noise" and the list shows the chip AND the reason, and the audit log
-    shows who said so."""
+    """An analyst can say "this thread is noise": the list shows the chip AND the reason, and the audit
+    log shows who said so."""
     from noctornal_api.collection import CollectionService
 
     owner = _user(conn)

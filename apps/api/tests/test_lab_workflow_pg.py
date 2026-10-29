@@ -1,22 +1,15 @@
-"""The Lab's own work over HTTP, and the refusals around it (review of
-2026-09-22, closed 2026-09-23).
+"""The Lab's own work over HTTP, and the refusals around it.
 
-- gap-reject-step-up: a rejection needs a sign-in from the last 15
-  minutes, because it moves the evidence into a store it cannot leave
-  without two people, or destroys it;
-- ux13-lab:no-assign-or-record-analysis: assign takes only an eligible
-  analyst, the analysis comes back with who recorded it, and an extracted
-  selector is proposed into the case's triage queue, derived and never
-  repeated, with one answer whatever the case already holds (the
-  verifier's existence oracle, 2026-09-23);
-- assign, analysis, detonation and the people lists refuse a sample the
-  caller cannot see, with the 404 `detail` gives;
-- ux13-lab:detonation-authoriser-uuid: the sign-off is another lead
-  investigator on the sample's case, never the requester;
-- ux13-lab:label-chip-understates-handling: the queue carries the labels a
-  sample is handled at;
-- ux13-lab:legal-banner-copy and submit-form-ignores-refusal-and-scope:
-  the policy says the notice once and carries the caller's own labels.
+- A rejection needs a sign-in from the last 15 minutes, because it moves the evidence into a store it
+  cannot leave without two people, or destroys it.
+- Assign takes only an eligible analyst, the analysis comes back with who recorded it, and an extracted
+  selector is proposed into the case's triage queue, derived and never repeated, with one answer whatever
+  the case already holds (no existence oracle).
+- Assign, analysis, detonation and the people lists refuse a sample the caller cannot see, with the 404
+  `detail` gives.
+- The detonation sign-off is another lead investigator on the sample's case, never the requester.
+- The queue carries the labels a sample is handled at.
+- The policy says the notice once and carries the caller's own labels.
 
 Email prefix `labw-`. Env-gated on DATABASE_URL.
 """
@@ -66,8 +59,8 @@ def conn():
         c.execute("ALTER TABLE lab.detonation ENABLE TRIGGER USER")
         c.execute(f"DELETE FROM lab.sample_analysis WHERE sample_id IN {ssub}")
         c.execute(f"DELETE FROM lab.sample WHERE submitted_by IN {sub}")
-        # lab-3 (2026-10-03): a record-only exposed detonation tells the
-        # lead it names, so this suite's notices go before its cases.
+        # A record-only exposed detonation tells the lead it names, so this suite's notices go before its
+        # cases.
         c.execute(f"DELETE FROM notify.delivery WHERE notification_id IN (SELECT id "
                   f"FROM notify.notification WHERE recipient_id IN {sub} "
                   f"OR case_id IN {csub})")
@@ -174,8 +167,6 @@ def _sample(conn, store, submitter, **kw):
         b"MZ\x90\x00not-really-malware-" + uuid4().bytes,
         submitted_by=submitter, original_filename="x.bin", **kw)
 
-
-# --- gap-reject-step-up ------------------------------------------------------
 
 def test_rejecting_needs_a_fresh_sign_in(conn, client, store):
     analyst = _user(conn, roles=("MALWARE_ANALYST",))
@@ -315,11 +306,10 @@ def test_an_analysis_comes_back_attributed_and_its_selector_is_proposed(
 
 def test_proposing_says_nothing_about_what_the_case_already_holds(
         conn, client, store):
-    """The verifier's existence oracle (2026-09-23): a malware analyst, who
-    holds no case access, recorded values of their choosing and learnt from
-    the answers which were entities in the case (with their node ids),
-    which had been proposed and rejected, and the case's code. The answer
-    is now one shape whatever the case holds; the audit trail says which."""
+    """Proposing says nothing about what the case already holds: a malware analyst, who holds no case
+    access, must not learn from the answers which values are entities in the case (with their node ids),
+    which were proposed and rejected, or the case's code. The answer is one shape whatever the case holds;
+    the audit trail says which."""
     from psycopg.types.json import Json
 
     from noctornal_api.samples import SampleService
@@ -385,8 +375,7 @@ def test_proposing_refuses_an_unattached_sample_and_a_closed_case(
                  (case_id,))
     r = client.post(f"{API}/samples/{held.id}/analyses/{aid}/propose",
                     headers=_auth(token), json={"index": 0})
-    # The case's own refusal since c7 (2026-09-24): titled so the console
-    # knows it, naming the state and never the case's code.
+    # The case's own refusal: titled so the console knows it, naming the state and never the case's code.
     assert r.status_code == 409 and r.json()["title"] == "Case is read-only"
     assert "CLOSED" in r.json()["detail"]
 
@@ -428,8 +417,8 @@ def test_the_queue_carries_the_labels_a_sample_is_handled_at(conn, client, store
     owner = _user(conn, roles=("CASE_OWNER",), compartments=("LABW-X",))
     case_id = _case(conn, owner, compartments=("LABW-X",))
     sample = _sample(conn, store, owner, case_id=case_id, classification="AMBER")
-    # A sample from before its case was compartmented and raised: its own
-    # labels no longer say how it is handled.
+    # A sample whose own labels no longer say how it is handled, because its case was since compartmented
+    # and raised.
     conn.execute("UPDATE lab.sample SET compartments = '{}' WHERE id = %s",
                  (sample.id,))
     conn.execute('UPDATE core."case" SET classification = \'RED\' WHERE id = %s',

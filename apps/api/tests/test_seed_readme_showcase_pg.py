@@ -1,23 +1,17 @@
-"""`scripts/seed_readme_showcase.py`, held to what the README's screenshots
-claim and to the analytics it must not move.
+"""`scripts/seed_readme_showcase.py`, held to what the README's screenshots claim and to the analytics it
+must not move.
 
-README screenshot review, 2026-09-23. Round 1 found the showcase case too
-thin for the paragraphs under its images (no exhibit behind any element, no
-inferred tie, one entity type, no selector, nothing above CLEAR, empty
-triage, inbox and comms, a one-point trend). The seeder writes the missing
-material through the services; these tests run it against a case of their
-own, built the way estate.sh builds OP-SHOWCASE-26 (demo-network at CLEAR,
-then the deception seed for the .eml), and hold each item, the TLP rule,
-the second run, and above all the constraint that the README's analytics
-paragraph depends on: over the fifteen demo-network identities, the social
-projection is what demo-network made it.
+The showcase case needs enough behind the paragraphs under its images: an exhibit behind elements, an
+inferred tie, several entity types, a selector, something above CLEAR, a filled triage, inbox and comms,
+and a trend of more than one point. The seeder writes that material through the services; these tests run
+it against a case of their own, built the way estate.sh builds OP-SHOWCASE-26 (demo-network at CLEAR, then
+the deception seed for the .eml), and hold each item, the TLP rule, the second run, and above all the
+constraint that the README's analytics paragraph depends on: over the fifteen demo-network identities, the
+social projection is what demo-network made it.
 
-The verifier round of the same review found the first version of these
-tests pinned too little: with inferred ties counted (the console's
-default), a unit-weight inferred tie had inverted the eigenvector ranking
-and moved constraint, effective size, hierarchy and the given and received
-columns, and nothing here compared them. Every per-identity number is now
-compared, and what may differ is listed, with the reason, in one place:
+With inferred ties counted (the console's default), a unit-weight inferred tie inverts the eigenvector
+ranking and moves constraint, effective size, hierarchy and the given and received columns, so every
+per-identity number is compared, and what may differ is listed, with the reason, in one place:
 `POPULATION` and `INFERRED_COUNTS`.
 """
 from __future__ import annotations
@@ -38,11 +32,10 @@ SCRIPTS = REPO / "scripts"
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DATABASE_URL"), reason="DATABASE_URL not set")
 
-#: What the five new entities move for the fifteen, and why: they are
-#: isolates in the social projection, and these figures are computed over
-#: the whole population. Harmonic closeness is normalised by n - 1 (checked
-#: exactly below); the percentiles are ranks over everyone (checked below
-#: to be the old ones once the population is the fifteen again).
+#: What the five new entities move for the fifteen, and why: they are isolates in the social projection,
+#: and these figures are computed over the whole population. Harmonic closeness is normalised by n - 1
+#: (checked exactly below); the percentiles are ranks over everyone (checked below to be the old ones once
+#: the population is the fifteen again).
 POPULATION = ("betweenness_percentile", "constraint_percentile",
               "harmonic_closeness")
 
@@ -201,9 +194,8 @@ def estate():
     yield {**case, "seeder": seeder, "before": before, "after": after,
            "first": first.getvalue(), "second": second.getvalue(),
            "once": once, "twice": twice}
-    # The case stays (its exhibits are locked), but its Lab samples go: the
-    # Lab is gated by labels, not by case, so a GREEN reader in any other
-    # suite would see them (the YARA retrohunt counts; 2026-09-25).
+    # The case stays (its exhibits are locked), but its Lab samples go: the Lab is gated by labels, not by
+    # case, so a GREEN reader in any other suite would see them (the YARA retrohunt counts).
     from lab_static_fixtures import remove_case_samples
     with connect() as conn:
         remove_case_samples(conn, case["case_id"])
@@ -239,12 +231,10 @@ def _same_but(before: dict, after: dict, *, moved: dict, skip=()) -> None:
 # ------------------------------------------------ the analytics do not move
 
 def test_with_inferred_ties_counted_only_the_listed_counts_move(estate):
-    """The console's default projection (inferred IN): every per-identity
-    number on the Analysis pane and in the inspector is what it was,
-    eigenvector, constraint, effective size, hierarchy and their ranks
-    included, except the population figures (next test) and the given and
-    received counts of the inferred tie's two ends. And every set the
-    README's analytics paragraph reads."""
+    """The console's default projection (inferred IN): every per-identity number on the Analysis pane and
+    in the inspector is unchanged, eigenvector, constraint, effective size, hierarchy and their ranks
+    included, except the population figures (next test) and the given and received counts of the inferred
+    tie's two ends. And so is every set the README's analytics paragraph reads."""
     before, after = estate["before"][True], estate["after"][True]
     _same_but(before["per"], after["per"], moved=INFERRED_COUNTS, skip=POPULATION)
     _same_but(before["local"], after["local"], moved=INFERRED_LOCAL)
@@ -283,8 +273,7 @@ def test_what_the_new_entities_move_is_the_population_alone(estate, inferred):
     _r, pct = _rank_and_percentile(btw)
     assert pct == [before["per"][x]["betweenness_percentile"] for x in people]
     con = [after["per"][x]["constraint"] for x in people]
-    # Least constrained first, as the suite ranks it since 2026-09-23
-    # (ux10-analytics:rank-percentile-opposite-directions).
+    # Least constrained first, as the suite ranks it.
     _r, pct = _rank_and_percentile([-v if v is not None else float("-inf")
                                     for v in con])
     assert pct == [before["per"][x]["constraint_percentile"] for x in people]
@@ -345,10 +334,9 @@ def test_coverage_is_partial_so_the_canvas_shows_the_difference(estate):
     assert 0.4 <= share <= 0.6, share
 
 
-#: The words that make a passage say what its tie says, per edge type. The
-#: first version linked "mer_kite: escrow through mer_ash" (ash holds the
-#: escrow) to mer_kite ESCROW_FOR mer_ash (kite holds it), and "ash has held
-#: escrow for me" to a vouch (README screenshot review, verifier round).
+#: The words that make a passage say what its tie says, per edge type: "mer_kite: escrow through mer_ash"
+#: (ash holds the escrow) must not be linked to mer_kite ESCROW_FOR mer_ash (kite holds it), nor "ash has
+#: held escrow for me" to a vouch.
 SAYS = {"VOUCHED_FOR": lambda s, d: "vouch", "ESCROW_FOR": lambda s, d: f"escrow for {d}",
         "ACCUSED_SCAM": lambda s, d: "scam", "CONTROLS": lambda s, d: d,
         "USED": lambda s, d: d}
@@ -460,8 +448,8 @@ def test_the_exhibits_are_real_objects_in_the_store(estate):
 
 
 class _Store:
-    """An object store that records the lock it was asked for and keeps the
-    bytes in memory, so a lock of a year never reaches the dev bucket."""
+    """An object store that records the lock it was asked for and keeps the bytes in memory, so a lock of
+    a year never reaches the dev bucket."""
     bucket = "test-only"
 
     def __init__(self) -> None:
@@ -477,11 +465,10 @@ class _Store:
 
 
 def test_the_exhibits_are_locked_for_the_services_own_term(monkeypatch):
-    """The first version locked its exhibits for the SHORTER of a month and
-    the service default, so on an estate built with the default year they
-    read "retain until" a month out beside the .eml's year (README
-    screenshot review, 2026-09-23, verifier round). The test settings cut
-    the default to a day, which hid it; here the default is a long one."""
+    """The exhibits are locked for the service's own term, not the SHORTER of a month and the service
+    default: on an estate built with the default year they must not read "retain until" a month out beside
+    the .eml's year. The test settings cut the default to a day, which would hide it; here the default is
+    a long one."""
     from datetime import datetime, timedelta, timezone
 
     from noctornal_api import evidence
@@ -630,9 +617,8 @@ def test_everything_is_clear_but_the_one_green_exhibit(estate):
     # no case: it is a notification about a grant, not case material.
     assert officer_alert == [("GREEN", None)]
     r = report.redaction
-    # The seeded case discloses PRESENCE (the default), so the document says
-    # that some exhibits are above CLEAR and not how many (2026-10-07):
-    # this asserted the exact figure 1 before.
+    # The seeded case discloses PRESENCE (the default), so the document says that some exhibits are above
+    # CLEAR and not how many.
     assert (r.nodes_withheld, r.edges_withheld, r.evidence_withheld,
             r.evidence_some_withheld) == (0, 0, 0, True)
 
@@ -824,9 +810,8 @@ def test_refuses_in_production_and_writes_nothing(estate, monkeypatch):
 # ------------------------------------------------------------ the lab
 
 def test_each_lab_sample_has_its_own_finding(estate):
-    """seed_lab_demo recorded the submission note as the analysis narrative,
-    so the Analysis card repeated the note word for word (README screenshot
-    review). Each analysed sample now carries its own one-line finding."""
+    """Each analysed lab sample carries its own one-line finding: seed_lab_demo must not record the
+    submission note as the analysis narrative, or the Analysis card repeats the note word for word."""
     subprocess.run([sys.executable, str(SCRIPTS / "seed_lab_demo.py"),
                     "--case", estate["code"], "--email", estate["owner_email"]],
                    check=True, capture_output=True, env=dict(os.environ))
@@ -847,13 +832,11 @@ class _Crash(RuntimeError):
 
 
 def test_a_run_that_dies_half_way_is_finished_by_the_next(monkeypatch):
-    """The docstring's promise, tested where the verifier found it broken:
-    a run that died after the capture left proposals with no audit row and
-    no notice, and one that died after the invoke left a live, unused grant,
-    and in both cases the next run skipped the step for good. The same held
-    for an approval request whose notice failed (the service keeps the
-    request and logs the failure). Each step now rolls back whole, and the
-    next run does it."""
+    """A run that dies half way is finished by the next. A run that died after the capture must not leave
+    proposals with no audit row and no notice, nor one that died after the invoke a live, unused grant,
+    with the next run skipping the step for good. The same holds for an approval request whose notice
+    failed (the service keeps the request and logs the failure). Each step rolls back whole, and the next
+    run does it."""
     from noctornal_api import notify_events
     from noctornal_api.break_glass import BreakGlassService
     from noctornal_api.db import connect

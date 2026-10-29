@@ -1,7 +1,6 @@
-"""A Telegram persona in the database: its egress profile for life, its
-account id, its device, its enrolment, its holds, the enrolment gate that
-lets a persona Telegram locked be enrolled again, and its sealed session
-(roadmap F5.2, 2026-09-24). DATABASE_URL-gated.
+"""A Telegram persona in the database: its egress profile for life, its account id, its device, its
+enrolment, its holds, the enrolment gate that lets a persona Telegram locked be enrolled again, and its
+sealed session. DATABASE_URL-gated.
 """
 from __future__ import annotations
 
@@ -253,10 +252,9 @@ def test_a_person_needs_their_own_clearance_at_the_gate(conn):
 # --- the sealed session -------------------------------------------------------------
 
 def test_a_telegram_session_is_rewrapped_like_any_persona_secret(conn, monkeypatch):
-    """Rewritten 2026-10-02 (A collector process): a persona's session seals
-    under the persona ring, NOCTORNAL_PERSONA_KEK, which only the collector
-    holds in production, and a rotation of THAT ring moves it; the TOTP
-    ring's inventory no longer holds the column at all."""
+    """A persona's session seals under the persona ring, NOCTORNAL_PERSONA_KEK, which only the collector
+    holds in production, and a rotation of THAT ring moves it; the TOTP ring's inventory does not hold the
+    column at all."""
     from noctornal_api.collection import PersonaVault
     from noctornal_api.security.persona_sealed import (
         PERSONA_SEALED_COLUMNS,

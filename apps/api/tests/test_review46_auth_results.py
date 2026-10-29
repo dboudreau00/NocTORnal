@@ -1,19 +1,16 @@
-"""http_ui-007 (review of 2026-10-03).
+"""The Authentication-Results header is believed only when a trusted MTA wrote it.
 
-The parser believed the FIRST Authentication-Results header and never asked
-who wrote it. A message the receiving server stamped nothing on (forwarded,
-exported) carries only the sender's own header, and the sender chooses which
-domain it says passed: `dkim=pass header.d=microsoft.com` became a durable,
-"cryptographically authenticated" DOMAIN selector, in the same output that
-said no trusted MTA was recognised in the chain.
+The parser must not believe the FIRST Authentication-Results header without asking who wrote it. A message
+the receiving server stamped nothing on (forwarded, exported) carries only the sender's own header, and the
+sender chooses which domain it says passed: `dkim=pass header.d=microsoft.com` would become a durable,
+"cryptographically authenticated" DOMAIN selector, in the same output that says no trusted MTA was
+recognised in the chain.
 
-The header is now believed only when (1) its authserv-id is a trusted MTA
-(`NOCTORNAL_TRUSTED_MTA_HOSTS`), (2) the topmost Received header was written
-by a trusted MTA and (3) it sits above every Received header, because an MTA
-prepends and a header below one was written before that hop saw the message.
+The header is believed only when (1) its authserv-id is a trusted MTA (`NOCTORNAL_TRUSTED_MTA_HOSTS`), (2)
+the topmost Received header was written by a trusted MTA and (3) it sits above every Received header,
+because an MTA prepends and a header below one was written before that hop saw the message.
 
-Fails on dc28ffa: the forged header's verdicts and domains are recorded. No
-database.
+No database.
 """
 from __future__ import annotations
 
@@ -53,8 +50,7 @@ def _nothing_recorded(parsed):
 
 
 def test_a_lone_sender_written_header_is_not_a_verdict_and_not_a_selector():
-    """The reviewer's message: a trusted-looking authserv-id, written by the
-    sender, below the Received line our own MTA stamped."""
+    """A trusted-looking authserv-id, written by the sender, below the Received line our own MTA stamped."""
     parsed = parse_eml(STAMP + FORGED + BODY, trusted=TRUSTED)
     gap = _nothing_recorded(parsed)
     assert "sits below a Received header" in gap

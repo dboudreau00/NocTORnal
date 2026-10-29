@@ -1,21 +1,14 @@
 """First run and the session, held from the shipped console files.
 
-Four findings of the 2026-09-22 review, each with the check that would have
-caught it:
-
-- firstrun-oneclick-wipe: the first-run card showed a generated password
-  and TOTP secret and one "I saved them" click removed both, with nothing
-  checked. The secrets must now outlive the click until a sign-in with them
-  has succeeded, or until a confirmation that says what is lost.
-- totp-enrolment-typein: enrolment was a 32-character type-in (no QR code),
-  the copy buttons were invisible and the enrolment URI ran out of the
-  card. The QR encoder is held module for module to the `qrcode` package
-  `scripts/bootstrap.py` already uses, and the browser's TOTP to
-  `security/totp.py`, by running both under Node.
-- recovery-codes-unobtainable: the sign-in form offered recovery codes that
-  nothing in the console could issue.
-- expiry-drops-context: an idle expiry arrived unannounced, did not say the
-  Save that met it had failed, and dropped the analyst on the case list.
+- The first-run card shows a generated password and TOTP secret. They outlive the "I saved them" click
+  until a sign-in with them has succeeded, or until a confirmation that says what is lost.
+- TOTP enrolment is not a 32-character type-in: there is a QR code, the copy buttons are visible and
+  the enrolment URI stays inside the card. The QR encoder is held module for module to the `qrcode`
+  package `scripts/bootstrap.py` uses, and the browser's TOTP to `security/totp.py`, by running both
+  under Node.
+- The sign-in form offers only recovery codes the console can issue.
+- An idle expiry is announced, says the Save that met it failed, and does not drop the analyst on the
+  case list.
 
 Pure, like test_ui_invariants: the static assets and the router sources,
 plus Node when it is installed (the two cross-checks skip without it).
@@ -172,11 +165,11 @@ def test_the_browser_computes_the_same_codes_the_server_accepts():
 
 
 def test_the_local_code_check_accepts_what_the_server_accepts_and_names_a_skew():
-    """Fix round, 2026-09-22. The local checks allowed two steps either
-    side where `security/totp.py` allows one, so a code from a phone about
-    a minute out passed here, was refused by the server, and the refusal
-    was blamed on the server's clock. The window is now the server's, and
-    a code from further out is told apart from a wrong secret."""
+    """The local code check accepts what the server accepts and names a skew.
+
+    The local window is the server's one step either side (`security/totp.py`), so a code from a phone
+    about a minute out is not passed here and then blamed on the server's clock; a code from further
+    out is told apart from a wrong secret."""
     from noctornal_api.security import totp
 
     js = _js()
@@ -319,12 +312,12 @@ def test_recovery_codes_can_be_obtained_where_the_sign_in_says():
 
 
 def test_a_shut_step_up_gate_is_answered_before_the_request_spends_a_token():
-    """Fix round, 2026-09-22. Every refused POST /auth/recovery-codes
-    spent a token of the route's rate limit (burst 3), so Generate,
-    Cancel, Generate, confirm left the analyst unable to issue codes for
-    about twelve minutes. /auth/me now says how long the gate stays open
-    and the console asks for the sign-in first; the 403 path remains for
-    a server that does not say."""
+    """A shut step-up gate is answered before the request spends a token.
+
+    Every refused POST /auth/recovery-codes spends a token of the route's rate limit (burst 3), so
+    Generate, Cancel, Generate, confirm would leave the analyst unable to issue codes for about twelve
+    minutes. /auth/me says how long the gate stays open and the console asks for the sign-in first; the
+    403 path remains for a server that does not say."""
     auth_src = (SRC / "http" / "routers" / "auth.py").read_text(encoding="utf-8")
     me_model = auth_src[auth_src.index("class Me(BaseModel):"):auth_src.index('@router.get("/me"')]
     assert "step_up_fresh_seconds: int" in me_model
@@ -341,10 +334,9 @@ def test_a_shut_step_up_gate_is_answered_before_the_request_spends_a_token():
 
 
 def test_the_account_sheet_is_modal_in_fact():
-    """It said aria-modal and left the app behind it reachable by Tab (fix
-    round, 2026-09-22). Every opening goes through `setAccountOpen`, which
-    makes the app inert, and the sign-in sheet leaves it inert when it
-    closes back onto Account."""
+    """The account sheet is modal in fact, not only by aria-modal. Every opening goes through
+    `setAccountOpen`, which makes the app inert, and the sign-in sheet leaves it inert when it closes
+    back onto Account."""
     js = _js()
     assert "$('view-app').inert = on ||" in _fn("setAccountOpen")
     assert "show($('account-scrim'), true)" not in js, (
@@ -426,12 +418,10 @@ function dispatch(target, key, mods) {
 
 
 def test_a_session_sheet_holds_the_keyboard():
-    """2026-09-23. `inert` on the app does not stop the key
-    handlers on `document`: with Account open (a LIVE session) a stray a,
-    r or d accepted, rejected or deferred the selected triage proposal
-    behind it, Ctrl+K opened the palette over Account and one Escape then
-    closed both, and Tab walked out of both sheets to the skip link.
-    Driven through the real `initSession`, `onTriageKey` and sheet
+    """`inert` on the app does not stop the key handlers on `document`: with Account open (a LIVE
+    session) a stray a, r or d would accept, reject or defer the selected triage proposal behind it,
+    Ctrl+K would open the palette over Account and one Escape then close both, and Tab would walk out
+    of both sheets to the skip link. Driven through the real `initSession`, `onTriageKey` and sheet
     handlers over a DOM that dispatches as a browser does."""
     js = _js()
     # The page's shortcuts listen on `document` in the bubble phase, which
@@ -628,12 +618,12 @@ def test_the_idle_warning_counts_against_the_servers_own_limits():
 
 
 def test_the_idle_warning_is_announced_once_a_minute_not_every_second():
-    """Fix round, 2026-09-22. The countdown was rewritten every second
-    inside role="alert", so a screen reader read the whole sentence out
-    every second for the five minutes before the limit. The m:ss text is
-    now hidden from assistive technology and the alert beside it changes
-    only with the whole minute. Driven through the real `tickSession`
-    for the full 30 minutes of an idle session."""
+    """The idle warning is announced once a minute, not every second.
+
+    The m:ss text is hidden from assistive technology and the alert beside it changes only with the
+    whole minute, so a screen reader does not read the sentence out every second for the five minutes
+    before the limit. Driven through the real `tickSession` for the full 30 minutes of an idle
+    session."""
     html = _html()
     warn = _block(html, "idle-warn")
     opening = warn[:warn.index(">") + 1]
@@ -670,12 +660,12 @@ def test_the_idle_warning_is_announced_once_a_minute_not_every_second():
 
 
 def test_a_sign_in_in_another_tab_moves_this_tabs_limits_too():
-    """Fix round, 2026-09-22. Only a LAPSED tab listened for a sibling's
-    sign-in, so a tab that had not lapsed kept the replaced session's
-    12-hour deadline and then warned, and covered itself with a sign-in,
-    at a limit that no longer applied. Also held here: a case list whose
-    read met the lapse is reloaded after the sign-in, and the sheet no
-    longer promises a case that "All cases" had already closed."""
+    """A sign-in in another tab moves this tab's limits too.
+
+    A tab that has not lapsed listens for a sibling's sign-in, so it does not keep the replaced
+    session's 12-hour deadline and warn, or cover itself with a sign-in, at a limit that no longer
+    applies. Also held: a case list whose read met the lapse is reloaded after the sign-in, and the
+    sheet does not promise a case that "All cases" had already closed."""
     stubs = (
         "let now = 5000000; Date.now = () => now;\n"
         "const calls = [];\n"
@@ -731,9 +721,8 @@ def test_a_sign_in_in_another_tab_moves_this_tabs_limits_too():
     assert "closeReauth" not in got["live"]["calls"]
     assert "clearSessionBanners" not in got["live"]["calls"]
     assert "hideIdleWarning" in got["live"]["calls"]
-    # The socket is moved onto the new session too (verifier of
-    # ux01-firstrun:live-dot-green-on-dead-session, 2026-09-23); a lapsed
-    # tab reopens it through connectLive instead.
+    # The socket is moved onto the new session too; a lapsed tab reopens it through connectLive
+    # instead.
     assert "relinkLive" in got["live"]["calls"]
     assert "relinkLive" not in got["lapsedCase"]["calls"]
     assert got["lapsedCase"]["lapsed"] is False
@@ -745,11 +734,11 @@ def test_a_sign_in_in_another_tab_moves_this_tabs_limits_too():
 
 
 def test_every_raw_request_meets_the_session_like_api_does():
-    """The report download calls fetch() itself (it wants the raw body),
-    so its 401 read "invalid or expired session" in the pane with no way
-    back in but a sign-out, and its success did not slide the idle clock
-    (fix round, 2026-09-22). Every `fetch(API` outside `_fetch` now goes
-    through `sessionRefusedRaw` before it reads the answer."""
+    """Every raw request meets the session as `api` does.
+
+    The report download calls fetch() itself (it wants the raw body), so every `fetch(API` outside
+    `_fetch` goes through `sessionRefusedRaw` before it reads the answer: a 401 then offers a way back
+    in, and a success slides the idle clock."""
     js = _js()
     raw = _fn("sessionRefusedRaw")
     assert "sessionLapsed({" in raw and "noteSessionActivity(sentAt)" in raw
@@ -793,14 +782,11 @@ def test_the_same_analyst_comes_back_to_their_case_and_pane():
 
 
 def test_leaving_a_lapse_signs_out_a_session_the_server_still_holds():
-    """2026-09-23. "Sign in as someone else" after this tab's
-    own clock ended the session went through `endSession` alone, which
-    cannot delete the HttpOnly cookie: if the server still held the
-    session (the live socket's handshake slides it unseen), the previous
-    analyst's session stayed live in the browser until the server's
-    timeout. It is now signed out first, while the CSRF cookie the
-    double-submit needs still exists, and only when it is still the same
-    analyst's; nothing is sent for a session the server already refused."""
+    """"Sign in as someone else" after this tab's own clock ended the session signs the session out
+    first, while the CSRF cookie the double-submit needs still exists, and only when it is still the
+    same analyst's. `endSession` alone cannot delete the HttpOnly cookie, so if the server still held
+    the session (the live socket's handshake slides it unseen) the previous analyst's session would
+    stay live until the server's timeout. Nothing is sent for a session the server already refused."""
     source = r"""
 const log = [];
 const els = {};

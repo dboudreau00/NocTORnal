@@ -1,13 +1,10 @@
-"""The persona key's split, without a database (ROADMAP-REMAINING "A
-collector process", 2026-10-02).
+"""The persona key's split, without a database.
 
-Invariant 7, as of 2026-10-02: a persona credential opens only under
-NOCTORNAL_PERSONA_KEK, never the TOTP ring; in production only the collector
-holds that key and only the collector's vault opens with it; every other
-process refuses to start holding it; the inline mode that runs persona acts
-inside the API is refused in production; and the deployment files give the
-key to the collector service alone. Each test here fails without the
-behaviour it names.
+Invariant 7: a persona credential opens only under NOCTORNAL_PERSONA_KEK, never the TOTP ring; in
+production only the collector holds that key and only the collector's vault opens with it; every other
+process refuses to start holding it; the inline mode that runs persona acts inside the API is refused in
+production; and the deployment files give the key to the collector service alone. Each test here fails
+without the behaviour it names.
 """
 from __future__ import annotations
 
@@ -289,10 +286,8 @@ _PERSONA_KEY_WRITE = re.compile(r"NOCTORNAL_PERSONA_KEK=[%$]")
 @pytest.mark.parametrize("path", ["release/install.sh", "release/install.ps1",
                                   "scripts/launch.sh", "scripts/launch.ps1"])
 def test_every_installer_and_launcher_gives_a_dev_install_its_persona_key(path):
-    """Each place that WRITES the key draws it from a 32 byte generator (the
-    one before the write is read, not any in the file), writes the inline
-    mode beside it, and the header no longer counts two secrets where
-    three are written (2026-10-03)."""
+    """Each place that writes the key draws it from a 32 byte generator (the one before the write), writes
+    the inline mode beside it, and the header counts three secrets, not two."""
     text = (ROOT / path).read_text(encoding="utf-8")
     writes = [m.start() for m in _PERSONA_KEY_WRITE.finditer(text)]
     assert writes, f"{path} never writes the persona key"
@@ -301,7 +296,7 @@ def test_every_installer_and_launcher_gives_a_dev_install_its_persona_key(path):
                  _GENERATOR.findall(text[max(0, at - 4000):at])]
         assert drawn and drawn[-1] == 32, (path, drawn)
     assert re.search(r"NOCTORNAL_COLLECTOR_INLINE\s*=?\s*'?1\b", text), path
-    # The TOTP header no longer claims the persona credentials.
+    # The TOTP header does not claim the persona credentials.
     assert "collection persona credentials, which NOCTORNAL_PERSONA_KEK seals" in text
     assert "these two secrets" not in text
 
@@ -326,7 +321,7 @@ def test_the_key_a_dev_install_writes_is_one_the_persona_ring_accepts(ring):
     assert persona_envelope.decrypt(blob, key_id=key_id) == "tg-session"
 
 
-# --- the scripts that must not start without it (2026-10-03) ------------------------
+# --- the scripts that must not start without it ------------------------------------
 
 def test_telegram_enrolment_refuses_before_asking_anybody_when_there_is_no_key(
         ring, capsys):
@@ -361,8 +356,8 @@ def test_telegram_enrolment_refuses_before_asking_anybody_when_there_is_no_key(
 
 def test_the_embed_pass_worker_refuses_to_hold_the_persona_key_in_production(
         ring, capsys):
-    """It was the one Lab worker that called neither enforce_environment nor
-    the boundary, so only the vault guard stood between it and the key."""
+    """The embed-pass worker calls neither enforce_environment nor the boundary, so only the vault guard
+    stands between it and the key."""
     import sys
 
     sys.path.insert(0, str(ROOT / "scripts"))
@@ -385,7 +380,7 @@ def test_the_test_suites_key_is_not_the_totp_one():
     assert os.environ["NOCTORNAL_PERSONA_KEK"] != os.environ["NOCTORNAL_TOTP_KEK"]
 
 
-# --- claims the deployment files and docs may make (2026-10-03) ----------
+# --- claims the deployment files and docs may make ----------------------------
 
 def test_the_collectors_wait_needs_the_psycopg_the_project_asks_for():
     """scripts/collector.py waits with Connection.notifies(timeout=,
@@ -403,13 +398,10 @@ def test_the_collectors_wait_needs_the_psycopg_the_project_asks_for():
 
 
 def test_the_docs_name_the_services_that_check_the_key_and_not_every_service():
-    """Only the services that run the application's code, the egress proxy
-    and the migration job refuse to start holding the persona key; the
-    database, the object store and Redis read secrets.env and check nothing,
-    and Caddy reads caddy.env alone (corrected on
-    2026-10-07: the migration job reads migrate.env and refuses the key). A
-    document that says every other service refuses is wrong about the one
-    place the key must never be put."""
+    """Only the services that run the application's code, the egress proxy and the migration job refuse to
+    start holding the persona key; the database, the object store and Redis read secrets.env and check
+    nothing, and Caddy reads caddy.env alone. A document that says every other service refuses is wrong
+    about the one place the key must never be put."""
     for path in ("infra/production/README.md", "infra/production/collector.env.example"):
         text = (ROOT / path).read_text(encoding="utf-8")
         assert not re.search(r"(?i)every other (?:service|process)\b[^.]*\brefuse", text), path

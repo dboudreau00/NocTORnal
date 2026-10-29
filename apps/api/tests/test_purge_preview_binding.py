@@ -1,10 +1,8 @@
 """A real purge destroys what its dry run counted, or nothing (pure half).
 
-2026-09-23. The HTTP half, with a real database and a
-hold lifted between the count and the confirmation, is
-`test_purge_preview_binding_pg.py`. These need no database: the digest
-itself, and the route handler driven with a stand-in purger, so they run
-wherever the suite runs.
+The HTTP half, with a real database and a hold lifted between the count and the confirmation, is
+`test_purge_preview_binding_pg.py`. These need no database: the digest itself, and the route handler driven
+with a stand-in purger, so they run wherever the suite runs.
 """
 from __future__ import annotations
 
@@ -60,9 +58,8 @@ class _Purger:
                       if not i.held]
         result = PurgeResult(evidence_purged=len(actionable),
                              held_back=len(self.items) - len(actionable))
-        # The objects each count stands for, as the real service records
-        # them: a real run's answer is drawn from these (2026-10-08), and
-        # this stand-in used to leave them out.
+        # The objects each count stands for, as the real service records them: a real run's answer is
+        # drawn from these.
         result.count("evidence_purged", [i.object_id for i in actionable])
         result.count("held_back", [(i.object_type, i.object_id)
                                    for i in self.items if i.held])
@@ -75,25 +72,21 @@ def route(monkeypatch):
     purger = _Purger([_item(2), _item(3, held=True)])
     monkeypatch.setattr(governance, "_case_scoped", lambda *a, **k: None)
     monkeypatch.setattr(governance, "_purger", lambda conn: purger)
-    # The dry run's item list reads exhibit titles from the database since
-    # 2026-09-23 (ux15-report:due-list-no-forward-view-no-names); this half
-    # has none, and the list is proven in test_retention_due_named_pg.py.
+    # The dry run's item list reads exhibit titles from the database; this half has none, and the list is
+    # proven in test_retention_due_named_pg.py.
     monkeypatch.setattr(governance, "_due_rows", lambda conn, user, items: [])
-    # And leaves out exhibits above the caller since 2026-10-03
-    # (evidence-due-leaks-hold-reason): a database read as well, proven in
-    # test_g44_http_pg.py.
+    # It also leaves out exhibits above the caller, another database read, proven in test_evidence_retention_http_request_role_pg.py.
     monkeypatch.setattr(governance, "_visible_due",
                         lambda conn, user, items, scope: (list(items), []))
-    # A real run's answer is drawn from the objects the caller may know of
-    # (2026-10-08), read from the database; this caller may know of all.
+    # A real run's answer is drawn from the objects the caller may know of, read from the database; this
+    # caller may know of all.
     monkeypatch.setattr(governance, "_visible_ids",
                         lambda conn, user, case_id, result: {
                             who for ids in result.members.values()
                             for entry in ids
                             for who in ([entry[1]] if isinstance(entry, tuple)
                                         else [entry])})
-    # And the meter is spent in the handler, after the gate (2026-10-08),
-    # on the request's limiter: this half has no request.
+    # The meter is spent in the handler, after the gate, on the request's limiter: this half has no request.
     monkeypatch.setattr(governance, "enforce", lambda *a, **k: None)
     user = governance.CurrentUser(user_id=UUID(int=7), session_id=UUID(int=8),
                                   session_mfa_at=AT)
@@ -107,9 +100,8 @@ def route(monkeypatch):
 
 
 def test_the_check_and_the_sweep_read_what_is_due_at_one_instant(route):
-    """The gate's read and the sweep's own read are handed the same
-    `as_of`, so an item cannot cross its deadline between the check and
-    the act and be destroyed unconfirmed (2026-09-23, U20 follow-up)."""
+    """The gate's read and the sweep's own read are handed the same `as_of`, so an item cannot cross its
+    deadline between the check and the act and be destroyed unconfirmed."""
     _, purger, call = route
     out = call(dry_run=True)
     assert out["preview"] and len(out["preview"]) == 64

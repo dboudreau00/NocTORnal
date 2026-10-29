@@ -1,18 +1,13 @@
-"""Correct... is a graded form: the console half of gap-api-grade-required.
+"""Correct... is a graded form: the console half of the grading rule.
 
-Decided 2026-09-23: the API requires every claim's grading (basis,
-reliability, credibility, confidence) and answers a missing field with a
-422 naming it. A correction is a claim ("this is now called X", invariant
-1), and the console's Correct... was two window prompts that sent the
-reason alone, leaving the server to grade it DIRECT_OBSERVATION F6 LOW.
-Under the new rule that request is refused, and grading it in the console
-instead would only move the old gap into the browser. So the inspector
-has a Correct form, graded the way the create forms and Add a claim are:
-nothing chosen for the analyst, refused until all four are picked.
+The API requires every claim's grading (basis, reliability, credibility, confidence) and answers a
+missing field with a 422 naming it. A correction is a claim ("this is now called X", invariant 1), so
+grading it for the analyst in the console would only move the gap into the browser. The inspector has
+a Correct form, graded the way the create forms and Add a claim are: nothing chosen for the analyst,
+refused until all four are picked.
 
-Pure, as `test_tie_claim_ui.py` is: the static checks run everywhere, and
-the ones marked `needs_node` EXECUTE the shipped functions under Node.
-`test_api_grade_required_pg.py` holds the server half.
+Pure, as `test_tie_claim_ui.py` is: the static checks run everywhere, and the ones marked `needs_node`
+EXECUTE the shipped functions under Node. `test_api_grade_required_pg.py` holds the server half.
 """
 from __future__ import annotations
 
@@ -179,13 +174,9 @@ def test_what_the_form_block_says_carries_no_dash():
 
 
 def test_the_card_no_longer_explains_a_correction_by_an_api_default():
-    """Verifier round on gap-api-grade-required, 2026-09-23. The card
-    headlines a correction as "Correction" rather than its basis, and the
-    comment gave the reason as "the basis it carries is the server's
-    ungraded default". Corrections now carry the basis the analyst chose,
-    so that reason was false for every new one. The display stays (the
-    recorded basis is in the meta line); the reason is restated, and the
-    ux05 note above it says the prompt-only dialogue is gone."""
+    """The card headlines a correction as "Correction" rather than its basis, and its comment must not
+    give the reason as the server's ungraded default: corrections carry the basis the analyst chose,
+    which is shown in the meta line."""
     flat = " ".join(_js().split())
     assert "the basis it carries is the server's ungraded default" not in flat
     assert "dialogue sends only a rationale, and the server fills in" not in flat

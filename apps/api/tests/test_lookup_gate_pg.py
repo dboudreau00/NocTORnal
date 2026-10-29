@@ -1,10 +1,8 @@
-"""The lookup gates (F15.3, 2026-09-24): every rule that
-decides whether one selector leaves for one provider, each refusal made
-before a row exists and audited with the keyed fingerprint, never the
-value.
+"""The lookup gates: every rule that decides whether one selector leaves for one provider, each refusal made
+before a row exists and audited with the keyed fingerprint, never the value.
 
-The fetcher and the routes are fakes; nothing reaches VirusTotal, Shodan
-or a MISP. **The email prefix is `lkgate-`.** Env-gated on DATABASE_URL.
+The fetcher and the routes are fakes; nothing reaches VirusTotal, Shodan or a MISP. The email prefix is
+`lkgate-`. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -279,10 +277,9 @@ def test_a_none_lookup_sends_once_through_its_own_tagged_route(conn):
 
 
 def test_a_hash_held_by_a_sample_in_another_case_is_restricted_without_saying_why(conn):
-    """An AMBER sample the caller's labels dominate, in a case they are not
-    assigned to: the refusal used to be the sample sentence, which told
-    them the hash is a lab sample there (2026-09-25). Only
-    a sample of the case being worked names itself."""
+    """An AMBER sample the caller's labels dominate, in a case they are not assigned to: the refusal must
+    not be the sample sentence, which would tell them the hash is a lab sample there. Only a sample of the
+    case being worked names itself."""
     from noctornal_api import lookups
     from outbound_support import make_case
     w = lookup_world(conn, PREFIX)

@@ -1,11 +1,8 @@
-"""The Search pane and the palette's selector lookup, held by reading the
-shipped files (ux09-search, 2026-09-22).
+"""The Search pane and the palette's selector lookup, held by reading the shipped files.
 
-Pure: no database, no browser, like test_ui_invariants.py beside it. The
-DB-backed half of the same findings is test_search_selectors_pg.py; this
-file holds the console to using what that half built, because each finding
-was a server that could answer and a console that did not ask, or asked
-and did not say.
+Pure: no database, no browser, like test_ui_invariants.py beside it. The DB-backed half is
+test_search_selectors_pg.py; this file holds the console to using what that half built, so that a server
+that can answer is also asked, and says what it found.
 """
 from __future__ import annotations
 
@@ -111,8 +108,7 @@ def test_a_selector_hit_shows_the_selector_and_defangs_it():
 def test_the_palette_looks_up_selectors_and_forgets_them_on_a_case_switch():
     js = _js()
     fetch = _function("fetchPaletteSelectors")
-    # The pane's own Entities route since 2026-09-23, so the palette and
-    # the pane match entities by one rule (two-searches-disagree).
+    # The pane's own Entities route, so the palette and the pane match entities by one rule.
     assert "'/search/nodes?with_total=true" in fetch
     assert fetch.index("caseToken()") < fetch.index("await api(")
     assert "caseChanged(token)" in fetch
@@ -134,10 +130,9 @@ def test_the_palette_looks_up_selectors_and_forgets_them_on_a_case_switch():
 
 
 def test_a_palette_answer_is_not_kept_past_one_opening_or_its_ttl():
-    """Held for the whole case, an empty answer stuck: a wallet looked up
-    before it was recorded kept answering "Nothing matches." until a case
-    switch or a reload, and reopening the palette sent no request at all
-    (verifier of the 2026-09-22 fix)."""
+    """An empty palette answer must not be held for the whole case: a wallet looked up before it was
+    recorded would keep answering "Nothing matches." until a case switch or a reload, and reopening the
+    palette would send no request at all."""
     js = _js()
     assert re.search(r"^const PAL_SEL_TTL_MS = \d+;$", js, flags=re.M)
     assert "resetPalSel()" in _function("openPalette"), (
@@ -155,12 +150,10 @@ def test_a_palette_answer_is_not_kept_past_one_opening_or_its_ttl():
 
 
 def test_the_palette_sends_a_value_behind_its_type_label_and_no_command():
-    """"ICQ: 123456789" is a spaced query, so the palette never asked the
-    server, which reads the label as the type (curation.type_label), and
-    answered "Nothing matches." (verifier of the second 2026-09-22 fix
-    round). A one-word label and a value go; a two-word command still
-    never spends the search meter. The pattern is plain enough to run
-    here with Python's `re`, which agrees with JS on ASCII input."""
+    """"ICQ: 123456789" is a spaced query, but the server reads the label as the type
+    (curation.type_label), so the palette sends it rather than answering "Nothing matches." A one-word
+    label and a value go; a two-word command still never spends the search meter. The pattern is plain
+    enough to run here with Python's `re`, which agrees with JS on ASCII input."""
     js = _js()
     m = re.search(r"^const PAL_SEL_LABELLED = /(.+)/;$", js, flags=re.M)
     assert m, "app.js has no PAL_SEL_LABELLED"

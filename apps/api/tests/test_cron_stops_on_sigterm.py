@@ -1,19 +1,16 @@
-"""The cron loops stop on SIGTERM and finish the pass in progress (infra-11,
-2026-10-03).
+"""The cron loops stop on SIGTERM and finish the pass in progress.
 
-The four loop services in infra/production/compose.yml (cron, lab-triage,
-lab-cron, embed-pass) were `sh -c 'while true; ...'` as PID 1, which has no
-handler for SIGTERM, so `docker stop` waited ten seconds and killed the whole
-tree mid-pass: between a persona poll's request and its record, a sandbox send
-and its row, an email and its ledger entry. The scripts below are the real
-ones from the compose file, as the container receives them (`$$` turned into
-`$`), with the CA bundle line dropped, the jobs replaced by a stub on PATH and
-the naps shortened. The signal goes to the shell alone, as `docker stop`
-sends it to PID 1, and the shell's stdout goes to a file, because an orphaned
-`sleep` would otherwise hold a pipe open after the shell has gone.
+The four loop services in infra/production/compose.yml (cron, lab-triage, lab-cron, embed-pass) run a shell
+as PID 1, which has no default handler for SIGTERM, so a bare `sh -c 'while true; ...'` would make
+`docker stop` wait ten seconds and kill the whole tree mid-pass: between a persona poll's request and its
+record, a sandbox send and its row, an email and its ledger entry. The scripts below are the real ones from
+the compose file, as the container receives them (`$$` turned into `$`), with the CA bundle line dropped,
+the jobs replaced by a stub on PATH and the naps shortened. The signal goes to the shell alone, as
+`docker stop` sends it to PID 1, and the shell's stdout goes to a file, because an orphaned `sleep` would
+otherwise hold a pipe open after the shell has gone.
 
-POSIX only: Python on Windows cannot deliver SIGTERM to a child. CI runs on
-Linux, where /bin/sh is dash, as in the production image.
+POSIX only: Python on Windows cannot deliver SIGTERM to a child. CI runs on Linux, where /bin/sh is dash,
+as in the production image.
 """
 from __future__ import annotations
 
@@ -130,7 +127,6 @@ def test_without_a_stop_the_cron_loop_runs_every_job_in_order(tmp_path):
     finally:
         _finish(proc)
     ends = [j.split()[1] for j in _jobs(log) if j.startswith("job-end")]
-    # The collection poll left this loop for the collector service
-    # (A collector process, 2026-10-02): two jobs, round and round.
+    # The collection poll lives in the collector service; this loop runs two jobs, round and round.
     assert ends[:4] == ["scripts/notify_drain.py", "scripts/lookup_drain.py",
                         "scripts/notify_drain.py", "scripts/lookup_drain.py"], ends

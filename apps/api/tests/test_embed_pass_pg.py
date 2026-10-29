@@ -1,13 +1,10 @@
-"""The embedding pass and scripts/embed_pass.py (F6.1, embeddings,
-2026-09-24).
+"""The embedding pass and scripts/embed_pass.py.
 
-Newest first; bounded by --limit and --max-seconds with the rest counted
-deferred; a second pass of the same role is `locked` and writes nothing;
-FAILED items back off and are retried; victim data is EXCLUDED from every
-space, by category and by a compartment an ingest key forces, including
-when the key starts forcing after the items were embedded; the counters
-line carries counts and codes and never a title, a text, a source or an
-id.
+Newest first; bounded by --limit and --max-seconds with the rest counted deferred; a second pass of the
+same role is `locked` and writes nothing; FAILED items back off and are retried; victim data is EXCLUDED
+from every space, by category and by a compartment an ingest key forces, including when the key starts
+forcing after the items were embedded; the counters line carries counts and codes and never a title, a
+text, a source or an id.
 
 Env-gated on DATABASE_URL. Prefix `epp-`.
 """

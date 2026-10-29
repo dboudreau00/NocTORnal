@@ -1,21 +1,14 @@
-"""A report file comes out of the egress decision, and it is the document
-the analyst previewed.
+"""A report file comes out of the egress decision, and it is the document the analyst previewed.
 
-ux15-report:report-download-bypasses-egress and
-report-preview-undefined-relationships (2026-09-22). Three things were
-wrong together:
-
-- `POST /report?fmt=markdown` handed over the file under
-  `report.generate` alone, with no step-up and no egress check, so a RED
-  document reached disk one click after Prepare, which invariant 8 says
+- `POST /report?fmt=markdown` must not hand over the file under `report.generate` alone, with no step-up
+  and no egress check, or a RED document would reach disk one click after Prepare, which invariant 8 says
   never happens ("webhooks and export alike").
-- `/release` rebuilt with the builder's defaults, so a preview prepared
-  with hypotheses OFF was cleared as a document with them ON.
-- Nothing tied the preview, the verdict and the file to one document.
+- `/release` must rebuild with the preview's own choices, so a preview prepared with hypotheses OFF is not
+  cleared as a document with them ON.
+- The preview, the verdict and the file are tied to one document.
 
-These drive the real routes. Also here, because they are the two small
-API additions the console's case header and inspector now read:
-`closed_at` on the case and the validity interval on a node.
+These drive the real routes. Also here, because they are the two small API additions the console's case
+header and inspector read: `closed_at` on the case and the validity interval on a node.
 
 Env-gated on DATABASE_URL.
 """
@@ -167,7 +160,7 @@ def test_the_build_endpoint_no_longer_hands_over_a_file(conn, client):
 
 
 def test_a_red_document_is_refused_and_no_file_comes_back(conn, client):
-    """Invariant 8 on the one path that used to skip it."""
+    """Invariant 8 on the download path."""
     owner, token = _user(conn)
     case_id = _case(conn, owner, classification="RED")
     _node(conn, case_id, owner, "red_actor", classification="RED")
@@ -206,9 +199,8 @@ def test_the_cleared_file_is_the_previewed_document(conn, client):
 
 
 def test_the_release_judges_the_preview_s_hypotheses_choice(conn, client):
-    """A preview prepared with hypotheses OFF used to be cleared as a
-    document with them ON, so the file carried ACH statements, which often
-    name suspects, that nobody had seen on screen."""
+    """A preview prepared with hypotheses OFF must not be cleared as a document with them ON, or the file
+    would carry ACH statements, which often name suspects, that nobody had seen on screen."""
     _, token, case_id = _network(conn)
     off = _build(client, token, case_id, include_hypotheses="false").json()
     assert SUSPECT not in off["document"]
@@ -256,12 +248,10 @@ def _age_the_sign_in(conn, uid, minutes=20):
 
 def test_a_stale_sign_in_is_asked_to_sign_in_not_told_it_lacks_the_role(
         conn, client):
-    """Final review C15 (2026-09-23). `report.export` is a step-up
-    permission, and the permission gate answered a stale sign-in with
-    "missing permission report.export on this case", so a Lead investigator
-    twenty minutes into a session read that they lacked the permission they
-    hold, as an egress refusal, with no way to recover but signing out. The
-    freshness check now runs first and says what it is."""
+    """`report.export` is a step-up permission, and the permission gate must not answer a stale sign-in
+    with "missing permission report.export on this case": a Lead investigator twenty minutes into a session
+    would read that they lack the permission they hold, with no way to recover but signing out. The
+    freshness check runs first and says what it is."""
     owner, token, case_id = _network(conn)
     _age_the_sign_in(conn, owner)
     r = _release(client, token, case_id)
@@ -276,10 +266,8 @@ def test_a_stale_sign_in_is_asked_to_sign_in_not_told_it_lacks_the_role(
             WHERE case_id = %s AND action LIKE 'REPORT_RELEASE%%'""",
         (case_id,)).fetchone()[0]
     assert judged == 0
-    # ...but the refusal is, against the case and the permission, as the
-    # permission gate always recorded it. The first C15 fix ran the bare
-    # freshness check first and wrote this row with no case at all (final
-    # review C15 follow-up, 2026-09-23).
+    # ...but the refusal is recorded against the case and the permission, as the permission gate always
+    # records it, not with no case at all.
     assert _denials(conn, owner) == [
         (case_id, {"permission": "report.export",
                    "failed_checks": ["step_up_freshness"]})]
@@ -291,12 +279,9 @@ def test_a_stale_sign_in_is_asked_to_sign_in_not_told_it_lacks_the_role(
 
 
 def test_every_case_gate_asks_a_stale_sign_in_to_sign_in(conn):
-    """The report route's own fix, generalised (ROADMAP "a stale sign-in
-    reads as missing permission", 2026-09-24): `authorize_object` itself
-    answers a caller whose ONLY failed check is step-up freshness with the
-    global gate's "re-authentication required", which the console
-    recognises. A role a sign-in would not fix still reads "missing
-    permission", and the denial row is written either way."""
+    """`authorize_object` itself answers a caller whose ONLY failed check is step-up freshness with the
+    global gate's "re-authentication required", which the console recognises. A role a sign-in would not
+    fix still reads "missing permission", and the denial row is written either way."""
     from datetime import datetime, timedelta, timezone
 
     from noctornal_api.http.deps import CurrentUser, authorize_object

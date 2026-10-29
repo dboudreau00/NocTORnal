@@ -1,21 +1,14 @@
-"""The Deception pane's cross-channel pivot, proposals and record forms,
-against a real database (review of 2026-09-22, closed 2026-09-23).
+"""The Deception pane's cross-channel pivot, proposals and record forms, against a real database.
 
-- ux14-deception:ecrime-no-cross-channel-pivot: the address one actor
-  used for the phishing page, the BEC mail and the vishing call is named
-  on all three records, over what the READER may see, and a record can
-  propose INFRA and LURE entities into Triage, derived and never twice,
-  naming an existing entity only to a reader who may see it; case search
-  finds the records by host, address or URL;
-- ux14-deception:web-durable-ids-missing: the capture carries its
-  certificate issue date and each hop's ASN, and is read against the
-  case's first lure, dated by the recipient relay and never by the
-  sender's Date header;
-- ux14-deception:calls-vouched-and-tooltip-only: the call's candidates are
-  merged by selector;
-- ux14-deception:no-deception-ingest-ui: what the console's forms send is
-  accepted, and what the table would refuse is a sentence, not a 500, and
-  never after an exhibit was already written.
+- the address one actor used for the phishing page, the BEC mail and the vishing call is named on all
+  three records, over what the READER may see, and a record can propose INFRA and LURE entities into
+  Triage, derived and never twice, naming an existing entity only to a reader who may see it; case
+  search finds the records by host, address or URL;
+- the capture carries its certificate issue date and each hop's ASN, and is read against the case's
+  first lure, dated by the recipient relay and never by the sender's Date header;
+- the call's candidates are merged by selector;
+- what the console's forms send is accepted, and what the table would refuse is a sentence, not a 500,
+  and never after an exhibit was already written.
 
 Email prefix `dcx-`. Env-gated on DATABASE_URL.
 """
@@ -277,12 +270,10 @@ def test_a_record_proposes_what_it_holds_once_and_nothing_it_was_not_shown(
 
 
 def test_proposing_names_an_entity_only_to_a_reader_who_may_see_it(conn, client):
-    """The verifier (2026-09-23): "already an entity" came back with the id
-    of ANY node carrying the label, so an AMBER case member proposing the
-    address from a capture they could see learnt that a RED entity held it,
-    and its id. Only a node the caller may see is named; one above their
-    labels is treated as absent and the proposal is queued at the record's
-    labels, for a reviewer who may see both."""
+    """"Already an entity" must not come back with the id of ANY node carrying the label, or an AMBER
+    case member proposing the address from a capture they could see would learn that a RED entity held
+    it, and its id. Only a node the caller may see is named; one above their labels is treated as absent
+    and the proposal is queued at the record's labels, for a reviewer who may see both."""
     owner = _user(conn)
     case_id = _case(conn, owner)
     capture, _message, _call = _seed(conn, owner, case_id)
@@ -317,12 +308,11 @@ def test_proposing_names_an_entity_only_to_a_reader_who_may_see_it(conn, client)
 
 def test_already_proposed_names_only_a_proposal_the_callers_queue_shows(
         conn, client):
-    """Final review c20 (2026-09-24): "already proposed" matched a proposal
-    from a RED capture that the AMBER member's Triage queue hides. They got
-    its id and review state, learnt that RED material carried the host, and
-    their own AMBER suggestion was never queued, for good once the RED one
-    was rejected. One above the caller is now absent to them, as the queue
-    and /source already say, and theirs is queued beside it."""
+    """"Already proposed" must not match a proposal from a RED capture that the AMBER member's Triage
+    queue hides: they would get its id and review state, learn that RED material carried the host, and
+    their own AMBER suggestion would never be queued, for good once the RED one was rejected. One above
+    the caller is absent to them, as the queue and /source already say, and theirs is queued beside
+    it."""
     owner = _user(conn)
     case_id = _case(conn, owner)
     from noctornal_api.deception import DeceptionService
@@ -370,11 +360,10 @@ def test_already_proposed_names_only_a_proposal_the_callers_queue_shows(
 
 def test_calls_to_one_victims_pbx_are_not_linked_as_shared_infrastructure(
         conn, client):
-    """Final review u17 (2026-09-24): two vishing calls to two employees
-    of one company carry the company's PBX in their SIP To URIs, and each
-    row said the other shared it, as if it were the actor's. The victim's
-    end is no overlap and no proposal; case search still finds the calls
-    by it, which is a fair question to ask."""
+    """Two vishing calls to two employees of one company carry the company's PBX in their SIP To URIs,
+    and each row must not say the other shared it, as if it were the actor's. The victim's end is no
+    overlap and no proposal; case search still finds the calls by it, which is a fair question to
+    ask."""
     owner = _user(conn)
     case_id = _case(conn, owner)
     from noctornal_api.deception import DeceptionService
@@ -416,9 +405,8 @@ def test_calls_to_one_victims_pbx_are_not_linked_as_shared_infrastructure(
 
 def test_the_first_lure_is_dated_by_the_relay_and_never_by_the_date_header(
         conn, client):
-    """The verifier (2026-09-23): the first lure was ordered by the
-    message's Date header, which the sender writes, so a backdated header
-    moved the certificate finding to wherever the sender liked."""
+    """The first lure is ordered by the relay's time, not the message's Date header, which the sender
+    writes: a backdated header must not move the certificate finding to wherever the sender likes."""
     owner = _user(conn)
     case_id = _case(conn, owner)
     backdated = EML.replace(b"Date: Fri, 17 Jul 2026 08:14:00 +0000",
@@ -435,9 +423,8 @@ def test_the_first_lure_is_dated_by_the_relay_and_never_by_the_date_header(
 
 def test_case_search_finds_the_records_that_carry_a_host_address_or_url(
         conn, client):
-    """The finding's last part: "index deception hosts, IPs and URLs in case
-    search". Over what the reader may see, defanged input accepted, and the
-    victim's side of a call never searched."""
+    """Case search indexes deception hosts, IPs and URLs. Over what the reader may see, defanged input
+    accepted, and the victim's side of a call never searched."""
     owner = _user(conn)
     case_id = _case(conn, owner)
     capture, message, call = _seed(conn, owner, case_id,
@@ -512,10 +499,9 @@ def test_what_the_capture_form_sends_is_recorded(conn, client):
 
 def test_a_key_hash_that_is_not_a_sha256_is_a_sentence_and_not_a_500(
         conn, client):
-    """Final review u16 (2026-09-24): the form's key-hash field was sent as
-    typed, and any hex that was not 32 bytes (a SHA-1 pin, a hash cut
-    short) reached the table's capture_spki_is_a_sha256 CHECK as an opaque
-    500 that named no field."""
+    """The form's key-hash field is validated: hex that is not 32 bytes (a SHA-1 pin, a hash cut
+    short) must not reach the table's capture_spki_is_a_sha256 CHECK as an opaque 500 that names no
+    field."""
     owner = _user(conn)
     case_id = _case(conn, owner)
     token = _token(conn, owner)

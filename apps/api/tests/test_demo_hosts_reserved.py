@@ -1,13 +1,9 @@
-"""The demo estate names only hosts nobody can own (x-nightmarket, 2026-09-24).
+"""The demo estate names only hosts nobody can own.
 
-`nightmarket` plus the Isle of Man's country code is a domain anyone can
-register, and it was the Jabber domain of every persona the demo seeders
-wrote and of three tests. A demo that names a registrable host puts a
-stranger's domain on screen as a criminal forum, in screenshots and in
-the selectors an analyst copies out to try; the README estate already
-used `.example` for exactly that reason. RFC 2606 and RFC 6761 reserve
-`.example`, `.test`, `.invalid` and `.localhost`, and the three
-`example.*` second-level names, for this; RFC 7686 reserves `.onion`.
+A demo that names a registrable host puts a stranger's domain on screen as a criminal forum, in
+screenshots and in the selectors an analyst copies out to try; the README estate uses `.example` for
+exactly that reason. RFC 2606 and RFC 6761 reserve `.example`, `.test`, `.invalid` and `.localhost`, and
+the three `example.*` second-level names, for this; RFC 7686 reserves `.onion`.
 
 Pure: it reads files and runs nothing.
 """
@@ -70,8 +66,8 @@ def test_the_demo_forum_is_named_on_a_reserved_host(rel):
 
 
 def test_the_registrable_name_is_gone_from_the_code():
-    """Every file that ships code or markup. The planning documents may
-    still say what was replaced; nothing that runs may name it."""
+    """Every file that ships code or markup. The planning documents may still say what was replaced;
+    nothing that runs may name it."""
     gone = "nightmarket" + ".im"
     suffixes = {".py", ".js", ".html", ".css", ".ps1", ".sh", ".sql",
                 ".json", ".yml", ".yaml", ".toml"}

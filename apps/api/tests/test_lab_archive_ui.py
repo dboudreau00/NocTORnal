@@ -1,9 +1,8 @@
-"""The Lab card's archive tree, held by reading the shipped console
-(roadmap phase 8 "archive expansion", 2026-10-02).
+"""The Lab card's archive tree, held by reading the shipped console.
 
-Beside test_lab_ui_invariants.py and for the same reason: the console is
-plain JavaScript with no build step, so "a member's name reaches the page
-through textContent and nothing else" is checkable by reading the file.
+Beside test_lab_ui_invariants.py and for the same reason: the console is plain JavaScript with no build
+step, so "a member's name reaches the page through textContent and nothing else" is checkable by reading
+the file.
 
 Pure: no database, no browser.
 """

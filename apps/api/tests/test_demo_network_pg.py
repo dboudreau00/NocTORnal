@@ -1,12 +1,9 @@
-"""`bootstrap.py demo-network --classification`, and why it has to reach
-every row.
+"""`bootstrap.py demo-network --classification`, and why it has to reach every row.
 
-The README's screenshots are a live render of the showcase case and are
-published on GitHub, so the README promises that case is TLP:CLEAR. Its own
-recipe could only make an AMBER one: `demo-network` hardcoded the case's
-label, and graph writes default every node and tie to AMBER, so asking for
-CLEAR at the case alone would still put AMBER entities on the screen
-(2026-09-23). These hold the recipe to the promise.
+The README's screenshots are a live render of the showcase case and are published on GitHub, so the
+README promises that case is TLP:CLEAR. Graph writes default every node and tie to AMBER, so asking for
+CLEAR at the case alone would still put AMBER entities on the screen. These hold the recipe to the
+promise.
 """
 from __future__ import annotations
 

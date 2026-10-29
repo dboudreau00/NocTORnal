@@ -1,18 +1,13 @@
-"""Retention: holds, the purge's locks, category clocks and samples (unit g44,
-2026-10-03).
+"""Retention: holds, the purge's locks, category clocks and samples.
 
-- evidence-purge-hold-race: a hold placed after the sweep keeps its exhibit,
-  one placed while the store deletes waits for the purge and is then refused
-  as the destroyed exhibit it is, and the database refuses the two states
-  together. Proven with a second connection and a store that stops in the
-  middle of a delete.
-- evidence-purge-stalls-audit-chain: nothing audited is written, and so the
-  chain's global lock is not taken, while the store deletes.
-- evidence-case-hold-unreachable: a case-level hold can be placed and lifted,
-  and binds exhibits (those lodged after it too), ingest records and samples.
-- evidence-category-clock-outlives-case: a category clock only shortens.
-- lab-4: an expired case's samples are disposed of by the purge, and a purged
-  case's sample is not handed out.
+- a hold placed after the sweep keeps its exhibit, one placed while the store deletes waits for the purge
+  and is then refused as the destroyed exhibit it is, and the database refuses the two states together.
+  Proven with a second connection and a store that stops in the middle of a delete.
+- nothing audited is written, and so the chain's global lock is not taken, while the store deletes.
+- a case-level hold can be placed and lifted, and binds exhibits (those lodged after it too), ingest
+  records and samples.
+- a category clock only shortens.
+- an expired case's samples are disposed of by the purge, and a purged case's sample is not handed out.
 
 Accounts `g44t-*`. No test writes to the real object store.
 """
@@ -25,7 +20,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-import g44_support as g
+import evidence_retention_support as g
 import rls_support as s
 
 pytestmark = g.GATED
@@ -158,10 +153,9 @@ def test_a_hold_on_the_exhibit_being_destroyed_waits_and_is_then_refused(conn):
 
 
 def test_a_hold_entered_while_the_sweep_is_part_way_is_honoured_where_it_has_not_reached(conn):
-    """The review's reproduction: while the store deletes the first exhibit,
-    a court order for the second is entered from another connection. It
-    lands at once, and the sweep, which rereads the holds under the lock it
-    takes for each exhibit before that exhibit's delete, keeps the second."""
+    """While the store deletes the first exhibit, a court order for the second is entered from another
+    connection. It lands at once, and the sweep, which rereads the holds under the lock it takes for each
+    exhibit before that exhibit's delete, keeps the second."""
     result, seen, (first, second), store, _boss, case_id = (
         _sweep_with_a_stop_in_the_first_delete(conn, hold_on="second"))
     assert seen == "placed"
@@ -461,8 +455,7 @@ def test_a_case_hold_is_lifted_only_by_somebody_cleared_for_all_of_it(conn):
                                     reason="released by order", lifter_ceiling=ceiling)
     assert conn.execute('SELECT legal_hold FROM core."case" WHERE id = %s',
                         (case_id,)).fetchone()[0] is True
-    # Each refusal is recorded (2026-10-07: it left no row at all), and
-    # the row names nothing above the lifter.
+    # Each refusal is recorded, and the row names nothing above the lifter.
     refused = conn.execute(
         """SELECT outcome, detail FROM audit.event
             WHERE action = 'LEGAL_HOLD_LIFT_REFUSED' AND case_id = %s
@@ -509,12 +502,11 @@ def test_a_lift_with_an_unknown_clearance_refuses(conn):
                         (case_id,)).fetchone()[0] is True
 
 
-# --- case-hold-lift-documents -------------------------------------------
+# --- case-hold lift counts documents ------------------------------------
 #
-# The case-hold lift gate counted exhibits, records, samples and lookups above
-# the lifter and not the collected documents the case cites, which are held
-# only through the case: a lead cleared below a RED document lifted the case
-# hold alone and the document sweep could then destroy it.
+# The case-hold lift gate counts the collected documents the case cites as well as the exhibits, records,
+# samples and lookups above the lifter: documents are held only through the case, so a lead cleared below a
+# RED document could otherwise lift the case hold alone and the document sweep could then destroy it.
 
 def _document_hold(conn, doc):
     """The hold reason of a collected document, from the predicate the sweep
@@ -678,8 +670,7 @@ def test_a_category_clock_that_is_shorter_is_kept(conn):
 
 
 def test_the_sweep_takes_the_earlier_of_the_stamp_and_the_case(conn):
-    """A record stamped before this change, or attached later, is covered by
-    the sweep's own LEAST."""
+    """A record stamped earlier, or attached later, is covered by the sweep's own LEAST."""
     boss = g.user(conn, "RED")
     retention = date.today() + timedelta(days=15)
     case_id = g.case(conn, boss, retention=retention)
@@ -694,8 +685,6 @@ def test_the_sweep_takes_the_earlier_of_the_stamp_and_the_case(conn):
     assert item.object_id == record_id and item.rule == "case.retention_until"
     assert item.deadline == _midnight(retention)
 
-
-# --- lab-4 -----------------------------------------------------------------
 
 def test_an_expired_cases_sample_is_disposed_of_by_the_purge(conn, lab):
     boss = g.user(conn, "RED")
@@ -772,16 +761,15 @@ def test_a_purged_cases_sample_is_not_handed_out(conn, lab):
         svc._downloadable(sample.id, clearance="RED")
 
 
-# --- 2026-10-07 ------------------------------
+# --- holds and failures mid-purge ------------------------------
 #
-# C4: a case hold committed while a destroying rejection deletes the sample's
-#     bytes was missed, because the hold was reread with a plain read.
-# C5: the store's delete and the exhibit's `purged_at` shared one
-#     transaction with everything after them, so a failure after a delete
-#     left the object destroyed and the row unmarked.
-# C6: a case hold entered mid-purge landed after the whole sweep had run.
-#     (`test_g44_races_pg.py` holds the two-connection test.)
-# C8: a sweep that names no case never reread the case hold of a record.
+# - A case hold committed while a destroying rejection deletes the sample's bytes must not be missed: the
+#   hold is reread under a lock, not with a plain read.
+# - The store's delete and the exhibit's `purged_at` must not share a transaction with everything after
+#   them, or a failure after a delete leaves the object destroyed and the row unmarked.
+# - A case hold entered mid-purge is read by every exhibit the sweep has not reached
+#   (`test_purge_races_second_connection_pg.py` holds the two-connection test).
+# - A sweep that names no case rereads the case hold of a record.
 
 def test_a_case_hold_entered_while_a_sample_is_destroyed_waits_for_it(conn, lab):
     """`SampleService._reject_destroying` reread the hold under the sample's
@@ -842,11 +830,10 @@ class _Crash(BaseException):
 
 
 def test_a_failure_part_way_leaves_the_destroyed_exhibits_marked(conn):
-    """Each exhibit is marked destroyed in the transaction that destroyed it
-    (Beta 1, C5). The object store's delete cannot be rolled back, so a
-    purge that fails on the second of three exhibits must not take the
-    first one's mark with it: before, the first object was gone, its row
-    read live, and every later read raised an integrity alarm for it."""
+    """Each exhibit is marked destroyed in the transaction that destroyed it. The object store's delete
+    cannot be rolled back, so a purge that fails on the second of three exhibits must not take the first
+    one's mark with it, or the first object would be gone, its row would read live, and every later read
+    would raise an integrity alarm for it."""
     store = g.VersionedStore()
     boss = g.user(conn, "RED")
     case_id = g.case(conn, boss)
@@ -873,10 +860,8 @@ def test_a_failure_part_way_leaves_the_destroyed_exhibits_marked(conn):
 
 
 def test_a_tombstone_that_fails_does_not_undo_the_marks_and_says_what_happened(conn):
-    """The failure the verifier simulated: everything after the store's
-    delete failed. The marks stand (the objects are gone), and the error
-    names what was destroyed without a tombstone, so nobody reads a retry
-    as a way to record it."""
+    """When everything after the store's delete fails, the marks stand (the objects are gone), and the error
+    names what was destroyed without a tombstone, so nobody reads a retry as a way to record it."""
     from noctornal_api.retention import RetentionError
     store = g.VersionedStore()
     boss, case_id, one, two = _expired_case_with_two_exhibits(conn, store)
@@ -896,8 +881,7 @@ def test_a_tombstone_that_fails_does_not_undo_the_marks_and_says_what_happened(c
 
 
 def test_a_later_leg_that_fails_does_not_undo_the_exhibits(conn):
-    """The exhibit leg no longer shares a transaction with the documents,
-    records and lookups after it."""
+    """The exhibit leg does not share a transaction with the documents, records and lookups after it."""
     store = g.VersionedStore()
     boss, case_id, one, two = _expired_case_with_two_exhibits(conn, store)
     svc = _service(conn, store)
@@ -913,10 +897,9 @@ def test_a_later_leg_that_fails_does_not_undo_the_exhibits(conn):
 
 
 def test_a_case_hold_placed_after_a_caseless_sweep_keeps_a_record(conn, monkeypatch):
-    """`purge_due(case_id=None)` never reread the case hold (Beta 1, C8): a
-    record the sweep had listed was emptied although a case hold had
-    committed since. Only `retention_sweep.py` calls it without a case, and
-    it restricts itself to documents, so this was latent."""
+    """`purge_due(case_id=None)` rereads the case hold: a record the sweep had listed must not be emptied
+    although a case hold has committed since. Only `retention_sweep.py` calls it without a case, and it
+    restricts itself to documents, so the gap is latent."""
     boss = g.user(conn, "RED")
     case_id = g.case(conn, boss)
     record_id, _ = g.record_in_case(conn, boss, case_id)

@@ -1,17 +1,11 @@
 """`scripts/check_source_hygiene.py`, proved on bytes built here.
 
-CI runs the script over the tree, which proves only that today's tree is
-clean. It never proved the script can see what it claims to look for, and
-the one byte class it did not look for shipped in all seven tagged
-releases, Alpha 1 to Alpha 5.2: `release/INSTALL.md` carried a literal
-BACKSPACE (0x08) where `scripts\\bootstrap.py` was meant, in both Windows
-recovery commands, so each printed as `scriptsootstrap.py` and failed when
-copied (Alpha 6 pre-release check, 2026-09-23). The check now refuses every
-C0 control byte except tab, line feed and carriage return, in every text
-file the repository tracks, and these tests hold it to that.
+CI runs the script over the tree, which proves only that today's tree is clean, not that the script can
+see what it claims to look for. A literal BACKSPACE (0x08) where `scripts\\bootstrap.py` was meant would
+print as `scriptsootstrap.py` and fail when copied. The check refuses every C0 control byte except tab,
+line feed and carriage return, in every text file the repository tracks, and these tests hold it to that.
 
-Pure: imports the script by path; reads files and runs `git ls-files`,
-writes nothing.
+Pure: imports the script by path; reads files and runs `git ls-files`, writes nothing.
 """
 from __future__ import annotations
 
@@ -44,8 +38,8 @@ def test_every_control_byte_is_refused_with_its_place(byte: int):
     raw = b"first line\r\nsecond " + bytes([byte]) + b"line\n"
     problems = hygiene.check_file("doc.md", raw)
     assert len(problems) == 1, problems
-    # Line 2, column 8: the byte after "second ", counted from 1, so the
-    # finding points at the character to fix.
+    # Line 2, column 8: the byte after "second ", counted from 1, so the finding points at the character
+    # to fix.
     assert problems[0].startswith("doc.md:2:8: "), problems[0]
     assert f"0x{byte:02X}" in problems[0], problems[0]
 
@@ -106,12 +100,10 @@ def _tracked_text_files() -> list[str] | None:
 
 
 def test_every_tracked_text_file_is_scanned():
-    """The walk chose files by a list of suffixes, so `start.cmd`, the
-    Dockerfile, the Caddyfile, the requirements, the PGP fixtures, the SVGs
-    and the ignore files were never read for a control byte, although the
-    brief was every tracked text file (Alpha 6 pre-release check,
-    2026-09-23). Git decides what is text; the checker must cover all of
-    it, so a new kind of tracked file fails here until it is added."""
+    """The walk covers every tracked text file, not a list of suffixes: `start.cmd`, the Dockerfile, the
+    Caddyfile, the requirements, the PGP fixtures, the SVGs and the ignore files must be read for a control
+    byte too. Git decides what is text; the checker must cover all of it, so a new kind of tracked file
+    fails here until it is added."""
     tracked = _tracked_text_files()
     if tracked is None:
         pytest.skip("no git history here to list the tracked files from")

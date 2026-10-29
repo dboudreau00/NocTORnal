@@ -1,23 +1,19 @@
-"""Every claim about an element or an exhibit is found by an index, live or
-not (2026-10-07, migration assertion_element_indexes).
+"""Every claim about an element or an exhibit is found by an index, live or not (migration
+assertion_element_indexes).
 
-`core.assertion`'s indexes on `node_id` and `edge_id` are partial, live
-claims only, and `evidence_id` had none; `core.evidence_link` had none on
-`evidence_id` either. A lookup that does not repeat the live predicate
-cannot use a partial index, so these scanned the whole table, every case's
-claims, on every call. Measured on a 1,254,000-claim database: the deferred
-invariant-1 check behind every entity or tie create (`core.require_node_
-assertion`) was a parallel sequential scan of 29,000 buffers, 188 ms per
-element, and the evidence register computed each exhibit's backs with one
-such scan per exhibit.
+`core.assertion`'s indexes on `node_id` and `edge_id` are partial, live claims only. A lookup that does not
+repeat the live predicate cannot use a partial index, so it scans the whole table, every case's claims, on
+every call. Measured on a 1,254,000-claim database: the deferred invariant-1 check behind every entity or
+tie create (`core.require_node_assertion`) was a parallel sequential scan of 29,000 buffers, 188 ms per
+element, and the evidence register computed each exhibit's backs with one such scan per exhibit. The
+migration adds indexes that serve those lookups, `evidence_id` on `core.assertion` and on
+`core.evidence_link` included.
 
-The EXPLAIN tests run the statements the product runs: the trigger
-functions' own lookup, the claim history's (`read._assertions` with
-`include_retracted`, captured from the function itself), a retraction's
-restore (`GraphWriteService._supported_value`, captured), and the register's
-backs (`evidence._backs_counts`). Sequential scans are off in a rolled-back
-transaction, so the planner takes an index whenever one can answer, on a
-small database as on a large one. Each EXPLAIN test fails before the
+The EXPLAIN tests run the statements the product runs: the trigger functions' own lookup, the claim
+history's (`read._assertions` with `include_retracted`, captured from the function itself), a retraction's
+restore (`GraphWriteService._supported_value`, captured), and the register's backs
+(`evidence._backs_counts`). Sequential scans are off in a rolled-back transaction, so the planner takes an
+index whenever one can answer, on a small database as on a large one. Each EXPLAIN test fails without the
 migration, where the plan is a sequential scan.
 
 Env-gated on DATABASE_URL.

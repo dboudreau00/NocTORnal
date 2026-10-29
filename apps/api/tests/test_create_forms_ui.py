@@ -1,26 +1,20 @@
 """The ENTITY and LINK create forms: nothing chosen on the analyst's behalf.
 
-Three findings from the 2026-09-22 usability review, each a default the
-console picked and the analyst never saw it pick:
+Three defaults the console must not pick without the analyst seeing it pick:
 
-- ux06 grading-prefilled-upward: both forms opened on Direct observation /
-  C / 3 / MODERATE, so an entity typed and submitted became a graded claim
-  nobody graded, pitched above the server's own not-graded F / 6 / LOW.
-- ux06 edge-type-defaults-to-scam-accusation: the relationship type took
-  the list's first option, which for persona to persona is ACCUSED_SCAM,
-  and every endpoint change rebuilt the list and reset the choice to it.
-- ux06 edge-endpoint-pickers: two unsearchable selects of every entity,
-  both opening on the SAME entity, so the form started on a self-loop.
+- grading: both forms open with nothing graded, so an entity typed and submitted does not become a
+  graded claim nobody graded, pitched above the server's own not-graded F / 6 / LOW;
+- the relationship type starts on a placeholder, not the list's first option (for persona to persona,
+  ACCUSED_SCAM), and a change of endpoint does not reset the choice to it;
+- the endpoint pickers are searchable and do not both open on the SAME entity, which would start the
+  form on a self-loop.
 
-Plus the client half of ux06 edge-confidence-not-stored: the form's
-confidence must travel in the assertion, which since migration 0064 is
-the tie's confidence (`test_tie_confidence_pg.py` holds the server half).
+Plus the client half of the tie's confidence: the form's confidence must travel in the assertion,
+which since migration 0064 is the tie's confidence (`test_tie_confidence_pg.py` holds the server half).
 
-Pure: these read the shipped static assets, as `test_ui_invariants.py`
-does. The behaviour was also driven in a real browser on 2026-09-22; what
-is pinned here is the shape that behaviour depends on. One check, the
-final review's U12 (2026-09-23), executes the endpoint pin under Node and
-skips where Node is not installed.
+Pure: these read the shipped static assets, as `test_ui_invariants.py` does. The shape the behaviour
+depends on is pinned here; one check executes the endpoint pin under Node and skips where Node is not
+installed.
 """
 from __future__ import annotations
 
@@ -60,9 +54,7 @@ GRADING_IDS = [f"{p}-{f}" for p in ("node", "edge")
                for f in ("basis", "conf", "rel", "cred")]
 
 
-# ---------------------------------------------------------------------------
-# ux06 grading-prefilled-upward
-# ---------------------------------------------------------------------------
+# The grading selects start with nothing chosen.
 
 def test_no_grading_is_preselected():
     """The four old defaults, by value. `buildPickers` and `resetGrading`
@@ -121,9 +113,7 @@ def test_an_unchosen_select_reads_as_unset():
     assert re.search(r"select\.select:disabled\s*\{[^}]*var\(--text-tertiary\)", css)
 
 
-# ---------------------------------------------------------------------------
-# ux06 edge-type-defaults-to-scam-accusation
-# ---------------------------------------------------------------------------
+# The relationship type select starts on a placeholder.
 
 def test_the_type_select_starts_on_a_placeholder_not_the_first_type():
     body = _fn("refreshEdgeTypes")
@@ -158,9 +148,7 @@ def test_negative_ties_are_grouped_apart():
     assert "Math.sign(t.default_sign)" in _fn("refreshEdgeTypes")
 
 
-# ---------------------------------------------------------------------------
-# ux06 edge-endpoint-pickers
-# ---------------------------------------------------------------------------
+# The endpoint pickers.
 
 @pytest.mark.parametrize("element_id", [
     "edge-src-filter", "edge-dst-filter", "edge-src-count", "edge-dst-count",
@@ -196,11 +184,9 @@ def test_enter_in_a_filter_picks_rather_than_submits():
 
 
 def test_enter_in_an_empty_filter_picks_nothing():
-    """Fix-round verifier, 2026-09-22: with the filter cleared, Enter chose
-    the first entity of the whole list (amber_heron in NIGHTJAR), an
-    endpoint nobody picked. No terms, no pick, and no preventDefault, so
-    Enter submits as it does in any other field and createEdge refuses an
-    unfinished form with its reason."""
+    """With the filter cleared, Enter must not choose the first entity of the whole list, an endpoint
+    nobody picked. No terms, no pick, and no preventDefault, so Enter submits as it does in any other
+    field and createEdge refuses an unfinished form with its reason."""
     body = _fn("onEndpointFilterKey")
     guard = "if (!endpointTerms(which).length) return;"
     assert guard in body
@@ -209,9 +195,8 @@ def test_enter_in_an_empty_filter_picks_nothing():
 
 
 def test_a_case_with_fewer_than_two_entities_says_to_add_them():
-    """Fix-round verifier, 2026-09-22: the empty OP-WHEATEAR-26 read "0
-    entities, grouped by type. Type above to filter", naming the wrong next
-    step. Fewer than two entities is said once, beside a way out."""
+    """Fewer than two entities is said once, beside a way out: a relationship joins two, so add them
+    first."""
     body = _fn("buildEndpointSelect")
     assert "This case has no entities yet. " in body
     assert "A relationship joins two, so add them first." in body
@@ -234,13 +219,10 @@ def test_the_inspector_hook_chooses_one_end_and_nothing_else():
 
 
 def test_the_inspector_hook_offers_an_entity_beyond_the_entity_page():
-    """2026-09-23. The pickers were built from
-    `state.nodes`, the newest 1000, while the canvas draws the oldest 800,
-    so "Link from this..." on an older entity in a large case opened on
-    "Choose the source entity" without a word, and the entity could not be
-    chosen in the form at all. The hook now pins the entity first, from
-    the sociogram's record or a read under the session's clearance, and
-    says so when it cannot."""
+    """The pickers are built from `state.nodes`, the newest 1000, while the canvas draws the oldest
+    800, so "Link from this..." on an older entity in a large case must pin the entity first, from the
+    sociogram's record or a read under the session's clearance, and say so when it cannot. Otherwise
+    the form opens on "Choose the source entity" without a word and the entity cannot be chosen."""
     body = _fn("openLinkFormFrom")
     assert body.index("await pinEndpoint(nodeId, token)") < body.index(
         "buildEndpointSelect(which, nodeId)")
@@ -351,13 +333,11 @@ def test_the_reverse_direction_advice_is_only_given_when_it_helps():
     assert "legalEdgeTypes(dst.node_type, src.node_type)" in body
 
 
-# ---------------------------------------------------------------------------
-# ux06 edge-confidence-not-stored, client half
-# ---------------------------------------------------------------------------
+# The link form's confidence travels in the assertion (client half).
 
 def test_the_link_form_sends_its_confidence_inside_the_assertion_only():
-    """The API refuses a top-level `confidence` on POST /edges (it used to
-    drop it). The grade goes in `assertion`, which is where 0064 reads it."""
+    """The API refuses a top-level `confidence` on POST /edges. The grade goes in `assertion`, which is
+    where 0064 reads it."""
     body = _fn("createEdge")
     payload = body[body.index("json: {"):body.index("});", body.index("json: {"))]
     assert "confidence" not in payload
@@ -406,11 +386,9 @@ def test_the_forms_reset_on_a_case_switch():
 
 
 def test_reopening_the_same_case_keeps_what_the_analyst_typed():
-    """Fix-round verifier, 2026-09-22: editing a case's title or status
-    reopens it (openCase(state.caseId)), which runs every case-switch
-    reset, and this one cleared a half-typed label, rationale and
-    reference. The reset now leaves the typed fields alone; the decision
-    waits for the new case id, and the same id keeps them."""
+    """Editing a case's title or status reopens it (openCase(state.caseId)), which runs every
+    case-switch reset; that reset must leave a half-typed label, rationale and reference alone. The
+    decision waits for the new case id, and the same id keeps them."""
     reset = _fn("resetCreateForms")
     for field in _typed_ids():
         assert f"'{field}'" not in reset, (
@@ -425,7 +403,7 @@ def test_reopening_the_same_case_keeps_what_the_analyst_typed():
 def test_every_typed_field_named_for_a_case_switch_exists():
     ids = _typed_ids()
     html = _html()
-    # The three the verifier saw lost, by name.
+    # The three most likely to be lost, by name.
     for named in ("node-label", "node-rationale", "node-ref", "edge-rationale",
                   "edge-ref", "edge-src-filter", "edge-dst-filter"):
         assert named in ids

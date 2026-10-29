@@ -1,16 +1,13 @@
-"""The live socket and the labels of what changed (http_ui-012, http_ui-013; g45, 2026-10-03).
+"""The live socket and the labels of what changed.
 
-http_ui-012: the statement triggers announced every node and edge write in
-a case to every subscriber who may read the case, so a RED or compartmented
-node written in an AMBER case woke the AMBER analyst's console. The hint has
-no content, but its existence and its time are a channel. 0146 puts the
-labels a reader would need into the NOTIFY payload; the socket asks the
-access gate per delivery and drops what the subscriber may not read. The
-labels never reach the client.
+The statement triggers must not announce every node and edge write in a case to every subscriber who may
+read the case: a RED or compartmented node written in an AMBER case would wake the AMBER analyst's console,
+and the hint's existence and time are a channel even without content. 0146 puts the labels a reader would
+need into the NOTIFY payload; the socket asks the access gate per delivery and drops what the subscriber
+may not read. The labels never reach the client.
 
-http_ui-013: the first frame is untrusted input that arrives before any
-credential is checked; a list, a number or an object where a case id
-belongs raised AttributeError out of the handshake, a traceback per
+The first frame is untrusted input that arrives before any credential is checked; a list, a number or an
+object where a case id belongs must not raise AttributeError out of the handshake, a traceback per
 connection for a peer with no session.
 
 Accounts carry the prefix `g45live-`, unique to this file.
@@ -248,11 +245,9 @@ def _app():
 
 
 def _until_change(ws, seconds=20.0):
-    """The next change message, or None after `seconds` of wall time. A
-    wall-clock window and not a count of pings (2026-10-03): the pings come every 0.2 s
-    here, so a count of forty was an
-    eight second window that a loaded machine could spend on slow session
-    checks, and the socket test failed intermittently."""
+    """The next change message, or None after `seconds` of wall time. A wall-clock window and not a count of
+    pings: the pings come every 0.2 s here, so a count of forty is an eight second window that a loaded
+    machine could spend on slow session checks."""
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         message = ws.receive_json()
@@ -305,7 +300,7 @@ def test_a_subscriber_cleared_for_the_restricted_element_is_told(owner, world, l
 
 
 # ---------------------------------------------------------------------------
-# http_ui-013: the hello
+# The hello
 # ---------------------------------------------------------------------------
 
 def _close_of(client, frame, *, raw=False, binary=False):
@@ -355,15 +350,12 @@ def test_a_json_null_hello_and_an_empty_one_still_close_for_want_of_credentials(
         assert _close_of(client, "{not json", raw=True) == ("close", 1008, "no credentials")
 
 
-# Why these are separate from the list above (2026-10-03): they are not shapes of JSON. The
-# first fix closed every hello
-# that DECODES to the wrong thing, and left a binary frame (KeyError out of
-# Starlette's receive_json) and JSON nested past the interpreter's limit
-# (RecursionError) raising out of the handshake, a logged traceback per
-# connection from a peer with no session. The deep frames below are built
-# to fit under the hello's own length bound, because a longer frame never
-# reaches the parser; where exactly a parser gives up depends on the
-# interpreter build, so the RecursionError itself is also forced.
+# These are separate from the list above because they are not shapes of JSON. Closing every hello that
+# DECODES to the wrong thing still leaves a binary frame (KeyError out of Starlette's receive_json) and JSON
+# nested past the interpreter's limit (RecursionError) raising out of the handshake, a logged traceback per
+# connection from a peer with no session. The deep frames below are built to fit under the hello's own
+# length bound, because a longer frame never reaches the parser; where exactly a parser gives up depends on
+# the interpreter build, so the RecursionError itself is also forced.
 _DEEP_ARRAY = "[" * 4000
 _DEEP_OBJECT = '{"a":' * 800
 
@@ -383,8 +375,7 @@ def test_a_binary_first_frame_is_a_clean_close(live, frame, reason):
 @pytest.mark.parametrize("frame", [_DEEP_ARRAY, _DEEP_OBJECT],
                          ids=["deep_array", "deep_object"])
 def test_json_nested_deeply_is_a_clean_close(live, frame):
-    """Whether this build's parser gives up on the nesting (it raised
-    RecursionError here before the fix) or reads it as the wrong kind of
+    """Whether this build's parser gives up on the nesting (RecursionError) or reads it as the wrong kind of
     hello, the answer is a policy close and not an exception."""
     from fastapi.testclient import TestClient
     assert len(frame) <= live._HELLO_MAX_CHARS, "the case must reach the parser"
@@ -396,10 +387,9 @@ def test_json_nested_deeply_is_a_clean_close(live, frame):
 
 
 def test_a_parser_that_gives_up_with_recursion_error_is_a_clean_close(live, monkeypatch):
-    """The failure the review reproduced, forced: `json.loads` raising
-    RecursionError on the hello. Not a ValueError, so the first handler
-    missed it. Only the hello's text is intercepted; the test client reads
-    its own replies through the same function."""
+    """`json.loads` raising RecursionError on the hello is forced. It is not a ValueError, so a handler for
+    ValueError alone misses it. Only the hello's text is intercepted; the test client reads its own replies
+    through the same function."""
     import json
 
     from fastapi.testclient import TestClient
@@ -475,7 +465,7 @@ def test_a_good_hello_is_unchanged(owner, world, live):
 
 
 # ---------------------------------------------------------------------------
-# 2026-10-07: a token that cannot be one (G1)
+# A token that cannot be one
 # ---------------------------------------------------------------------------
 
 BS = "\\"
@@ -515,7 +505,7 @@ def test_a_token_of_the_longest_allowed_shape_still_reaches_the_session_check(li
 
 
 # ---------------------------------------------------------------------------
-# 2026-10-07: a proposal hint carries its labels (G3)
+# A proposal hint carries its labels
 # ---------------------------------------------------------------------------
 
 def _document(owner, *, classification="AMBER", keys=()):

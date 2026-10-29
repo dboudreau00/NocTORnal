@@ -1,14 +1,12 @@
-"""The purge against a second connection (unit g44, 2026-10-03), the cases
-`test_g44_retention_pg.py` leaves out:
+"""The purge against a second connection, the cases `test_retention_holds_locks_and_clocks_pg.py` leaves out:
 
-- an out-of-schedule purge locks every row and case it names before the
-  store is asked to delete any, so a hold entered while it runs waits and is
-  then refused as the destroyed exhibit it is, and never acknowledged;
-- a case-level hold entered while the scheduled sweep runs waits for the
-  exhibit in flight (the sweep claims each in a transaction of its own) and
-  is then read by every exhibit the sweep has not reached (Beta 1, C6).
+- an out-of-schedule purge locks every row and case it names before the store is asked to delete any, so a
+  hold entered while it runs waits and is then refused as the destroyed exhibit it is, and never
+  acknowledged;
+- a case-level hold entered while the scheduled sweep runs waits for the exhibit in flight (the sweep
+  claims each in a transaction of its own) and is then read by every exhibit the sweep has not reached.
 
-Accounts `g44t-*`; the object store is `g44_support.VersionedStore`.
+Accounts `g44t-*`; the object store is `evidence_retention_support.VersionedStore`.
 """
 from __future__ import annotations
 
@@ -17,7 +15,7 @@ import threading
 import psycopg
 import pytest
 
-import g44_support as g
+import evidence_retention_support as g
 import rls_support as s
 
 pytestmark = g.GATED
@@ -156,12 +154,10 @@ def test_a_case_hold_entered_during_the_sweep_waits_for_the_sweep(conn):
 
 
 def test_a_case_hold_entered_during_the_sweep_keeps_the_exhibits_it_has_not_reached(conn):
-    """2026-10-07. The sweep took the case FOR SHARE
-    once and kept it to the end, so a case hold entered during the first
-    exhibit's delete waited out the WHOLE sweep and then landed on three
-    destroyed exhibits with no word. Each exhibit is now claimed in a
-    transaction of its own: the hold waits only for the exhibit in flight,
-    and every exhibit after it is read as held and kept."""
+    """The sweep claims each exhibit in a transaction of its own, so a case hold entered during the first
+    exhibit's delete waits only for the exhibit in flight, and every exhibit after it is read as held and
+    kept. Holding the case FOR SHARE for the whole sweep would make the hold wait out the WHOLE sweep and
+    then land on destroyed exhibits with no word."""
     import time
 
     store = g.VersionedStore()

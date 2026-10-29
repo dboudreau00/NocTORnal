@@ -1,11 +1,10 @@
-"""The sandbox over HTTP (F14, 2026-09-24).
+"""The sandbox over HTTP.
 
-A submit request is refused with 409 naming the reason; a record-only one
-is unchanged and says it is never sent; sign-off and cancel need a fresh
-second factor and answer 404 to anyone the request does not name;
-awaiting-signoff lists only the caller's still-eligible rows; the policy
-block never carries the token, the URL or the host; the card says whether
-the sample may be sent; request, sign-off and cancel are metered.
+A submit request is refused with 409 naming the reason; a record-only one says it is never sent; sign-off
+and cancel need a fresh second factor and answer 404 to anyone the request does not name;
+awaiting-signoff lists only the caller's still-eligible rows; the policy block never carries the token,
+the URL or the host; the card says whether the sample may be sent; request, sign-off and cancel are
+metered.
 
 Email prefix `sbxh-`. Env-gated on DATABASE_URL.
 """

@@ -1,10 +1,9 @@
-"""The MyBB pages, parsed (F4, 2026-09-24).
+"""The MyBB pages, parsed.
 
-Pure, golden-file: saved MyBB 1.8 pages under tests/fixtures/mybb, on hosts
-nobody can register, installed under /community/. Linear and threaded
-views, a board, a profile and a no-permission page; and the one sharp
-difference from XenForo, times printed in the board's own zone, read only
-under a declared zone and formats.
+Pure, golden-file: saved MyBB 1.8 pages under tests/fixtures/mybb, on hosts nobody can register, installed
+under /community/. Linear and threaded views, a board, a profile and a no-permission page; and the one
+sharp difference from XenForo, times printed in the board's own zone, read only under a declared zone and
+formats.
 """
 from __future__ import annotations
 

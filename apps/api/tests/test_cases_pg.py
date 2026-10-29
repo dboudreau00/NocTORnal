@@ -1,5 +1,5 @@
-"""Case CRUD: mandatory governance, atomic owner grant, validated status
-lifecycle, audited mutations (docs/09 Phase 1). Env-gated on DATABASE_URL.
+"""Case CRUD: mandatory governance, atomic owner grant, validated status lifecycle, audited mutations
+(docs/09). Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

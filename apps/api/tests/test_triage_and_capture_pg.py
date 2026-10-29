@@ -1,20 +1,14 @@
-"""Triage and capture, held to the Alpha 6 release review (2026-09-24).
+"""Triage and capture: classification, compartments and what a reply discloses.
 
-Each test fails on d0faa34 and names the finding it holds:
-
-- c1: an ATTRIBUTE claim found in RED, compartmented material was accepted
-  onto a CLEAR entity, where every CLEAR reader of it could read the claim.
-  The route, the service and the card now share one refusal.
-- c15: a capture was stored below its case's floor (the form defaulted to
-  AMBER on every case), in a table the collection lists by label alone;
-  a compartmented case could not keep its document inside the compartment.
-  The fix round kept a re-paste from reaching into another case's queue
-  and from naming, in its reply, a label above the analyst.
-- a closed case's pending proposals counted as waiting for ever.
-- an entity accepted from Triage had an undated claim, so its first
-  and last seen stayed blank although its capture was dated.
-- the "waiting in triage" notice was labelled at the case, so an
-  owner below the capture's label was told what it raised.
+- An ATTRIBUTE claim found in RED, compartmented material is not accepted onto a CLEAR entity, where
+  every CLEAR reader of it could read the claim. The route, the service and the card share one refusal.
+- A capture is stored at or above its case's floor, and a compartmented case keeps its document inside
+  the compartment. A re-paste does not reach into another case's queue or name, in its reply, a label
+  above the analyst.
+- A closed case's pending proposals do not count as waiting.
+- An entity accepted from Triage has a dated claim, so its first and last seen are filled when the
+  capture is dated.
+- The "waiting in triage" notice is labelled at the capture, not the case.
 
 Email prefix `trr-`, document titles `trr-`, unique to this file.
 Env-gated on DATABASE_URL.
@@ -184,16 +178,11 @@ def _document(conn, document_id) -> str:
         (document_id,)).fetchone()[0]
 
 
-# ---------------------------------------------------------------------------
-# c1: an ATTRIBUTE claim never lands below what it was found in
-# ---------------------------------------------------------------------------
+# An ATTRIBUTE claim never lands below what it was found in
 
 def test_a_compartmented_red_claim_is_refused_onto_a_clear_entity(conn, client):
-    """The finding's reproduction: a RED contact block in a compartment,
-    naming a CLEAR, compartment-free publisher. The card said TLP:RED,
-    Accept wrote the Tox ID where every CLEAR reader of the entity reads
-    it. Now the card says it cannot be accepted, and accept writes
-    nothing, over HTTP and through the service."""
+    """A RED contact block in a compartment naming a CLEAR, compartment-free publisher: the card says
+    it cannot be accepted, and accept writes nothing, over HTTP and through the service."""
     from noctornal_api.proposals import ProposalError, ProposalReview
     owner = _user(conn, "RED", [KEY])
     case_id = _case(conn, owner, "CLEAR")
@@ -293,14 +282,12 @@ def test_a_capture_is_stored_no_lower_than_its_case(conn, client):
 
 def test_a_repaste_labels_its_own_proposals_and_leaves_the_shared_document(
         conn, client):
-    """A re-paste into a stricter case labels the proposals it raises at
-    that case, and leaves the one shared document where it was.
+    """A re-paste into a stricter case labels the proposals it raises at that case, and leaves the one
+    shared document where it was.
 
-    The first fix raised the shared document as well (the verifier of the
-    fix round, 2026-09-24). That protected nothing, since the same text
-    was already stored at AMBER, and a proposal is read at the stricter of
-    its own and its document's label: the AMBER case's pending proposals
-    and their Open source view vanished from its own AMBER reviewer."""
+    Raising the shared document too would protect nothing, since the same text is already stored at
+    AMBER, and a proposal is read at the stricter of its own and its document's label: the AMBER case's
+    pending proposals and their Open source view would vanish from its own AMBER reviewer."""
     from noctornal_api.extraction import CaptureService
     amber_owner = _user(conn, "AMBER")
     red_owner = _user(conn, "RED")
@@ -339,9 +326,8 @@ def test_a_repaste_labels_its_own_proposals_and_leaves_the_shared_document(
 
 
 def test_a_capture_reply_names_no_label_above_the_caller(conn, client):
-    """The fix round's disclosure: an AMBER analyst re-pasting text first
-    captured at RED (in any case) was told "RED", the label of a document
-    the collection keeps from them. The labels come back null instead."""
+    """An AMBER analyst re-pasting text first captured at RED (in any case) is not told "RED", the
+    label of a document the collection keeps from them: the labels come back null."""
     red_owner = _user(conn, "RED")
     amber_owner = _user(conn, "AMBER")
     red_case = _case(conn, red_owner, "RED")
@@ -385,10 +371,8 @@ def test_a_capture_reply_names_no_label_above_the_caller(conn, client):
 
 def test_a_compartmented_case_stores_a_capture_under_its_compartments(
         conn, client):
-    """L1 (2026-09-24): a document carries compartments now, so a capture
-    into a compartmented case is stored under the case's, where c15 had to
-    refuse it. The queue says what the form stores under, and refuses
-    nothing."""
+    """A document carries compartments, so a capture into a compartmented case is stored under the
+    case's. The queue says what the form stores under, and refuses nothing."""
     owner = _user(conn, "RED", [KEY])
     case_id = _case(conn, owner, "RED", [KEY])
     title = f"{PREFIX}{uuid4().hex[:6]}"

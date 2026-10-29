@@ -1,24 +1,20 @@
-"""Row-level security on notifications and what they reached (F51, 2026-10-02).
+"""Row-level security on notifications and what they reached.
 
-0125 makes `notify.enqueue` the one writer of a notification, a definer
-that checks the recipient; 0126 puts the five notify tables under policy.
-Seeded as the owner; what is under test is a connection SET ROLE to the
-request role and bound by a real session's proof, the system role, and
-the routes with NOCTORNAL_TEST_ASSUME_ROLE set so that each request and
-each system connection takes production's role:
+0125 makes `notify.enqueue` the one writer of a notification, a definer that checks the recipient; 0126
+puts the five notify tables under policy. Seeded as the owner; what is under test is a connection SET ROLE
+to the request role and bound by a real session's proof, the system role, and the routes with
+NOCTORNAL_TEST_ASSUME_ROLE set so that each request and each system connection takes production's role:
 
-- a notice is its recipient's own (within their labels and their cases),
-  whole to the system role, and nobody else can read, update, delete or
-  insert it, or learn of it from a duplicate key;
-- a request raises a notice for SOMEONE ELSE in its own transaction and
-  cannot read it back; a recipient who may not read it gets nothing;
-- the producers' one-open-notice guards still hold under row security,
-  and answer only within the caller's reach;
-- a case owner's Jira veto holds whoever raises the notice, and a caller
-  who is not on the case raises none about it (0181);
-- the drain, the delivery ledger and its requeue, Jira's administration
-  and a request's reach count see every recipient and case, while the
-  case's own Integrations view and the inbox keep working as before.
+- a notice is its recipient's own (within their labels and their cases), whole to the system role, and
+  nobody else can read, update, delete or insert it, or learn of it from a duplicate key;
+- a request raises a notice for SOMEONE ELSE in its own transaction and cannot read it back; a recipient
+  who may not read it gets nothing;
+- the producers' one-open-notice guards still hold under row security, and answer only within the
+  caller's reach;
+- a case owner's Jira veto holds whoever raises the notice, and a caller who is not on the case raises
+  none about it (0181);
+- the drain, the delivery ledger and its requeue, Jira's administration and a request's reach count see
+  every recipient and case, while the case's own Integrations view and the inbox keep working.
 
 Gated like the other row-security tests. Account prefix `rlsnote-`.
 """
@@ -223,8 +219,7 @@ def test_nobody_else_reads_updates_deletes_or_inserts_a_notice(owner, world):
         assert svc.mark_read(theirs, world["boss"]) is False, "not even naming the recipient"
         assert app.execute("UPDATE notify.notification SET read_at = now() "
                            "WHERE id = %s", (theirs,)).rowcount == 0
-        # No DELETE privilege since 0178 (Beta 1.1), where there was no
-        # DELETE policy: not even the recipient's own row goes.
+        # No DELETE privilege (0178) and no DELETE policy: not even the recipient's own row goes.
         with pytest.raises(psycopg.errors.InsufficientPrivilege):
             app.execute("DELETE FROM notify.notification WHERE id = ANY(%s)",
                         ([mine, theirs],))
@@ -324,9 +319,8 @@ def test_a_recipient_who_may_not_read_it_gets_no_row_whoever_asks(owner, world):
 
 
 def test_the_integrity_alarm_still_rings_once_when_an_analyst_finds_the_mismatch(owner, world):
-    """The amplifier guard (2026-09-02) under row security: the open alarm
-    is the owner's row, hidden from the analyst whose read found the
-    mismatch, so a guard that read it as the analyst would never fire."""
+    """The amplifier guard under row security: the open alarm is the owner's row, hidden from the analyst
+    whose read found the mismatch, so a guard that read it as the analyst would never fire."""
     from noctornal_api import notify_events
 
     exhibit = s.exhibit(owner, world["case"], world["boss"])
@@ -582,12 +576,10 @@ def test_drain_now_revokes_another_recipients_delivery(owner, world):
 
 def test_a_requests_reach_counts_the_signers_notices(owner, world):
     signers = [make_user(owner, PREFIX, clearance="AMBER")[0] for _ in range(2)]
-    # The two entities a merge request names, both readable by the analyst
-    # who lists the case's approvals: a node.merge request is listed only to a
-    # viewer who sees both (2026-10-03), and a payload naming nothing is
-    # hidden from everyone as a request that does not exist. That hidden
-    # case is held by test_review_g42_merge_visibility_pg; this test is about
-    # the count of notices behind a request the viewer may read.
+    # The two entities a merge request names, both readable by the analyst who lists the case's approvals:
+    # a node.merge request is listed only to a viewer who sees both, and a payload naming nothing is
+    # hidden from everyone. That hidden case is held by test_merge_visibility_pg; this test is
+    # about the count of notices behind a request the viewer may read.
     source, target = (s.node(owner, world["case"], world["boss"], label)
                       for label in ("rls note crew", "rls note crew renamed"))
     payload = {"source_node_id": str(source), "target_node_id": str(target),

@@ -1,16 +1,13 @@
-"""Retention, purge tombstones and break-glass (Phase 6, docs/08 + docs/05).
+"""Retention, purge tombstones and break-glass (docs/08 + docs/05).
 
 The tests that carry this file are the ones about what SURVIVES:
 
-- `test_the_tombstone_outlives_the_data` — a purge that leaves nothing
-  behind is indistinguishable from data never collected and from data
-  somebody deleted to hide it.
-- `test_a_locked_object_is_reported_as_locked_not_as_deleted` — evidence
-  under COMPLIANCE-mode object lock cannot be deleted even to satisfy a
-  deletion order (docs/16 C2), and reporting success because a database row
-  changed is how somebody tells a court the wrong thing.
-- `test_break_glass_is_refused_when_nobody_can_review_it` — unreviewed
-  emergency access is just access.
+- `test_the_tombstone_outlives_the_data`: a purge that leaves nothing behind is indistinguishable from data
+  never collected and from data somebody deleted to hide it.
+- `test_a_locked_object_is_reported_as_locked_not_as_deleted`: evidence under COMPLIANCE-mode object lock
+  cannot be deleted even to satisfy a deletion order (docs/16 C2), and reporting success because a database
+  row changed is how somebody tells a court the wrong thing.
+- `test_break_glass_is_refused_when_nobody_can_review_it`: unreviewed emergency access is just access.
 
 Env-gated on DATABASE_URL.
 """
@@ -41,13 +38,10 @@ def conn():
         c.execute(f"DELETE FROM notify.delivery WHERE notification_id IN "
                   f"(SELECT id FROM notify.notification WHERE recipient_id IN {sub})")
         c.execute(f"DELETE FROM notify.notification WHERE recipient_id IN {sub}")
-        # By ACTOR as well. An alert raised by a gov- user (actor_id) for a
-        # recipient outside the sweep, on no case of theirs, survived the
-        # recipient and case deletes and blocked the user delete with
-        # notification_actor_id_fkey: 35 teardown errors per run until
-        # 2026-09-02. Each one rolled back the WHOLE cleanup transaction,
-        # so the global TEST% retention rules leaked too and later tests
-        # failed on them. notify.delivery cascades from notification.
+        # By ACTOR as well. An alert raised by a gov- user (actor_id) for a recipient outside the sweep, on
+        # no case of theirs, survives the recipient and case deletes and blocks the user delete with
+        # notification_actor_id_fkey, which rolls back the WHOLE cleanup transaction so the global TEST%
+        # retention rules leak into later tests. notify.delivery cascades from notification.
         c.execute(f"DELETE FROM notify.notification WHERE actor_id IN {sub}")
         c.execute(f"DELETE FROM notify.notification WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM iam.break_glass WHERE user_id IN {sub}")
@@ -63,14 +57,10 @@ def conn():
         c.execute(f"DELETE FROM core.purge_tombstone WHERE purged_by IN {sub}")
         c.execute("ALTER TABLE core.purge_tombstone ENABLE TRIGGER USER")
         c.execute(f"DELETE FROM core.approval_request WHERE case_id IN {csub}")
-        # Custody rows stay and the chain trigger stays up. Until 2026-09-02
-        # this teardown deleted them with the trigger stood down, which
-        # only ever took the chain's tail and so never tripped
-        # `custody_verify.py` -- the teardown in `test_evidence_pg.py` has
-        # the full account. What a custody row points at stays with it:
-        # the exhibit, its case, and the humans on the custody row, the
-        # exhibit and the case. NULL-guarded because one NULL in a NOT IN
-        # list silently deletes nothing.
+        # Custody rows stay and the chain trigger stays up (the teardown in `test_evidence_pg.py` has the
+        # full account). What a custody row points at stays with it: the exhibit, its case, and the humans
+        # on the custody row, the exhibit and the case. NULL-guarded because one NULL in a NOT IN list
+        # silently deletes nothing.
         pinned_evidence = "(SELECT evidence_id FROM core.evidence_custody)"
         pinned_cases = "(SELECT case_id FROM core.evidence WHERE case_id IS NOT NULL)"
         pinned_users = (
@@ -483,9 +473,8 @@ def test_break_glass_is_refused_when_nobody_can_review_it(conn):
 
 
 def test_break_glass_alerts_the_security_officer_at_priority_one(conn):
-    """docs/05 asks for an immediate alert. Priority 1 is the only tier
-    that overrides quiet hours -- somebody's evening is interrupted on
-    purpose, and an alert that waits until 08:00 is a report."""
+    """docs/05 asks for an immediate alert. Priority 1 is the only tier that overrides quiet hours:
+    somebody's evening is interrupted on purpose, and an alert that waits until 08:00 is a report."""
     from noctornal_api.break_glass import BreakGlassService
     from noctornal_api.notifications import URGENT, NotificationService
 
@@ -499,8 +488,7 @@ def test_break_glass_alerts_the_security_officer_at_priority_one(conn):
     inbox = NotificationService(conn).inbox(officer)
     assert [n.kind for n in inbox] == ["BREAK_GLASS_INVOKED"]
     assert inbox[0].priority == URGENT
-    # Read verbatim, so it carries the console's time form, not ISO
-    # (README screenshot set review, 2026-09-23).
+    # Read verbatim, so it carries the console's time form, not ISO.
     import re
     assert re.search(r"Expires: \d{4}-\d\d-\d\d \d\d:\d\d UTC\n", inbox[0].body)
     assert "+00:00" not in inbox[0].body
@@ -597,8 +585,7 @@ def test_a_review_cannot_be_revisited(conn):
     svc = BreakGlassService(conn)
     grant = svc.invoke(user_id=analyst, case_id=None,
                        justification="live incident, owner unreachable now")
-    # Ended first: a live grant cannot be reviewed at all (2026-09-23;
-    # test_breakglass_final_review_pg.py).
+    # Ended first: a live grant cannot be reviewed at all (test_breakglass_invariants_pg.py).
     svc.revoke(grant.id, actor_id=officer)
     svc.review(grant.id, reviewer_id=officer, outcome="UNJUSTIFIED")
     with pytest.raises(BreakGlassError, match="already been reviewed"):
@@ -643,21 +630,15 @@ def test_break_glass_does_not_cross_a_compartment(conn):
     assert "granted_compartments" not in source
 
 
-# ---------------------------------------------------------------------------
-# Phase 6 hostile pass, 2026-08-10
-# ---------------------------------------------------------------------------
-
 def test_a_dry_run_reports_what_would_be_destroyed(conn):
-    """A dry run used to return every counter at zero. It did the full
-    sweep and threw the answer away, so a preview of a case with exhibits
-    about to be destroyed was byte-identical to a preview of a case with
-    nothing due -- and the pane rendered both as "Nothing would be
-    destroyed."
+    """A dry run reports what would be destroyed. One that returns every counter at zero (doing the full
+    sweep and throwing the answer away) makes a preview of a case with exhibits about to be destroyed
+    byte-identical to a preview of a case with nothing due, and the pane would render both as "Nothing
+    would be destroyed."
 
-    `held_back` was the only non-zero number it could produce, which made
-    it worse than silent: the one figure on screen counted the items being
-    SPARED. This is the control whose entire purpose is to be read before
-    an irreversible action.
+    `held_back` would be the only non-zero number, which is worse than silent: the one figure on screen
+    would count the items being SPARED. This is the control whose entire purpose is to be read before an
+    irreversible action.
     """
     from noctornal_api.retention import RetentionService
 
@@ -670,7 +651,6 @@ def test_a_dry_run_reports_what_would_be_destroyed(conn):
     assert dry.evidence_purged == 1, (
         "the dry run reports nothing is due while an exhibit is about to "
         "be destroyed")
-    # And it really was a preview.
     still = conn.execute(
         "SELECT purged_at FROM core.evidence WHERE id = %s", (ev,)).fetchone()
     assert still[0] is None, "the dry run destroyed something"
@@ -689,10 +669,9 @@ def test_a_case_scoped_sweep_does_not_reach_documents(conn):
 
     uid = _user(conn)
     case_id = _case(conn, uid, retention=date(2020, 1, 1))
-    # A document that IS due, so the assertion is not vacuous: with no due
-    # document the sweep returns none either way and the test proves
-    # nothing. This is the row that used to be swept up by a case it has
-    # no relationship to.
+    # A document that IS due, so the assertion is not vacuous: with no due document the sweep returns none
+    # either way and the test proves nothing. This row must not be swept up by a case it has no
+    # relationship to.
     src = conn.execute(
         """INSERT INTO collect.source
                (kind, name, base_url, default_reliability, poll_interval_s,
@@ -707,12 +686,8 @@ def test_a_case_scoped_sweep_does_not_reach_documents(conn):
            VALUES (%s, %s, 'x', decode(md5('x'),'hex'), '2020-01-01')""",
         (src, uuid4().hex))
 
-    # try/finally, not cleanup-after-assertions. The first version cleaned
-    # up on the last line, so when it was run against the unfixed code and
-    # failed -- which is the whole point of a regression test -- it left a
-    # due document behind, and the next unscoped `purge_due` in the suite
-    # inherited it. A test that only tidies up when it passes is a test
-    # that poisons the run it was written to protect.
+    # try/finally, not cleanup-after-assertions: a test that tidies up only when it passes leaves a due
+    # document behind when it fails, and the next unscoped `purge_due` in the suite inherits it.
     try:
         scoped = RetentionService(conn).due(case_id=case_id)
         assert not [i for i in scoped if i.object_type == "document"], (
@@ -809,15 +784,12 @@ def test_a_storage_failure_is_not_reported_as_a_retention_lock(conn):
 
 
 def test_purging_a_document_does_not_abort_on_a_not_null_column(conn):
-    """`body_text` is NOT NULL (0011) and the purge set it to NULL, so the
-    statement aborts the whole transaction with a constraint violation.
+    """`body_text` is NOT NULL (0011), so the purge must not set it to NULL: the statement would abort the
+    whole transaction with a constraint violation.
 
-    It had never once run against a row: nothing writes
-    `collect.document.retain_until`, so no document has ever been due. The
-    document sweep was dead in two independent ways and the second was
-    hidden behind the first -- which is why fixing only the visible half
-    would have turned a silent no-op into a purge that fails outright the
-    first time somebody wires the clock.
+    Nothing writes `collect.document.retain_until`, so no document has yet been due and this path has never
+    run against a row. Fixing only the visible half of the document sweep would turn a silent no-op into a
+    purge that fails outright the first time somebody wires the clock.
     """
     from noctornal_api.retention import RetentionService
 

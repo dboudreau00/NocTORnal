@@ -1,11 +1,9 @@
-"""The in-tree TLSH and ssdeep ports, held to the reference builds (F11,
-2026-09-24).
+"""The in-tree TLSH and ssdeep ports, held to the reference builds.
 
-A drifted port would cluster unrelated samples with confidence, so each is
-held to golden vectors from the reference implementations (py-tlsh 4.12.1
-built with 128 buckets and a one-byte checksum; libfuzzy 2.14.1): every
-digest, every distance and every compare score. The vectors store the
-generator of each input, never its bytes (data/fuzzy_vectors_build.py).
+A drifted port would cluster unrelated samples with confidence, so each is held to golden vectors from the
+reference implementations (py-tlsh 4.12.1 built with 128 buckets and a one-byte checksum; libfuzzy 2.14.1):
+every digest, every distance and every compare score. The vectors store the generator of each input, never
+its bytes (data/fuzzy_vectors_build.py).
 
 Pure: no database.
 """

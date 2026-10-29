@@ -1,11 +1,9 @@
-"""The model endpoint's one call site (F6.2, 2026-09-24).
+"""The model endpoint's one call site.
 
-Through egress.route_for and pinned_http only (docs/20 section 9, the
-per-consumer table): the route is the integration route `embeddings`,
-declared with the configured endpoint and tagged embed:<uuid>; the answer
-is validated item by item; errors are mapped by type and status and never
-by message; and a model server's 4xx body, which can echo the input text,
-appears nowhere.
+Through egress.route_for and pinned_http only (docs/20 section 9, the per-consumer table): the route is the
+integration route `embeddings`, declared with the configured endpoint and tagged embed:<uuid>; the answer
+is validated item by item; errors are mapped by type and status and never by message; and a model server's
+4xx body, which can echo the input text, appears nowhere.
 
 No database, and no network beyond a stub on loopback.
 """
@@ -99,9 +97,8 @@ def test_the_route_is_tagged_with_the_embed_context(stub):
     ("count", "endpoint_bad_response"), ("dup_index", "endpoint_bad_response"),
     ("nan", "endpoint_bad_response"), ("mixed", "endpoint_bad_response"),
     ("long", "dimension_unsupported"), ("notjson", "endpoint_bad_response"),
-    # 2026-09-25: a 400-digit integer (OverflowError) and a
-    # body nested 100,000 deep (RecursionError) escaped as Python errors and
-    # wedged the pass; a string, a list and a zero vector are values too.
+    # A 400-digit integer (OverflowError) and a body nested 100,000 deep (RecursionError) must not escape as
+    # Python errors and wedge the pass; a string, a list and a zero vector are bad values too.
     ("bigint", "endpoint_bad_response"), ("deep", "endpoint_bad_response"),
     ("zeros", "endpoint_bad_response"), ("text_value", "endpoint_bad_response"),
     ("nested_value", "endpoint_bad_response"),
@@ -200,7 +197,7 @@ def test_the_endpoint_module_opens_no_socket_of_its_own():
 
 
 # ---------------------------------------------------------------------------
-# Hostile answers, parsed directly (2026-09-25)
+# Hostile answers, parsed directly
 # ---------------------------------------------------------------------------
 
 def _answer(*vectors) -> dict:

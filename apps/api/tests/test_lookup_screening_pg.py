@@ -1,9 +1,10 @@
-"""The lookups' sample seam reads prohibited-content screening (merge of
-F13 and F15.3, 2026-09-25). What each test would catch:
-- a sample leaves only once a list is active and it was screened NO_MATCH
-  against it; before that the refusal says why, in screening's words;
-- a matched sample is refused with the generic restricted sentence and is
-  marked hidden, so no lookup confirms that a matched sample exists.
+"""The lookups' sample seam reads prohibited-content screening. What each test would catch:
+
+- a sample leaves only once a list is active and it was screened NO_MATCH against it; before that the
+  refusal says why, in screening's words;
+- a matched sample is refused with the generic restricted sentence and is marked hidden, so no lookup
+  confirms that a matched sample exists.
+
 Email prefix `lks-`. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations

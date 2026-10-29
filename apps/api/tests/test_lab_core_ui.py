@@ -1,8 +1,6 @@
-"""The console's side of the Lab seams (F11-core J, 2026-09-24): custody
-rows the product wrote say so and name nobody, a SCANNED read has words
-of its own, machine findings name what produced them and no person, and
-every gap status reads in words, with "does not apply" never counted as a
-check not done.
+"""The console's side of the Lab seams: custody rows the product wrote say so and name nobody, a SCANNED
+read has words of its own, machine findings name what produced them and no person, and every gap status
+reads in words, with "does not apply" never counted as a check not done.
 
 Pure: reads the shipped console, and runs the gap summary under Node.
 """

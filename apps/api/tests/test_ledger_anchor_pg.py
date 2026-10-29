@@ -1,26 +1,20 @@
-"""The ledgers' tail anchor, and the caveat beside every green tick
-(evidence-chain-no-anchor, 2026-10-03).
+"""The ledgers' tail anchor, and the caveat beside every green tick.
 
-Every check in the two verifiers is relative: a row is accused because
-another row disagrees with it. Nothing names the newest row as a predecessor,
-so rows deleted from the END leave nothing behind to disagree, and a run of
-rows edited and then re-chained with fresh hashes (plain SHA-256, the
-expression is in the repo) is self-consistent. `/audit/custody/verify` said
-so and returned `tail_row_hash`; `/audit/verify` said "intact" with neither
-the sentence nor the hash.
+Every check in the two verifiers is relative: a row is accused because another row disagrees with it.
+Nothing names the newest row as a predecessor, so rows deleted from the END leave nothing behind to
+disagree, and a run of rows edited and then re-chained with fresh hashes (plain SHA-256, the expression is
+in the repo) is self-consistent. `/audit/custody/verify` says so and returns `tail_row_hash`; `/audit/verify`
+does the same.
 
 What these tests hold:
 
-- THE TAIL: both reports carry the newest row of the WHOLE ledger and the
-  row count, windowed or not;
-- THE ANCHOR: handed back, the recorded row must still be here at its
-  number with its hash. A tail deleted since is ANCHOR_MISSING, an edit
-  re-chained to the tail is ANCHOR_REWRITTEN, a renumbering is ANCHOR_MOVED,
-  and each makes `intact` false. WITHOUT the anchor the same tampering still
-  reads intact, which is the documented blind spot, and the test says so;
-- THE ANSWER: `/audit/verify` carries the caveat on EVERY run, names the
-  anchor parameters, and says what a held anchor does and does not cover;
-  the custody answer carries the same pair. Half an anchor is a 422.
+- The tail: both reports carry the newest row of the whole ledger and the row count, windowed or not.
+- The anchor: handed back, the recorded row must still be here at its number with its hash. A tail deleted
+  since is ANCHOR_MISSING, an edit re-chained to the tail is ANCHOR_REWRITTEN, a renumbering is
+  ANCHOR_MOVED, and each makes `intact` false. Without the anchor the same tampering still reads intact,
+  which is the documented blind spot, and the test says so.
+- The answer: `/audit/verify` carries the caveat on every run, names the anchor parameters, and says what a
+  held anchor does and does not cover; the custody answer carries the same pair. Half an anchor is a 422.
 
 All tampering is inside a transaction that is rolled back.
 """
@@ -345,9 +339,7 @@ def test_half_an_anchor_or_a_malformed_one_is_a_422(client, officer):
 
 
 def test_the_custody_answer_carries_the_same_pair(tamperable):
-    """The route function itself, on the transaction that holds the custody
-    rows it needs (it used to ask the API and skip when the database held
-    none)."""
+    """The route function itself, on the transaction that holds the custody rows it needs."""
     from noctornal_api.http.routers.audit import verify_custody
 
     _custody(tamperable)

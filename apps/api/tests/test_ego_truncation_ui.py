@@ -1,11 +1,9 @@
-"""The console says when an ego network was cut (Beta 1.1).
+"""The console says when an ego network was cut.
 
 The API builds a neighbourhood outward and stops at what one view draws
-(`projections.NEIGHBOURHOOD_MAX_NODES`), saying `truncated`; a partial
-neighbourhood read as the whole one misleads, so `enterEgo` tells the analyst.
-A path search that stopped at the same bound answers 422, which `enterPath`
-and `reapplyFocus` already show as an error and as "connectivity unknown",
-never as "not connected".
+(`projections.NEIGHBOURHOOD_MAX_NODES`), saying `truncated`; a partial neighbourhood read as the whole one
+misleads, so `enterEgo` tells the analyst. A path search that stopped at the same bound answers 422, which
+`enterPath` and `reapplyFocus` show as an error and as "connectivity unknown", never as "not connected".
 
 Pure: reads the shipped asset.
 """

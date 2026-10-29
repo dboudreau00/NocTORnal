@@ -1,10 +1,8 @@
-"""lab-5 (review of 2026-10-03): a download ticket posted to the APPLICATION
-process was spent, and audited SAMPLE_DOWNLOAD_TICKET_REDEEMED, before the
-origin-split refusal. The exhibit route asks the split first; the Lab route
-now does too.
+"""A download ticket posted to the APPLICATION process is refused by the origin split before it is spent.
 
-Fails on dc28ffa: the ticket was redeemed on the application process, so
-the later presentation at the sample origin was refused as used.
+The ticket must not be redeemed, and audited SAMPLE_DOWNLOAD_TICKET_REDEEMED, on the application process,
+or the later presentation at the sample origin is refused as used. The exhibit route asks the split first;
+the Lab route does too.
 
 Env-gated on DATABASE_URL. Email prefix `r46t-`.
 """

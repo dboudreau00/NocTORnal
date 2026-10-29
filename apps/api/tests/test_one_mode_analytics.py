@@ -1,15 +1,13 @@
-"""F2 in the analytics payload and the cache key (2026-09-24), without a
-database.
+"""One-mode projection in the analytics payload and the cache key, without a database.
 
-- The default digest is the one pinned before one-mode existed; the
-  coverage is folded in only when venues were projected, and a renamed
-  oversized venue changes the digest (without it the old name was served
-  on a cache hit with current: true).
-- The suite carries the coverage with the prose that reads it, and the
-  derived ties count as inferred in review_coverage.
-- The mode warning keeps both of its branches over the transformed view,
-  names the projection option for a tied wallet the run did not project,
-  and says nothing new for the Communication preset (docs/00 decision 73).
+- The default digest is the one pinned before one-mode existed; the coverage is folded in only when venues
+  were projected, and a renamed oversized venue changes the digest (otherwise the old name is served on a
+  cache hit with current: true).
+- The suite carries the coverage with the prose that reads it, and the derived ties count as inferred in
+  review_coverage.
+- The mode warning keeps both of its branches over the transformed view, names the projection option for a
+  tied wallet the run did not project, and says nothing new for the Communication preset (docs/00 decision
+  73).
 
 Pure: no database.
 """

@@ -1,23 +1,20 @@
-"""docs/17, "no statement timeout" (Beta 1.1).
+"""docs/17, "no statement timeout".
 
-Nothing bounded the statements of a request connection, so a request nobody
-was waiting for any more kept running: ten register queries were seen
-stacked, the oldest ten minutes old. A request connection is opened with a
-`statement_timeout` now, `NOCTORNAL_REQUEST_STATEMENT_TIMEOUT` seconds (120
-by default), and a request that hits it answers a 504 problem with a
-reference, never a 500 and a trace.
+Without a bound on the statements of a request connection, a request nobody is waiting for any more keeps
+running (ten register queries were seen stacked, the oldest ten minutes old). A request connection is
+opened with a `statement_timeout`, `NOCTORNAL_REQUEST_STATEMENT_TIMEOUT` seconds (120 by default), and a
+request that hits it answers a 504 problem with a reference, never a 500 and a trace.
 
 What these hold:
 
-- the limit is on REQUEST connections and on no other: a system connection,
-  a job and a migration are opened as they always were;
-- the setting is a whole number of seconds from 5 to 3600, anything else
-  reads as the default, and nothing switches the limit off;
-- an operator's own `statement_timeout` in DATABASE_URL is not loosened by
-  the default, and their explicit setting wins over it;
-- a real overrun is a 504 problem whichever way the router meets it: raised
-  as it is, wrapped by a service error, or turned into a `Problem` through
-  `safe_detail`; and the answer names nothing of the statement.
+- the limit is on REQUEST connections and on no other: a system connection, a job and a migration are
+  opened without it;
+- the setting is a whole number of seconds from 5 to 3600, anything else reads as the default, and nothing
+  switches the limit off;
+- an operator's own `statement_timeout` in DATABASE_URL is not loosened by the default, and their explicit
+  setting wins over it;
+- a real overrun is a 504 problem whichever way the router meets it: raised as it is, wrapped by a service
+  error, or turned into a `Problem` through `safe_detail`; and the answer names nothing of the statement.
 
 Env-gated on DATABASE_URL.
 """

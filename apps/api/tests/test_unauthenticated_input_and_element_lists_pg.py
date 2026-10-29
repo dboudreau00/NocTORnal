@@ -1,16 +1,15 @@
-"""Unauthenticated input and per-element lists after the 2026-10-03 review (g45).
+"""Unauthenticated input and per-element lists.
 
-- http_ui-004: a bad session token appended an undeletable audit row for
-  EVERY request, with no source address, at up to the blanket ceiling.
-- http_ui-005: no body ceiling on JSON or form routes, so the whole body was
-  buffered before authentication, validation or rate limiting.
-- http_ui-006: a failed login wrote the submitted email, unbounded, into the
-  append-only audit log.
-- http_ui-014: a NUL in a JSON string answered 500 on several routes.
-- http_ui-015: per-element lists returned every row.
+- a bad session token appends no undeletable audit row per request, with no source address, at up to the
+  blanket ceiling.
+- JSON and form routes have a body ceiling, so the whole body is not buffered before authentication,
+  validation or rate limiting.
+- a failed login does not write the submitted email, unbounded, into the append-only audit log.
+- a NUL in a JSON string does not answer 500.
+- per-element lists do not return every row.
 
-Every refusal is paired with the legitimate request that must still work.
-Accounts carry the prefix `g45http-`, unique to this file.
+Every refusal is paired with the legitimate request that must still work. Accounts carry the prefix
+`g45http-`, unique to this file.
 """
 from __future__ import annotations
 
@@ -90,10 +89,6 @@ def _count(conn, sql, *params):
 REJECTED = "SELECT count(*) FROM audit.event WHERE action = 'AUTH_SESSION_REJECTED'"
 
 
-# ---------------------------------------------------------------------------
-# http_ui-004
-# ---------------------------------------------------------------------------
-
 def test_a_token_that_matches_no_session_appends_nothing_and_logs_one_sampled_line(
         owner, client, caplog, monkeypatch):
     from noctornal_api.http import session_rejections as rej
@@ -161,10 +156,6 @@ def test_a_live_session_writes_no_rejection_and_the_window_is_bounded(owner, cli
     assert len(window._seen) <= rej.REMEMBERED_SESSIONS, "the window's memory is unbounded"
 
 
-# ---------------------------------------------------------------------------
-# http_ui-005
-# ---------------------------------------------------------------------------
-
 def _asgi(app, method, path, *, first=b"", chunk=b"", chunks=0, headers=(),
           declared=None, content_type=b"application/json"):
     """Drive the real ASGI app with a streamed body and report what it did:
@@ -214,9 +205,8 @@ CHUNK = 64 * 1024
 
 
 def test_a_huge_streamed_json_body_is_refused_at_the_ceiling_not_buffered(app):
-    """The review's reproduction, scaled: 100 MiB streamed at login was read
-    to the end before a 422. Now it is refused once the body passes the
-    ceiling, having read no more than the ceiling plus one chunk."""
+    """100 MiB streamed at login (scaled here) must not be read to the end before a 422: it is refused once
+    the body passes the ceiling, having read no more than the ceiling plus one chunk."""
     for path in ("/api/v1/auth/login", "/api/v1/cases", "/api/v1/setup/first-admin"):
         got = _asgi(app, "POST", path, first=b'{"email":"' + b"a" * (CHUNK - 10),
                     chunk=b"a" * CHUNK, chunks=1600)       # 100 MiB on offer
@@ -305,10 +295,6 @@ def test_requests_without_a_body_and_the_static_console_are_untouched(client):
     assert client.get("/api/v1/auth/me").status_code == 401
 
 
-# ---------------------------------------------------------------------------
-# http_ui-006
-# ---------------------------------------------------------------------------
-
 def _failed_login_row(conn, marker: str):
     return conn.execute(
         "SELECT detail, outcome, octet_length(detail::text) FROM audit.event "
@@ -364,10 +350,6 @@ def test_the_password_change_body_is_bounded_too(client, world):
         "current_password": "c" * 4097, "totp_code": "000000", "new_password": "n" * 20})
     assert r.status_code == 422
 
-
-# ---------------------------------------------------------------------------
-# http_ui-014
-# ---------------------------------------------------------------------------
 
 NUL_BODIES = [
     ("assumptions", "/assumptions", {"statement": "a\u0000b"}),
@@ -448,10 +430,6 @@ def test_a_nul_the_json_check_cannot_see_is_a_422_too(client, world, suffix, par
     assert ok.status_code != 500
 
 
-# ---------------------------------------------------------------------------
-# http_ui-015
-# ---------------------------------------------------------------------------
-
 def _seed_node_with_claims(owner, world, extra):
     from noctornal_api.graph import AssertionInput, GraphWriteService
     lead = world["lead"]
@@ -526,8 +504,7 @@ def test_tags_sets_and_members_page_with_exact_withheld(owner, client, world):
     assert len(client.get(f"/api/v1/cases/{case_id}/curation/sets", headers=h,
                           params={"limit": 3}).json()) == 3
     url = f"/api/v1/cases/{case_id}/curation/sets/{set_ids[0]}/members"
-    # the exact count is said only under COUNT (rls-9, 2026-10-03): this test is
-    # about paging, so the case declares COUNT
+    # The exact count is said only under COUNT: this test is about paging, so the case declares COUNT.
     owner.execute('UPDATE core."case" SET withheld_disclosure = %s WHERE id = %s',
                   ("COUNT", case_id))
     whole = client.get(url, headers=h).json()
@@ -646,10 +623,6 @@ def test_no_router_takes_a_limit_above_1000_except_the_two_recorded_exceptions()
                 found.append((path.name, int(m.group(1).replace("_", ""))))
     assert sorted(found) == [("graphview.py", 5000), ("read.py", 2000)], found
 
-
-# ---------------------------------------------------------------------------
-# 2026-10-07
-# ---------------------------------------------------------------------------
 
 BS = "\\"
 
@@ -840,9 +813,8 @@ def _failed_login_by_hash(conn, digest: str):
 
 
 def test_a_password_typed_into_the_email_box_is_not_stored(owner, client):
-    """http_ui-006: the 'email' of a failed sign-in was
-    kept verbatim up to 64 characters, so a password typed into the wrong
-    box for an unknown account sat in the append-only log in clear."""
+    """The 'email' of a failed sign-in is not kept verbatim up to 64 characters: a password typed into the
+    wrong box for an unknown account must not sit in the append-only log in clear."""
     typed = f"g45http-pw-{uuid4().hex[:6]}-Hunter2-typed-in-email-box"
     assert len(typed) <= 64
     r = client.post("/api/v1/auth/login", json={"email": typed, "password": "x"})

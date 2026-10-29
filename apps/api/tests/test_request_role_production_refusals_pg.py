@@ -1,12 +1,11 @@
-"""A production request connection is refused when its role is a superuser,
-bypasses row security or is the schema owner (infra-4, 2026-10-03).
+"""A production request connection is refused when its role is a superuser, bypasses row security or is the
+schema owner.
 
-`config.verify_environment` refuses the names it can see in the DSN (see
-`test_g48_request_role_boot.py`); this is the half that reads the catalog,
-once per process and DSN, for a role under another name or one that merely
-holds the owner's membership. As in the row-security suites the runtime roles
-are reached by SET ROLE from the owner's own login, so no password enters the
-test environment. Env-gated on DATABASE_URL and NOCTORNAL_APP_DB_ROLE.
+`config.verify_environment` refuses the names it can see in the DSN (see `test_request_role_boot_refusals.py`);
+this is the half that reads the catalog, once per process and DSN, for a role under another name or one that
+merely holds the owner's membership. As in the row-security suites the runtime roles are reached by SET ROLE
+from the owner's own login, so no password enters the test environment. Env-gated on DATABASE_URL and
+NOCTORNAL_APP_DB_ROLE.
 """
 from __future__ import annotations
 

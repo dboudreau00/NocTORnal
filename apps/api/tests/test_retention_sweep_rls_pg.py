@@ -1,17 +1,14 @@
-"""The sweep as the system role it runs as (docs/17 F30, 2026-10-02; S1).
+"""The sweep as the system role it runs as (docs/17 F30).
 
-`scripts/retention_sweep.py` opens `connect_system(SystemPurpose.RETENTION)`,
-the BYPASSRLS role that owns nothing. These run the script's own `main` with
-no connection handed in, so it connects as that role, and hold three things
-the owner-connection suite cannot: a document no request-role reader can see
-(RED, in a compartment) is still counted and destroyed, because a sweep that
-silently saw part of the data would report success; the role holds every
-privilege the run needs (the account lookup, the purge, its tombstone, its
-audit row); and the readiness row counts across the deployment from the
-register's system connection.
+`scripts/retention_sweep.py` opens `connect_system(SystemPurpose.RETENTION)`, the BYPASSRLS role that owns
+nothing. These run the script's own `main` with no connection handed in, so it connects as that role, and
+hold three things the owner-connection suite cannot: a document no request-role reader can see (RED, in a
+compartment) is still counted and destroyed, because a sweep that silently saw part of the data would
+report success; the role holds every privilege the run needs (the account lookup, the purge, its
+tombstone, its audit row); and the readiness row counts across the deployment from the register's system
+connection.
 
-Gated like the other row-security tests (NOCTORNAL_APP_DB_ROLE). Account and
-source prefix `rlsw-`.
+Gated like the other row-security tests (NOCTORNAL_APP_DB_ROLE). Account and source prefix `rlsw-`.
 """
 from __future__ import annotations
 

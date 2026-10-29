@@ -1,13 +1,10 @@
-"""The console halves of two final-review fixes (2026-09-23).
+"""The console halves of two fixes: purge binding and role names.
 
-U20: the real purge was not bound to the dry run whose counts its
-confirmation repeated. The server half (`preview`, 428 and 409) is in
-`test_purge_preview_binding_pg.py`; these hold the console to sending the
-dry run's digest, letting an old count lapse, and dropping a count the
-server has refused.
+The real purge is bound to the dry run whose counts its confirmation repeats. The server half
+(`preview`, 428 and 409) is in `test_purge_preview_binding_pg.py`; these hold the console to sending
+the dry run's digest, letting an old count lapse, and dropping a count the server has refused.
 
-U21: the Share panel printed the raw CASE_OWNER key where the owner decided
-people read "Lead investigator". The server half is in
+The Share panel prints "Lead investigator", not the raw CASE_OWNER key. The server half is in
 `test_share_role_names_pg.py`; these hold the panel to the names.
 
 Pure, beside `test_ui_invariants.py`: the shipped static assets and the

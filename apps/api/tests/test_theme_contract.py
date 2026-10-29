@@ -1,20 +1,15 @@
-"""The theme contract, finally enforced.
+"""The theme contract.
 
-theme.css has claimed since it was written that "app.css names no colour
-that is not a token defined here", and that test_ui_invariants held it to
-that rule. The second half was false. There was no such test, and by the
-time anyone looked, app.css had accumulated nine raw rgba() literals and
-app.js twelve hard-coded hexes -- four of the rgba values duplicating
-tokens that theme.css already defined and that consequently nothing used.
+theme.css claims that "app.css names no colour that is not a token defined here", and that
+test_ui_invariants holds it to that rule. These tests enforce it: app.css carries no raw rgba() literal and
+app.js no hard-coded hex, and no literal duplicates a token that theme.css already defines.
 
-The failure mode is worth naming, because it is this codebase's signature
-shape: swapping theme.css did NOT fail. It produced a console that was
-mostly the new theme with fragments of the old one left in the chips, the
-banners, the live indicator and every canvas. A wrong answer that looks
-like a right one.
+The failure mode is this codebase's signature shape: swapping theme.css must FAIL if anything ignores it.
+Otherwise it produces a console that is mostly the new theme with fragments of the old one left in the
+chips, the banners, the live indicator and every canvas: a wrong answer that looks like a right one.
 
-These tests are pure -- no database, no browser. They read the shipped
-static assets, exactly like test_ui_invariants.
+These tests are pure: no database, no browser. They read the shipped static assets, exactly like
+test_ui_invariants.
 """
 from __future__ import annotations
 
@@ -82,18 +77,16 @@ def test_app_css_names_no_colour_that_is_not_a_token():
 
 
 def test_the_canvas_painters_carry_no_hard_coded_palette():
-    """The sociogram, the timeline strip and the metric chart draw on a
-    <canvas>, so they cannot use CSS and must read tokens at runtime.
+    """The sociogram, the timeline strip and the metric chart draw on a <canvas>, so they cannot use CSS
+    and must read tokens at runtime.
 
-    They used to do that AND carry a literal fallback:
+    They must not also carry a literal fallback:
 
         tlCtx.fillStyle = PAINT.surface2 || '#2D2030';
 
-    `cssVar()` returns '' for a property that does not resolve, and '' is
-    falsy, so a renamed or deleted token did not raise -- it silently
-    painted the OLD theme onto the canvas while the DOM around it painted
-    the new one. The fallback has to be absent for the failure to be
-    visible.
+    `cssVar()` returns '' for a property that does not resolve, and '' is falsy, so a renamed or deleted
+    token would not raise: it would silently paint the OLD theme onto the canvas while the DOM around it
+    paints the new one. The fallback has to be absent for the failure to be visible.
     """
     js = APP_JS.read_text(encoding="utf-8")
     hexes = re.findall(r"""['"]#[0-9a-fA-F]{3,8}['"]""", js)
@@ -263,8 +256,7 @@ def test_the_node_hues_stay_mutually_distinguishable():
         "canvas; they are two different entity types.")
 
 
-#: Machado, Oliveira and Fernandes (2009), severity 1.0, applied to linear
-#: RGB: the simulation the 2026-09-23 review measured with.
+#: Machado, Oliveira and Fernandes (2009), severity 1.0, applied to linear RGB.
 _CVD = {
     "deuteranopia": ((0.367322, 0.860646, -0.227968),
                      (0.280085, 0.672501, 0.047413),
@@ -273,8 +265,7 @@ _CVD = {
                    (0.114503, 0.786281, 0.099216),
                    (-0.003882, -0.048116, 1.051998)),
 }
-#: CIE76 under simulation below which two type hues are taken to have
-#: collapsed. The review's collapses were 7.9 and 5.0.
+#: CIE76 under simulation below which two type hues are taken to have collapsed.
 CVD_FLOOR = 10.0
 
 
@@ -314,13 +305,9 @@ def _hue_shapes() -> dict[str, str]:
 
 
 def test_node_types_survive_the_common_colour_vision_deficiencies():
-    """ux04 persona-person-hue-cvd (2026-09-23). docs/06 promised the type
-    hues were distinguishable "under the common colour-vision
-    deficiencies", and nothing measured it: under deuteranopia the Persona
-    blue and the Assessed person purple were 7.9 apart and Malware and
-    Context 5.0, while hue was the only channel for type. Every pair is
-    now held apart by hue under both simulations, or by the outline the
-    canvas draws."""
+    """docs/06 promises the type hues are distinguishable "under the common colour-vision deficiencies",
+    and hue is the only channel for type, so every pair is held apart by hue under both simulations, or by
+    the outline the canvas draws."""
     t = _tokens()
     shapes = _hue_shapes()
     collapsed = []
@@ -427,14 +414,11 @@ def test_no_element_dims_a_colour_that_is_already_dim():
 def test_the_canvas_reads_confidence_alpha_from_the_theme_and_docs_06_agrees():
     """Three sides of one number.
 
-    `confAlpha` in app.js carried its own steps -- 1 / 0.72 / 0.45 -- so
-    when the theme raised `--conf-low` to 0.58 for contrast (the test
-    above), the DOM chips dimmed by the new step and the sociogram kept
-    drawing the old one: the inspector printed one opacity and the edge
-    was painted at another. docs/06 meanwhile still said 0.45. So: the
-    function carries no literal step, reads the three tokens through
-    `cssVar` like every other painter, and docs/06's table equals
-    theme.css exactly.
+    `confAlpha` in app.js must not carry its own steps (1 / 0.72 / 0.45): when the theme changes
+    `--conf-low` for contrast (the test above), the DOM chips would dim by the new step and the sociogram
+    keep drawing the old one, so the inspector would print one opacity and the edge be painted at another.
+    So: the function carries no literal step, reads the three tokens through `cssVar` like every other
+    painter, and docs/06's table equals theme.css exactly.
     """
     js = APP_JS.read_text(encoding="utf-8")
     start = js.index("function confAlpha(")
@@ -456,7 +440,7 @@ def test_the_canvas_reads_confidence_alpha_from_the_theme_and_docs_06_agrees():
 
 
 # ---------------------------------------------------------------------------
-# The sociogram's ground and marks (2026-09-22 review, cr01 / cr02)
+# The sociogram's ground and marks
 # ---------------------------------------------------------------------------
 
 def _alpha_tokens() -> dict[str, float]:
@@ -535,10 +519,8 @@ def test_the_canvas_is_still_the_darkest_surface_under_its_key_light():
     ("--text-secondary", 3.0),  # pinned
 ])
 def test_the_canvas_ground_keeps_every_mark_above_its_floor(token, floor):
-    """The ceiling theme.css claims for the ground, measured instead of
-    asserted. Setting the ground tokens back to the first cut's 0.055 and
-    0.035, which that comment itself says measured 4.07:1, used to pass
-    the whole suite (cr02 no-test-pins-ground-ceiling, 2026-09-22)."""
+    """The ceiling theme.css claims for the ground, measured instead of asserted: ground tokens as
+    bright as 0.055 and 0.035, which theme.css's own comment says measure 4.07:1, must fail the suite."""
     t = _tokens()
     r = _ratio_rgb(_rgb(t[token]), _worst_ground())
     assert r >= floor, (
@@ -547,9 +529,8 @@ def test_the_canvas_ground_keeps_every_mark_above_its_floor(token, floor):
 
 
 def test_canvas_text_clears_4_5_on_its_plate():
-    """Every canvas label sits on a --void plate (placeText), so its
-    contrast is taken against --void. Edge types used to be --text-tertiary
-    at 0.85 alpha straight on the ground: 3.5:1."""
+    """Every canvas label sits on a --void plate (placeText), so its contrast is taken against --void,
+    not the ground (edge types at --text-tertiary and 0.85 alpha straight on the ground are 3.5:1)."""
     t = _tokens()
     a = _alpha_tokens()
     void = _rgb(t["--void"])
@@ -568,13 +549,10 @@ def test_canvas_text_clears_4_5_on_its_plate():
 
 
 def test_the_node_body_carries_confidence_by_theme_steps():
-    """The body is the largest area of a node, so it is where confidence is
-    read. The restyle drew it at confAlpha * 0.40 above 5px and solid below,
-    which put a HIGH hub's body under a LOW leaf's (cr02
-    node-opacity-follows-size-not-confidence, 2026-09-22). The steps are
-    theme tokens now, ordered, each no stronger than its --conf-* step,
-    and HIGH against LOW holds 2:1 on --void for every node hue (the old
-    opaque disc gave 2.19:1; the 0.40 body gave 1.39:1)."""
+    """The body is the largest area of a node, so it is where confidence is read. Drawing it at
+    confAlpha * 0.40 above 5px and solid below would put a HIGH hub's body under a LOW leaf's. The steps
+    are theme tokens, ordered, each no stronger than its --conf-* step, and HIGH against LOW holds 2:1 on
+    --void for every node hue (an opaque disc gives 2.19:1; a 0.40 body gives 1.39:1)."""
     a = _alpha_tokens()
     t = _tokens()
     void = _rgb(t["--void"])
@@ -595,12 +573,10 @@ def test_the_node_body_carries_confidence_by_theme_steps():
 
 
 def test_no_literal_scales_confidence_on_the_canvas():
-    """Opacity is confidence and nothing else. Two literals multiplied it
-    in draw(): 0.40 on the node body and 0.45 on an unevidenced tie, the
-    second of which drew an unevidenced HIGH tie fainter than an evidenced
-    LOW one (ux07 unevidenced-fade-hijacks-confidence-opacity). No alpha
-    in the sociogram painter may be a product: a step is a token, and a
-    token is not scaled."""
+    """Opacity is confidence and nothing else. A literal multiplied into it in draw() (0.40 on the node
+    body, 0.45 on an unevidenced tie) would draw an unevidenced HIGH tie fainter than an evidenced LOW
+    one. No alpha in the sociogram painter may be a product: a step is a token, and a token is not
+    scaled."""
     js = APP_JS.read_text(encoding="utf-8")
     start = js.index("function draw() {")
     painter = js[start:js.index("/* ── hit testing", start)]
@@ -634,11 +610,9 @@ def test_docs_06_quotes_the_canvas_tokens_the_theme_defines():
 
 
 def test_docs_06_claims_only_the_hue_distances_this_file_measures():
-    """docs/06 said the node hues sat 20 or more from "the sign colours",
-    and test_no_node_hue_can_be_mistaken_for_an_edge_sign measures only
-    positive and negative: --context is about dE 9 from --sign-neutral,
-    near-neutral by design (fix round of the 2026-09-22 review). The
-    sentence names the two it measures, and the exception is real."""
+    """docs/06 claims only the hue distances this file measures. test_no_node_hue_can_be_mistaken_for_an_
+    edge_sign measures only positive and negative: --context is about dE 9 from --sign-neutral,
+    near-neutral by design, so the sentence names the two it measures, and the exception is real."""
     docs = (Path(__file__).resolve().parents[3]
             / "docs" / "06-interface.md").read_text(encoding="utf-8")
     start = docs.index("/* Node type hues")
@@ -652,10 +626,8 @@ def test_docs_06_claims_only_the_hue_distances_this_file_measures():
 
 
 def test_identity_is_a_documented_use_of_the_accent():
-    """The TOR in the wordmark is drawn in --accent, and the theme listed
-    the accent's uses without it while docs/06 kept chrome neutral (cr02
-    brand-split-and-accent-in-chrome, 2026-09-22). The use stays; it is
-    written down in both places now."""
+    """The TOR in the wordmark is drawn in --accent, so the theme lists identity among the accent's uses
+    (docs/06 keeps chrome neutral otherwise), in both places."""
     theme = _theme_css()
     block = theme[theme.index("── accent"):theme.index("--accent:")]
     assert "wordmark" in block, "theme.css's accent uses omit the wordmark"

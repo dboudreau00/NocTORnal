@@ -1,16 +1,10 @@
-"""collection-shared-exit (review of 2026-10-03).
+"""A persona and a public read never share an exit, in either order of creation.
 
-docs/04: one persona, one egress profile, and a public read never shares an
-exit with a persona. Binding a persona-less source to a profile a persona
-holds was refused; creating a persona on a profile a persona-less source
-already read through was not, so the rule held in one order only. The
-exits listing offered the shared exit, the separation report missed it (it
-looked only for a persona registered on the same source) and the egress
-proxy admitted both tunnels.
-
-Fails on dc28ffa: the persona is CREATED on the shared exit, the listing
-says it is available, `check_egress_separation` returns nothing and the
-proxy's `_shared` is False.
+docs/04: one persona, one egress profile, and a public read never shares an exit with a persona. Binding a
+persona-less source to a profile a persona holds is refused, and so is creating a persona on a profile a
+persona-less source already reads through; otherwise the rule would hold in one order only, the exits
+listing would offer the shared exit, the separation report (which looks for more than a persona registered
+on the same source) would miss it and the egress proxy would admit both tunnels.
 
 DATABASE_URL-gated; prefix `r46e-`.
 """

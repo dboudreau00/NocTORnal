@@ -1,24 +1,20 @@
-"""scripts/production_secrets.py, and the installer switches that run it
-(docs/17 F52 and the limiter's Redis ACL, 2026-10-02).
+"""scripts/production_secrets.py, and the installer switches that run it (docs/17).
 
-Moving the schema owner's credential out of secrets.env naively would stop
-every existing production deployment at boot, so the installers bring an
-existing deployment along: they detect the old layout, move the values
-into the files that now hold them with restrictive permissions and a backup
-of each file they change, and write the Redis password and a REDIS_URL that
-signs in as the limiter's own user. Held here, against temporary
-directories only:
+Moving the schema owner's credential out of secrets.env naively would stop every existing production
+deployment at boot, so the installers bring an existing deployment along: they detect the old layout, move
+the values into the files that now hold them with restrictive permissions and a backup of each file they
+change, and write the Redis password and a REDIS_URL that signs in as the limiter's own user. Held here,
+against temporary directories only:
 
-* an old-layout deployment is moved, value for value, with backups, and the
-  result is one the API, the migration job and the redis service accept;
+* an old-layout deployment is moved, value for value, with backups, and the result is one the API, the
+  migration job and the redis service accept;
 * a second run changes nothing; a conflict writes nothing;
-* a fresh deployment gets its Redis password, and its owner password only
-  when the database volume does not exist yet;
+* a fresh deployment gets its Redis password, and its owner password only when the database volume does
+  not exist yet;
 * nothing printed carries a value;
-* install.sh --production-secrets runs the same helper as install.ps1
-  -ProductionSecrets. The PowerShell run exists on Windows only; what is
-  held about install.ps1 everywhere is its text (no test here skips: CI's
-  "No tests were skipped" gate fails the build on one).
+* install.sh --production-secrets runs the same helper as install.ps1 -ProductionSecrets. The PowerShell
+  run exists on Windows only; what is held about install.ps1 everywhere is its text (no test here skips:
+  CI's "No tests were skipped" gate fails the build on one).
 """
 from __future__ import annotations
 
@@ -117,7 +113,6 @@ def test_an_old_layout_is_moved_value_for_value(prod):
     assert init[config.OWNER_PASSWORD_ENV] == OWNER
     assert migrate[config.MIGRATION_DSN_ENV] == \
         f"postgresql+psycopg://noctornal:{OWNER}@postgres:5432/noctornal"
-    # Everything else stays exactly as it was.
     assert init["NOCTORNAL_EGRESS_DB_PASSWORD"] == EGRESS
     assert init["NOCTORNAL_WORKER_DB_PASSWORD"] == WORKER
     assert secrets["DATABASE_URL"].endswith(f":{APP}@postgres:5432/noctornal")
@@ -280,7 +275,7 @@ def test_a_redis_on_another_host_is_left_alone(prod):
     f"redis://:{REDIS}@redis:6379/0",                    # an older secrets.env
     f"redis://:{REDIS}@REDIS:6379/0",                    # host names have no case
     "redis://redis:6379/0",
-    f"rediss://{LIMITER_ACL_USER}:{REDIS}@redis:6379/0",  # left alone until 2026-10-02
+    f"rediss://{LIMITER_ACL_USER}:{REDIS}@redis:6379/0",
     f"redis://other:{REDIS}@redis:6379/0?socket_timeout=1",
     "unix:///run/redis.sock",
     "not a url",
@@ -289,10 +284,9 @@ def test_a_redis_on_another_host_is_left_alone(prod):
     f"redis://cache-user:{REDIS}@cache.corp.example:6380/0",
 ])
 def test_whatever_the_start_check_refuses_the_installer_rewrites(prod, url, tmp_path):
-    """No circle (review of 2026-10-02): the redis service's start check
-    names this step for every REDIS_URL it refuses, so after this step its
-    start check passes, whatever REDIS_URL was. Until then a `rediss://`
-    URL naming the bundled service was left alone here and refused there."""
+    """No circle: the redis service's start check names this step for every REDIS_URL it refuses, so after
+    this step its start check passes, whatever REDIS_URL was. A `rediss://` URL naming the bundled service
+    is rewritten here, not left alone and refused there."""
     _old_layout(prod)
     text = OLD_SECRETS.replace(f"REDIS_URL=redis://:{REDIS}@redis:6379/0", f"REDIS_URL={url}")
     (prod / "secrets.env").write_text(text, encoding="utf-8")
@@ -306,11 +300,11 @@ def test_whatever_the_start_check_refuses_the_installer_rewrites(prod, url, tmp_
 
 
 # ---------------------------------------------------------------------------
-# The old template's comments (review of 2026-10-02)
+# The old template's comments
 # ---------------------------------------------------------------------------
 
-#: The Postgres and Redis sections of secrets.env.example before 2026-10-02,
-#: comments shortened, each keeping the phrase the helper recognises it by.
+#: The Postgres and Redis sections of the earlier secrets.env.example, comments shortened, each keeping
+#: the phrase the helper recognises it by.
 OLD_TEMPLATE = f"""# ---------------------------------------------------------------------------
 # Postgres
 # ---------------------------------------------------------------------------
@@ -350,10 +344,8 @@ NOCTORNAL_ENV=production
 
 
 def test_the_old_templates_comments_go_with_the_lines_they_described(prod):
-    """The verifier's reproduction: an old secrets.env kept "Nothing
-    compares them" above the marker of a line that had moved, and
-    "--requirepass" and "the empty username" above Redis lines that now
-    say the opposite."""
+    """An old secrets.env kept "Nothing compares them" above the marker of a line that had moved, and
+    "--requirepass" and "the empty username" above Redis lines that now say the opposite."""
     (prod / "secrets.env").write_text(OLD_TEMPLATE, encoding="utf-8")
     (prod / "postgres-init.env").write_text(OLD_INIT, encoding="utf-8")
     status, said = _run(prod)
@@ -386,7 +378,7 @@ def test_an_operators_own_comment_is_left_as_written(prod):
 
 
 # ---------------------------------------------------------------------------
-# Files it may not read or write (review of 2026-10-02)
+# Files it may not read or write
 # ---------------------------------------------------------------------------
 
 _AS_OWNER = ("run this as the user who owns the secrets files, with sudo on Linux "
@@ -395,9 +387,8 @@ _AS_OWNER = ("run this as the user who owns the secrets files, with sudo on Linu
 
 
 def test_an_unreadable_file_is_one_sentence_naming_it_and_sudo(prod, monkeypatch):
-    """Root's mode 600 files read by anybody else: a PermissionError
-    traceback until 2026-10-02, after which install.sh said "what is left
-    is listed above" over nothing."""
+    """Root's mode 600 files read by anybody else give one sentence naming the file and sudo, not a
+    PermissionError traceback."""
     _old_layout(prod)
     before = {p.name: p.read_bytes() for p in prod.iterdir()}
     real = Path.read_bytes
@@ -417,10 +408,8 @@ def test_an_unreadable_file_is_one_sentence_naming_it_and_sudo(prod, monkeypatch
 
 
 def test_a_file_that_is_not_utf8_is_one_sentence_and_no_traceback(prod):
-    """The docstring promises a file the helper cannot read is one sentence
-    and never a traceback, and only OSError was caught: a Windows-1252
-    comment ended in a UnicodeDecodeError (2026-10-03). The
-    sentence says where the byte is, never what it is."""
+    """A file the helper cannot read is one sentence and never a traceback: a Windows-1252 comment must
+    not end in a UnicodeDecodeError. The sentence says where the byte is, never what it is."""
     _old_layout(prod)
     with (prod / "secrets.env").open("ab") as handle:
         handle.write(b"# caf\xe9 comment\n")
@@ -453,9 +442,8 @@ _LAST = ("secrets.env is written last, so it still holds every line it had; once
 ])
 def test_a_file_it_cannot_write_stops_it_naming_the_file_and_what_changed(
         prod, monkeypatch, failing, changed):
-    """2026-10-03: the file the owner's lines leave is written
-    LAST, whichever write fails, so secrets.env keeps them until the files
-    they move into hold them, and running it again finishes the job."""
+    """The file the owner's lines leave is written LAST, whichever write fails, so secrets.env keeps them
+    until the files they move into hold them, and running it again finishes the job."""
     _old_layout(prod)
     before = (prod / "secrets.env").read_bytes()
     helper = _helper()
@@ -491,12 +479,9 @@ def test_a_file_it_cannot_write_stops_it_naming_the_file_and_what_changed(
 
 
 def test_a_blocked_last_write_leaves_the_real_dsn_where_a_rerun_finds_it(prod):
-    """The verifier's reproduction, with no stand-in: a DIRECTORY named
-    migrate.env fails the second moved-to write for real. Written the old
-    way (secrets.env first) the run ended with the owner password gone from
-    secrets.env, a re-run made migrate.env from its template, and the real
-    DSN lived in secrets.env.backup-STAMP alone, behind a "make them the
-    same" message that was wrong."""
+    """With no stand-in: a DIRECTORY named migrate.env fails the second moved-to write for real. Writing
+    secrets.env first would drop the owner password from it, a re-run would make migrate.env from its
+    template, and the real DSN would live in secrets.env.backup-STAMP alone."""
     _old_layout(prod)
     (prod / "migrate.env").mkdir()
     before = (prod / "secrets.env").read_bytes()
@@ -516,9 +501,8 @@ def test_a_blocked_last_write_leaves_the_real_dsn_where_a_rerun_finds_it(prod):
 
 
 def test_a_failed_chmod_leaves_the_file_it_was_for_as_it_was(prod, monkeypatch):
-    """chmod comes BEFORE the rename (2026-10-03). After it, a
-    chmod that failed on secrets.env left the file replaced while the run
-    said it had not been written."""
+    """chmod comes BEFORE the rename: a chmod that failed after it would leave secrets.env replaced while
+    the run said it had not been written."""
     _old_layout(prod)
     before = (prod / "secrets.env").read_bytes()
     helper = _helper()
@@ -543,8 +527,7 @@ def test_a_failed_chmod_leaves_the_file_it_was_for_as_it_was(prod, monkeypatch):
 @pytest.mark.skipif(os.name != "posix" or (hasattr(os, "geteuid") and os.geteuid() == 0),
                     reason="needs POSIX permissions and a user that is not root")
 def test_install_sh_on_a_file_it_cannot_read_says_sudo_and_no_traceback(prod):
-    """The verifier's reproduction, on the real permission bits: CI runs
-    it as a user that is not root."""
+    """On the real permission bits; CI runs it as a user that is not root."""
     _old_layout(prod)
     (prod / "secrets.env").chmod(0)
     try:
@@ -589,8 +572,8 @@ def test_every_file_and_backup_is_created_and_left_mode_600(prod, monkeypatch):
     assert helper.apply(prod, out=lambda line: None, stamp=STAMP) == 0
     assert recording.created and all(mode == 0o600 for _, mode in recording.created), \
         recording.created
-    # A file is chmodded as the temporary it is written to, before the
-    # rename (2026-10-03), so ".NAME.tmp-PID" stands for NAME.
+    # A file is chmodded as the temporary it is written to, before the rename, so ".NAME.tmp-PID" stands
+    # for NAME.
     assert {re.sub(r"^\.(.+)\.tmp-\d+$", r"\1", name) for name, _ in recording.chmodded} == {
         "secrets.env", "postgres-init.env", "migrate.env",
         f"secrets.env.backup-{STAMP}", f"postgres-init.env.backup-{STAMP}"}
@@ -720,10 +703,8 @@ def test_install_sh_reports_what_is_left_and_exits_1(prod):
                          env=_path_with_this_python())
     assert run.returncode == 1, run.stdout + run.stderr
     assert "still to do: choose the schema owner's password" in run.stdout
-    # The whole sentence, not "not finished" (2026-10-03): the
-    # old one, "what is left is listed above, and nothing it refused was
-    # written", was false for a stop that listed nothing, and a substring
-    # check let it back in unnoticed.
+    # The whole sentence, not "not finished": a substring check would let a false sentence ("what is left
+    # is listed above") back in for a stop that listed nothing.
     assert _NOT_FINISHED in run.stdout
 
 
@@ -735,11 +716,9 @@ _NOT_FINISHED = ("not finished: the lines above say what is left, or why it stop
 def test_the_installers_say_a_stop_the_same_true_way_and_lock_the_same_files():
     """What is held about install.ps1 on every platform, run or not.
 
-    It is the Windows installer (backslashed paths, icacls), so the run
-    below exists on Windows alone. This is the half that exists everywhere,
-    and it was written as a skip until 2026-10-03, which CI's Linux runner
-    counted as a skipped test and the "No tests were skipped" gate failed
-    the build for (2026-10-03)."""
+    install.ps1 is the Windows installer (backslashed paths, icacls), so the run below exists on Windows
+    alone. This is the half that exists everywhere; a skip would count as a skipped test and fail CI's
+    "No tests were skipped" gate."""
     sh = (ROOT / "release" / "install.sh").read_text(encoding="utf-8")
     ps1 = (ROOT / "release" / "install.ps1").read_text(encoding="utf-8")
     for name, text in (("install.sh", sh), ("install.ps1", ps1)):
@@ -759,11 +738,9 @@ def test_the_installers_say_a_stop_the_same_true_way_and_lock_the_same_files():
 
 
 if os.name == "nt":
-    # Defined on Windows only, and not skipped anywhere else: a skip is a
-    # line in CI's summary that fails its gate, and a test that quietly
-    # passes without running proves nothing. install.ps1 is not run off
-    # Windows (its helper path is backslashed, its lock-down is icacls), and
-    # the test above holds what can be held there.
+    # Defined on Windows only, and not skipped elsewhere: a skip is a line in CI's summary that fails its
+    # gate, and a test that quietly passes without running proves nothing. install.ps1 is not run off
+    # Windows (backslashed helper path, icacls lock-down); the test above holds what can be held there.
     def test_install_ps1_production_secrets_runs_the_helper_and_locks_the_files(prod):
         powershell = shutil.which("powershell") or shutil.which("pwsh")
         assert powershell, "Windows without PowerShell: install.ps1 cannot run"

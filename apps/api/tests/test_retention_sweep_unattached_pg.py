@@ -1,18 +1,14 @@
-"""Dead letters and the records attached to no case join the operator-run
-sweep (docs/17 F55; owner decision of 2026-10-08).
+"""Dead letters and the records attached to no case join the operator-run sweep (docs/17 F55).
 
-A dead letter carries a 90-day clock and third-party victim data and has no
-case, so no case hold reaches it and the case-scoped purge skips it by
-design; a record attached to no case has a clock and no case to govern it. The
-sweep (`scripts/retention_sweep.py`) destroyed collected documents only
-(docs/00 decision 172), and nothing destroyed these when their clock ran
-out. They join it under the same rules: a dry run by default, `--apply` with
-the declared authority and the named account, never scheduled. A record
-attached to a case stays that case's, with its clock and its hold.
+A dead letter carries a 90-day clock and third-party victim data and has no case, so no case hold reaches
+it and the case-scoped purge skips it by design; a record attached to no case has a clock and no case to
+govern it. The sweep (`scripts/retention_sweep.py`) also destroys collected documents (docs/00 decision
+172), and these join it under the same rules: a dry run by default, `--apply` with the declared authority
+and the named account, never scheduled. A record attached to a case stays that case's, with its clock and
+its hold.
 
-The sweep is deployment-wide, so other suites' leftovers past their clock are
-its too: counts are read as differences from a baseline and every row is read
-by its own id. Accounts `g44t-*`; DATABASE_URL-gated.
+The sweep is deployment-wide, so other suites' leftovers past their clock are its too: counts are read as
+differences from a baseline and every row is read by its own id. Accounts `g44t-*`; DATABASE_URL-gated.
 """
 from __future__ import annotations
 
@@ -22,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-import g44_support as g
+import evidence_retention_support as g
 
 pytestmark = g.GATED
 
@@ -155,8 +151,8 @@ def test_a_dry_run_counts_the_new_families_and_changes_nothing(
 
 def test_the_hint_to_apply_is_printed_when_only_a_dead_letter_is_sweepable(
         conn, letters, declared, raw_store, capsys, monkeypatch):
-    """The line used to count documents alone, so a deployment whose only
-    backlog was a dead letter was told nothing could be destroyed."""
+    """The hint counts dead letters as well as documents, so a deployment whose only backlog is a dead
+    letter is not told nothing can be destroyed."""
     from noctornal_api import retention_sweep as rs
     from noctornal_api.retention import RetentionService
 

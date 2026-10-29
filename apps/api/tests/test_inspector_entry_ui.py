@@ -1,31 +1,22 @@
-"""The inspector and the create forms, as the 2026-09-22 review left them.
+"""The inspector and the create forms, held by reading the shipped static assets and running their pure
+functions under Node (skipped where Node is not installed).
 
-Findings from the ux05 (inspector) and ux06 (data entry) lenses, fixed on
-2026-09-23 and held here by reading the shipped static assets and running
-their pure functions under Node (skipped where Node is not installed). The
-server halves are in `test_entity_entry_pg.py` (the pre-create check, the
-selector recorded on create, the entity count, the ontology's inverse names
-and selector types, selector dates) and `test_tie_review_pg.py`.
+The server halves are in `test_entity_entry_pg.py` (the pre-create check, the selector recorded on create,
+the entity count, the ontology's inverse names and selector types, selector dates) and
+`test_tie_review_pg.py`.
 
-- why-below-metrics: Assertions and Evidence come before the numbers, and
-  the metrics help is folded.
-- positive-degree-called-vouches: "Positive ties", not "N vouches"; vouches
-  by direction; the dyad rule said when the tie counts exceed Degree.
-- first-last-seen-always-dash: the observed window from the live claims,
-  said to be so; selector dates beside the count.
-- grade-words-hover-only: the Admiralty grade printed in words.
-- edge-type-note-stale: the chosen type read both ways, the permitted
-  count on its own line.
-- post-create-state: the outcome said in the inspector, under the name of
-  the element it made (one note, gone when the analyst moves on; not a
-  corner banner, which covered that name), the source cleared unless
-  kept, the pane's messages dropped when it is left.
-- valid-interval-shifts-day: the interval inputs say UTC.
-- entity-list-no-find: a label filter, sortable columns, and pages of
-  entities and of ties that say when they are not the whole case.
-- selector-entities-bypass-normalisation and no-duplicate-check-on-create:
-  the form asks before it creates; the merge panel lists likely matches
-  first.
+- Assertions and Evidence come before the numbers, and the metrics help is folded.
+- "Positive ties", not "N vouches"; vouches by direction; the dyad rule says when tie counts exceed Degree.
+- The observed window comes from the live claims and says so; selector dates sit beside the count.
+- The Admiralty grade is printed in words.
+- The chosen edge type reads both ways, with the permitted count on its own line.
+- The outcome of a create is said in the inspector under the name of the element it made (one note, gone
+  when the analyst moves on, not a corner banner that would cover the name); the source is cleared unless
+  kept; the pane's messages are dropped when it is left.
+- The interval inputs say UTC.
+- Entity list: a label filter, sortable columns, and pages of entities and ties that say when they are not
+  the whole case.
+- The create form asks before it creates; the merge panel lists likely matches first.
 """
 from __future__ import annotations
 
@@ -82,10 +73,6 @@ function countOf(n, one, many) { return n + ' ' + agree(n, one, many); }
 """
 
 
-# ---------------------------------------------------------------------------
-# ux05-inspector:why-below-metrics
-# ---------------------------------------------------------------------------
-
 def test_assertions_and_evidence_come_before_the_ties_and_the_numbers():
     html = _html()
     body = html[html.index('<div id="insp-body"'):]
@@ -101,10 +88,6 @@ def test_the_metrics_help_is_one_short_line():
     assert '<details class="insp-more">' not in sec
     assert '<p class="help">Local measures for this entity. Run Analysis for brokerage.</p>' in sec
 
-
-# ---------------------------------------------------------------------------
-# ux05-inspector:positive-degree-called-vouches
-# ---------------------------------------------------------------------------
 
 def test_the_signed_rows_are_called_ties_not_vouches():
     body = _fn("renderNodeMetrics")
@@ -142,10 +125,6 @@ console.log(JSON.stringify({
     assert got["simple"] == "", "said only when the counts need reconciling"
 
 
-# ---------------------------------------------------------------------------
-# ux05-inspector:first-last-seen-always-dash
-# ---------------------------------------------------------------------------
-
 def test_the_observed_window_comes_from_live_claims_and_says_so():
     script = _dates() + "\n".join([
         _fn("observedWindow"), _fn("fmtWindow"), _fn("seenPhrase"),
@@ -179,11 +158,10 @@ console.log(JSON.stringify({
     assert got["loading"] == "n1 · no validity interval recorded"
     assert got["none"] == ("n1 · no validity interval recorded · "
                            "no claim dates an observation")
-    # Before the claims arrive, the server's window (gap-first-seen) in
-    # seenPhrase's words: a lone end is one sighting, said once.
+    # Before the claims arrive, the server's window in seenPhrase's words: a lone end is one sighting, said
+    # once.
     assert got["server"] == "seen 27 Aug 2025"
-    # One window, one format (the 2026-09-23 verifier: "27 Aug 2025 to
-    # 2026-01-02 10:15 UTC" mixed a day with a time).
+    # One window, one format: a day is not mixed with a time.
     assert got["sel3"] == ("observed 3 times, 2025-08-27 00:00 UTC to "
                            "2026-01-02 10:15 UTC")
     assert got["timed"] == ("observed 2025-08-27 00:00 UTC to 2026-01-02 "
@@ -200,10 +178,6 @@ def test_the_sub_line_is_repainted_when_the_claims_arrive():
     assert "selectorSeenWords(s)" in _fn("renderSelectors")
 
 
-# ---------------------------------------------------------------------------
-# ux05-inspector:grade-words-hover-only
-# ---------------------------------------------------------------------------
-
 def test_the_grade_is_printed_in_words():
     js = _js()
     consts = js[js.index("const RELIABILITY = {"):js.index("/* ICD 203 analytic confidence. */")]
@@ -219,10 +193,6 @@ console.log(JSON.stringify([gradeWords('C', '3'), gradeWords('F', 6),
     assert "el('div', 'assert-grade',\n      gradeWords(a.reliability, a.credibility))" \
         in _fn("renderAssertions")
 
-
-# ---------------------------------------------------------------------------
-# ux06-entry:edge-type-note-stale
-# ---------------------------------------------------------------------------
 
 def test_the_chosen_type_is_read_both_ways_with_its_sign():
     got = _run(_fn("signWords") + _fn("edgeTypeWords") + """
@@ -251,10 +221,6 @@ def test_the_permitted_count_is_its_own_line():
     assert "$('edge-type-count').textContent = '';" in _fn("refreshEdgeTypes")
 
 
-# ---------------------------------------------------------------------------
-# ux06-entry:post-create-state
-# ---------------------------------------------------------------------------
-
 @pytest.mark.parametrize("fn,prefix", [("createNode", "node"), ("createEdge", "edge")])
 def test_the_outcome_is_said_on_the_element_and_the_source_is_not_inherited(
         fn, prefix):
@@ -263,9 +229,8 @@ def test_the_outcome_is_said_on_the_element_and_the_source_is_not_inherited(
     assert f"noteCreated('{prefix}', out.id," in body
     assert "setMsg(okBox, assertion.evidence_id" not in body, (
         "a status line written and hidden in the same moment is never read")
-    # Found 2026-09-23: the corner banner stack
-    # sat over the inspector's title, stacked per entry, took the error
-    # edge for a success and outlived a case switch.
+    # Not a corner banner: it would sit over the inspector's title, stack per entry, take the error edge for
+    # a success and outlive a case switch.
     assert "banner(" not in body, "the outcome is not a corner banner"
     assert f"resetAfterCreate('{prefix}');" in body
     assert f'id="{prefix}-keep-source" type="checkbox"' in _html()
@@ -340,10 +305,6 @@ def test_a_create_panes_messages_go_when_it_is_left():
     assert "watchCreatePanes();" in _js()
 
 
-# ---------------------------------------------------------------------------
-# ux06-entry:valid-interval-shifts-day
-# ---------------------------------------------------------------------------
-
 @pytest.mark.parametrize("prefix", ["node", "edge"])
 def test_the_interval_inputs_say_utc(prefix):
     html = _html()
@@ -354,10 +315,6 @@ def test_the_interval_inputs_say_utc(prefix):
     fieldset = html[html.index(f'id="{prefix}-valid-from"'):]
     assert "UTC days." in fieldset[:fieldset.index("</fieldset>")]
 
-
-# ---------------------------------------------------------------------------
-# ux06-entry:entity-list-no-find
-# ---------------------------------------------------------------------------
 
 def test_the_list_has_a_label_filter_and_sortable_headers():
     html = _html()
@@ -415,16 +372,11 @@ console.log(JSON.stringify({
     assert got["whole"] == "2 of 146 entities · 492 relationships in the case"
     assert got["page"].startswith("12 listed from the newest 1000 of 1432 entities")
     assert got["page"].endswith("· 1000 relationships in the case")
-    # The tie page stops at 1000 too, and said "1000 relationships" of a
-    # larger case (the 2026-09-23 verifier).
+    # The tie page stops at 1000 too, so the count says so rather than reporting "1000 relationships" of a
+    # larger case.
     assert got["ties"] == ("146 of 146 entities · 1204 relationships in the "
                            "case (only the newest 1000 are loaded)")
 
-
-# ---------------------------------------------------------------------------
-# ux06-entry:selector-entities-bypass-normalisation
-# ux06-entry:no-duplicate-check-on-create
-# ---------------------------------------------------------------------------
 
 def test_the_selector_picker_exists_and_every_offered_type_is_real():
     from noctornal_ontology import SELECTOR_TYPES

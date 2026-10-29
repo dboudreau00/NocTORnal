@@ -1,14 +1,11 @@
 """The request role reads no sealed column outside the accounts table (0180).
 
-A persona's sealed credential and forum session, an ingest key's HMAC, a
-lookup provider's sealed key, a download ticket's hash and a sample's
-sealed data key are refused to the request role, bound or not. What read
-them now reads a generated column (whether a credential is held, whether a
-key was destroyed) or a definer: a provider's key for the system role
-alone, the two ticket spends and a refused ticket's read by the hash its
-holder presents, and a sample's key for whoever may handle its bytes. Run
-as the request role, and over HTTP in production's shape
-(NOCTORNAL_TEST_ASSUME_ROLE). Account prefix `rlsseal-`.
+A persona's sealed credential and forum session, an ingest key's HMAC, a lookup provider's sealed key, a
+download ticket's hash and a sample's sealed data key are refused to the request role, bound or not. What
+reads them reads a generated column (whether a credential is held, whether a key was destroyed) or a
+definer: a provider's key for the system role alone, the two ticket spends and a refused ticket's read by
+the hash its holder presents, and a sample's key for whoever may handle its bytes. Run as the request
+role, and over HTTP in production's shape (NOCTORNAL_TEST_ASSUME_ROLE). Account prefix `rlsseal-`.
 """
 from __future__ import annotations
 

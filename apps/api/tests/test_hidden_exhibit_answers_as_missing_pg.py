@@ -1,22 +1,17 @@
-"""An exhibit above the caller's labels answers as a missing one (2026-10-07).
+"""An exhibit above the caller's labels answers as a missing one.
 
-The exhibit routes gated the exhibit's own labels with `authorize_object`
-and let its 403 through, so an AMBER analyst holding the id of a RED exhibit
-in their own case got "missing permission evidence.read on this case" where
-a random id got 404 "evidence does not exist in this case": the status told
-an exhibit they may not see from one that does not exist. The element
-routes of the graph were moved to one answer by http_ui-016; the exhibit
-routes were not. Each row below is one route asked with a hidden exhibit, a
-random id and another case's exhibit, and the three answers must be
-identical. The refusal of the hidden one is still audited.
+The exhibit routes must not let `authorize_object`'s 403 through for the exhibit's own labels: an AMBER
+analyst holding the id of a RED exhibit in their own case would get "missing permission evidence.read on
+this case" where a random id gets 404 "evidence does not exist in this case", and the status would tell an
+exhibit they may not see from one that does not exist. The element routes of the graph give one answer
+likewise. Each row below is one route asked with a hidden exhibit, a random id and another case's exhibit,
+and the three answers must be identical. The refusal of the hidden one is still audited.
 
-`POST /deception/captures` names exhibits in its body and had the same
-split, and a second one for a caller holding `evidence.upload` without
-`evidence.read` (the SERVICE role): a present exhibit answered 403 and a
-missing one 404.
+`POST /deception/captures` names exhibits in its body and has the same split, and a second one for a caller
+holding `evidence.upload` without `evidence.read` (the SERVICE role): a present exhibit must not answer 403
+and a missing one 404.
 
-Runs with NOCTORNAL_TEST_ASSUME_ROLE, so every request connection is the
-request role, as in production.
+Runs with NOCTORNAL_TEST_ASSUME_ROLE, so every request connection is the request role, as in production.
 """
 from __future__ import annotations
 

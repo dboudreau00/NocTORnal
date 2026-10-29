@@ -1,50 +1,29 @@
-"""The Lab download stops carrying a session credential to the sample
-origin (0061).
+"""The Lab download carries a one-shot ticket, not a session credential, to the sample origin (0061).
 
-Invariant 10 puts sample bytes on a SECOND origin, and the console's
-session lives in `__Host-` cookies, which are `Secure`, `Path=/`, no
-`Domain`, `SameSite=strict`: none of it can reach that origin, and that
-is the POINT of the split rather than a limitation of it. So
-`downloadSample()` forced the token from the login response there as a
-Bearer -- the session credential itself, held in page memory, posted to a
-second origin, on the one path in this system that puts working malware
-on somebody's disk. It was also one of the two reasons the login response
-carried a token at all; with this and the socket's cookie in place it
-carries none, and answers 204.
+Sample bytes live on a second origin, and the console's session lives in `__Host-` cookies (`Secure`,
+`Path=/`, no `Domain`, `SameSite=strict`) that cannot reach it. That is the point of the split, so the
+session token must never be posted there as a Bearer. A ticket is minted on the application origin under
+the ordinary cookie session (the `x-csrf-token` double-submit applies), is good for ONE sample, ONE
+redemption and sixty seconds, and is audited at issue and at redemption.
 
-A ticket replaces it: minted on the APPLICATION origin under the ordinary
-cookie session (so the `x-csrf-token` double-submit applies), good for
-ONE sample, ONE redemption and sixty seconds, audited at issue and at
-redemption, and worth nothing afterwards.
+What these tests hold:
 
-What these tests hold, and what each would catch:
-
-- the round trip: minted on the app process, spent on the sample process
-  with NO Authorization header and NO cookie -- the thing the split makes
-  impossible any other way;
+- the round trip: minted on the app process, spent on the sample process with no Authorization header and
+  no cookie;
 - one-shot, and atomically so: the second presentation is refused;
-- expiry is real, and the CHECK constraint means a row cannot be back-
-  dated into validity without back-dating its issue too;
-- the mint makes the DOWNLOAD's decision, so a sample above the caller's
-  clearance never yields a ticket -- the shape of the worst defect this
-  codebase has found in itself, where `detail()` 404'd a sample and
-  `download()` handed the same caller its bytes one request later;
-- a live ticket is not an authority on its own: the ACCOUNT is re-read at
-  redemption, so a deactivated account and a revoked `sample.download`
-  are both refused inside the sixty-second window. The SESSION is not
-  re-read, and that -- narrowly, exactly -- is the residual 0061 states;
-- a flood of strings that match no ticket is refused by an address-scoped
-  limit and writes nothing to `audit.event`. That path needs no
-  credential, so a row per attempt made an append-only, hash-chained
-  table appendable by anyone who could reach the sample origin;
-- a cookie mint without the CSRF header is refused, because that header
-  is what a page on another origin cannot supply;
-- the sample origin does not mint: a session must never be presented
-  there, which is what the split is for;
-- the ticket is stored as a hash and appears nowhere else, `ingest.
-  api_key`'s rule for the same reason;
-- the custody row names the TICKET's user, not nobody and not whoever
-  happened to be holding the socket.
+- expiry is real, and the CHECK constraint means a row cannot be back-dated into validity without
+  back-dating its issue too;
+- the mint makes the download's decision, so a sample above the caller's clearance never yields a ticket;
+- a live ticket is not an authority on its own: the account is re-read at redemption, so a deactivated
+  account and a revoked `sample.download` are both refused inside the sixty-second window. The session is
+  not re-read, which is the residual 0061 states;
+- a flood of strings that match no ticket is refused by an address-scoped limit and writes nothing to
+  `audit.event`: that path needs no credential, so a row per attempt would make the append-only,
+  hash-chained table appendable by anyone who can reach the sample origin;
+- a cookie mint without the CSRF header is refused, because a page on another origin cannot supply it;
+- the sample origin does not mint: a session must never be presented there;
+- the ticket is stored as a hash and appears nowhere else, `ingest.api_key`'s rule;
+- the custody row names the ticket's user.
 
 Env-gated on DATABASE_URL. Email prefix `dt-`, unique to this file.
 """
@@ -75,15 +54,12 @@ SAMPLES = "https://samples.example"
 
 @pytest.fixture(autouse=True)
 def deployment(monkeypatch):
-    """A correctly split deployment, declared once and visibly.
+    """A correctly split deployment, declared once.
 
-    The three origin variables are cleared first so the split is decided
-    by what this file sets and never by a developer's shell, and the
-    prohibited-content policy is declared because nothing may be ingested
-    until an operator has said one exists. `NOCTORNAL_PUBLIC_ORIGIN` is
-    left unset, which makes this process the APPLICATION -- where tickets
-    are minted. The tests that redeem set it to the sample origin for the
-    request that redeems, exactly as two processes would.
+    The three origin variables are cleared first so a developer's shell cannot decide the split, and the
+    prohibited-content policy is declared because nothing may be ingested without one.
+    `NOCTORNAL_PUBLIC_ORIGIN` is left unset, which makes this process the application, where tickets are
+    minted; the tests that redeem set it to the sample origin for that request.
     """
     monkeypatch.setenv("NOCTORNAL_PROHIBITED_CONTENT_POLICY", "POL-2026-014")
     monkeypatch.setenv("NOCTORNAL_DESIGNATED_PERSON", "the.dp@example.test")
@@ -137,9 +113,9 @@ class MemoryStore:
 
 @pytest.fixture
 def store(monkeypatch):
-    """One store shared by the service that submits and the router that
-    serves: `_svc` builds `SampleStorage()` at call time, so the class is
-    replaced on the module rather than on an instance."""
+    """One store shared by the submitting service and the serving router.
+
+    `_svc` builds `SampleStorage()` at call time, so the class is replaced on the module, not an instance."""
     import noctornal_api.samples as samples
     memory = MemoryStore()
     monkeypatch.setattr(samples, "SampleStorage", lambda: memory)
@@ -177,13 +153,10 @@ def _user(conn, *, roles=(), clearance="RED"):
 
 
 def _login(client, email, secret):
-    """A real sign-in, for the ONE test here that needs the browser's
-    transport rather than a session: the cookie pair and its CSRF half.
+    """A real sign-in, for the one test that needs the browser's transport: the cookie pair and its CSRF half.
 
-    204 since 2026-09-10, with the token only in `__Host-session` -- so
-    this returns the response and the caller reads the jar out of
-    `Set-Cookie`. Everything else in this file wants an authenticated
-    analyst and takes `_session`, which does not spend a TOTP code.
+    Login answers 204 with the token only in `__Host-session`, so this returns the response and the caller
+    reads the jar out of `Set-Cookie`. Other tests take `_session`, which does not spend a TOTP code.
     """
     from noctornal_api.security import totp
     r = client.post(f"{API}/auth/login", json={
@@ -194,15 +167,11 @@ def _login(client, email, secret):
 
 
 def _session(conn, email) -> str:
-    """A session minted directly, the way `scripts/bootstrap.py session`
-    does -- and with `mfa_satisfied=True`, as login passes, because
-    `sample.download` is step-up gated and the ticket inherits that
-    assurance rather than side-stepping it. A session that never
-    satisfied MFA would make every mint below a 403 for a reason that is
-    not what the test is about.
+    """A session minted directly, the way `scripts/bootstrap.py session` does.
 
-    Unbound: no address and no User-Agent, which 0058 records and only
-    `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it is off here.
+    `mfa_satisfied=True`, as login passes it: `sample.download` is step-up gated and the ticket inherits
+    that assurance. Unbound: no address and no User-Agent, which only `NOCTORNAL_SESSION_STRICT_BINDING`
+    refuses (off here, 0058).
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
@@ -240,14 +209,11 @@ def _mint(client, token, sample_id):
 
 
 def _redeem(client, sample_id, ticket):
-    """The redemption as the console will make it: no Authorization
-    header, no cookie, the ticket in a form body.
+    """The redemption as the console makes it: no Authorization header, no cookie, the ticket in a form body.
 
-    `application/x-www-form-urlencoded` is a CORS-safelisted content type,
-    so this is a SIMPLE cross-origin request and needs no preflight;
-    `application/json` would need `content-type` added to
-    `app._preflight`'s `Access-Control-Allow-Headers` and would surface as
-    the console's "the request did not complete" until somebody did.
+    `application/x-www-form-urlencoded` is CORS-safelisted, so this is a simple cross-origin request with no
+    preflight; `application/json` would need `content-type` in `app._preflight`'s
+    `Access-Control-Allow-Headers`.
     """
     return client.post(f"{API}/samples/{sample_id}/download",
                        data={"ticket": ticket})
@@ -304,15 +270,8 @@ def _shrink(client, **overrides):
 
 def test_a_ticket_crosses_the_split_that_a_session_cannot(
         conn, client, store, monkeypatch):
-    """The whole point, in one test: minted on the application process,
-    spent on the sample process by a request carrying NO Authorization
-    header and NO cookie.
-
-    Before this, the only credential that could make that second request
-    was the login-body token the page was holding -- a standing session
-    credential on a second origin. The archive comes back with the
-    headers the route has always carried, and the ticket is spent.
-    """
+    """A ticket minted on the application process is spent on the sample process with no Authorization
+    header and no cookie, and the archive comes back with the route's usual headers."""
     _, token, sample = _analyst(conn)
 
     minted = _mint(client, token, sample.id)
@@ -362,15 +321,12 @@ def test_the_url_the_mint_hands_back_is_one_the_sample_process_serves(
 # --- one shot, and it means one -----------------------------------------
 
 def test_a_second_redemption_is_refused(conn, client, store, monkeypatch):
-    """`redeemed_at` is set by the same statement that reads it -- one
-    `UPDATE ... WHERE redeemed_at IS NULL ... RETURNING` -- so a second
-    presentation finds nothing. A `SELECT` then an `UPDATE` would have
-    been the readable version and would have served both halves of a
-    race, which is what one-shot must not mean.
+    """`redeemed_at` is set by the statement that reads it, one `UPDATE ... WHERE redeemed_at IS NULL ...
+    RETURNING`, so a second presentation finds nothing. A `SELECT` then an `UPDATE` would serve both halves
+    of a race.
 
-    The refusal says only that the ticket is not valid: telling the
-    holder of a stolen ticket that it was already redeemed confirms that
-    the string was real and that someone else got there first.
+    The refusal says only that the ticket is not valid: saying it was already redeemed would confirm to the
+    holder of a stolen ticket that the string was real and that someone else got there first.
     """
     _, token, sample = _analyst(conn)
     ticket = _mint(client, token, sample.id).json()["ticket"]
@@ -392,20 +348,13 @@ def test_a_second_redemption_is_refused(conn, client, store, monkeypatch):
 
 
 def test_an_expired_ticket_is_refused(conn, client, store, monkeypatch):
-    """Sixty seconds, on the DATABASE's clock at both ends of the
-    hand-off: `expires_at` is written by `now() + %s` with the TTL
-    crossing as a `timedelta` (psycopg adapts it to an `interval`), and
-    compared against `now()` again at redemption -- so a skewed API host
-    cannot mint a ticket that is expired on arrival. Named precisely
-    because `make_interval(secs => %s)` is what the service comment says
-    it deliberately did NOT use, and a test that describes the rejected
-    spelling is a test nobody can check against the code.
+    """Sixty seconds, on the database's clock at both ends: `expires_at` is written by `now() + %s` with the
+    TTL passed as a `timedelta` (psycopg adapts it to an `interval`) and compared against `now()` at
+    redemption, so a skewed API host cannot mint a ticket that is expired on arrival.
 
-    The row is aged rather than the clock moved, and BOTH timestamps have
-    to move: `download_ticket_expiry_after_issue` refuses a row whose
-    expiry precedes its issue, which is the constraint that catches a
-    unit confusion (60 versus 60000) before it ships as "downloads
-    stopped working".
+    The row is aged rather than the clock moved, and both timestamps move: the
+    `download_ticket_expiry_after_issue` constraint refuses a row whose expiry precedes its issue, which
+    catches a unit confusion (60 versus 60000).
     """
     _, token, sample = _analyst(conn)
     ticket = _mint(client, token, sample.id).json()["ticket"]
@@ -445,7 +394,6 @@ def test_a_ticket_is_bound_to_its_sample_and_is_not_spent_by_a_wrong_guess(
     audit = _audit(conn, "SAMPLE_DOWNLOAD_TICKET_REFUSED", other.id)
     assert audit and audit[-1][2]["reason"] == "issued_for_another_sample"
 
-    # Still good for the sample it was issued for.
     assert _redeem(client, mine.id, ticket).status_code == 200
 
 
@@ -453,16 +401,9 @@ def test_a_ticket_is_bound_to_its_sample_and_is_not_spent_by_a_wrong_guess(
 
 def test_no_ticket_is_minted_for_a_sample_above_the_callers_clearance(
         conn, client, store):
-    """The mint runs `_downloadable`, the same check `download()` runs,
-    so a ticket cannot be minted for a sample its holder could not have
-    downloaded directly -- and the answer is the 404 a nonexistent id
-    gets, because a status code must not be an existence oracle for a
-    compartmented case.
-
-    This is the shape of the worst defect this codebase has found in
-    itself: `detail()` 404'd an over-classified sample while `download()`
-    handed the same caller its bytes one request later. A ticket minted
-    on a weaker predicate than the download's would have rebuilt it.
+    """The mint runs `_downloadable`, the same check `download()` runs, so no ticket exists for a sample its
+    holder could not download directly. The answer is the 404 a nonexistent id gets, so the status code is
+    not an existence oracle for a compartmented case.
     """
     owner, _, _ = _user(conn, clearance="RED")
     red = _sample(conn, owner, classification="RED")
@@ -478,18 +419,12 @@ def test_no_ticket_is_minted_for_a_sample_above_the_callers_clearance(
 
 def test_minting_with_a_cookie_session_needs_the_csrf_header(
         conn, client, store):
-    """The mint is a POST so that `deps.session_token` demands the
-    double-submit: a cookie-authenticated unsafe method must carry
-    `x-csrf-token` matching the readable cookie. That header is what a
-    page on ANOTHER origin cannot supply -- it can make the browser send
-    the cookie, but CORS will not let it set a custom header on a request
-    that carries one, and `SameSite=strict` stops the cookie travelling
-    at all. A GET would be exempt from the whole mechanism, which is the
-    first reason this is not one.
+    """The mint is a POST so that `deps.session_token` demands the double-submit: a cookie-authenticated
+    unsafe method must carry `x-csrf-token` matching the readable cookie, which a page on another origin
+    cannot supply. A GET would be exempt from the mechanism.
 
-    Cookies go in an explicit header: httpx will not send a `Secure`
-    cookie over the test client's plain-http base URL, and a test that
-    silently sent none would pass for the wrong reason.
+    Cookies go in an explicit header: httpx will not send a `Secure` cookie over the test client's plain-http
+    base URL, and a test that sent none would pass for the wrong reason.
     """
     from noctornal_api.http.deps import CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE
     uid, email, secret = _user(conn, roles=("MALWARE_ANALYST",))
@@ -515,16 +450,11 @@ def test_minting_with_a_cookie_session_needs_the_csrf_header(
 
 
 def test_the_sample_origin_does_not_mint(conn, client, store, monkeypatch):
-    """A ticket is minted where the session already is. The sample origin
-    exists so that no page carrying an analyst's session runs there, and
-    minting on it would put the session it is minted under exactly where
-    the split says none may be.
+    """A ticket is minted where the session already is: minting on the sample origin would put a session
+    exactly where the split says none may be.
 
-    Two layers, and the second is the one that does not depend on a
-    regular expression in another file: `app._allowed_on_sample_origin`
-    404s everything on that process but the download, its preflight,
-    `/healthz` and the register -- and the service refuses on its own
-    reading of the configuration.
+    Two layers: `app._allowed_on_sample_origin` 404s everything on that process but the download, its
+    preflight, `/healthz` and the register, and the service refuses on its own reading of the configuration.
     """
     from noctornal_api.samples import SampleError, SampleService
     _, token, sample = _analyst(conn)
@@ -547,20 +477,15 @@ def test_the_sample_origin_does_not_mint(conn, client, store, monkeypatch):
 
 def test_a_deactivated_account_cannot_redeem_a_live_ticket(
         conn, client, store, monkeypatch):
-    """The window is sixty seconds and "a disabled account can still pull
-    hostile bytes for the next minute" is the wrong answer for this
-    product, so the redemption re-reads the ACCOUNT.
+    """A disabled account must not pull hostile bytes during the sixty-second window, so redemption
+    re-reads the account.
 
-    Not a third copy of the session check -- `_still_authorised` calls
-    `IamAdminService.holds_global_permission`, the same active-account,
-    verb-through-a-global-role read `deps.require_global` is built on, and
-    the same one the mint made a moment earlier.
+    `_still_authorised` calls `IamAdminService.holds_global_permission`, the same active-account,
+    verb-through-a-global-role read `deps.require_global` is built on and the mint used.
 
-    The ticket is SPENT even though nothing was served, and that is
-    deliberate: the one-shot property lives in the single atomic UPDATE,
-    and a ticket whose holder has just lost their authority should not
-    survive to be presented again if the deactivation is reversed. The
-    refusal says nothing about which of the reasons it was.
+    The ticket is spent even though nothing was served: the one-shot property lives in the single atomic
+    UPDATE, and a ticket whose holder lost authority must not survive if the deactivation is reversed. The
+    refusal does not say which reason applied.
     """
     uid, token, sample = _analyst(conn)
     ticket = _mint(client, token, sample.id).json()["ticket"]
@@ -586,15 +511,12 @@ def test_a_deactivated_account_cannot_redeem_a_live_ticket(
 
 
 def test_both_doors_state_the_same_permission(conn):
-    """Two processes now read `sample.download`: `require_global` gates the
-    mint and the session download on the application origin, and
-    `_still_authorised` re-reads it at redemption on the sample origin.
+    """`require_global` gates the mint and the session download on the application origin, and
+    `_still_authorised` re-reads `sample.download` at redemption on the sample origin.
 
-    The router spells the key literally because `test_ui_invariants` pins
-    that source line, so the two cannot be held together by an import.
-    They are held together here instead: a permission renamed in the seed
-    and updated in one place would otherwise ungate one door while the
-    other kept refusing, and nothing would say so.
+    The router spells the key literally because `test_ui_invariants` pins that source line, so an import
+    cannot tie them together. This test does: a permission renamed in the seed and updated in one place
+    would otherwise ungate one door while the other kept refusing.
     """
     from pathlib import Path
 
@@ -613,15 +535,11 @@ def test_both_doors_state_the_same_permission(conn):
 
 def test_a_revoked_download_permission_cannot_redeem_a_live_ticket(
         conn, client, store, monkeypatch):
-    """The other half of the same read. An account can stay active and
-    lose the one verb that puts malware on a disk -- a role removed while
-    an investigation is reassigned is the ordinary way that happens -- and
-    a ticket minted thirty seconds earlier must not outlive it.
+    """An account can stay active and lose `sample.download` (a role removed on reassignment), and a ticket
+    minted earlier must not outlive it.
 
-    The reason is distinguished from a deactivation because they are two
-    different things to go and ask somebody about, which is the same
-    argument `_ticket_refusal` makes for telling a replay from a stale
-    tab.
+    The reason is distinguished from a deactivation because they are two different things to ask somebody
+    about, as `_ticket_refusal` does for a replay versus a stale tab.
     """
     uid, token, sample = _analyst(conn)
     ticket = _mint(client, token, sample.id).json()["ticket"]
@@ -650,21 +568,16 @@ def test_a_revoked_download_permission_cannot_redeem_a_live_ticket(
 
 def test_a_flood_of_unknown_tickets_is_metered_and_audits_nothing(
         conn, client, store, monkeypatch):
-    """`POST /samples/{id}/download` with `ticket=x` needs no credential of
-    any kind, and every refusal used to append a row to `audit.event` --
-    append-only by design, hash-chained, serialised by an advisory lock.
-    Anyone who could reach the sample origin could therefore grow a table
-    nothing can delete from, one request at a time.
+    """A flood of unknown tickets is metered and audits nothing.
 
-    Both halves of the fix are asserted here, because either alone leaves
-    the hole: a string matching no row is counted in a sampled log line
-    and never written down, and the route is metered on the peer address
-    so there is a bound on how many strings one source may send at all.
+    `POST /samples/{id}/download` with `ticket=x` needs no credential, and `audit.event` is append-only,
+    hash-chained and serialised by an advisory lock, so a row per refusal would let anyone who can reach the
+    sample origin grow a table nothing can delete from. Both halves are asserted: a string matching no row
+    is counted in a sampled log line and never written, and the route is metered on the peer address.
 
-    The limit is shrunk for the test and its real shape is asserted
-    separately -- a test that hard-coded 120 would fail on a tuning change
-    that is not a defect, and one that never asserted the scope would pass
-    with the limit keyed on something the caller can mint.
+    The limit is shrunk for the test and its real shape asserted separately: hard-coding 120 would fail on
+    a harmless tuning change, and not asserting the scope would pass with the limit keyed on something the
+    caller can mint.
     """
     from noctornal_api.ratelimit import LIMITS, Limit, OnBackendFailure, Scope
     real = LIMITS["sample.download"]
@@ -706,16 +619,12 @@ def test_a_flood_of_unknown_tickets_is_metered_and_audits_nothing(
 # --- what is stored, and what is not ------------------------------------
 
 def test_the_ticket_itself_is_never_written_down(conn, client, store):
-    """`ingest.api_key` keeps a hash and never the secret, so a read of
-    the table -- a backup, a replica, a support dump -- yields nothing
-    that can be presented. The same rule here, and the row is sharper
-    still: it names a user, a sample and a live authorisation to download
-    it.
+    """The ticket is stored as a hash, never the secret, so a backup, replica or support dump yields
+    nothing that can be presented (`ingest.api_key`'s rule). The row names a user, a sample and a live
+    authorisation to download it.
 
-    The whole row is cast to text rather than the columns checked one by
-    one, so a column added later that quietly carried the value would
-    fail this too. The audit detail is read for the same reason: it is
-    the other place a credential gets copied to by accident.
+    The whole row is cast to text so a column added later that carried the value would fail too, and the
+    audit detail is read because it is the other place a credential gets copied by accident.
     """
     _, token, sample = _analyst(conn)
     ticket = _mint(client, token, sample.id).json()["ticket"]

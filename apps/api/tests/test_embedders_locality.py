@@ -1,15 +1,11 @@
-"""Where the model endpoint is, and so which destination it is (F6.2,
-embeddings, 2026-09-24).
+"""Where the model endpoint is, and so which destination it is.
 
-The locality comes from the route and the one lookup pinned_http makes
-(docs/20 section 9), never from a lookup of our own.
-Only a loopback answer on a DIRECT route, outside production, with
-NOCTORNAL_EMBED_MEANING_LOCAL_HOST naming the host, is this host
-(Destination.MODEL_HOST). Everything else is outside it (MODEL_REMOTE),
-where invariant 8's floor applies: the old "platform network" proof let
-a LAN box take RED on the shipped development install, and the egress
-proxy refuses the deployment's own networks, so a production platform
-endpoint could not be configured anyway.
+The locality comes from the route and the one lookup pinned_http makes (docs/20 section 9), never from a
+lookup of our own. Only a loopback answer on a DIRECT route, outside production, with
+NOCTORNAL_EMBED_MEANING_LOCAL_HOST naming the host, is this host (Destination.MODEL_HOST). Everything else
+is outside it (MODEL_REMOTE), where invariant 8's floor applies: a "platform network" proof would let a LAN
+box take RED on the shipped development install, and the egress proxy refuses the deployment's own
+networks, so a production platform endpoint could not be configured anyway.
 
 No database, no network.
 """
@@ -85,8 +81,8 @@ def test_production_never_treats_an_endpoint_as_this_host(monkeypatch):
     with pytest.raises(E.EndpointError) as caught:
         _open(_settings("http://127.0.0.1:8080/v1", local="127.0.0.1"))
     assert caught.value.reason in ("unrouted", "route_refused")
-    # Production leaves only through the proxy (docs/00 decision 68;
-    # 2026-09-25), so the second half asks through a proxied route.
+    # Production leaves only through the proxy (docs/00 decision 68), so the second half asks through a
+    # proxied route.
     _proxied(monkeypatch, Rule.for_host("10.20.0.7", {8080}))
     endpoint = _open(_settings("http://10.20.0.7:8080/v1", local="10.20.0.7"))
     assert endpoint.destination is Destination.MODEL_REMOTE

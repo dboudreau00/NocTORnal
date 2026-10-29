@@ -1,22 +1,18 @@
 """A read-only case, statically: the route inventory and the console half.
 
-gap-closed-case-writes (2026-09-23). The server refuses content writes on
-a CLOSED, ARCHIVED or PURGED case at ONE place, `authorize_object`, keyed
-on the verb (`deps.CONTENT_WRITE_PERMISSIONS`) or on `content_write=True`
-from a route whose verb also gates reads. That is only as good as the
-route table's agreement with it, so this file holds the table:
+The server refuses content writes on a CLOSED, ARCHIVED or PURGED case at ONE place,
+`authorize_object`, keyed on the verb (`deps.CONTENT_WRITE_PERMISSIONS`) or on `content_write=True`
+from a route whose verb also gates reads. That is only as good as the route table's agreement with it:
 
-- every unsafe case route is named here as a content write, as
-  governance, or as decided by the operation it asks for, and a new one
-  fails until somebody says which;
-- every content write really passes the guard, and no governance route
-  and no read does (a read gated on a content verb would 409 on a closed
-  case, which is worse than the gap this closed);
-- the console recognises the refusal by the server's own title, agrees on
-  the states, and has its one read-only mechanism wired where it must be.
+- every unsafe case route is named here as a content write, as governance, or as decided by the
+  operation it asks for, and a new one fails until somebody says which;
+- every content write really passes the guard, and no governance route and no read does (a read gated
+  on a content verb would 409 on a closed case);
+- the console recognises the refusal by the server's own title, agrees on the states, and has its one
+  read-only mechanism wired where it must be.
 
-Pure: it reads the router objects and the shipped static assets. The
-behaviour over HTTP is `test_closed_case_read_only_pg.py`.
+Pure: it reads the router objects and the shipped static assets. The behaviour over HTTP is
+`test_closed_case_read_only_pg.py`.
 """
 from __future__ import annotations
 
@@ -51,7 +47,7 @@ CONTENT = {
     ("POST", "/cases/{case_id}/nodes/{node_id}/assertions"),
     ("POST", "/cases/{case_id}/edges/{edge_id}/assertions"),
     ("POST", "/cases/{case_id}/assertions/{assertion_id}/retract"),
-    # Dating a claim that never had a date, by supersession (2026-10-02).
+    # Dating a claim that never had a date, by supersession.
     ("POST", "/cases/{case_id}/assertions/{assertion_id}/supersede"),
     ("PATCH", "/cases/{case_id}/graph/nodes/{node_id}"),
     ("PATCH", "/cases/{case_id}/graph/edges/{edge_id}"),
@@ -78,7 +74,7 @@ CONTENT = {
     ("POST", "/cases/{case_id}/comms/pgp/verify"),
     ("POST", "/cases/{case_id}/comms/conversations"),
     ("POST", "/cases/{case_id}/comms/conversations/{conversation_id}/incidental"),
-    # Comms F10b and F10c (2026-09-24): the key registry and the lookups.
+    # Comms: the key registry and the lookups.
     ("POST", "/cases/{case_id}/comms/pgp/keys"),
     ("POST", "/cases/{case_id}/comms/pgp/keys/{key_id}/confirm"),
     ("POST", "/cases/{case_id}/comms/pgp/keys/{key_id}/retire"),
@@ -99,35 +95,31 @@ CONTENT = {
     ("POST", "/cases/{case_id}/curation/sets/{set_id}/members"),
     ("DELETE", "/cases/{case_id}/curation/sets/{set_id}/members/{node_id}"),
     ("POST", "/samples"),
-    # `POST /ingest/batches/{batch_id}/parse` is no longer here: it takes no
-    # case (2026-10-08, docs/17 "`parse` with a case id") and parses into the
-    # unattached queue. A record reaches a case by `POST /ingest/records/
-    # {record_id}/attach`, which gates on `ingest.replay`, a content verb.
+    # `POST /ingest/batches/{batch_id}/parse` is not listed: it takes no case and parses into the
+    # unattached queue. A record reaches a case by `POST /ingest/records/{record_id}/attach`, which
+    # gates on `ingest.replay`, a content verb.
     ("POST", "/ingest/dead-letters/{dead_letter_id}/replay"),
-    # Lab work on a sample already attached to a case: its case is in no
-    # path and the verbs are global, so each calls the gate by hand (c7/c21,
-    # 2026-09-24: all five used to work on a CLOSED case's sample).
+    # Lab work on a sample already attached to a case: its case is in no path and the verbs are
+    # global, so each calls the gate by hand.
     ("POST", "/samples/{sample_id}/assign"),
     ("POST", "/samples/{sample_id}/analysis"),
     ("POST", "/samples/{sample_id}/analyses/{analysis_id}/propose"),
     ("POST", "/samples/{sample_id}/detonation"),
     ("POST", "/samples/{sample_id}/reject"),
-    # F11 K, 2026-09-24. Static triage on demand writes machine
-    # findings onto an attached sample; a closed case takes none.
+    # Static triage on demand writes machine findings onto an attached sample; a closed case takes none.
     ("POST", "/samples/{sample_id}/static-triage"),
-    # Lookups (F15.3 and F15.4, 2026-09-24): each may send a
-    # case selector out, or files an answer as an exhibit.
+    # Lookups: each may send a case selector out, or files an answer as an exhibit.
     ("POST", "/cases/{case_id}/lookups"),
     ("POST", "/cases/{case_id}/lookups/{lookup_id}/sign-off"),
     ("POST", "/cases/{case_id}/lookups/results/{result_id}/file"),
     ("POST", "/cases/{case_id}/lookups/batches"),
     # Keeping a case out of Jira is governance, below.
-    # F53 (2026-10-08): a new standing tasking on the case. Unlike the hits it
-    # raises, which are housekeeping, a closed case takes no new watch.
+    # A new standing tasking: unlike the hits it raises, which are housekeeping, a closed case takes
+    # no new watch.
     ("POST", "/cases/{case_id}/collection/watches"),
 }
 
-#: Why a similarity route is a read (F6.3, F6.4, 2026-09-24).
+#: Why a similarity route is a read.
 _SIMILAR_READ = ("a read sent as POST so the query text stays out of the URL; a "
                  "similar meaning query is audited before it leaves")
 
@@ -147,14 +139,12 @@ NOT_CONTENT = {
         "a read with a custody record; disclosure happens after closure",
     ("POST", "/cases/{case_id}/evidence/{evidence_id}/verify"):
         "an integrity check that adds nothing",
-    # x-hostile-export (2026-09-24): the export of attacker markup, in two
-    # legs, and a read with a custody record as the export is.
+    # The export of attacker markup, in two legs, and a read with a custody record as the export is.
     ("POST", "/cases/{case_id}/evidence/{evidence_id}/production-ticket"):
         "a read with a custody record; disclosure happens after closure",
     ("POST", "/cases/{case_id}/evidence/{evidence_id}/download"):
         "the production ticket spent on the sample origin; a read",
-    # x-lock-extension (2026-09-24): what extending the retention date
-    # does, for locks set before they followed it. Governance, as the date.
+    # Extending the retention date lengthens locks set before they followed it. Governance, as the date.
     ("POST", "/cases/{case_id}/evidence/locks"):
         "lengthens the storage locks to the retention date, as the PATCH does",
     ("POST", "/cases/{case_id}/report"): "builds a document, audits, writes no content",
@@ -177,14 +167,13 @@ NOT_CONTENT = {
         "withdrawing that authorisation",
     ("POST", "/samples/{sample_id}/preserved/retrieval-ticket"):
         "a read under that authorisation",
-    # Similarity reads (F6.3, F6.4, 2026-09-24). They may write a
-    # derived vector row, never case content.
+    # Similarity reads. They may write a derived vector row, never case content.
     ("POST", "/cases/{case_id}/search/documents/similar"): _SIMILAR_READ,
     ("POST", "/cases/{case_id}/search/evidence/similar"): _SIMILAR_READ,
     ("POST", "/cases/{case_id}/search/assertions/similar"): _SIMILAR_READ,
     ("POST", "/cases/{case_id}/evidence/{evidence_id}/similar"): _SIMILAR_READ,
     ("POST", "/cases/{case_id}/assertions/{assertion_id}/similar"): _SIMILAR_READ,
-    # Lookups and Jira routing (F15.3, F15.4 and F7, 2026-09-24).
+    # Lookups and Jira routing.
     ("POST", "/cases/{case_id}/lookups/{lookup_id}/cancel"):
         "withdrawing a request sends nothing",
     ("POST", "/cases/{case_id}/lookups/plan"):
@@ -193,7 +182,6 @@ NOT_CONTENT = {
         "cancelling queued sends sends nothing",
     ("PUT", "/cases/{case_id}/notify-routing"):
         "keeping a case out of Jira: governance, and wanted most on a closed case",
-    # evidence-case-hold-unreachable (2026-10-03).
     ("POST", "/retention/cases/{case_id}/legal-hold"):
         "a hold on everything a case governs: preservation does not wait for "
         "a reopening, and is wanted most on a closed case",
@@ -301,9 +289,7 @@ def _guarded(route) -> bool:
 
 
 def _is_case_route(path: str) -> bool:
-    """A case's own route, or one on a sample, which a case owns once it
-    is attached (c7/c21, 2026-09-24: the scan read `{case_id}` alone, so
-    the Lab's writes on an attached sample were never classified)."""
+    """A case's own route, or one on a sample, which a case owns once it is attached."""
     return "{case_id}" in path or path.startswith("/samples/{sample_id}")
 
 
@@ -387,18 +373,13 @@ def test_the_case_record_says_read_only():
             owner_user_id="u", legal_basis="b", retention_until="2028-01-01",
             review_due="2027-01-01", created_at="2026-01-01T00:00:00Z",
             closed_at=None, summary=None, authority_ref=None,
-            # The record carries the case's hold since 2026-10-08.
             legal_hold=False)
         assert _out(row).read_only is (status in CONTENT_READ_ONLY_STATES)
 
 
 def test_no_router_keeps_its_own_copy_of_the_refusal():
-    """A second copy of the check drifts from the gate. The ingest router
-    had one (g08) that refused only CLOSED and ARCHIVED, titled its 409
-    "Conflict" and wrote no audit row: a PURGED case's record could be
-    triaged, and the console, which knows the refusal by its title, never
-    turned read-only (merged 2026-09-24). Ingest record triage gates on a
-    reader's verb, `ingest.read`, so it calls the one gate by hand."""
+    """A second copy of the check drifts from the gate. The ingest router must not refuse on its own:
+    its triage gates on a reader's verb, `ingest.read`, so it calls the one gate by hand."""
     import noctornal_api.http.routers as pkg
     for info in pkgutil.iter_modules(pkg.__path__):
         src = inspect.getsource(
@@ -417,11 +398,10 @@ def test_no_router_keeps_its_own_copy_of_the_refusal():
 
 
 def test_the_lab_asks_the_gate_after_the_label_check():
-    """The Lab's writes on an attached sample call the one gate by hand, as
-    ingest record triage does, and only once the sample's labels have
-    answered: a caller who cannot see the sample gets the 404 and never
-    the case's state (c7/c21, 2026-09-24). The service's own refusal is
-    answered as the gate's, so the console turns read-only on it."""
+    """The Lab's writes on an attached sample call the one gate by hand, as ingest record triage does,
+    and only once the sample's labels have answered: a caller who cannot see the sample gets the 404 and
+    never the case's state. The service's own refusal is answered as the gate's, so the console turns
+    read-only on it."""
     from noctornal_api.http.routers import samples as router
     helper = inspect.getsource(router._refuse_if_read_only)
     assert "refuse_if_case_read_only(conn, user, sample.case_id, permission_key)" in helper
@@ -509,19 +489,17 @@ def test_the_rail_keys_skip_a_tab_the_read_only_case_turned_off():
 
 def test_clearing_pins_on_a_read_only_case_does_not_try_to_save():
     assert "!caseReadOnly()" in _fn("clearPins")
-    # Each clear the Undo card counts keeps its own `store` (merged
-    # 2026-09-24: one sticky card may count two clears).
+    # Each clear the Undo card counts keeps its own `store`: one sticky card may count two clears.
     assert "push({ caseId, token, before, store })" in _fn("clearPins")
     assert "restorePins(c.caseId, c.token, c.before, c.store);" in _fn("clearPins")
     assert "if (!store) return;" in _fn("restorePins")
 
 
 def test_placements_on_a_read_only_case_are_never_marked_or_stored():
-    """Hand placements are marked unsaved, asked about as the page is left
-    and stored as the case is left (ux03 pin-layout-work-lost). None of
-    that can happen on a read-only case, whose layout the server refuses
-    to change: the Save dot would sit on a control that is off, the page
-    would ask about work it cannot keep, and leaving would draw a 409."""
+    """Hand placements are marked unsaved, asked about as the page is left and stored as the case is
+    left. None of that can happen on a read-only case, whose layout the server refuses to change: the
+    Save dot would sit on a control that is off, the page would ask about work it cannot keep, and
+    leaving would draw a 409."""
     js = _js()
     assert "if (!caseReadOnly()) state.layoutDirty.add(g.drag.id);" in js
     assert "if (!caseReadOnly()) state.layoutDirty.add(n.id);" in _fn("togglePin")
@@ -547,34 +525,22 @@ def test_the_read_only_copy_is_in_house_style():
     assert not re.search(OFF_STYLE, table)
 
 
-# ---------------------------------------------------------------------------
-# Every console write on a case, and what turns it off
-#
-# The first pass turned off the markup's controls and left every control a
-# pane draws at render time live: on a CLOSED case the tag, exhibit-link,
-# retract, reverse, proposal, stance and assumption controls all worked up
-# to the server's 409, under a strip saying they were off, and the palette
-# still offered "Save layout" and "Go to Add entity" (verifier,
-# 2026-09-23). This holds the console the way the tables above hold the
-# routes: every function that sends a write to one case is named, and each
-# content write says what turns it off.
-# ---------------------------------------------------------------------------
+# Every console write on a case, and what turns it off: every function that sends a write to one case
+# is named, and each content write says what turns it off.
 
-#: A console function that writes one case's CONTENT, and what turns it off
-#: on a read-only case:
-#: ("id", container, trigger): the trigger sits in `container`, a control
-#:   in the markup that CASE_CONTENT_CONTROLS lists;
-#: ("drawn", selector, builder, marker): `builder` draws the control (it
-#:   contains `marker`) and CASE_CONTENT_RENDERED matches it by `selector`;
-#: ("guard", function): a path with no control of its own (a key, the
-#:   palette, a local action) that asks caseReadOnly() first.
+#: A console function that writes one case's CONTENT, and what turns it off on a read-only case:
+#: ("id", container, trigger): the trigger sits in `container`, a control in the markup that
+#:   CASE_CONTENT_CONTROLS lists;
+#: ("drawn", selector, builder, marker): `builder` draws the control (it contains `marker`) and
+#:   CASE_CONTENT_RENDERED matches it by `selector`;
+#: ("guard", function): a path with no control of its own (a key, the palette, a local action) that
+#:   asks caseReadOnly() first.
 CONSOLE_CONTENT = {
     "saveLayout": [("id", "btn-save-layout", "btn-save-layout")],
-    # Lookups send a case selector out (F15.3 and F15.4, 2026-09-24).
+    # Lookups send a case selector out.
     "lookupPanel": [("drawn", ".case-write", "lookupPanel", "case-write")],
     "signoffRow": [("drawn", ".case-write", "signoffRow", "case-write")],
-    # The plan card queues, for both ways in (2026-09-25); a stored answer
-    # is filed as an exhibit.
+    # The plan card queues, for both ways in; a stored answer is filed as an exhibit.
     "renderLookupPlan": [("drawn", ".case-write", "renderLookupPlan", "case-write")],
     "renderLookupResult": [("drawn", ".case-write", "renderLookupResult", "case-write")],
     "clearPins": [("guard", "clearPins")],
@@ -582,8 +548,8 @@ CONSOLE_CONTENT = {
     "restorePins": [("guard", "clearPins")],
     # Its one caller drops a read-only case's placements first.
     "saveLayoutOnLeave": [("guard", "leaveLayout")],
-    # Unsaved placements, stored before a status change shuts the case
-    # (2026-09-24); it asks whether the case is still open first.
+    # Unsaved placements, stored before a status change shuts the case; it asks whether the case is
+    # still open first.
     "saveLayoutBeforeShut": [("guard", "saveLayoutBeforeShut")],
     "uploadEvidence": [("id", "ev-form", "ev-form")],
     "renderTags": [("drawn", ".tag-x", "renderTags", "'tag-x'"),
@@ -592,8 +558,7 @@ CONSOLE_CONTENT = {
                            ("id", "insp-actions", "btn-retire-element")],
     "retractAssertion": [("drawn", ".assert-actions", "renderAssertions",
                           "'assert-actions'")],
-    # Date this claim sits beside Retract in the same actions row and is
-    # turned off with it (2026-10-02).
+    # This claim sits beside Retract in the same actions row and is turned off with it.
     "openDateClaimForm": [("drawn", ".assert-actions", "renderAssertions",
                            "'assert-actions'")],
     "addTieClaim": [("id", "insp-claim", "claim-form")],
@@ -613,10 +578,8 @@ CONSOLE_CONTENT = {
     "initCommsBlocks": [("id", "comms-block-form", "comms-block-form")],
     # Raising a merge approval is part of the same press.
     "runMerge": [("id", "merge-run", "merge-run")],
-    # A merge's Approve, Reject and Execute merge; Withdraw and a
-    # case.delete decision are governance and carry no `case-write`.
-    # The buttons are built in approvalActions (ux08-triage:approval-row-
-    # uuids-no-requester); Execute merge stays on the row.
+    # A merge's Approve, Reject and Execute merge; Withdraw and a case.delete decision are governance
+    # and carry no `case-write`. The buttons are built in approvalActions; Execute merge stays on the row.
     "approvalActions": [
         ("drawn", ".case-write", "approvalActions",
          "const write = a.operation === MERGE_OPERATION ? ' case-write' : '';"),
@@ -638,8 +601,7 @@ CONSOLE_CONTENT = {
                           "reviewAssumption(a, status, b, msg)")],
     "saveStance": [("drawn", ".ach-cell-btn", "renderAchMatrix", "'ach-cell-btn'"),
                    ("id", "ach-score-card", "ach-evidence-add"),
-                   # The next-test line's shortcut to the first blank cell
-                   # (2026-09-24: live beside cells that were off).
+                   # The next-test line's shortcut to the first blank cell.
                    ("drawn", ".case-write", "renderAchRanking",
                     "el('button', 'btn small ach-next-go case-write', "
                     "'Score it now')")],
@@ -653,8 +615,7 @@ CONSOLE_CONTENT = {
     # "Add a hypothesis" opening at full strength on a closed case.
     "addHypothesis": [("id", "ach-add-card", "ach-add")],
     "verifyPgp": [("id", "comms-pgp-form", "comms-pgp-form")],
-    # Comms F10b and F10c (2026-09-24): the key registry's forms, the
-    # drawn Confirm and Retire, and a lookup's Approve and Decline.
+    # Comms: the key registry's forms, the drawn Confirm and Retire, and a lookup's Approve and Decline.
     "importPgpKey": [("id", "comms-pgpkey-form", "comms-pgpkey-form")],
     "requestKeyLookup": [("id", "comms-pgpkey-wkd-form", "comms-pgpkey-wkd-form")],
     "confirmPgpKey": [
@@ -673,15 +634,14 @@ CONSOLE_CONTENT = {
     "declineKeyLookup": [
         ("drawn", ".case-write", "renderKeyLookup",
          "'btn ghost small case-write pgpkey-lookup-decline'")],
-    # The deception pane's new-record forms and its proposals (g09).
+    # The deception pane's new-record forms and its proposals.
     "saveCapture": [("id", "dcp-cap-new", "dcp-capf-save")],
     "saveEmail": [("id", "dcp-eml-new", "dcp-emlf-save")],
     "saveCall": [("id", "dcp-call-new", "dcp-callf-save")],
     "dcpProposeBar": [("drawn", ".case-write", "dcpProposeBar",
                        "el('button', 'btn small case-write', 'Propose')")],
-    # The Feeds queue's triage verbs on a record in the case's own queue
-    # (2026-09-24): live under the strip, refused with the 409. A
-    # quarantined record belongs to no case and its row stays live.
+    # The Feeds queue's triage verbs on a record in the case's own queue are turned off. A quarantined
+    # record belongs to no case and its row stays live.
     "applyTriage": [
         ("drawn", ".case-write", "ingestRow",
          "const write = r.case_id ? ' case-write' : '';"),
@@ -702,8 +662,7 @@ CONSOLE_CONTENT = {
         ("drawn", ".case-write", "ingestRow", "verb('Correct category…', "),
         ("drawn", ".case-write", "ingestRow", "const cases = attachTargets();"),
     ],
-    # F53 (2026-10-08): the Collected tab's Add a watch box, the whole box
-    # (the summary included), as Add a hypothesis is.
+    # The Collected tab's Add a watch box, the whole box (the summary included), as Add a hypothesis is.
     "addWatch": [("id", "col-watch-box", "col-watch-btn")],
 }
 
@@ -715,8 +674,7 @@ CONSOLE_GOVERNANCE = {
                       "custody record, and disclosure happens after closure",
     "lengthenLocks": "the storage locks follow the retention date, which is "
                      "governance and stays open on a closed case",
-    # The case's own record and its status, reopen included: once written
-    # in wireCaseActions, now the record and status dialogs' own (ux02-cases).
+    # The case's own record and its status, reopen included.
     "submitStatus": "the status dialog: the lifecycle, reopen included",
     "saveCaseRecord": "the case's own record (the metadata PATCH)",
     "buildReport": "builds a document and audits it",
@@ -726,20 +684,17 @@ CONSOLE_GOVERNANCE = {
     "shareRow": "unsharing",
     "submitShare": "sharing",
     "runNodeCheck": "a read sent as POST so the label stays out of the URL",
-    # A record's score is derived from the case's watches, not content, and
-    # the server recomputes it on a closed case too (2026-09-24).
+    # A record's score is derived from the case's watches, not content, and the server recomputes it
+    # on a closed case too.
     "rescoreRecord": "a derived score, recomputed on a closed case too",
     "rescoreAll": "the same, for every record in the case's queue",
-    # F9b (2026-09-24): the case's merge switch is the approval
-    # policy, which NOT_CONTENT names as governance.
+    # The case's merge switch is the approval policy, which NOT_CONTENT names as governance.
     "setCaseMergePolicy": "the approval policy: turning merges' second "
                           "signature on",
     "raiseRelaxRequest": "asking a second Lead investigator to turn it off",
     "applyRelaxApproval": "turning it off with that approval",
-    # Similarity reads (F6.3, F6.4, 2026-09-24).
     "runSimilarSearch": _SIMILAR_READ,
     "loadSimilarPanel": _SIMILAR_READ,
-    # F7 and F15.3 (2026-09-24).
     "saveCaseRouting": "keeping a case out of Jira: governance, wanted most "
                        "on a closed case",
     "lookupRow": "cancelling a waiting or queued lookup sends nothing",
@@ -748,11 +703,9 @@ CONSOLE_GOVERNANCE = {
 
 
 def _console_case_writes() -> dict[str, set[int]]:
-    """Enclosing top-level function -> line numbers, for every `api(` call
-    with an unsafe method whose path is one case's (`cpath(` or
-    '/cases/' + ...), or a Feeds record's, which belongs to one case
-    ('/ingest/records/...'). The record writers were never scanned, so the
-    triage and category verbs stayed live on a closed case (2026-09-24)."""
+    """Enclosing top-level function -> line numbers, for every `api(` call with an unsafe method whose
+    path is one case's (`cpath(` or '/cases/' + ...), or a Feeds record's, which belongs to one case
+    ('/ingest/records/...')."""
     js = _js()
     starts = [(m.start(), m.group(1)) for m in
               re.finditer(r"(?m)^(?:async )?function (\w+)\(", js)]
@@ -1079,8 +1032,6 @@ def test_the_triage_keys_ask_nothing_on_a_read_only_case(tmp_path):
     script = (_const("CASE_STATES_SHUT") + _fn("caseReadOnly")
               + "".join(_fn(n) for n in ("acceptProposal", "rejectProposal",
                                           "deferProposal",
-                                          # The prompts name their card
-                                          # (final review c14).
                                           "triageNamed", "triageTitle",
                                           "triageClaimValue")) + r"""
 const calls = [];
@@ -1125,7 +1076,7 @@ async function api() { throw answer; }
 """)
     got = _run_node(script, tmp_path)
     assert got["fails"] == ["Case is read-only"]
-    # A real race keeps its banner, in ux08-triage's words ("Not <verb>").
+    # A real race keeps its banner ("Not <verb>").
     assert got["banners"] == ["Not accepted"]
 
 
@@ -1153,10 +1104,8 @@ console.log(JSON.stringify({ closed: closed, open: { offered: offered, value: bo
 
 @needs_node
 def test_attach_offers_no_read_only_case(tmp_path):
-    """2026-09-24: the picker compared the status with CLOSED and
-    ARCHIVED, so a PURGED case was offered and then refused. It reads each
-    case's own `read_only` now, and the status only for a record without
-    it."""
+    """The picker reads each case's own `read_only`, and the status only for a record without it, so
+    a PURGED case is not offered."""
     script = (_const("CASE_STATES_SHUT")
               + "".join(_fn(n) for n in ("caseReadOnly", "attachTargets")) + r"""
 const state = { cases: [
@@ -1211,11 +1160,8 @@ const summary = (box) => {
 
 @needs_node
 def test_the_lab_card_offers_no_work_on_a_read_only_cases_sample(tmp_path):
-    """c21 (2026-09-24): the card drew assign, record an analysis, propose,
-    detonate and reject for a CLOSED case's sample, all refused by the
-    server. The row's own `case_read_only` decides it, never the open
-    case, because the Lab lists samples from every case; the download, a
-    read, stays."""
+    """The row's own `case_read_only` decides what the Lab card offers for a sample, never the open
+    case, because the Lab lists samples from every case; the download, a read, stays."""
     names = ("smpCaseShut", "sampleWorkPanel", "detonationPanel",
              "extractedSelector", "sampleActions")
     script = (_FAKE_EL + "".join(_fn(n) for n in names) + r"""

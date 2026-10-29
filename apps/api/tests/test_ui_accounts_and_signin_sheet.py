@@ -1,19 +1,13 @@
-"""The Admin pane and the sign-in sheet, after the final review of Alpha 6
-(2026-09-24). Each test names the finding it would have caught:
+"""The Admin pane and the sign-in sheet.
 
-- c8: the creation card says the issued password is replaced at the
-  account's first sign-in;
-- a one-time password typed into the lapse sheet asks for the new
-  password IN the sheet and carries on through `sessionRenewed`, instead
-  of ending the session and discarding the screen the sheet had promised
-  to keep;
-- after an account action succeeds, the focus goes back into the
-  redrawn card (into a <details> the redraw built closed, too) and the
-  outcome is said through a status region that stays on the page;
-- a stale step-up asks for the sign-in in place, and is never said as
-  a missing System administrator role or as "sign out"; the registry,
-  which is not a step-up read, still shows while the accounts wait;
-- registering a compartment reloads the Rename or retire list too.
+- The creation card says the issued password is replaced at the account's first sign-in.
+- A one-time password typed into the lapse sheet asks for the new password in the sheet and carries on
+  through `sessionRenewed`, keeping the screen the sheet promised to keep.
+- After an account action succeeds, the focus goes back into the redrawn card (into a <details> the
+  redraw built closed, too) and the outcome is said through a status region that stays on the page.
+- A stale step-up asks for the sign-in in place, and is never said as a missing System administrator
+  role or as "sign out"; the registry, which is not a step-up read, still shows while the accounts wait.
+- Registering a compartment reloads the Rename or retire list too.
 
 The `needs_node` tests run the shipped functions under Node over a stub
 DOM; the rest read the shipped source. Pure: no database.
@@ -316,10 +310,9 @@ def test_after_a_success_the_focus_returns_to_the_card_and_it_is_said(tmp_path):
 
 @needs_node
 def test_save_read_ins_gets_the_focus_back_inside_its_fold(tmp_path):
-    """u19, the verifier's case: Save read-ins sits in a <details> the
-    redraw builds closed, and focusing a button in a closed <details> does
-    nothing, so the focus stayed on <body>. The fold is opened again; and a
-    button that still cannot take the focus falls back to the note."""
+    """Save read-ins sits in a <details> the redraw builds closed, and focusing a button in a closed
+    <details> does nothing. The fold is opened again; a button that still cannot take the focus falls
+    back to the note."""
     source = (_DOM + _ADMIN
               + _consts("ADM_STEP_UP_WHY")
               + _fns("withStepUp", "admStepUp", "admStepUpRefused",
@@ -480,12 +473,9 @@ const ADM = { users: [], usersRead: false, usersStepUp: false, comps: null,
 
 @needs_node
 def test_a_cancelled_step_up_still_shows_the_registry_and_says_why(tmp_path):
-    """The verifier's residual on u20: the registry read sat behind the gate
-    with the accounts, so a cancelled sign-in left the Compartments subpane
-    saying the registry "could not be read", with the reason written into
-    the hidden Accounts section. GET /compartments is not a step-up route:
-    it is read beside the gate, its keys never claim "nobody" from a listing
-    that was not read, and the subpane says what the sign-in would show."""
+    """The registry read sits beside the step-up gate, not behind it. `GET /compartments` is not a
+    step-up route, so a cancelled sign-in still shows the registry, its keys never claim "nobody" from
+    a listing that was not read, and the subpane says what the sign-in would show."""
     source = (_DOM + _LOAD_USERS
               + _consts("ADM_STEP_UP_WHY")
               + _fns("withStepUp", "admStepUp", "admStepUpRefused",

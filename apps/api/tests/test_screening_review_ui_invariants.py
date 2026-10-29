@@ -1,17 +1,13 @@
-"""The console's prohibited-content screening and sandbox parts (F13
-and F14, 2026-09-24), held by reading the shipped console.
+"""The console's prohibited-content screening and sandbox parts, held by reading the shipped console.
 
-The Oversight section exists with its aria-label, is mounted by showAdmin
-after the two-person changes and before the YARA section, and is loaded
-from /admin/access's verbs; the preserved list shows a matched sample's
-authorisations as void and offers no Authorise or Revoke for it; every new
-function avoids inline styles; times go through fmtTime (which says UTC);
-counts agree; the derived gap steps have names; a matched submission shows
-the server's sentence as a refusal and opens no card; the detonation panel
-says a sandbox send is the worker's and a record-only request is never
-sent, and no longer claims nothing leaves; the rows chip by status and say
-"not submitted" on record-only rows alone; the sign-off section exists and
-loads with the Lab; custody and analysis rows name the sandbox's events.
+The Oversight section exists with its aria-label, is mounted by showAdmin after the two-person changes
+and before the YARA section, and is loaded from /admin/access's verbs; the preserved list shows a matched
+sample's authorisations as void and offers no Authorise or Revoke for it; every new function avoids
+inline styles; times go through fmtTime (which says UTC); counts agree; the derived gap steps have names;
+a matched submission shows the server's sentence as a refusal and opens no card; the detonation panel
+says a sandbox send is the worker's and a record-only request is never sent; the rows chip by status and
+say "not submitted" on record-only rows alone; the sign-off section exists and loads with the Lab;
+custody and analysis rows name the sandbox's events.
 
 Pure: no database, no browser.
 """
@@ -210,8 +206,8 @@ def test_the_handling_pane_says_what_screening_does_not_mean():
 
 
 def test_an_absence_reads_as_reviewed_only_once_a_review_follows_it():
-    """F13: only a review recorded after the absence ends the
-    question, and the chip and the record say which (verifier, 2026-09-24)."""
+    """Only a review recorded after the absence ends the question, and the chip and the record say
+    which."""
     js = _js()
     table = js[js.index("const SCREENING_NOW = {"):]
     table = table[:table.index("};")]

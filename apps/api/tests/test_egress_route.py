@@ -1,12 +1,9 @@
-"""egress.route_for, the one reader of the network path an outbound
-connection takes (2026-09-24; docs/00 decisions 68 and 77, docs/20
-section 6.2's decision table and section 7's provider).
+"""egress.route_for, the one reader of the network path an outbound connection takes (docs/00 decisions 68
+and 77, docs/20 section 6.2's decision table and section 7's provider).
 
-Pure: the environment is monkeypatched, the route provider is a fake
-module installed in sys.modules (or the real one hidden with a None entry,
-so these cells hold whether or not it is installed), and `conn` is a
-stand-in: route_for hands it to the provider and reads nothing from it
-itself.
+Pure: the environment is monkeypatched, the route provider is a fake module installed in sys.modules (or
+the real one hidden with a None entry, so these cells hold whether or not it is installed), and `conn` is a
+stand-in: route_for hands it to the provider and reads nothing from it itself.
 """
 from __future__ import annotations
 
@@ -304,7 +301,7 @@ class _Conn:
 
     def execute(self, sql, *args):
         self.sql.append(sql)
-        # 2026-09-25: jira and lookups read their own tables
+        # jira and lookups read their own tables
         self.answer = self.polled if "collect.source" in sql else False
         return self
 
@@ -313,9 +310,8 @@ class _Conn:
 
 
 def test_outbound_uses_states_presence_and_never_names(monkeypatch, provider):
-    """The collection use is a presence, not a count (2026-09-24), and
-    only a source the collector would poll is asked about. The
-    database half (a MANUAL capture source is not a use) is in
+    """The collection use is a presence, not a count, and only a source the collector would poll is asked
+    about. The database half (a MANUAL capture source is not a use) is in
     test_egress_boundary_readiness_pg.py."""
     assert egress.outbound_uses(_Conn(False)) == []
     conn = _Conn(True)

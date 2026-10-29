@@ -1,20 +1,16 @@
-"""A change hint must not be lost while the stream is idle-pinging (2026-10-03).
+"""A change hint must not be lost while the stream is idle-pinging.
 
-`_stream` waits on the socket and on the hub queue at once, with a timeout
-that is the ping interval. When the timeout fires neither is done and the
-loop takes its idle branch: a session check on a worker thread, then a ping
-on the socket. Both yield to the event loop. A hint that arrives in that
-window completes the queue getter task while nobody is looking, and the loop
-top used to replace a done getter with a fresh one without reading it, so
-the hint was thrown away and the console missed a refetch it had been told
-to make. In production the window is one session check per 25 seconds, so
-the loss was rare and invisible; under a 0.2 s ping and a loaded machine the
-socket test failed one run in two.
+`_stream` waits on the socket and on the hub queue at once, with a timeout that is the ping interval. When
+the timeout fires neither is done and the loop takes its idle branch: a session check on a worker thread,
+then a ping on the socket. Both yield to the event loop. A hint that arrives in that window completes the
+queue getter task while nobody is looking, and the loop top must read a done getter before replacing it, or
+the hint is thrown away and the console misses a refetch it was told to make. In production the window is
+one session check per 25 seconds, so the loss would be rare and invisible; under a 0.2 s ping and a loaded
+machine it is not.
 
-This file needs no database: the stream is driven with a socket that
-delivers the hint at the one moment that matters, so the race is made on
-purpose rather than hoped for, and the result is the same on a quiet machine
-and a loaded one.
+This file needs no database: the stream is driven with a socket that delivers the hint at the one moment
+that matters, so the race is made on purpose rather than hoped for, and the result is the same on a quiet
+machine and a loaded one.
 """
 from __future__ import annotations
 

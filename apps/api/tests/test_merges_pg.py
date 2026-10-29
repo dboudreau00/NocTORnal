@@ -1,9 +1,8 @@
-"""Reversible entity merge (docs/01 "Entity resolution", Phase 6).
+"""Reversible entity merge (docs/01 "Entity resolution").
 
-docs/01: "Merging is the operation most likely to quietly corrupt a case."
-So the tests are mostly about the corruption paths: a merge that cannot be
-undone, a merge that crosses the persona/person boundary, a merge that
-strands an edge, and a merge that happens twice.
+docs/01: "Merging is the operation most likely to quietly corrupt a case." So the tests are mostly about the
+corruption paths: a merge that cannot be undone, a merge that crosses the persona/person boundary, a merge
+that strands an edge, and a merge that happens twice.
 
 Env-gated on DATABASE_URL.
 """
@@ -105,13 +104,9 @@ def test_a_merge_repoints_edges_and_hides_the_losing_node(conn, world):
     rec = _svc(conn).merge(case_id=case_id, source_node_id=ids["alpha_alt"],
                            target_node_id=ids["alpha"], merged_by=uid,
                            reason="same PGP fingerprint on both handles")
-    # ONE tie moved (alpha_alt -> witness). The tie BETWEEN the two was
-    # destroyed, not moved: it would have become a self-loop.
-    #
-    # This assertion said `edges_repointed == 2` until 2026-08-10, which
-    # was asserting the defect -- the record, the audit row, the case
-    # owner's notification ("re-pointed 2 relationships") and the UI all
-    # described a destruction as a move.
+    # One tie moved (alpha_alt -> witness). The tie between the two was destroyed, not moved: it would have
+    # become a self-loop. `edges_repointed` counts only the move, so the record, the audit row, the case
+    # owner's notification and the UI do not describe a destruction as a move.
     assert rec.is_live
     assert rec.edges_repointed == 1
     assert rec.edges_self_loop_deleted == 1
@@ -197,26 +192,19 @@ def test_a_reversed_merge_stays_in_the_history(conn, world):
 
 def test_reversing_a_merge_does_not_resurrect_an_unrelated_retirement(
         conn, world):
-    """`unmerge` cleared `deleted_at` on EVERY recorded edge.
+    """`unmerge` must not clear `deleted_at` on every recorded edge.
 
-    Found 2026-08-07. `merge` only ever selects live edges
-    (`WHERE deleted_at IS NULL`) and only ever soft-deletes the ties that
-    would collapse into a self-loop -- so an edge that is deleted at
-    reversal time and was not deleted BY the merge was retired afterwards,
-    deliberately, for a reason of its own. The reversal overwrote that:
+    `merge` only selects live edges (`WHERE deleted_at IS NULL`) and only soft-deletes the ties that would
+    collapse into a self-loop, so an edge that is deleted at reversal time and was not deleted by the merge
+    was retired afterwards, deliberately, for a reason of its own. Clearing it would resurrect it:
 
         Monday    merge, twelve edges repointed, one self-loop retired
-        Tuesday   an analyst retires edge #4 -- a mis-keyed import
-        Wednesday somebody reverses Monday's merge; edge #4 is back
+        Tuesday   an analyst retires edge #4 (a mis-keyed import)
+        Wednesday somebody reverses Monday's merge; edge #4 must stay retired
 
-    with nothing recording the resurrection and `deleted_by` still naming
-    the analyst who retired it. Invariant 5 says history is superseded and
-    never overwritten, and this put a tie into the graph with no assertion
-    behind it.
-
-    Pre-existing, and REACHABLE only since edge retirement got a caller --
-    before that nothing but a merge could set `deleted_at` on an edge, so
-    clearing it unconditionally was accidentally correct.
+    Otherwise nothing records the resurrection, `deleted_by` still names the analyst who retired it, and a
+    tie enters the graph with no assertion behind it, against invariant 5 (history is superseded and never
+    overwritten).
     """
     from datetime import datetime, timezone
 
@@ -401,24 +389,14 @@ def test_both_the_merge_and_its_reversal_are_audited(conn, world):
     assert actions == ["NODE_MERGED", "NODE_UNMERGED"]
 
 
-# ---------------------------------------------------------------------------
-# Phase 6 hostile pass, 2026-08-10
-# ---------------------------------------------------------------------------
-
 def test_reversing_out_of_order_is_refused_rather_than_corrupting(conn, world):
-    """`unmerge` writes an edge's RECORDED originals over wherever that
-    edge is now. If a later merge has since moved the same edge, those
-    originals are stale, and writing them yanks the tie out from under a
-    merge that is still live.
+    """`unmerge` writes an edge's recorded originals over wherever that edge is now. If a later merge has
+    since moved the same edge, those originals are stale, and writing them yanks the tie out from under a
+    merge that is still live. Reversing the earlier merge first is therefore refused: otherwise the graph
+    asserts a relationship that never existed while the response says `edges_restored: 1`.
 
-    Before this refusal, reversing the earlier merge first left the graph
-    asserting a relationship that never existed -- while the response said
-    `edges_restored: 1` and the UI banner said "Every tie is back at its
-    original endpoints and the entity has returned to the graph."
-
-    0055 closed the `deleted_at` half of exactly this (a reversal
-    resurrecting edges an ANALYST retired in between). A later MERGE
-    moving the edge is the same class and was still overwritten.
+    The same class as the `deleted_at` case above, where a reversal resurrects edges an analyst retired in
+    between.
     """
     from noctornal_api.merges import MergeError
 
@@ -469,18 +447,13 @@ def test_two_unrelated_merges_do_not_constrain_each_others_order(conn, world):
 
 
 def test_a_colliding_merge_is_a_conflict_not_an_internal_error(conn, world):
-    """`edge_uniq_active` refuses when both entities already hold a live tie
-    of the same type, same `valid_from`, to the same third party -- which is
-    the topology that most often PROVES two personas are one actor, so it is
-    the commonest real merge rather than an edge case.
+    """`edge_uniq_active` refuses when both entities already hold a live tie of the same type, same
+    `valid_from`, to the same third party, the topology that most often proves two personas are one actor, so
+    it is the commonest real merge rather than an edge case.
 
-    The bare UPDATE let the UniqueViolation reach the catch-all handler, so
-    the flagship operation of the product failed as "Internal error:
-    unexpected failure (ref ...)" -- unactionable, and indexed as a bug in
-    the product rather than as a decision for the analyst.
-
-    The suite could not catch it: the fixture gives the two personas
-    DIFFERENT edge types, so they cannot collide.
+    The UniqueViolation must surface as a conflict for the analyst to decide, not reach the catch-all handler
+    as an "Internal error". The fixture for the other tests gives the two personas different edge types, so
+    they cannot collide; this test builds the collision.
     """
     from noctornal_api.graph import AssertionInput, GraphWriteService
     from noctornal_api.merges import MergeError

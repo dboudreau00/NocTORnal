@@ -1,10 +1,8 @@
-"""The console's Telegram lines, as it ships them (roadmap F5.2 and F5.3,
-2026-09-24).
+"""The console's Telegram lines, as it ships them.
 
-Pure: no database. The markup is read from the shipped index.html; the
-functions marked `needs_node` run under Node over the collection
-foundation's stub DOM (test_collection_ui_foundation) and are judged by what they
-draw and what they send.
+Pure: no database. The markup is read from the shipped index.html; the functions marked `needs_node` run
+under Node over the collection foundation's stub DOM (test_collection_ui_foundation) and are judged by
+what they draw and what they send.
 """
 from __future__ import annotations
 
@@ -156,8 +154,7 @@ def test_the_telegram_poll_confirm_names_persona_and_egress(tmp_path):
 
 @needs_node
 def test_a_due_telegram_chat_shows_its_chat_and_exit_not_a_host(tmp_path):
-    # actCall since 2026-10-02 (A collector process): a persona source's
-    # Poll now is a persona act the collector runs.
+    # actCall: a persona source's Poll now is a persona act the collector runs.
     got = _run_tg(["dueRow", "dueAgo", "personaLabel", "telegramPollText", "actCall"], r"""
     globalThis.apiAnswer = () => ({ items_new: 1, items_seen: 1, warnings: [] });
     const row = dueRow({ id: 's1', name: 'Ops chat', kind: 'TELEGRAM', base_url: null,
@@ -222,8 +219,7 @@ def test_a_chat_row_draws_its_state_and_offers_the_verbs_it_may_use(tmp_path):
 
 @needs_node
 def test_the_join_form_needs_the_box_ticked_and_a_note(tmp_path):
-    # actCall since 2026-10-02 (A collector process): the join is a
-    # persona act the collector runs.
+    # actCall: the join is a persona act the collector runs.
     got = _run(["openTelegramJoin", "actCall"], r"""
     const card = mk('div');
     const reloads = [];

@@ -1,37 +1,24 @@
-"""Every cron job refuses the schema owner's credential and a published one
-(docs/17 F52 and ROADMAP-REMAINING's "The cron jobs and a published
-credential", 2026-10-02).
+"""Every cron job refuses the schema owner's credential and a published one (docs/17).
 
-The 2026-10-02 review of F52 found that in a mixed layout (migrate.env in
-place, the owner's line still, or again, in secrets.env) the migrate job
-ran, the API refused, and cron and embed-pass started holding the owner's
-password and DSN with no check at all. Held here:
+In a mixed layout (migrate.env in place, the owner's line still, or again, in secrets.env) the migrate job
+runs, the API refuses, and cron and embed-pass would otherwise hold the owner's password and DSN with no
+check at all. Held here:
 
-* `config.refuse_unsafe_job_environment` is the one helper, production
-  only, one line per variable, never a value, and one refusal per variable;
-  it asks for the owner's credential and for a published one, and the
-  migration job, which holds the owner's DSN by design, is asked for the
-  published half alone;
-* notify_drain, collection_poll, lookup_drain, embed_pass and the collector
-  (scripts/collector.py, A collector process, 2026-10-02) call it once,
-  first, before they connect to anything, and all five exit
-  `config.JOB_REFUSAL_EXIT` (2: 1 means a pass ran and failed). Merged from
-  two builds that disagreed on the code (docs/17 F52 gave collection_poll and
-  embed_pass 1; infra-12 gave all four 2) and on the helper that made the
-  published half (`config.refuse_published`, now gone);
-* a job that is not the collector also refuses the persona key and the
-  collector's mark, through the same helper (the collector and the poll it
-  starts as a child pass `holds_persona_key=True`: the key is theirs by
-  design, and each makes the collector's own half itself);
-* the Lab's three workers ask the same helper for the API's whole production
-  list (`whole_environment=True`), and refuse the owner's credential, a
-  published one and the rest of that list the way every other job does: one
-  line per problem on stderr led by the job's name, exit 2 and no traceback.
-  They called `enforce_environment`, whose RuntimeError was exit 1 with a
-  traceback (2026-10-07).
+* `config.refuse_unsafe_job_environment` is the one helper, production only, one line per variable, never a
+  value, and one refusal per variable; it asks for the owner's credential and for a published one, and the
+  migration job, which holds the owner's DSN by design, is asked for the published half alone;
+* notify_drain, collection_poll, lookup_drain, embed_pass and the collector (scripts/collector.py) call it
+  once, first, before they connect to anything, and all five exit `config.JOB_REFUSAL_EXIT` (2: 1 means a
+  pass ran and failed);
+* a job that is not the collector also refuses the persona key and the collector's mark, through the same
+  helper (the collector and the poll it starts as a child pass `holds_persona_key=True`: the key is theirs
+  by design, and each makes the collector's own half itself);
+* the Lab's three workers ask the same helper for the API's whole production list
+  (`whole_environment=True`), and refuse the owner's credential, a published one and the rest of that list
+  the way every other job does: one line per problem on stderr led by the job's name, exit 2 and no
+  traceback (not `enforce_environment`'s RuntimeError, which is exit 1 with a traceback).
 
-No database: every script is stopped before it could connect, and the test
-fails if it tries.
+No database: every script is stopped before it could connect, and the test fails if it tries.
 """
 from __future__ import annotations
 
@@ -52,8 +39,7 @@ CRON_JOBS = [(name, config.JOB_REFUSAL_EXIT)
              for name in ("notify_drain", "collection_poll", "lookup_drain", "embed_pass",
                           "collector")]
 LAB_WORKERS = ["lab_triage", "sample_screen", "sandbox_dispatch"]
-#: The jobs that hold the persona key by design (A collector process,
-#: 2026-10-02): the collector, and the poll it starts as its child. The
+#: The jobs that hold the persona key by design: the collector, and the poll it starts as its child. The
 #: poll is not a line of any compose loop, so it is not in the compose scan.
 KEY_HOLDERS = ("collector", "collection_poll")
 COLLECTOR_CHILDREN = ("collection_poll",)
@@ -256,10 +242,6 @@ def test_the_cron_jobs_are_every_script_the_cron_loops_run():
     collector = (ROOT / "scripts" / "collector.py").read_text(encoding="utf-8")
     assert all(f"{child}.py" in collector for child in COLLECTOR_CHILDREN)
 
-
-# ---------------------------------------------------------------------------
-# The persona key (A collector process, 2026-10-02)
-# ---------------------------------------------------------------------------
 
 PERSONA_KEY = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="
 

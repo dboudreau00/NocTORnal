@@ -1,18 +1,14 @@
-"""Phase 9 ingest, with stealer logs in scope.
+"""Ingest, with stealer logs in scope.
 
-The tests that carry this file are the stealer-log controls, because those
-are the ones standing between an intelligence asset and a data protection
-incident (docs/12):
+The tests that matter are the stealer-log controls, which stand between an intelligence asset and a data
+protection incident (docs/12):
 
-- `test_free_text_search_across_victim_pii_is_IMPOSSIBLE` — not refused by
-  a permission somebody can route around; there is no index to run it
-  against.
-- `test_the_analytic_view_never_returns_a_value` — the whole design is
-  that infection timeline, victim organisation and C2 metadata are
-  available without ever touching a credential.
-- `test_a_stealer_log_key_without_a_compartment_is_refused` — by the
-  service AND by a CHECK constraint.
-- `test_an_ingest_key_can_never_read_the_case_file` — invariant 11.
+- `test_free_text_search_across_victim_pii_is_IMPOSSIBLE`: not refused by a permission somebody can route
+  around; there is no index to run it against.
+- `test_the_analytic_view_never_returns_a_value`: infection timeline, victim organisation and C2 metadata
+  are available without ever touching a credential.
+- `test_a_stealer_log_key_without_a_compartment_is_refused`: by the service and by a CHECK constraint.
+- `test_an_ingest_key_can_never_read_the_case_file`: invariant 11.
 
 Env-gated on DATABASE_URL.
 """
@@ -51,11 +47,9 @@ def conn():
         c.execute(f"DELETE FROM ingest.batch WHERE api_key_id IN {ksub}")
         c.execute(f"DELETE FROM ingest.api_key WHERE owner_user_id IN {sub}")
         c.execute(f"DELETE FROM ingest.pii_authorisation WHERE case_id IN {csub}")
-        # `collect.watch` references the case, and the triage-score test
-        # creates one. Cleaning it in the test BODY only works when the
-        # test passes: a failure part-way through leaves an orphan watch
-        # that blocks every later teardown with a foreign-key violation
-        # pointing at a table those tests never touched. Teardown owns it.
+        # `collect.watch` references the case and the triage-score test creates one. Teardown owns the
+        # cleanup: doing it in the test body leaves an orphan watch when a test fails part-way, blocking later
+        # teardowns with a foreign-key violation.
         c.execute(f"DELETE FROM collect.watch WHERE case_id IN {csub}")
         c.execute(f"DELETE FROM iam.case_assignment WHERE case_id IN {csub}")
         c.execute(f'DELETE FROM core."case" WHERE id IN {csub}')
@@ -68,12 +62,9 @@ def _user(conn):
     from noctornal_api.stores import PgUserStore
     uid = PgUserStore(conn).create_user(
         f"ing-{uuid4().hex[:8]}@noctornal.test", "Ingest", "x" * 20)
-    # Registered before it is used. `compartments` is set here with a raw
-    # UPDATE, which is the write path 0057's registry gate does not cover
-    # -- so without this the value is in use and unregistered, and
-    # test_compartment_registry_pg's whole-database invariant reports it.
-    # It only ever passed on a workstation whose database pre-dated 0057
-    # and had the value backfilled; CI builds a fresh one.
+    # Registered before use: `compartments` is set with a raw UPDATE, which the registry gate does not cover,
+    # so otherwise the value is in use and unregistered and test_compartment_registry_pg's whole-database
+    # invariant reports it.
     conn.execute("INSERT INTO iam.compartment (key, label) VALUES "
                  "('STEALER-2026', 'Stealer logs 2026 (test)') "
                  "ON CONFLICT (key) DO NOTHING")
@@ -91,14 +82,9 @@ def _case(conn, owner):
         review_due=date(2027, 1, 1), owner_user_id=owner, created_by=owner)
 
 
-#: `accept()` now REFUSES when it has nowhere to put the bytes, rather
-#: than acknowledging them and dropping them -- docs/12's "raw before
-#: parse, always" is not satisfied by recording that we meant to. So every
-#: fixture that accepts a batch has to say where the raw goes.
-#:
-#: In-memory, not MinIO: these tests are about the parser and the access
-#: gate, and a test that needs object storage running is a test that gets
-#: marked flaky and then skipped.
+#: `accept()` refuses when it has nowhere to put the bytes (docs/12: raw before parse, always), so every
+#: fixture that accepts a batch says where the raw goes. In-memory, not MinIO: these tests are about the
+#: parser and the access gate.
 
 
 @pytest.fixture
@@ -112,14 +98,9 @@ def svc(conn):
 def reader(conn):
     """The service as a caller that reads case content must construct it.
 
-    docs/17 F15(a,b,c): `IngestService` used to take no clearance at all,
-    so the three victim-PII methods answered for the whole corpus. It now
-    refuses rather than defaulting -- defaulting to RED would make every
-    caller that forgets silently maximally privileged, which is how the
-    defect arrived.
-
-    STEALER-2026 is the compartment `_stealer_key` forces onto its
-    records; a reader without it sees nothing, which is a test below.
+    `IngestService` takes a clearance and refuses rather than defaulting: defaulting to RED would make every
+    caller that forgets silently maximally privileged (docs/17). STEALER-2026 is the compartment
+    `_stealer_key` forces onto its records; a reader without it sees nothing.
     """
     from noctornal_api.ingest import IngestService
     from noctornal_api.rawstore import InMemoryRawStorage
@@ -222,9 +203,8 @@ def test_a_revoked_key_does_not(conn, svc):
 def test_an_expired_key_does_not(conn, svc):
     owner = _user(conn)
     key = _key(svc, owner)
-    # `api_key_expiry_mandatory` ties expiry to creation and fires on
-    # UPDATE too, so the key has to be aged rather than just expired -- a
-    # key that expires before it was issued is nonsense.
+    # `api_key_expiry_mandatory` ties expiry to creation and fires on UPDATE too, so the key is aged rather
+    # than just expired: a key cannot expire before it was issued.
     conn.execute(
         """UPDATE ingest.api_key
               SET created_at = now() - interval '200 days',
@@ -494,10 +474,8 @@ def test_a_stealer_record_gets_the_shortest_retention_clock(conn, svc):
 # --- credentials: masked by default, revealed narrowly ------------------
 
 def test_the_analytic_view_never_returns_a_value(conn, svc, reader):
-    """The whole design. docs/12: "You can extract almost all of that from
-    the metadata without ever exposing the credential contents. Design for
-    that." Infection timeline, victim organisation and C2 metadata are all
-    available without touching a password."""
+    """The whole design (docs/12): infection timeline, victim organisation and C2 metadata are available from
+    the metadata without ever exposing the credential contents."""
     owner = _user(conn)
     case_id = _case(conn, owner)
     key = svc.authenticate(_stealer_key(svc, owner).secret)

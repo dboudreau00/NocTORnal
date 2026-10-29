@@ -1,17 +1,13 @@
 """No count in the console is hedged with a bracketed plural.
 
-The README screenshot set review (2026-09-23) found a bracketed "s" after
-counts the console already knew, in the final frames: one request on the
-approvals list, two claims on the comms pane, six connected components in
-the analysis cohesion line (beside "1 communities", the same fault without
-the brackets). The reviewers listed about thirty more sites. A reader does
-the agreement the line should have done, and it reads as unfinished.
+A bracketed "s" after a count the console already knows leaves the agreement to the reader and reads
+as unfinished.
 
 The rule: no string literal and no run of template text in `app.js`, and
 nothing a reader sees in `index.html`, holds a bracketed plural ending
 (s, es, ies, y/ies, is/es). The console agrees a count with `countOf`, and
 a verb or a noun printed apart from its count with `agree`; the checks
-marked `needs_node` run the rewritten lines under Node and read what they
+marked `needs_node` run the lines under Node and read what they
 say, for one and for many.
 
 The JavaScript lexer is `test_ui_copy_no_dashes.py`'s, which is proved
@@ -19,10 +15,9 @@ there on known input and against every dash in the file. Comments and
 regular expressions are skipped for the reason given there.
 
 The allow-list has one entry: renderRedaction's fallback line for a
-report whose server sent no statement. The report statement code belongs
-to a change that was in flight when this pass ran and was not this pass's
-to edit. The entry is keyed on the exact literal, so no new sentence can
-shelter under it, and it fails as stale the moment the line agrees.
+report whose server sent no statement. The entry is keyed on the exact
+literal, so no new sentence can shelter under it, and it fails as stale
+the moment the line agrees.
 
 Pure: no database.
 """
@@ -110,14 +105,12 @@ def test_the_allow_list_names_only_literals_that_still_exist():
 
 
 def test_the_reviewed_lines_use_the_helpers():
-    """The frames the review named, by function: each now builds its count
-    through the helper rather than beside a hedge."""
+    """Each function the rule names builds its count through the helper rather than beside a hedge."""
     js = _js()
     for fn, call in (
             ("loadApprovals", "countOf(rows.length, 'request', 'requests')"),
             ("loadUnverified", "countOf(claims.length, 'claim', 'claims')"),
-            # The observation count moved into selectorSeenWords with its
-            # dates (ux05-inspector:first-last-seen-always-dash, 2026-09-23).
+            # The observation count lives in selectorSeenWords with its dates.
             ("selectorSeenWords", "countOf(n, 'time', 'times')"),
             ("custodyVerdict", "countOf(r.forks, 'fork', 'forks')"),
             ("loadReadiness", "agree(failed, 'needs', 'need')"),
@@ -179,10 +172,8 @@ console.log(JSON.stringify([
 
 @needs_node
 def test_the_cohesion_line_agrees_for_one_and_for_many(tmp_path):
-    """The Analysis frame read "1 communities" beside a hedged count of
-    components. Since 2026-09-23 the line is in plain words, with the
-    cluster sizes and a reading of the modularity (ux10-analytics:
-    communities-anonymous-table-unsortable), and still agrees."""
+    """The cohesion line is in plain words, with the cluster sizes and a reading of the modularity, and
+    it agrees with the count: "1 community", not "1 communities"."""
     got = _run(["countOf", "agree", "andList", "modularityReading",
                 "communityNo", "graphButton", "renderCohesion"], """
 const lines = [];
@@ -298,7 +289,7 @@ def test_the_next_test_line_reads_as_english_for_both_kinds_of_row(tmp_path):
     """An unfinished row's diagnosticity is unknown, so it is not "the most
     diagnostic item"; the columns it lacks are listed as a sentence lists
     them; and a blank cell is not "a neutral" but a neutral one."""
-    # The ranking's helpers since the ux11-ach pass (2026-09-23).
+    # The ACH ranking's helpers.
     got = _run(["achNextTest", "renderAchRanking", "achKey", "achColumns",
                 "achNum", "achAnd", "achCard", "achSubject"], """
 const four = ['h1', 'h2', 'h3', 'h4'].map(hyp);

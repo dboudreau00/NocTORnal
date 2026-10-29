@@ -1,26 +1,12 @@
 """Invariants that live in `scripts/` rather than in the API.
 
-## Why this file exists
+The scripts need a database, an object store and a seeded case, so nothing in the suite executes them.
+These checks are STATIC: they parse the source and assert a property (for example that every script that
+reads DATABASE_URL loads `.env.local` through the one shared loader, so a variable sitting in `.env.local`
+is found). Weaker than executing the script, but a check that fires.
 
-The suite had 1269 tests and not one of them looked at `scripts/`. So when
-an installed package was finally used the way the documentation says to use
-it, three seed scripts died on their first line of real work:
-
-    RuntimeError: DATABASE_URL is not set
-
-on a machine where DATABASE_URL was sitting in `.env.local` the whole time.
-The R9 fix for exactly that failure had been made in `bootstrap.py` alone,
-and a second, slightly different copy of it was later written into
-`seed_deception_demo.py`. The remaining five scripts got neither.
-
-Nothing caught it because nothing ran them, and nothing ran them because
-they need a database, an object store and a seeded case. These checks are
-STATIC instead — they parse the source and assert a property. That is
-weaker than executing the script, and it is the check that would actually
-have fired.
-
-Pure: no database, no object store, no imports of the scripts themselves
-(importing them executes module-level code, which is the thing under test).
+Pure: no database, no object store, no imports of the scripts themselves (importing them executes
+module-level code, which is the thing under test).
 """
 from __future__ import annotations
 
@@ -48,12 +34,9 @@ def _scripts() -> list[Path]:
 def _db_scripts() -> list[Path]:
     """Only the scripts that touch the API package.
 
-    Selected HERE, at collection, rather than by `pytest.skip` inside the
-    test. CI fails the build on any skip at all -- the gate exists so that
-    a dead Postgres leg cannot present as a green run with 100+ skips --
-    and a permanent, deliberate skip would both break that job and teach
-    everyone to read "N skipped" as normal. A parametrisation that never
-    generates the uninteresting case needs no skip.
+    Selected HERE, at collection, rather than by `pytest.skip` inside the test. CI fails the build on any
+    skip at all, so that a dead Postgres leg cannot present as a green run with 100+ skips, and a
+    permanent, deliberate skip would break that job and teach everyone to read "N skipped" as normal.
     """
     found = [p for p in _scripts()
              if any(m.startswith("noctornal_api")
@@ -111,12 +94,8 @@ def test_db_touching_scripts_load_env_local(path: Path) -> None:
 
 @pytest.mark.parametrize("path", _scripts(), ids=lambda p: p.name)
 def test_no_second_copy_of_the_env_loader(path: Path) -> None:
-    """One loader. R22 happened because there were two, disagreeing.
-
-    `seed_deception_demo.py` grew a private `_load_env_local` that was
-    subtly different from `bootstrap.py`'s -- no BOM handling. Two
-    implementations of a rule is one implementation plus a latent bug.
-    """
+    """One loader. Two implementations of a rule are one implementation plus a latent bug: a private copy
+    drifts from `bootstrap.py`'s, for example by missing its BOM handling."""
     defined = {n.name for n in ast.walk(_tree(path))
                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
     assert "_load_env_local" not in defined and "load_env_local" not in defined, (
@@ -125,12 +104,10 @@ def test_no_second_copy_of_the_env_loader(path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The installers and launchers, 2026-08-07
+# The installers and launchers
 # ---------------------------------------------------------------------------
 #
-# Same reasoning as the header: nothing executes these, because executing
-# them installs a stack. Static checks are weaker than a run and are the
-# checks that would have fired.
+# Same reasoning as the header: nothing executes these, because executing them installs a stack.
 
 REPO = Path(__file__).resolve().parents[3]
 INSTALLERS = (REPO / "release" / "install.ps1", REPO / "release" / "install.sh")
@@ -141,20 +118,15 @@ LAUNCHERS = (REPO / "scripts" / "launch.ps1", REPO / "scripts" / "launch.sh")
 def test_a_generated_secret_is_checked_before_it_is_written(path: Path):
     """An unchecked subprocess produces an EMPTY secret in `.env.local`.
 
-    Both installers took the output of `python -c "...urandom(32)..."` on
-    trust. A broken venv, a missing DLL, an interpreter that dies on
-    import: the variable is empty, the file is written with
-    `NOCTORNAL_TOTP_KEK=`, and the installer announces "fresh random keys".
+    A broken venv, a missing DLL, or an interpreter that dies on import leaves the variable empty, the
+    file is written with `NOCTORNAL_TOTP_KEK=`, and the installer announces "fresh random keys".
 
-    The failure then LATCHES. Every later run takes the "already exists -
-    left untouched" branch, so a recipient whose first run half-failed is
-    permanently installed with an empty key and is told twice that it
-    worked. Refusing BEFORE the write leaves no file, so re-running fixes
-    it.
+    The failure then LATCHES: every later run takes the "already exists - left untouched" branch, so a
+    recipient whose first run half-failed is permanently installed with an empty key. Refusing BEFORE the
+    write leaves no file, so re-running fixes it.
 
-    In PowerShell this is the more dangerous of the two: `& cmd` does not
-    stop the script on failure at all, where `set -euo pipefail` catches
-    the non-zero exit in sh.
+    In PowerShell this is the more dangerous of the two: `& cmd` does not stop the script on failure,
+    where `set -euo pipefail` catches the non-zero exit in sh.
     """
     src = path.read_text(encoding="utf-8")
     assert "32" in src and ("not 32" in src or "-ne 32" in src), (
@@ -169,24 +141,17 @@ def test_a_generated_secret_is_checked_before_it_is_written(path: Path):
 def test_a_set_but_empty_variable_is_not_treated_as_unset(path: Path):
     """`SMTP_ALLOW_PLAINTEXT=` is a deliberate act, not an absence.
 
-    Both launchers loaded `.env.local` over any variable that was empty,
-    so an operator who blanked one to turn something OFF had the file's
-    value put straight back on the next launch. `db.py` and
-    `scripts/_env.py` both distinguish "set but empty" from "not set" on
-    purpose -- `_env.py`'s docstring names this exact scenario -- and the
-    launchers were undoing it two directories away.
+    A launcher that loads `.env.local` over any variable that is empty puts the file's value straight
+    back after an operator blanked one to turn something OFF. `db.py` and `scripts/_env.py` both
+    distinguish "set but empty" from "not set" on purpose, and the launchers must agree.
 
-    sh needs `${!name+x}` (defined) rather than `${!name:-}` (non-empty);
-    PowerShell needs `$null -ne` rather than `IsNullOrWhiteSpace`, because
-    GetEnvironmentVariable returns "" for a defined-empty variable and
-    $null only for a missing one.
+    sh needs `${!name+x}` (defined) rather than `${!name:-}` (non-empty); PowerShell needs `$null -ne`
+    rather than `IsNullOrWhiteSpace`, because GetEnvironmentVariable returns "" for a defined-empty
+    variable and $null only for a missing one.
     """
     src = path.read_text(encoding="utf-8")
-    # BOTH implementations, in both files. Each launcher applies this rule
-    # twice -- once loading `.env.local`, once applying the development
-    # defaults -- and when this test was first written the two disagreed
-    # inside the same file. That is the cheapest lens in the roadmap:
-    # diff two implementations of one rule against each other.
+    # BOTH implementations, in both files: each launcher applies this rule twice, once loading
+    # `.env.local` and once applying the development defaults, and the two must not disagree.
     if path.suffix == ".sh":
         assert src.count("${!name+x}") >= 2, (
             "launch.sh still tests a variable with `:-` somewhere, so a "
@@ -206,26 +171,23 @@ def test_a_set_but_empty_variable_is_not_treated_as_unset(path: Path):
 
 
 # ---------------------------------------------------------------------------
-# The clean-VM install run, 2026-09-17 (release/CLEAN-VM-INSTALL.md)
+# The clean-VM install (release/CLEAN-VM-INSTALL.md)
 # ---------------------------------------------------------------------------
 #
-# Three defects stopped a new user on stock Ubuntu 24.04. None of them was
-# reachable from this suite before, and none is reachable now by running
-# anything: these are the static checks that would have fired.
+# Defects that stop a new user on stock Ubuntu 24.04. Nothing here runs the installer; these are static
+# checks.
 
 SH_INSTALLER = REPO / "release" / "install.sh"
 
 
 def test_the_venv_guard_asks_for_ensurepip_not_just_venv():
-    """R25. `import venv` succeeds on a machine that cannot build one.
+    """`import venv` succeeds on a machine that cannot build one.
 
-    `venv/` ships in python3-minimal; python3.12-venv carries `ensurepip`
-    and the pip wheel it installs. So the guard, which asked only for
-    `venv`, passed on a stock Ubuntu 24.04 and the install died two steps
-    later inside `python -m venv`, printing Python's message about
-    `apt install python3.12-venv` rather than one of this script's own
-    "Cannot continue / What to do" blocks. Measured on a clean VM:
-    `import venv` exit 0, `import ensurepip` exit 1.
+    `venv/` ships in python3-minimal; python3.12-venv carries `ensurepip` and the pip wheel it installs.
+    A guard that asks only for `venv` passes on a stock Ubuntu 24.04 and the install dies two steps later
+    inside `python -m venv`, printing Python's message about `apt install python3.12-venv` rather than one
+    of this script's own "Cannot continue / What to do" blocks. On a clean VM `import venv` exits 0 and
+    `import ensurepip` exits 1.
     """
     src = SH_INSTALLER.read_text(encoding="utf-8")
     assert "import ensurepip" in src, (
@@ -241,15 +203,11 @@ def test_the_venv_guard_asks_for_ensurepip_not_just_venv():
 
 
 def test_a_half_built_venv_is_not_mistaken_for_a_good_one():
-    """R26. A failed `venv` leaves bin/python and no pip.
+    """A failed `venv` leaves bin/python and no pip.
 
-    The "already built" test was `-x "$VENV_PY"` alone, which that
-    wreckage satisfies. So the second run reported '.venv already exists',
-    went on to install dependencies, and died with 'No module named pip':
-    a message FURTHER from the cause than the first run's, and one that
-    never mentioned the real fix again however many times it was re-run.
-    Installing the package the first run named did not help. Only
-    `rm -rf .venv` did, and nothing said so.
+    An "already built" test of `-x "$VENV_PY"` alone is satisfied by that wreckage, so the second run
+    would report '.venv already exists', install dependencies, and die with 'No module named pip': further
+    from the cause than the first run's message, and never naming the real fix (`rm -rf .venv`).
     """
     src = SH_INSTALLER.read_text(encoding="utf-8")
     assert '-x "$VENV/bin/pip"' in src, (
@@ -263,14 +221,12 @@ def test_a_half_built_venv_is_not_mistaken_for_a_good_one():
 
 
 def test_the_readiness_probe_does_not_eat_the_installers_stdin():
-    """R27. `docker compose exec` forwards stdin even with -T.
+    """`docker compose exec` forwards stdin even with -T.
 
-    -T disables the TTY, not the attach. Sixty iterations of the Postgres
-    readiness loop therefore drained whatever the installer was given, and
-    the account prompt below read EOF. Every non-interactive install hit
-    it: piped input, cron, CI, cloud-init, Ansible, ssh without a TTY. A
-    person at a keyboard never did, because a pty does not reach EOF,
-    which is why it stood.
+    -T disables the TTY, not the attach. Sixty iterations of the Postgres readiness loop would drain
+    whatever the installer was given, and the account prompt below would read EOF. Every non-interactive
+    install (piped input, cron, CI, cloud-init, Ansible, ssh without a TTY) would hit it; a person at a
+    keyboard never does, because a pty does not reach EOF.
     """
     src = SH_INSTALLER.read_text(encoding="utf-8")
     probe = [ln for ln in src.splitlines() if "pg_isready" in ln]
@@ -289,10 +245,9 @@ def test_the_readiness_probe_does_not_eat_the_installers_stdin():
 
 
 def test_the_account_prompt_survives_end_of_input():
-    """R27, second half. `read` returns non-zero at EOF and `set -e` acts
-    on it BEFORE the emptiness test, so the branch written to handle "they
-    gave nothing" was unreachable. The script just stopped, having printed
-    `Email: ` and nothing after it, with exit 1 and no error.
+    """`read` returns non-zero at EOF and `set -e` acts on it BEFORE the emptiness test, so the branch
+    written to handle "they gave nothing" is unreachable unless the read is guarded: the script would stop
+    having printed `Email: ` and nothing after it, with exit 1 and no error.
     """
     src = SH_INSTALLER.read_text(encoding="utf-8")
     assert "set -e" in src, "if this is no longer set -e, re-read this test"
@@ -307,15 +262,12 @@ def test_the_account_prompt_survives_end_of_input():
 
 @pytest.mark.parametrize("path", INSTALLERS, ids=lambda p: p.name)
 def test_the_generated_env_declares_the_upload_caps(path: Path):
-    """R28. Production refuses to boot without an evidence cap.
+    """Production refuses to boot without an evidence cap.
 
-    `config.verify_environment` stops a production boot while
-    NOCTORNAL_MAX_EVIDENCE_BYTES is unset, on purpose: a cap nobody chose
-    is a cap nobody can be held to. The installers wrote every other
-    setting and not that one, so the obvious act of promoting the
-    generated `.env.local` to a real deployment met a boot refusal with no
-    hint the line had ever been available. On the dev stack it showed up
-    as `evidence_size_cap_declared` warning on a brand-new install.
+    `config.verify_environment` stops a production boot while NOCTORNAL_MAX_EVIDENCE_BYTES is unset, on
+    purpose: a cap nobody chose is a cap nobody can be held to. The installers write every setting, that
+    one included, so promoting the generated `.env.local` to a real deployment does not meet a boot
+    refusal, and the dev stack does not show `evidence_size_cap_declared` as a warning on a new install.
     """
     src = path.read_text(encoding="utf-8")
     for key in ("NOCTORNAL_MAX_EVIDENCE_BYTES",
@@ -330,16 +282,13 @@ def test_the_generated_env_declares_the_upload_caps(path: Path):
 
 @pytest.mark.parametrize("path", INSTALLERS, ids=lambda p: p.name)
 def test_the_generated_env_declares_where_rejected_samples_go(path: Path):
-    """F2, 2026-09-22. A rejected sample is preserved in its own
-    object-locked bucket by default, and `NOCTORNAL_REJECTED_SAMPLE_
-    DISPOSITION` decides whether that happens at all. Both installers write
-    the two lines with the owner's default, so a fresh install says in its
-    own configuration what a rejection does, and a readiness check that
-    reads them (docs/11) is not answered by a default nobody wrote down.
+    """A rejected sample is preserved in its own object-locked bucket by default, and
+    `NOCTORNAL_REJECTED_SAMPLE_DISPOSITION` decides whether that happens at all. Both installers write the
+    two lines with the default, so a fresh install says in its own configuration what a rejection does, and
+    a readiness check that reads them (docs/11) is not answered by a default nobody wrote down.
 
-    The values are pinned, not only the names: an installer that wrote
-    `destroy` would quietly reverse the owner's decision on every new
-    machine.
+    The values are pinned, not only the names: an installer that wrote `destroy` would quietly reverse the
+    default on every new machine.
     """
     from noctornal_api.samples import DISPOSITION_ENV, PRESERVE
     src = path.read_text(encoding="utf-8")
@@ -350,15 +299,13 @@ def test_the_generated_env_declares_where_rejected_samples_go(path: Path):
 
 
 # ---------------------------------------------------------------------------
-# 127.0.0.1, not localhost (Alpha 6 pre-release check, 2026-09-23)
+# 127.0.0.1, not localhost
 # ---------------------------------------------------------------------------
 #
-# The dev stack publishes every port on 127.0.0.1 only, so nothing answers
-# on ::1. A client that resolves localhost to ::1 first, which is the
-# Windows default order, waits about two seconds for each refused attempt
-# (measured at 2.01 to 2.05 s) before it tries IPv4. So every address the
-# installers write into .env.local, and every default the launchers apply,
-# names 127.0.0.1.
+# The dev stack publishes every port on 127.0.0.1 only, so nothing answers on ::1. A client that resolves
+# localhost to ::1 first, which is the Windows default order, waits about two seconds for each refused
+# attempt before it tries IPv4. So every address the installers write into .env.local, and every default
+# the launchers apply, names 127.0.0.1.
 
 #: file -> the addresses it must write or apply. launch.sh sets no Redis
 #: or SMTP default and has none to hold.
@@ -398,7 +345,7 @@ def test_the_dev_addresses_name_127_0_0_1_not_localhost(path: Path):
 
 
 # ---------------------------------------------------------------------------
-# 2026-10-07: a transport bound on the live socket's first frame
+# A transport bound on the live socket's first frame
 # ---------------------------------------------------------------------------
 
 def _api_start_commands() -> list[tuple[Path, str]]:

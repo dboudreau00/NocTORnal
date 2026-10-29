@@ -1,12 +1,11 @@
-"""The production `models` network is reachable through an embeddings entry
-that names it, and `exits` never is (S2, 2026-09-25; docs/20 section 9).
+"""The production `models` network is reachable through an embeddings entry that names it, and `exits`
+never is (docs/20 section 9).
 
-integration_internal once listed the models network among the deployment's
-own networks, so validate_rule refused `model@172.31.246.0/24:8080` and the
-proxy's admission refused the model's answer anyway: the local model server
-the README puts there could never be reached. The exits network, where a
-Tor or VPN sidecar sits, must stay unnameable, or an integration could leave
-through a persona's exit. Pure: no database, no network (a fake resolver).
+`integration_internal` does not list the models network among the deployment's own networks, so
+validate_rule accepts `model@172.31.246.0/24:8080` and the proxy admits the model's answer: the local model
+server the README puts there can be reached. The exits network, where a Tor or VPN sidecar sits, must stay
+unnameable, or an integration could leave through a persona's exit. Pure: no database, no network (a fake
+resolver).
 """
 from __future__ import annotations
 

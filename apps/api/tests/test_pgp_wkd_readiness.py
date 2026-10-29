@@ -1,7 +1,6 @@
-"""The pgp_key_directory readiness row (F10c, comms, 2026-09-24): off is a
-pass; half configured is a fail naming the fix; on is a pass whose caveat
-says what a lookup discloses and to whom. Whether the network boundary is
-in force is egress_boundary's row. Pure: the route is a fake.
+"""The pgp_key_directory readiness row: off is a pass; half configured is a fail naming the fix; on is a
+pass whose caveat says what a lookup discloses and to whom. Whether the network boundary is in force is
+egress_boundary's row. Pure: the route is a fake.
 """
 from __future__ import annotations
 

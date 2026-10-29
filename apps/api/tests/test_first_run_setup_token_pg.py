@@ -1,21 +1,18 @@
-"""The first-run door needs proof of possession (http_ui-010 and infra-3; g45, 2026-10-03).
+"""The first-run door needs proof of possession.
 
-`POST /setup/first-admin` made the first caller SYS_ADMIN, SECURITY_OFFICER
-and RED-cleared and handed back the password and the TOTP secret, so on an
-internet-facing fresh deployment (Caddy publishes 80 and 443 as soon as the
-API is up; the hostname is in certificate-transparency logs within seconds)
-whoever called first owned it. Now:
+`POST /setup/first-admin` makes the first caller SYS_ADMIN, SECURITY_OFFICER and RED-cleared and hands back
+the password and the TOTP secret, so on an internet-facing fresh deployment (Caddy publishes 80 and 443 as
+soon as the API is up; the hostname is in certificate-transparency logs within seconds) whoever called
+first would own it. So:
 
-- production with NO `NOCTORNAL_SETUP_TOKEN`: the route does not exist (404,
-  the answer an unknown path gives) and the console never offers the card;
+- production with NO `NOCTORNAL_SETUP_TOKEN`: the route does not exist (404, the answer an unknown path
+  gives) and the console never offers the card;
 - a token configured: the request must carry it in `X-Setup-Token`;
-- outside production with no token: unchanged, the door is open while the
-  table is empty (a laptop, CI).
+- outside production with no token: the door is open while the table is empty (a laptop, CI).
 
-The table is not empty in the shared development database, so the emptiness
-the route tests is narrowed to this file's own accounts (`g45setup-`),
-which is the real rule applied to a smaller table. Accounts are created for
-real by the route and removed afterwards.
+The table is not empty in the shared development database, so the emptiness the route tests is narrowed to
+this file's own accounts (`g45setup-`), which is the real rule applied to a smaller table. Accounts are
+created for real by the route and removed afterwards.
 """
 from __future__ import annotations
 
@@ -211,8 +208,7 @@ def test_the_operators_documents_say_how():
                    "bootstrap.py create-user"):
         assert needle in readme, needle
     assert "x-setup-token" in readme.lower()
-    # The curl example reads a shell variable; the README must say to set it
-    # (2026-10-03).
+    # The curl example reads a shell variable; the README must say to set it.
     assert "export NOCTORNAL_SETUP_TOKEN" in readme
     assert "# NOCTORNAL_SETUP_TOKEN=" in example, "the example must ship it commented out"
     assert "\nNOCTORNAL_SETUP_TOKEN=" not in example
@@ -221,15 +217,13 @@ def test_the_operators_documents_say_how():
 
 # ---------------------------------------------------------------------------
 # A closed door is indistinguishable from no door for EVERY request shape
-# (2026-10-03)
 # ---------------------------------------------------------------------------
 #
-# The first version closed the door in the route's dependency, which FastAPI
-# runs after it has read the body and validated the headers, so a closed door
-# answered 404 only to a well-formed request: invalid JSON got a 422, a long
-# X-Setup-Token header a 422, a body over the 1 MiB ceiling a 413, a GET a 405
-# and a trailing slash a redirect, where an unknown path answers each with the
-# plain 404. `ClosedSetupDoor` answers the path before anything is read.
+# `ClosedSetupDoor` answers the path before anything is read. Closing the door in the route's dependency
+# would not do: FastAPI runs that after it has read the body and validated the headers, so a closed door
+# would answer 404 only to a well-formed request (invalid JSON a 422, a long X-Setup-Token header a 422, a
+# body over the 1 MiB ceiling a 413, a GET a 405 and a trailing slash a redirect), where an unknown path
+# answers each with the plain 404.
 
 _JSON = {"content-type": "application/json"}
 _OK_BODY = '{"email":"a@b.test","display_name":"x"}'

@@ -1,23 +1,19 @@
-"""F2 over HTTP (2026-09-24): venues projected to entities through the
-analysis routes, their meter, the too-large answer and batched currency.
+"""One-mode projection over HTTP: venues projected to entities through the analysis routes, their meter,
+the too-large answer and batched currency.
 
-- `one_mode` is a repeated query parameter; a run under it is found again
-  under the same parameters.
-- "conversation" and unknown families or weightings are a 400 (docs/00
-  decision 73); a size out of range is FastAPI's 422.
-- A view over the derived-tie limit is a 422 "Cannot compute" on the
-  compute routes and never a 500, while the stored reads
-  answer 200 with current false: a stored run exists only for a view that
-  was within the limit.
-- One-mode reads spend `analytics.one_mode` beside their own meter; plain
-  reads do not (the transform's cost is metered apart from graph.view
-  reads).
-- `/currency` projects ONCE for every run it is asked about, and says why
-  a run cannot be compared.
+- `one_mode` is a repeated query parameter; a run under it is found again under the same parameters.
+- "conversation" and unknown families or weightings are a 400 (docs/00 decision 73); a size out of range is
+  FastAPI's 422.
+- A view over the derived-tie limit is a 422 "Cannot compute" on the compute routes and never a 500, while
+  the stored reads answer 200 with current false: a stored run exists only for a view that was within the
+  limit.
+- One-mode reads spend `analytics.one_mode` beside their own meter; plain reads do not (the transform's cost
+  is metered apart from graph.view reads).
+- `/currency` projects once for every run it is asked about, and says why a run cannot be compared.
 - The sociogram's `/graph` never sees any of it.
 
-Borrows test_analytics_latest_pg's fixtures and helpers (teardown of `al-`
-accounts). Env-gated on DATABASE_URL.
+Borrows test_analytics_latest_pg's fixtures and helpers (teardown of `al-` accounts). Env-gated on
+DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -128,8 +124,8 @@ def test_too_many_derived_ties_is_a_422_not_a_500(conn, client, monkeypatch):
 
 
 def test_too_many_dated_period_comparisons_is_a_422_too(conn, client, monkeypatch):
-    """The period limit (2026-09-24) is answered like the tie
-    limit: a 422 on a compute, current false on a stored read."""
+    """The period limit is answered like the tie limit: a 422 on a compute, current false on a stored
+    read."""
     from noctornal_api import affiliation
     token, case_id = _setup(conn, client)
     suite = _get(client, token, case_id, "", OM).json()

@@ -1,15 +1,11 @@
-"""The console half of two review findings (2026-10-03):
+"""The console half of `valid_to` and of retracting a correction.
 
-- graph-valid-to-cannot-be-set-after-creation: the Retire dialog told the
-  analyst to "set valid_to" and nothing in the console could. The Correct
-  form now has a date, "Stopped being true on", sent as `valid_to` with the
-  correction, and the dialog points at it.
-- graph-retracted-correction-stays-in-force: retracting a correction now
-  gives its value back, so the prompt says so.
+- The Retire dialog tells the analyst to "set valid_to", so the Correct form has a date, "Stopped being
+  true on", sent as `valid_to` with the correction, and the dialog points at it.
+- Retracting a correction gives its value back, so the prompt says so.
 
-Pure, as `test_correction_form_ui.py` is: the static checks run everywhere
-and the ones marked `needs_node` EXECUTE the shipped functions under Node.
-The server half is `test_review_graph_valid_to_pg.py`.
+Pure, as `test_correction_form_ui.py` is: the static checks run everywhere and the ones marked `needs_node`
+EXECUTE the shipped functions under Node. The server half is `test_review_graph_valid_to_pg.py`.
 """
 from __future__ import annotations
 
@@ -181,9 +177,8 @@ def _deceptive() -> str:
 
 @needs_node
 def test_an_end_date_correction_reads_as_a_date_in_the_assertion_list(tmp_path):
-    """The verifier's cosmetic: a date-only correction read `valid_to ->
-    nothing` when the date was cleared and printed a raw ISO timestamp when
-    it was set."""
+    """A date-only correction reads `valid_to -> nothing` when the date is cleared and does not print a raw
+    ISO timestamp when it is set."""
     got = _run([_deceptive(), _function("visibleText"),
                 _function("claimValueText"), _function("claimLine")], """
 const line = (path, value) => claimLine(

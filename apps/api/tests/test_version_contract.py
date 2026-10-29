@@ -1,20 +1,10 @@
 """The version is declared in ONE place, and everything that reports it agrees.
 
-## What was wrong before 2026-09-09
+`apps/api/pyproject.toml` declares the version and `noctornal_api.__init__` READS it rather than
+declaring another, so the packaging metadata, the package and the OpenAPI document cannot disagree.
+These tests hold every reporter of it to the one declaration.
 
-`apps/api/pyproject.toml` said `version = "0.1.0"`. `noctornal_api.__version__`
-said `"0.4.0"`, and that is what FastAPI put in the OpenAPI document. Two
-literals, two files, no test reading both, so they disagreed for three
-releases and a reviewer reading the packaging metadata was told this was a
-0.1 while the API told them 0.4. That is the codebase's own signature
-defect -- a counter that claims something the code does not back -- in its
-smallest possible form.
-
-`__init__.py` now READS the version rather than declaring one, and these
-tests hold every reporter of it to the one declaration.
-
-Pure -- no database. Reads pyproject.toml, the package source, and the
-app factory.
+Pure: no database. Reads pyproject.toml, the package source, and the app factory.
 """
 from __future__ import annotations
 
@@ -34,8 +24,7 @@ def _pyproject_version() -> str:
 
 
 def test_the_package_version_is_the_pyproject_version():
-    """The contract, read from both sides. Fails on the tree as it stood
-    before 2026-09-09 (0.1.0 in pyproject, 0.4.0 in the package)."""
+    """The contract, read from both sides: the package version is the pyproject version."""
     import noctornal_api
 
     assert noctornal_api.__version__ == _pyproject_version(), (
@@ -47,9 +36,8 @@ def test_the_package_version_is_the_pyproject_version():
 def _version_literal_assignments(source: str) -> list[str]:
     """Every `__version__ = <constant>` in the module, as source text.
 
-    Checked on the AST, not with a regex over the text: the module's own
-    docstring quotes the literal it used to carry as a history lesson, and
-    a text search reported the lesson as the defect (2026-09-09)."""
+    Checked on the AST, not with a regex over the text, so a docstring that quotes a literal is not
+    reported as the defect."""
     found: list[str] = []
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Assign):
@@ -94,15 +82,12 @@ PRODUCTION_COMPOSE = API_ROOT.parents[1] / "infra" / "production" / "compose.yml
 
 
 def test_the_production_image_is_tagged_with_the_version():
-    """The fourth reporter: `infra/production/compose.yml` tags the image it
-    builds. Nothing held that tag to pyproject, and the Alpha 6 pre-release
-    check (2026-09-23) found the release preparation bumping pyproject
-    alone, which would have gone on tagging Alpha 6 images
-    `noctornal-api:0.5.2`. Equality, not a particular version: this holds
-    at 0.5.2 before the release commit and at 0.6.0 after it, and fails
-    on a commit that moves one without the other. Read as text: the tag is
-    one line, and parsing YAML for it would add a dependency this pure
-    test does not otherwise need."""
+    """The fourth reporter: `infra/production/compose.yml` tags the image it builds.
+
+    Equality with pyproject, not a particular version: a release preparation that bumps pyproject alone
+    would go on tagging images with the old version, and this fails on a commit that moves one without
+    the other. Read as text: the tag is one line, and parsing YAML for it would add a dependency this
+    pure test does not otherwise need."""
     text = PRODUCTION_COMPOSE.read_text(encoding="utf-8")
     tags = re.findall(r"^\s*image:\s*noctornal-api:(\S+)\s*$", text, re.M)
     assert tags, "infra/production/compose.yml builds no noctornal-api image"

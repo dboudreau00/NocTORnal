@@ -1,19 +1,15 @@
-"""The verification queue shows what was checked, to those allowed to see
-the check, and the verify route reads nothing through labels (F10-fix,
-comms, 2026-09-24).
+"""The verification queue shows what was checked, to those allowed to see the check, and the verify route
+reads nothing through labels.
 
-- The queue and the ledger share ONE visibility predicate: a check that
-  cites a block, a binding or a key above the reader reads to them as no
-  check (the queue's own unfiltered EXISTS would have been an existence
-  and outcome oracle the moment the console showed it).
-- The verify route loads the binding and the block under the caller's
-  labels BEFORE gpg is forked: a hidden, other-case or unknown one is the
-  same 404, and a mismatch message only ever names a value the caller can
-  see.
-- A binding with no durable value is refused before gpg, not with a 500
-  from the 0037 trigger after one.
-- A write is never judged through a case-scoped break-glass grant (that
-  would count no use on the officer's card).
+- The queue and the ledger share ONE visibility predicate: a check that cites a block, a binding or a key
+  above the reader reads to them as no check (an unfiltered EXISTS would be an existence and outcome
+  oracle).
+- The verify route loads the binding and the block under the caller's labels BEFORE gpg is forked: a
+  hidden, other-case or unknown one is the same 404, and a mismatch message only ever names a value the
+  caller can see.
+- A binding with no durable value is refused before gpg, not with a 500 from the 0037 trigger after one.
+- A write is never judged through a case-scoped break-glass grant (that would count no use on the
+  officer's card).
 
 Rows are deleted at teardown (pgp_support.teardown).
 """

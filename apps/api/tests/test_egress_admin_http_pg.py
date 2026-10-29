@@ -1,8 +1,7 @@
-"""Administration, Egress over HTTP (S2, 2026-09-24).
+"""Administration, Egress over HTTP.
 
-Who each route lets in, the audit row each write leaves, that an exit's
-endpoint appears nowhere once sealed, what a widening reports, and the
-labels on profiles. Env-gated on DATABASE_URL.
+Who each route lets in, the audit row each write leaves, that an exit's endpoint appears nowhere once
+sealed, what a widening reports, and the labels on profiles. Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 

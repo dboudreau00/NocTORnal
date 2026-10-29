@@ -1,11 +1,9 @@
 """Invariants that live in the analyst console rather than in the API.
 
-The UI is plain HTML and hand-written JavaScript under a strict CSP with no
-build step, which was chosen partly so that properties like these are
-CHECKABLE by reading the files. A property nobody checks is a property that
-survives until the first refactor.
+The UI is plain HTML and hand-written JavaScript under a strict CSP with no build step, which was
+chosen partly so that properties like these are CHECKABLE by reading the files.
 
-Pure — no database, no browser. These read the shipped static assets.
+Pure: no database, no browser. These read the shipped static assets.
 """
 from __future__ import annotations
 
@@ -46,15 +44,10 @@ _INNER_HTML_WRITE = re.compile(
 
 
 def test_the_console_never_assigns_html_from_data():
-    """Every value the console displays is attacker-influenced somewhere:
-    a case label an analyst typed, a forum handle, a filename on a malware
-    sample, a fragment of unparseable ingest.
-
-    So the console builds DOM through `document.createElement` and
-    `textContent` and never assigns markup. This is the single check that
-    keeps that true, because "we use textContent here" is a habit and a
-    habit is one hurried fix from ending.
-    """
+    """Every value the console displays is attacker-influenced somewhere (a case label, a forum handle,
+    a filename on a malware sample, a fragment of unparseable ingest), so the console builds DOM through
+    `document.createElement` and `textContent` and never assigns markup. This is the single check that
+    keeps that true."""
     offenders = [
         (i, line.strip())
         for i, line in enumerate(_js().splitlines(), 1)
@@ -65,16 +58,12 @@ def test_the_console_never_assigns_html_from_data():
         + "\n".join(f"  app.js:{i}: {line}" for i, line in offenders))
 
 
-#: `.src =` was NOT in `_INNER_HTML_WRITE`, and until the phishing pane
-#: existed nothing in the console set one. That gap was found by an
-#: adversarial pass in 2026-07-26: a single `img.src = row.something`
-#: passed every UI test in this file while pointing the browser at an
-#: attacker-chosen URL — which fetches it, from the analyst's machine,
-#: announcing the investigation (docs/19 §5) and handing over a referer.
+#: `.src =` is not in `_INNER_HTML_WRITE`, so a single `img.src = row.something` would pass the other
+#: UI tests while pointing the browser at an attacker-chosen URL, which fetches it from the analyst's
+#: machine, announcing the investigation (docs/19, section 5) and handing over a referer.
 #:
-#: `.src` cannot simply be banned: the capture pane has to show a
-#: screenshot. So it is CONSTRAINED instead — every assignment must be a
-#: same-origin API path built from `/api/v1/`, never a value out of a
+#: `.src` cannot simply be banned: the capture pane has to show a screenshot. So it is CONSTRAINED:
+#: every assignment must be a same-origin API path built from `/api/v1/`, never a value out of a
 #: response.
 _SRC_WRITE = re.compile(r"\.src\s*=\s*(.+)$")
 _SAFE_SRC = re.compile(r"^[`'\"]/api/v1/")
@@ -103,13 +92,11 @@ def test_an_image_source_is_always_a_same_origin_api_path():
 
 
 def test_no_iframe_and_therefore_no_sandbox_question():
-    """Invariant 10: "No sandbox attribute combines `allow-scripts` with
-    `allow-same-origin`."
+    """Invariant 10: "No sandbox attribute combines `allow-scripts` with `allow-same-origin`."
 
-    The console answers that by having no iframe at all. An iframe is the
-    only element the rule can apply to, so its absence is a stronger
-    guarantee than any review of its attributes -- and a much easier one to
-    verify a year from now.
+    The console answers that by having no iframe at all. An iframe is the only element the rule can
+    apply to, so its absence is a stronger guarantee than any review of its attributes, and easier to
+    verify.
     """
     assert "<iframe" not in _html().lower()
     assert "createElement('iframe'" not in _js()
@@ -168,28 +155,18 @@ def test_the_download_control_is_not_a_link():
 # ---------------------------------------------------------------------------
 
 def test_bidi_controls_are_substituted_not_merely_isolated():
-    """The first version of the filename display used `dir="ltr"` and
-    `unicode-bidi: isolate`, which set the BASE direction and leave an
-    explicit U+202E doing exactly its job. A seeded filename
-    `harmless<RLO>fdp.exe` rendered on screen as `harmlessexe.pdf`.
+    """Bidi controls are SUBSTITUTED before they reach the DOM, not merely isolated.
 
-    The CSS looked like the defence and was not one, and nothing in the
-    suite could tell — it took a screenshot and reading it.
-
-    So the characters are SUBSTITUTED before they reach the DOM. This test
-    asserts the substitution table covers the bidi overrides, the
-    zero-width family and the isolates.
+    `dir="ltr"` and `unicode-bidi: isolate` set the BASE direction and leave an explicit U+202E doing
+    its job: a filename `harmless<RLO>fdp.exe` renders as `harmlessexe.pdf`. This test asserts the
+    substitution table covers the bidi overrides, the zero-width family and the isolates.
     """
     js = _js()
     assert "function visibleText" in js
     table = js[js.index("const _DECEPTIVE"):js.index("function visibleText")]
 
-    # The class is declared with \u escapes rather than literal invisible
-    # characters, so the assertion is on the escapes. That is not a
-    # workaround: the literal form was silently mangled in transit while
-    # this defence was being written, which is exactly the failure mode a
-    # class of unprintable characters has and exactly why a test cannot be
-    # written against it.
+    # The class is declared with unicode escapes rather than literal invisible characters, so the
+    # assertion is on the escapes: literal unprintable characters are easily mangled in transit.
     ranges: list[tuple[int, int]] = []
     for lo, hi in re.findall(r"\\\\u([0-9A-Fa-f]{4})-\\\\u([0-9A-Fa-f]{4})",
                              table):
@@ -218,20 +195,14 @@ def test_bidi_controls_are_substituted_not_merely_isolated():
 
 
 def test_labels_are_sanitised_at_the_boundary_not_at_each_render_site():
-    """An IDENTITY node's label IS a forum handle — the analyst pastes it —
-    so it is attacker-chosen, and it is drawn in about two dozen places:
-    the canvas, the entity table, the palette, the inspector, the ACH
-    matrix, every analytics summary. A per-site fix is a fix that one site
-    will always be missing.
+    """An IDENTITY node's label IS a forum handle (the analyst pastes it), so it is attacker-chosen,
+    and it is drawn in about two dozen places: the canvas, the entity table, the palette, the
+    inspector, the ACH matrix, every analytics summary. A per-site fix is a fix that one site will
+    always be missing, so labels are sanitised at the boundary.
 
-    This docstring named "every analytics summary" from the day it was
-    written, and the assertions below covered the two graph paths only. The
-    analytics suite went to `state` raw and drew eight sets of unsanitised
-    names -- `removal_set`, `top_betweenness_set`, `cut_vertices`,
-    `bridges`, `triads[].nodes`, `dyads` and the two table paths. A claim in
-    a docstring is not a check, and this is the file where that costs the
-    most: analytics is the pane that NAMES the people an analyst is about to
-    act on.
+    The assertions cover the two graph paths and the analytics paths (`removal_set`,
+    `top_betweenness_set`, `cut_vertices`, `bridges`, `triads[].nodes`, `dyads` and the two table
+    paths): analytics is the pane that NAMES the people an analyst is about to act on.
     """
     js = _js()
     assert "function withSafeLabel" in js
@@ -270,20 +241,14 @@ def test_the_dead_letter_fragment_is_made_visible_too():
 # ---------------------------------------------------------------------------
 
 def test_no_animation_can_leave_content_invisible():
-    """`animation-fill-mode: backwards` holds an element at its `from`
-    keyframe for the whole of its delay. With a staggered per-row delay
-    that meant a stall in the animation clock left ROWS MISSING with no
-    error anywhere — a screenshot of the lab queue showed three samples out
-    of twenty-eight beside a count that said 28.
-
-    A hidden tab already clamps timers and suspends the compositor in this
-    app. Motion that can hide a row is not worth having in a queue whose
-    rows are malware samples.
+    """`animation-fill-mode: backwards` holds an element at its `from` keyframe for the whole of its
+    delay. With a staggered per-row delay, a stall in the animation clock leaves ROWS MISSING with no
+    error anywhere (a lab queue showing three samples of twenty-eight beside a count that said 28). A
+    hidden tab already clamps timers and suspends the compositor in this app, and motion that can hide
+    a row is not worth having in a queue of malware samples.
     """
-    # Comments stripped first. The rule this replaced is explained at
-    # length in a comment that names `animation-delay`, and a check that
-    # matched the comment would push the reasoning out of the file — the
-    # same trap the innerHTML check above had to avoid.
+    # Comments stripped first: a comment naming `animation-delay` would otherwise match the check and
+    # push the reasoning out of the file.
     css = re.sub(r"/\*.*?\*/", "", APP_CSS.read_text(encoding="utf-8"),
                  flags=re.S)
     for rule in re.findall(r"\{[^{}]*\}", css):
@@ -309,23 +274,19 @@ def test_reduced_motion_is_honoured():
 
 
 def test_animations_move_only_composited_properties():
-    """`transform` and `opacity` are the two properties a browser can
-    animate off the main thread. Animating `width`, `top` or `margin`
-    forces a layout pass per frame, and this app renders a sociogram that
-    cannot afford one because a card faded in.
+    """`transform` and `opacity` are the two properties a browser can animate off the main thread.
+    Animating `width`, `top` or `margin` forces a layout pass per frame, which the sociogram cannot
+    afford.
 
     `width` on `.meter-fill` is the deliberate exception: it is a single
     5px bar inside a card, it animates once on open, and a transform-based
     version would scale its own border radius.
     """
     css = APP_CSS.read_text(encoding="utf-8")
-    # Scan INSIDE each step's braces. The previous scan anchored on line
-    # start -- `^\s*([a-z-]+)\s*:` -- and every keyframe line here begins
-    # with a selector (`from {`, `0%, 100% {`) with the properties after
-    # the brace on the same line, so it extracted NOTHING from all six
-    # blocks and this test passed on any animation whatsoever. Found
-    # 2026-09-01. The sentinel at the end is the fix that matters: a check
-    # that matches nothing must fail, not pass.
+    # Scan INSIDE each step's braces: every keyframe line begins with a selector (`from {`,
+    # `0%, 100% {`) with the properties after the brace on the same line, so a scan anchored on line
+    # start extracts nothing and passes on any animation. The sentinel at the end matters: a check that
+    # matches nothing must fail, not pass.
     seen = 0
     for name, body in re.findall(r"@keyframes\s+([\w-]+)\s*\{(.*?)\n\}", css, re.S):
         for step in re.findall(r"\{([^{}]*)\}", body):
@@ -361,11 +322,8 @@ def test_every_pane_is_reachable_from_the_rail():
     assert panes <= tabs, f"panes with no rail tab: {sorted(panes - tabs)}"
 
 
-#: Every id app.js looks up by literal name. DERIVED, not listed: the
-#: hand-maintained version of this set covered twenty-two ids out of the
-#: two hundred and ninety-six that exist, all of them from one pane, so a
-#: typo anywhere else was checked by nothing. A curated list of the places
-#: somebody remembered to check is not a check.
+#: Every id app.js looks up by literal name. DERIVED, not listed: a curated list covers only the
+#: places somebody remembered to check, so a typo anywhere else would be checked by nothing.
 _ADDRESSED = re.compile(r"\$\('([A-Za-z][\w-]*)'\)")
 
 #: `renderList(listId, emptyId, ...)` resolves both of its first two
@@ -422,35 +380,24 @@ def test_the_shortcut_sheet_does_not_hijack_typing():
     assert "'TEXTAREA'" in guard and "'INPUT'" in guard
 
 
-# ---------------------------------------------------------------------------
-# Invariant 12 on screen: a failure must not be reported as a finding
-# ---------------------------------------------------------------------------
-#
-# Added 2026-08-07. Three defects in one family shipped under a green suite,
-# all of them in the UI layer, all invisible to an API test: the console
-# said something confident about the DATA when the truth was that the code
-# had failed or had not been told. Static, for the reason at the top of this
-# file -- there is no build step and no browser here, and a check that reads
-# the source is the one check that runs.
+# Invariant 12 on screen: a failure must not be reported as a finding. The console must not say
+# something confident about the DATA when the code has failed or has not been told. Static, for the
+# reason at the top of this file.
 
 
 def test_a_rejection_does_not_claim_a_destruction_it_did_not_perform():
     """`purge_bytes: false` is the LEGAL HOLD path.
 
-    An analyst reaches it because somebody has been ordered to preserve the
-    material. Telling them "the bytes are gone" is the worst available wrong
-    answer: it invites a spoliation report for a destruction that did not
-    happen, and it was the only feedback the screen gave, because the sample
+    An analyst reaches it because somebody has been ordered to preserve the material. Telling them "the
+    bytes are gone" is the worst available wrong answer: it invites a spoliation report for a
+    destruction that did not happen, and it is the only feedback the screen gives, because the sample
     row does not display whether the object survived.
     """
     js = _js()
     body = _js_function("sampleActions")
     assert "purge_bytes: purged" in body
-    # UPDATED 2026-09-22 (F2): the outcome is reported from the SERVER's
-    # answer, `bytes_disposition`, which is stricter than the old check
-    # that the message depended on what was sent. Since rejection became
-    # preserve-by-default there are three outcomes, and only the server
-    # knows which one it applied.
+    # The outcome is reported from the SERVER's answer, `bytes_disposition`: rejection preserves by
+    # default, there are three outcomes, and only the server knows which one it applied.
     assert "DISPOSITION_TEXT[out.bytes_disposition]" in body, (
         "the rejection message does not come from what the server did")
     words = js[js.index("const DISPOSITION_TEXT"):]
@@ -492,19 +439,13 @@ def test_a_partial_collection_run_is_not_painted_as_a_success_or_a_failure():
 
 
 def test_a_failed_path_recompute_does_not_keep_asserting_connectivity():
-    """`reapplyFocus` runs on every projection change and every scrubber
-    settle. Its path branch swallowed the error and cleared only the
-    highlight, leaving `state.focus.connected` and `.hops` holding the
-    verdict computed under the PREVIOUS projection -- which the focus flag
-    then printed against the new one.
+    """`reapplyFocus` runs on every projection change and every scrubber settle. Its path branch must
+    clear `state.focus.connected` and `.hops` on failure, not only the highlight, or the verdict
+    computed under the PREVIOUS projection is printed against the new one.
 
-    The false-negative direction is the dangerous one: an earlier NOT
-    CONNECTED survives into a projection that would have connected the two,
-    and "are these two linked" is the question the control exists to
-    answer.
-
-    The ego branch immediately above it already did this correctly, which
-    is what makes it a slip rather than a design.
+    The false-negative direction is the dangerous one: an earlier NOT CONNECTED survives into a
+    projection that would have connected the two, and "are these two linked" is the question the
+    control exists to answer. The ego branch above it does this correctly.
     """
     js = _js()
     start = js.index("async function reapplyFocus(")
@@ -546,18 +487,13 @@ def _copart_loader() -> str:
 
 
 def test_the_co_participation_pane_reads_the_keys_the_service_emits():
-    """This pane rendered the literal string "undefined — undefined" on
-    every row, under 1444 passing tests, for as long as it has existed.
+    """The pane reads the keys the service emits: `src`/`dst` for the endpoints and
+    `shared_conversations`, not `t.source`/`t.a` and `t.rooms`, which rendered the literal string
+    "undefined" for both endpoints on every row.
 
-    It read `t.source`/`t.a` for the endpoints and the service emits
-    `src`/`dst`; it read `t.rooms` and the service emits
-    `shared_conversations`. Both sides were internally consistent and both
-    were tested -- `test_coparticipation_pg.py` asserts the SERVER key and
-    the UI tests asserted element ids. Nothing asserted the contract
-    BETWEEN them, so the defect sat in the gap where neither suite looked.
-
-    Text-level by necessity (there is no browser here), which is enough:
-    it fails the moment either side renames a key without the other.
+    `test_coparticipation_pg.py` asserts the SERVER key and the UI tests assert element ids; nothing
+    else asserts the contract BETWEEN them. Text-level by necessity (there is no browser here), which
+    is enough: it fails the moment either side renames a key without the other.
     """
     service = (SRC / "coparticipation.py").read_text(encoding="utf-8")
     for key in ("src", "dst", "weight", "shared_conversations",
@@ -568,9 +504,8 @@ def test_the_co_participation_pane_reads_the_keys_the_service_emits():
 
 
 def test_the_co_participation_pane_does_not_read_keys_that_never_existed():
-    """The specific dead keys, named so a refactor cannot quietly restore
-    them. `body.ties` never existed either -- it was a fallback in front of
-    the real key, which is what made the bug survive review."""
+    """The dead keys are named so a refactor cannot quietly restore them. `body.ties` never existed
+    either: it was a fallback in front of the real key."""
     pane = _copart_loader()
     for dead in ("t.source", "t.target", "t.a", "t.b", "t.rooms",
                  "t.weighting", "body.warnings", "body.ties"):
@@ -635,15 +570,13 @@ def test_a_failed_deception_load_clears_the_previous_case_rows():
 
 
 def test_the_ingest_quarantine_latches_only_on_a_permission_refusal():
-    """The latch exists for a good reason -- `ingest.manage` is SYS_ADMIN
-    only, and re-probing hums AUTHZ_DENIED into the one signal a security
-    officer reads for probing -- but it was keyed on "anything that is not a
-    step-up expiry".
+    """The latch exists for a good reason: `ingest.manage` is SYS_ADMIN only, and re-probing hums
+    AUTHZ_DENIED into the one signal a security officer reads for probing. So it latches only on a
+    permission refusal (403), not on "anything that is not a step-up expiry".
 
-    That swept in a network drop (ApiError status 0), a 502, a 503 and a
-    429. One blip hid the section for the rest of the session with no
-    message at all, which reports a transport failure as a permission fact
-    and reports it by making the evidence disappear.
+    A network drop (ApiError status 0), a 502, a 503 or a 429 must not hide the section for the rest of
+    the session with no message, which reports a transport failure as a permission fact by making the
+    evidence disappear.
     """
     js = _js()
     start = js.index("async function loadQuarantine(")
@@ -653,17 +586,14 @@ def test_the_ingest_quarantine_latches_only_on_a_permission_refusal():
     assert "if (!stepUp) state.quarantineVisible = false;" not in body, (
         "the old catch-all predicate is back: every transient failure "
         "latches the pane off for the session")
-    # A transient failure must say the queue is UNKNOWN, not empty. Through
-    # the shared notice since 2026-09-23 (ux17-failure:sticky-error-text-in-
-    # empty-slot): written into the empty line, it outlived the failure.
+    # A transient failure must say the queue is UNKNOWN, not empty. It goes through the shared notice:
+    # written into the empty line, it would outlive the failure.
     assert "showLoadFailure('ing-quarantine-empty'" in body, (
         "a failed read leaves the section reading as 'nothing unattached', "
         "which is a claim about the data")
 
 
-# ---------------------------------------------------------------------------
-# Metric history — Phase 3's "visible" trend
-# ---------------------------------------------------------------------------
+# Metric history
 
 def _history_js() -> str:
     js = _js()
@@ -672,10 +602,8 @@ def _history_js() -> str:
 
 
 def test_the_trend_calls_the_endpoint_that_exists():
-    """ROADMAP-REMAINING.md named this route `metrics/history` until
-    2026-08-10. The real path is `analytics/history/{node_id}`, so anyone
-    grepping the string the roadmap gave them found nothing and concluded
-    the endpoint had never been built."""
+    """The trend calls `analytics/history/{node_id}`, the real path, not `metrics/history`, so a grep
+    for the route finds it."""
     js = _js()
     assert "'/analytics/history/'" in js, (
         "nothing calls the metric-history endpoint")
@@ -701,9 +629,8 @@ def test_a_refused_trend_is_not_reported_as_an_empty_one():
     its own wording, and neither borrows the other's."""
     body = _history_js()
     assert "err.status === 403" in body, "the refusal is not distinguished"
-    # refusedWords names a 403/404 through refusalText and gives a 400 the
-    # server's own reason (ux17-failure:sticky-error-text-in-empty-slot,
-    # 2026-09-23, test_ui_failure_states.py).
+    # refusedWords names a 403/404 through refusalText and gives a 400 the server's own reason (see
+    # test_ui_failure_states.py).
     assert "refusedWords(" in body, "the refusal is not named"
     js = _js()
     start = js.index("function renderMetricHistory(")
@@ -726,12 +653,11 @@ def test_the_trend_is_drawn_oldest_first():
 def test_an_unrenderable_value_is_not_drawn_as_a_position():
     """A guard, and deliberately not called gap handling.
 
-    `analytics_runs` writes no row when a metric is undefined for a node
-    (`if value is None: continue`), and `node_metric.value` is NOT NULL --
-    so an undefined run is ABSENT from the series rather than null, and
-    absent cannot be told from "no run happened" at this endpoint. The line
-    spans it. The pane says so in its help text instead of implying the
-    axis is continuous, which is the assertion below.
+    `analytics_runs` writes no row when a metric is undefined for a node (`if value is None: continue`),
+    and `node_metric.value` is NOT NULL, so an undefined run is ABSENT from the series rather than
+    null, and absent cannot be told from "no run happened" at this endpoint. The line spans it. The
+    pane says so in its help text instead of implying the axis is continuous, which is the assertion
+    below.
 
     The `pen` break still matters: if a value ever arrives unrenderable, it
     must not be drawn as a position.
@@ -764,16 +690,12 @@ def test_the_trend_canvas_has_an_accessible_twin():
 
 
 def test_the_approvals_pane_uses_the_servers_operation_key():
-    """The first version of the dual-control pane sent the operation as
-    `'MERGE'`. `approvals.py` keys its catalogue by `'node.merge'` and
-    answers anything else with "unknown operation", so raising a request
-    400'd -- and the Execute-merge button, which compared `a.operation`
-    against the SAME wrong string, could never appear.
+    """The dual-control pane sends the operation as the server's catalogue key.
 
-    Both halves of the pane were internally consistent and wrong
-    together. That is precisely the defect the co-participation pane
-    shipped, reappearing in the pane written after it, which is why the
-    key is now a named constant with this test behind it.
+    `approvals.py` keys its catalogue by `'node.merge'` and answers anything else with "unknown
+    operation", so a request raised with `'MERGE'` would 400, and the Execute-merge button, comparing
+    `a.operation` against the same wrong string, could never appear. The key is a named constant with
+    this test behind it: two halves internally consistent and wrong together.
     """
     js = _js()
     service = (SRC / "approvals.py").read_text(encoding="utf-8")
@@ -792,15 +714,12 @@ def test_the_approvals_pane_uses_the_servers_operation_key():
 
 
 def test_the_admin_pane_offers_exactly_the_roles_the_server_grants():
-    """Three lists had to agree and two drifted: `GRANTABLE_ROLES` in
-    `iam_admin.py` (which the server enforces), the create form's picker
-    in index.html, and the per-row grant dropdown in app.js.
+    """Three lists must agree: `GRANTABLE_ROLES` in `iam_admin.py` (which the server enforces), the
+    create form's picker in index.html, and the per-row grant dropdown in app.js.
 
-    The server's list was widened to ten roles and both pickers still
-    offered six, so COLLECTOR was grantable by `curl` and unreachable
-    from the panel whose entire purpose is that nobody needs `curl`. A
-    role offered but refused, or refused but offered, is the same
-    cross-file contract defect the co-participation pane shipped.
+    A role offered but refused, or refused but offered, is a cross-file contract defect: a role the
+    server grants but the panel does not offer is reachable only by `curl`, which the panel exists to
+    avoid.
     """
     import ast
 
@@ -826,9 +745,8 @@ def test_the_admin_pane_offers_exactly_the_roles_the_server_grants():
         f"app.js and iam_admin.py disagree: only in JS {ui - server}, "
         f"only in Python {server - ui}")
 
-    # The create form's roles are checkboxes since 2026-09-23 (ux16-admin
-    # create-roles-multiselect): a native multi-select dropped the
-    # pre-chosen ANALYST on a plain click. Their VALUES are the keys.
+    # The create form's roles are checkboxes: a native multi-select drops the pre-chosen ANALYST on a
+    # plain click. Their VALUES are the keys.
     html = _html()
     start = html.index('id="adm-roles"')
     picker = html[start:html.index("</fieldset>", start)]
@@ -846,16 +764,12 @@ def test_the_admin_pane_offers_exactly_the_roles_the_server_grants():
 # ---------------------------------------------------------------------------
 
 def test_the_watch_hit_reason_is_a_list_on_every_side_of_the_contract():
-    """The collector writes `matched_on` as a JSON LIST of reasons
-    ("regex:...", "selector:..."). For three weeks the console rendered
-    `Object.keys()` of it -- on a list, its indices -- so every real hit on
-    screen said it fired on "0" or "0, 1". The read-path test fixture had
-    fabricated a DICT, and both sides were individually green.
+    """The collector writes `matched_on` as a JSON LIST of reasons ("regex:...", "selector:..."), so
+    the console must not render `Object.keys()` of it, which on a list gives its indices ("0",
+    "0, 1").
 
-    This is the third time this codebase has shipped two internally
-    consistent halves that were wrong together (co-participation keys,
-    the approvals operation key). So the shape is asserted on all three
-    sides at once, from the one file that reads all of them.
+    The shape is asserted on all three sides at once (collector, fixture, console), from the one file
+    that reads all of them, because two internally consistent halves can be wrong together.
     """
     src = STATIC.parents[1]
     collector = (src / "collection.py").read_text(encoding="utf-8")
@@ -890,15 +804,13 @@ def test_the_watch_hit_reason_is_a_list_on_every_side_of_the_contract():
 # ---------------------------------------------------------------------------
 
 def test_the_drain_response_declares_every_counter_the_drain_returns():
-    """`transports.dispatch_due` returns five counters; `DrainOut` declared
-    four. Pydantic drops an undeclared key silently, so `revoked` -- the
-    count of people deliberately NOT told because their clearance or
-    assignment was revoked after the row was queued -- was computed on
-    every drain and reached nobody. A counter that exists to explain an
-    absence, absent.
+    """`transports.dispatch_due` returns five counters; `DrainOut` must declare all of them. Pydantic
+    drops an undeclared key silently, so `revoked` (the count of people deliberately NOT told because
+    their clearance or assignment was revoked after the row was queued) would be computed on every
+    drain and reach nobody.
 
-    Asserted structurally so the next counter cannot vanish the same way:
-    every key the service builds must be a declared field.
+    Asserted structurally so the next counter cannot vanish the same way: every key the service builds
+    must be a declared field.
     """
     src = STATIC.parents[1]
     transports = (src / "transports.py").read_text(encoding="utf-8")
@@ -915,16 +827,10 @@ def test_the_drain_response_declares_every_counter_the_drain_returns():
         "them; pydantic will drop them from the response without an error")
 
 
-# ---------------------------------------------------------------------------
-# Invariant -- the static files stay inside the CSP that serves them
-# ---------------------------------------------------------------------------
-# `_UI_CSP` (http/app.py) is script-src 'self', style-src 'self',
-# connect-src 'self', img-src 'self' data:, with no 'unsafe-inline' and no
-# font-src. Until 2026-09-01 nothing asserted the files honoured it: a
-# webfont @import or a CDN <script> passed every test and broke only in a
-# browser -- silently, because a blocked resource is a console line, not
-# an error anybody tests for. And nothing in the suite requested any /ui
-# path at all, so the header itself was unasserted too.
+# The static files stay inside the CSP that serves them. `_UI_CSP` (http/app.py) is script-src 'self',
+# style-src 'self', connect-src 'self', img-src 'self' data:, with no 'unsafe-inline' and no font-src.
+# A webfont @import or a CDN <script> would pass every test and break only in a browser, silently,
+# because a blocked resource is a console line, not an error anybody tests for.
 
 def _css_body(name: str) -> str:
     return re.sub(r"/\*.*?\*/", "", (STATIC / name).read_text(encoding="utf-8"),
@@ -1031,10 +937,7 @@ def test_the_console_is_served_under_the_ui_csp(monkeypatch):
     assert r.headers["Content-Security-Policy"].startswith("default-src 'none'")
 
 
-# ---------------------------------------------------------------------------
-# Alpha 4 product review, 2026-09-09: the console and the API each held one
-# half of four contracts, and nothing read both halves
-# ---------------------------------------------------------------------------
+# Contracts the console and the API each hold half of; these tests read both halves
 
 
 def _ach_block() -> str:
@@ -1046,17 +949,13 @@ def _ach_block() -> str:
 
 
 def test_the_ach_cells_call_the_stance_route_with_the_routers_vocabulary():
-    """K1. `PUT /cases/{id}/ach/hypotheses/{hid}/stance` has existed since
-    Phase 6 and `renderAchMatrix` drew every cell as a `<td>` with a
-    tooltip, so the only way to score evidence against a hypothesis was
-    `curl`. The ranking pane looked complete -- it rendered a matrix,
-    a scale and a method paragraph -- and could not be driven.
+    """`PUT /cases/{id}/ach/hypotheses/{hid}/stance` is the only way to score evidence against a
+    hypothesis, so `renderAchMatrix` must wire its cells to it, not draw them as a `<td>` with a
+    tooltip.
 
-    Reads both sides: the route the console calls must be the one the
-    router defines, the payload keys must be `StanceBody`'s, and the
-    stances the chooser offers must be exactly the integers the router's
-    `Field(ge=, le=)` accepts and the service labels. Fails before
-    2026-09-09 because the console never named the route at all.
+    Reads both sides: the route the console calls must be the one the router defines, the payload keys
+    must be `StanceBody`'s, and the stances the chooser offers must be exactly the integers the
+    router's `Field(ge=, le=)` accepts and the service labels.
     """
     import ast
 
@@ -1112,20 +1011,17 @@ def test_the_ach_cells_call_the_stance_route_with_the_routers_vocabulary():
 
 
 def test_there_is_one_labelOf_and_it_never_returns_null():
-    """K2. Two top-level `function labelOf(` declarations, one at the
-    inspector (falls back to the projection list, then a short id) and one
-    at the merge panel (entity list only, else `null`). Function
-    declarations hoist and the LAST wins, so the focus flag, the path
-    anchor, the palette and `edgeById` -- every caller written against the
-    first -- printed "ego of null" for any node the projection knew and the
-    entity list did not. Nothing crashed, which is why it shipped.
+    """There is one top-level `function labelOf(` and it never returns null.
 
-    One declaration, and the fallback order is asserted through the helper
-    it delegates to: the entity list first (richer record), then the
-    projection, then a placeholder that says what it is standing in for.
-    Callers that papered over the null with `|| shortId(...)` are gone,
-    because a guard against a value the function can no longer return is
-    the next reader's false clue.
+    Function declarations hoist and the LAST wins, so with two (the inspector's, falling back to the
+    projection list then a short id, and the merge panel's, entity list only, else `null`) every
+    caller written against the first would print "ego of null" for a node the projection knew and the
+    entity list did not, with nothing crashing.
+
+    The fallback order is asserted through the helper it delegates to: the entity list first (richer
+    record), then the projection, then a placeholder that says what it is standing in for. Callers do
+    not paper over the null with `|| shortId(...)`: a guard against a value the function can no longer
+    return is a false clue for the next reader.
     """
     js = _js()
     declared = re.findall(r"^function labelOf\(", js, flags=re.M)
@@ -1153,16 +1049,13 @@ def test_there_is_one_labelOf_and_it_never_returns_null():
 
 
 def test_the_login_code_field_admits_a_recovery_code():
-    """K3. `AuthService.authenticate` has accepted a recovery code in
-    `totp_code` since the codes were built (`recovery.looks_like_code`
-    tells the two apart by shape), and the sign-in field was
-    `maxlength="6" pattern="[0-9]{6}" inputmode="numeric"`. The escape
-    hatch existed on the server and could not be typed into the client,
-    so the working fallback for a skewed clock was `bootstrap.py session`
-    -- which bypasses MFA and says so in the audit trail.
+    """`AuthService.authenticate` accepts a recovery code in `totp_code` (`recovery.looks_like_code`
+    tells the two apart by shape), so the sign-in field must admit one, not be
+    `maxlength="6" pattern="[0-9]{6}" inputmode="numeric"`. Otherwise the escape hatch for a skewed
+    clock exists on the server and cannot be typed into the client.
 
-    The shape is taken from the recovery module, not copied: a second copy
-    of the alphabet or the group length is how the field drifts again.
+    The shape is taken from the recovery module, not copied: a second copy of the alphabet or the
+    group length is how the field drifts again.
     """
     from noctornal_api.security import recovery
 
@@ -1179,7 +1072,7 @@ def test_the_login_code_field_admits_a_recovery_code():
         f"recovery code before it reaches the server")
     assert re.fullmatch(pattern.group(1), code), (
         f"pattern={pattern.group(1)!r} rejects the recovery code {code!r}")
-    # The six-digit fast path is kept, not replaced.
+    # The six-digit fast path still matches.
     assert re.fullmatch(pattern.group(1), "123456")
 
     # The alphabet has letters in it, so a numeric keyboard would hide the
@@ -1197,17 +1090,14 @@ def test_the_login_code_field_admits_a_recovery_code():
 
 
 def test_the_console_holds_no_token_in_web_storage_and_speaks_the_cookie_contract():
-    """K4. The server has set `__Host-session` (HttpOnly) and `__Host-csrf`
-    on every login since the CSRF work, and `deps.session_token` has
-    honoured the pair with an `x-csrf-token` double-submit -- and the
-    console kept a bearer token in `sessionStorage` anyway, readable by
-    any script on the origin for the life of the tab.
+    """The server sets `__Host-session` (HttpOnly) and `__Host-csrf` on every login, and
+    `deps.session_token` honours the pair with an `x-csrf-token` double-submit, so the console keeps no
+    bearer token in `sessionStorage`, where any script on the origin could read it for the life of the
+    tab.
 
-    Both halves of the contract, from one file: the storage write is gone,
-    the header and cookie names the console uses are the ones deps.py
-    declares, requests carry credentials, and the `#token=` hand-off from
-    `bootstrap.py session` is exchanged for the cookie session through a
-    route auth.py defines.
+    Both halves of the contract, from one file: no storage write, the header and cookie names the
+    console uses are the ones deps.py declares, requests carry credentials, and the `#token=` hand-off
+    from `bootstrap.py session` is exchanged for the cookie session through a route auth.py defines.
     """
     js = _js()
     stored = [
@@ -1239,11 +1129,8 @@ def test_the_console_holds_no_token_in_web_storage_and_speaks_the_cookie_contrac
         "the console never exchanges a #token= hand-off for the cookie session")
 
 
-# ---------------------------------------------------------------------------
-# Alpha 4 product review, second pass (2026-09-09): the cookie session's
-# two refutations. Each test reads BOTH sides of a contract that crosses
-# app.js and the API, because each defect was two halves wrong together.
-# ---------------------------------------------------------------------------
+# Cookie session contracts across app.js and the API. Each test reads BOTH sides, because a defect
+# here is two halves wrong together.
 
 
 def _js_function(name: str) -> str:
@@ -1255,21 +1142,19 @@ def _js_function(name: str) -> str:
 
 
 def test_a_refused_hand_off_or_sign_out_never_reports_what_the_server_did_not_do():
-    """K4, correctness. `_fetch` ended the session on ANY 401 that was not
-    the login's, including the speculative `POST /auth/cookie` exchange;
-    `endSession` deleted the readable `__Host-csrf` and could not touch
-    the HttpOnly half; `boot()` then showed the app on `GET /auth/me`,
-    which the session cookie alone satisfies; every write was 403
-    "missing or invalid CSRF token"; and `doLogout` swallowed that 403
-    and showed the sign-in form while the server kept the session, which
-    a reload restored. A stale `bootstrap.py session` link opened in a
-    signed-in tab was enough to reach it.
+    """A refused hand-off or sign-out never reports what the server did not do.
 
-    Three halves, read together: the routes whose 401 `_fetch` treats as
-    a verdict on the credential in the request are exactly the credential
-    checks `routers/auth.py` defines; `startApp` refuses a session that
-    has no readable half and no in-memory token; and `doLogout` ends the
-    session only after the server accepted the sign-out.
+    `_fetch` must not end the session on a 401 that is not a verdict on the request's own credential
+    (the speculative `POST /auth/cookie` exchange). `endSession` deletes the readable `__Host-csrf`
+    but cannot touch the HttpOnly half, `boot()` would then show the app on `GET /auth/me` (which the
+    session cookie alone satisfies), every write would be a 403 "missing or invalid CSRF token", and
+    `doLogout` would show the sign-in form while the server kept the session, which a reload restores.
+    A stale `bootstrap.py session` link opened in a signed-in tab is enough to reach it.
+
+    Three halves, read together: the routes whose 401 `_fetch` treats as a verdict on the credential in
+    the request are exactly the credential checks `routers/auth.py` defines; `startApp` refuses a
+    session that has no readable half and no in-memory token; and `doLogout` ends the session only
+    after the server accepted the sign-out.
     """
     js = _js()
     m = re.search(r"const _CREDENTIAL_CHECKS = new Set\(\[([^\]]*)\]\);", js)
@@ -1308,27 +1193,20 @@ def test_a_refused_hand_off_or_sign_out_never_reports_what_the_server_did_not_do
 
 
 def test_a_fragment_token_never_replaces_the_session_the_browser_holds():
-    """K4, security. `adoptSessionFromFragment` POSTed the `#token=` to
-    `/auth/cookie` with the bearer forced and no look at the session the
-    browser already held; `deps.session_token` prefers the bearer; so a
-    link of the documented deep-link shape carrying another account's
-    token, opened by a signed-in analyst, swapped the cookie under every
-    tab they had open. Both halves: the console asks `/auth/me` on the
-    cookie BEFORE it exchanges and keeps a usable session it finds, and
-    `adopt_cookie` refuses a cookie session for a different account with
-    409 and an audit row -- the line that holds when the console is wrong
-    (`test_auth_cookie_http_pg` drives that refusal against Postgres).
+    """`adoptSessionFromFragment` must not replace a session the browser already holds.
 
-    Also holds the header comment to the code. When this was written the
-    token WAS readable from script after a form sign-in, and the header
-    had to say so rather than claim it could not be lifted. Since
-    2026-09-10 a form sign-in hands the page nothing at all -- login
-    answers 204 -- and the `#token=` hand-off this test is about is the
-    one thing left that fills `state.token`; the socket's first frame is
-    where that token is spent, on a host whose browser refused the Secure
-    pair. So both literals below are still required and still true, and
-    the assertion still does its job: it stops the header claiming that
-    nothing in this page is readable when one hand-off still is.
+    `deps.session_token` prefers the bearer, so a link of the documented deep-link shape carrying
+    another account's token, opened by a signed-in analyst, would swap the cookie under every tab they
+    have open. Both halves: the console asks `/auth/me` on the cookie BEFORE it exchanges and keeps a
+    usable session it finds, and `adopt_cookie` refuses a cookie session for a different account with
+    409 and an audit row, the line that holds when the console is wrong (`test_auth_cookie_http_pg`
+    drives that refusal against Postgres).
+
+    Also holds the header comment to the code. A form sign-in hands the page nothing (login answers
+    204); the `#token=` hand-off is the one thing that fills `state.token`, and the socket's first
+    frame is where that token is spent, on a host whose browser refused the Secure pair. So the header
+    must say where a hand-off token is held and what still spends it, not claim that nothing in this
+    page is readable.
     """
     js = _js()
     body = _js_function("adoptSessionFromFragment")
@@ -1343,12 +1221,9 @@ def test_a_fragment_token_never_replaces_the_session_the_browser_holds():
     header = js[:js.index("'use strict'")]
     assert "cannot lift the token" not in header, (
         "the header still claims the credential is unreadable from script")
-    # Whitespace-flattened before the match, because this is prose in a
-    # block comment and prose gets rewrapped. On 2026-09-10 it was, and
-    # "first frame" landed either side of a line break -- so this
-    # assertion failed for a header that says exactly what it must. An
-    # assertion about what a comment SAYS must not double as a detector
-    # of where its lines happen to end.
+    # Whitespace-flattened before the match, because this is prose in a block comment and prose gets
+    # rewrapped: an assertion about what a comment SAYS must not double as a detector of where its
+    # lines end.
     flat = re.sub(r"\s+", " ", header)
     assert "state.token" in flat and "first frame" in flat, (
         "the header does not say where a hand-off token is held and what "
@@ -1366,29 +1241,15 @@ def test_a_fragment_token_never_replaces_the_session_the_browser_holds():
 
 
 def test_the_sample_download_presents_the_credential_the_sample_origin_preflight_admits():
-    """The Lab download is the console's one cross-origin request, and
-    two groups' 2026-09-09 changes met in it: the sample-origin split made
-    it cross-origin and the cookie session made `authHeaders('POST')`
-    prefer the CSRF header. The sample process answers the preflight with
-    `Access-Control-Allow-Headers: authorization` alone and sends no
-    `Allow-Credentials`, so a CSRF header fails the preflight and the pane
-    reports "did not complete" for a request the server never saw. Both
-    sides: the header the preflight admits is the one the console forces,
-    and a session restored from the cookie -- which holds no token -- is
-    told so instead of sending a request that cannot be authenticated.
+    """The Lab download presents no custom header, which keeps it a SIMPLE cross-origin request.
 
-    UPDATED 2026-09-10, and the update is the point of the original: the
-    console now presents NO header there at all. 0061's download ticket
-    replaced the forced Bearer, and a ticket cannot be a header for the
-    reason this test was written -- `authorization` is the only one this
-    preflight admits, and inventing a second would fail it exactly as the
-    CSRF header did. With no custom header and a form body the redemption
-    is a SIMPLE cross-origin request, which is not preflighted at all. So
-    the assertion flips rather than the subject: the header set app.py
-    admits is still read from app.py, and what the console must NOT send
-    is read from the console. The `if (!state.token)` refusal this test
-    used to require went with the Bearer -- there is no longer a session
-    this pane cannot download on.
+    The Lab download is the console's one cross-origin request. The sample process answers the
+    preflight with `Access-Control-Allow-Headers: authorization` alone and sends no `Allow-Credentials`,
+    so a CSRF header would fail the preflight and the pane would report "did not complete" for a request
+    the server never saw. The console presents no header at all: 0061's download ticket is redeemed as
+    a form body, and a ticket cannot be a header because `authorization` is the only one this preflight
+    admits. The header set app.py admits is read from app.py, and what the console must NOT send is
+    read from the console.
     """
     app_src = (SRC / "http" / "app.py").read_text(encoding="utf-8")
     m = re.search(r'"Access-Control-Allow-Headers":\s*"([^"]+)"', app_src)
@@ -1412,15 +1273,9 @@ def test_the_sample_download_presents_the_credential_the_sample_origin_preflight
 # ---------------------------------------------------------------------------
 
 def test_the_live_client_stops_on_the_policy_close_the_server_documents():
-    """live.py sends 1008 for "the server decided" and says the console stops
-    reconnecting on it; the console's close handler must therefore read the
-    close code and return on 1008 before scheduling a retry.
-
-    Until 2026-09-09 the handler's own comment said retrying 1008 "is
-    pointless and looks like an attack in the audit log" while the handler
-    ignored the code and retried six times, and live.py recorded that
-    behaviour as the reason a finer code was not worth sending. Two files,
-    each honest about the other, wrong together.
+    """live.py sends 1008 for "the server decided" and says the console stops reconnecting on it; the
+    console's close handler must therefore read the close code and return on 1008 before scheduling a
+    retry, or it retries six times and looks like an attack in the audit log.
     """
     src = Path(__file__).resolve().parents[1] / "src" / "noctornal_api"
     js = (src / "http" / "static" / "app.js").read_text(encoding="utf-8")
@@ -1443,12 +1298,8 @@ def test_the_live_client_stops_on_the_policy_close_the_server_documents():
 
 
 def test_the_palette_offers_every_pane_the_rail_has():
-    """`TAB_NAMES` is the command palette's "Go to" list. It was written
-    when the rail had six panes and stayed at six while the rail grew to
-    seventeen, so the palette offered a third of the console and the
-    documents called it a way to reach anything (2026-09-09). Held to the
-    rail's `data-tab` set, in rail order, so the next pane cannot be
-    added to one and not the other."""
+    """`TAB_NAMES` is the command palette's "Go to" list. It is held to the rail's `data-tab` set, in
+    rail order, so the next pane cannot be added to one and not the other."""
     rail = re.findall(r'data-tab="([a-z-]+)"', _html())
     assert len(rail) >= 17, rail
     block = re.search(r"const TAB_NAMES = \[(.*?)\];", _js(), re.S)
@@ -1459,26 +1310,15 @@ def test_the_palette_offers_every_pane_the_rail_has():
         f"  rail:    {rail}\n  palette: {palette}")
 
 
-# ---------------------------------------------------------------------------
-# Wave 2 (2026-09-10): the console asks for no credential it can read
+# The console asks for no credential it can read. The live socket takes `__Host-session` itself, which
+# is HttpOnly and cannot be lifted from this page, and the Lab download takes a one-shot ticket minted
+# on THIS origin under the cookie session: readable by the page, and deliberately so, but worth one
+# archive for sixty seconds rather than the case file for the life of a session.
 #
-# Two paths kept a session token in page memory after the cookie session
-# landed. The live socket authenticated from a token in its first frame
-# and read no cookie; the Lab download is cross-origin by design, so no
-# `__Host-` cookie can reach it and the console forced the login body's
-# token there as a Bearer. Neither takes the session token now: the
-# socket takes `__Host-session` itself, which is HttpOnly and cannot be
-# lifted from this page at all, and the download takes a one-shot ticket
-# minted on THIS origin under the cookie session -- readable by the page,
-# and deliberately so, but worth one archive for sixty seconds rather
-# than the case file for the life of a session.
-#
-# Every test below reads both sides, because each of these contracts
-# exists only in the gap between two files and each half is silently
-# useless alone -- a console that opens a socket the server would refuse
-# reports "not live" and nothing else, and a server that accepts a cookie
-# no client sends is a feature nobody reaches.
-# ---------------------------------------------------------------------------
+# Every test below reads both sides, because each of these contracts exists only in the gap between
+# two files and each half is silently useless alone: a console that opens a socket the server would
+# refuse reports "not live" and nothing else, and a server that accepts a cookie no client sends is a
+# feature nobody reaches.
 
 
 def _live_py() -> str:
@@ -1490,22 +1330,14 @@ def _samples_router() -> str:
 
 
 def test_the_live_socket_opens_on_the_cookie_and_is_not_gated_on_a_token():
-    """The socket reads `__Host-session` off the upgrade, so `connectLive`
-    must not refuse to open one for a session that holds only the cookie.
+    """The socket reads `__Host-session` off the upgrade, so `connectLive` must not refuse to open one
+    for a session that holds only the cookie. A `connectLive` that still gates on `state.token` is a
+    console that never goes live after a reload and says only "not live".
 
-    Until 2026-09-10 it did, and the refusal was the honest state of that
-    build: the server took a token from the first frame and read no
-    cookie, so after a reload there was nothing to authenticate with. Both
-    halves had to move together, and this test is what stops one of them
-    moving back -- a `connectLive` that still gates on `state.token`
-    against this `_handshake` is a console that never goes live after a
-    reload and says only "not live" while doing it.
-
-    The frame's `token` survives as a FALLBACK and is sent only when the
-    tab actually holds one (a console the browser refused the Secure
-    cookies on; `scripts/bootstrap.py session` in a shell). Sending it
-    unconditionally would be sending `null` on every socket a signed-in
-    browser opens, which is a token field this page has no reason to fill.
+    The frame's `token` survives as a FALLBACK and is sent only when the tab actually holds one (a
+    console the browser refused the Secure cookies on; `scripts/bootstrap.py session` in a shell).
+    Sending it unconditionally would send `null` on every socket, a token field this page has no reason
+    to fill.
     """
     live = _live_py()
     assert re.search(
@@ -1537,21 +1369,13 @@ def test_the_live_socket_opens_on_the_cookie_and_is_not_gated_on_a_token():
 
 
 def test_the_policy_close_still_stops_the_client_that_now_reconnects_more():
-    """The 1008 rule is untouched by Wave 2 and must stay that way.
+    """The 1008 policy close still stops the client.
 
-    `connectLive` opens a socket in strictly more situations than it used
-    to, so the one close code that means "the server has decided" carries
-    more weight, not less: without the return the console would retry six
-    times against a hub that refused it, which reads as an attack in the
-    audit log. Held here as well as in
-    `test_the_live_client_stops_on_the_policy_close_the_server_documents`
-    because the line immediately below it is one this change edited.
-
-    That neighbour is the retry gate, and it had to move from
-    `state.token` to the session: a null token stopped meaning "no
-    session" the moment the socket started taking the cookie, and a gate
-    left as it was would have made the reconnect the one thing still
-    refusing a cookie-only session.
+    `connectLive` opens a socket in many situations, so the one close code that means "the server has
+    decided" must return before a retry: otherwise the console retries six times against a hub that
+    refused it, which reads as an attack in the audit log. The retry gate below it keys on the session,
+    not `state.token`: a null token does not mean "no session" now that the socket takes the cookie,
+    and a token gate would make the reconnect the one thing still refusing a cookie-only session.
     """
     body = _js_function("connectLive")
     stop = re.search(r"event\.code\s*===\s*1008\)\s*return", body)
@@ -1566,23 +1390,18 @@ def test_the_policy_close_still_stops_the_client_that_now_reconnects_more():
 
 
 def test_the_lab_download_crosses_the_origin_on_a_ticket_and_not_on_the_session():
-    """0061. The console mints a one-shot ticket on the application origin
-    and spends it at the sample origin, so the credential that crosses is
-    good for one sample, one redemption and sixty seconds -- instead of
-    the session token, which is what crossed until 2026-09-10 and is the
-    reason the login body's token had to be readable from script at all.
+    """0061. The console mints a one-shot ticket on the application origin and spends it at the sample
+    origin, so the credential that crosses is good for one sample, one redemption and sixty seconds,
+    not the session token.
 
-    Both sides, because the shape of the redemption is a contract and not
-    a preference: the route takes the ticket as a FORM field, and
-    `application/x-www-form-urlencoded` is CORS-safelisted, so the
-    redemption is a simple cross-origin request. A console that sent JSON
-    instead would need `content-type` added to `app._preflight`'s
-    `Access-Control-Allow-Headers` and would fail as "the request did not
-    complete" until somebody did.
+    Both sides, because the shape of the redemption is a contract: the route takes the ticket as a FORM
+    field, and `application/x-www-form-urlencoded` is CORS-safelisted, so the redemption is a simple
+    cross-origin request. A console that sent JSON would need `content-type` added to
+    `app._preflight`'s `Access-Control-Allow-Headers` and would fail as "the request did not complete"
+    until somebody did.
 
-    The ticket is never assembled into a URL, on either side. A query
-    string reaches the access log, the browser history and the `Referer`,
-    and this one buys a live binary.
+    The ticket is never assembled into a URL, on either side. A query string reaches the access log,
+    the browser history and the `Referer`, and this one buys a live binary.
     """
     samples_src = _samples_router()
     assert '@router.post("/{sample_id}/download-ticket"' in samples_src, (
@@ -1612,14 +1431,11 @@ def test_the_lab_download_crosses_the_origin_on_a_ticket_and_not_on_the_session(
 
 
 def test_the_download_ticket_is_minted_on_the_path_that_carries_the_double_submit():
-    """The mint is the whole reason this is safe to hand out, so it is
-    reached the ordinary way: `api()`, which sends the cookie and copies
-    `__Host-csrf` into `x-csrf-token` on an unsafe method. Three files
-    have to agree for that sentence to be true -- the console must POST
-    through `api()`, `deps` must count POST as unsafe, and the route must
-    be declared POST -- and a GET mint would be exempt from the
-    double-submit while remaining something a prefetcher or a link scanner
-    can fire.
+    """The mint is reached the ordinary way: `api()`, which sends the cookie and copies `__Host-csrf`
+    into `x-csrf-token` on an unsafe method. Three files have to agree for that to be true: the console
+    must POST through `api()`, `deps` must count POST as unsafe, and the route must be declared POST. A
+    GET mint would be exempt from the double-submit while remaining something a prefetcher or a link
+    scanner can fire.
     """
     body = _js_function("downloadSample")
     assert "await api('/samples/'" in body, (
@@ -1654,21 +1470,15 @@ def test_the_download_ticket_is_minted_on_the_path_that_carries_the_double_submi
 
 
 def test_both_legs_of_the_download_report_the_servers_own_sentence():
-    """A refusal from either leg has to reach the analyst as the server
-    wrote it. The two legs fail for different reasons and only the server
-    knows which: the mint refuses an expired step-up, a clearance that
-    does not reach the sample, or a misconfigured origin split; the
-    redemption refuses a ticket that has been spent, has expired, or was
-    issued for another sample -- and that one sentence ends by saying to
-    ask for another, which is the only thing the analyst can act on.
+    """A refusal from either leg of the download reaches the analyst as the server wrote it.
 
-    `refusalText` is the function that puts `detail` first; three strings
-    in this file once asserted a role fact instead and told the holder of
-    a permission that they did not hold it. The cross-origin leg does not
-    come through `api()`, so its refusal is not an `ApiError` until this
-    code makes one -- and a hand-rolled second spelling of "it was
-    refused" on that path is exactly the divergence `refusalText` exists
-    to prevent.
+    The two legs fail for different reasons and only the server knows which: the mint refuses an
+    expired step-up, a clearance that does not reach the sample, or a misconfigured origin split; the
+    redemption refuses a ticket that has been spent, has expired, or was issued for another sample.
+
+    `refusalText` puts `detail` first. The cross-origin leg does not come through `api()`, so its
+    refusal is not an `ApiError` until this code makes one, and a hand-rolled second spelling of "it
+    was refused" on that path is the divergence `refusalText` exists to prevent.
     """
     body = _js_function("downloadSample")
     assert body.count("refusalText(") >= 2, (
@@ -1685,32 +1495,21 @@ def test_both_legs_of_the_download_report_the_servers_own_sentence():
 
 
 def test_a_sign_in_hands_the_browser_a_cookie_and_nothing_it_can_read(monkeypatch):
-    """The last step of Wave 2, and the one with no other test in the pure
-    suite: `POST /auth/login` answers 204 with the cookie pair and NO body.
+    """`POST /auth/login` answers 204 with the cookie pair and NO body, so a sign-in hands the browser
+    a cookie and nothing it can read. With the raw token in the response, `HttpOnly` would buy nothing:
+    any script with a foothold on this origin could read the credential out of the login response or
+    `state.token`.
 
-    Everything above is why that became possible; this is the property it
-    was for. Until 2026-09-10 the response carried the raw session token
-    beside the `Set-Cookie`, so `HttpOnly` bought the console nothing --
-    any script that got a foothold on this origin read the same
-    credential out of the login response or out of `state.token`, and a
-    reload was the only thing that ever removed it.
+    Held from three sides, because a regression would look different from each. The OPENAPI document
+    is the contract a client is written against, and a `LoginResponse` reappearing there is the change
+    to catch. The DECORATOR is what that document is generated from, asserted separately so a failure
+    says which of the two moved. And the CONSOLE must not read a token off that response: `_fetch`
+    returns null for a 204, so such an assignment throws a TypeError on every form sign-in and reports
+    a completed sign-in as an unexpected error.
 
-    Held from three sides, because a regression would look different from
-    each. The OPENAPI document is the contract a client is written
-    against, and a `LoginResponse` reappearing there is the change to
-    catch before anybody writes against it. The DECORATOR is what that
-    document is generated from, and is asserted separately so a failure
-    says which of the two moved. And the CONSOLE must not read a token
-    off that response:
-    the assignment that stood there survived the server change by one
-    session and threw a TypeError on every form sign-in, because
-    `_fetch` returns null for a 204 -- a sign-in the server had completed,
-    reported to the analyst as an unexpected error.
-
-    `state.token` itself is deliberately NOT asserted away. The `#token=`
-    hand-off still fills it (`adoptSessionFromFragment`), and
-    `scripts/bootstrap.py session` still mints a bearer directly; what
-    ended is LOGIN handing one out.
+    `state.token` itself is deliberately NOT asserted away. The `#token=` hand-off still fills it
+    (`adoptSessionFromFragment`), and `scripts/bootstrap.py session` still mints a bearer directly;
+    what is excluded is LOGIN handing one out.
     """
     import json
 
