@@ -870,8 +870,3 @@ def to_one_mode(nodes: list[dict], ties: list[dict], consumable: list[dict],
         "edges_dropped_with_venues": dict(sorted(dropped.items())),
     })
     return keep_nodes, edges_out, cov
-
-
-def is_derived(edge: dict) -> bool:
-    return bool(edge.get("derived"))
-

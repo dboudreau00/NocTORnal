@@ -37,7 +37,7 @@ from noctornal_api.http.limits import (
     rate_limit_peek,
 )
 from noctornal_api.iam_admin import change_password, new_password_problem
-from noctornal_api.security.auth import AuthOutcome, AuthService
+from noctornal_api.security.auth import AuthService
 from noctornal_api.security.sessions import (
     IDLE_TIMEOUT,
     STEP_UP_FRESHNESS,
@@ -114,17 +114,6 @@ def _audit(conn, action: str, actor_id, detail: dict, request: Request,
     )
 
 
-#: Says what happened and what to do, and nothing about which key: the
-#: register names that, to somebody who may read it.
-SECOND_FACTOR_UNAVAILABLE = (
-    "the second factor for this account cannot be checked: the key that "
-    "sealed its authenticator secret is not available to this deployment. "
-    "Nothing about the credentials was wrong. An operator must read the "
-    "readiness register (kek_ring_opens_stored_secrets) and restore or "
-    "retire that key."
-)
-
-
 #: The problem `type` of the refusal that asks for a new password. A URN
 #: rather than a sentence the console would have to pattern-match: the
 #: detail is prose for a person, and prose gets reworded.
@@ -174,15 +163,6 @@ def _login(body: LoginBody, request: Request,
     result = service.authenticate(
         body.email, body.password, body.totp_code, spend_recovery=False
     )
-    if result.outcome is AuthOutcome.SECOND_FACTOR_UNAVAILABLE:
-        # The password verified but the stored second factor could not be opened under any key this
-        # process holds. Not a credential failure, so neither the failure meter nor the lockout is
-        # touched; audited under its own reason and answered as a server fault naming the
-        # readiness check that explains it.
-        _audit(conn, "AUTH_FAILED", result.user_id,
-               {"reason": result.audit_reason, **_audit_email(body.email)},
-               request, outcome="DENIED")
-        raise Problem(503, "Service unavailable", SECOND_FACTOR_UNAVAILABLE)
     if not result.ok:
         consume_on_failure(request, "auth.login_failed")
         # The specific cause is audited server-side and NEVER returned —
@@ -487,10 +467,6 @@ def _change_own_password(body: PasswordChangeBody, request: Request,
     `conn` as before."""
     result = AuthService(PgUserStore(sconn)).authenticate(
         email, body.current_password, body.totp_code)
-    if result.outcome is AuthOutcome.SECOND_FACTOR_UNAVAILABLE:
-        _audit(conn, "PASSWORD_CHANGE_FAILED", user.user_id,
-               {"reason": result.audit_reason}, request, outcome="DENIED")
-        raise Problem(503, "Service unavailable", SECOND_FACTOR_UNAVAILABLE)
     if not result.ok or result.user_id != user.user_id:
         consume_on_failure(request, "auth.login_failed")
         _audit(conn, "PASSWORD_CHANGE_FAILED", user.user_id,

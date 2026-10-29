@@ -125,10 +125,11 @@ def grant(conn) -> None:
     sequences = _migration_named("ledger_sequences_trigger_drawn")
     if _at_or_past(conn, sequences.revision):
         conn.execute(sequences.REVOKE_SQL)
-    # What else 0108's blanket grant hands back: the Lab custody ledger's sequence, the session,
-    # break-glass and other sealed columns, the case material's UPDATE and DELETE and the
-    # configuration tables' writes. Each found by name.
-    for stem, attribute in (("sample_access_sequence_trigger_drawn", "REVOKE_SQL"),
+    # What else 0108's blanket grant hands back: the reference vocabulary's writes, the Lab custody
+    # ledger's sequence, the session, break-glass and other sealed columns, the case material's
+    # UPDATE and DELETE and the configuration tables' writes. Each found by name.
+    for stem, attribute in (("vocabulary_read_only", "PRIVILEGES_SQL"),
+                            ("sample_access_sequence_trigger_drawn", "REVOKE_SQL"),
                             ("iam_session_break_glass_columns_sealed", "PRIVILEGES_SQL"),
                             ("case_material_request_writes", "GRANTS_SQL"),
                             ("configuration_read_only", "PRIVILEGES_SQL"),

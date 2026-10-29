@@ -1154,21 +1154,35 @@ class RetentionService:
                     approval_request_id, actor_id=actor_id,
                     operation="evidence.purge", case_id=case_id,
                     payload=payload)
+                # Every count and every warning about an exhibit is registered against it, so the route can
+                # answer a caller over only the exhibits they may know of: a warning names the storage key,
+                # which carries the exhibit's digest.
                 if storage.gone:
                     gone = set(storage.gone)
-                    result.warnings.append(
-                        f"{count_of(len(gone), 'exhibit was', 'exhibits were')} "
-                        f"already destroyed by another purge and "
-                        f"{agree(len(gone), 'was', 'were')} skipped.")
+                    result.warn_about(
+                        lambda n, _u: (
+                            f"{count_of(n, 'exhibit was', 'exhibits were')} "
+                            f"already destroyed by another purge and "
+                            f"{agree(n, 'was', 'were')} skipped."),
+                        storage.gone)
                     evidence_ids = [i for i in evidence_ids if i not in gone]
                 result.evidence_purged = len(evidence_ids)
+                result.count("evidence_purged", evidence_ids)
                 # Refusal counts, not the batch size -- and on the one path
                 # that writes an out-of-schedule tombstone, which is the
                 # most consequential record this module produces.
                 result.storage_locked = storage.locked
                 result.storage_failed = storage.failed
                 result.storage_deleted = storage.deleted
-                result.warnings.extend(storage.warnings)
+                result.count("storage_deleted", storage.deleted_ids)
+                result.count("storage_locked", storage.locked_ids)
+                result.count("storage_failed", storage.failed_ids)
+                if len(storage.warning_about) == len(storage.warnings):
+                    for text, about in zip(storage.warnings,
+                                           storage.warning_about, strict=True):
+                        result.warn_about(text, (about,))
+                else:
+                    result.warnings.extend(storage.warnings)
                 if storage.locked or storage.failed:
                     # THIS PATH HAS NO NEXT SWEEP. `_purge_evidence` leaves a refused row unmarked, and
                     # `purge_due` tells the operator it stays due so the sweep after the lock expires finishes
@@ -1176,26 +1190,29 @@ class RetentionService:
                     # out-of-schedule purge is by definition of exhibits whose retention has NOT expired. So a
                     # court-ordered early destruction refused by a COMPLIANCE lock must say that every byte
                     # remains, the row is visible and on no sweep, and the four-eyes approval is spent.
-                    kept = storage.locked + storage.failed
-                    one = kept == 1
-                    result.warnings.append(
-                        f"{kept} of "
-                        f"{count_of(len(evidence_ids), 'exhibit', 'exhibits')} "
-                        f"still {'has its' if one else 'have their'} "
-                        f"bytes in the object store, so "
-                        f"{'that row is' if one else 'those rows are'} NOT "
-                        f"marked purged. Unlike the scheduled sweep, nothing "
-                        f"will retry {'it' if one else 'them'}: `due()` "
-                        f"returns only evidence whose case retention has "
-                        f"expired, and this purge is out of schedule, so "
-                        f"{'that exhibit is' if one else 'those exhibits are'} "
-                        f"not due and will not come back due when the lock "
-                        f"lifts. "
-                        f"The four-eyes approval has been CONSUMED and "
-                        f"cannot be reused: a second attempt needs a new "
-                        f"one. A tombstone recording the refusal was "
-                        f"written. Do not report this as a completed "
-                        f"destruction.")
+                    def kept_warning(kept: int, total: int) -> str:
+                        one = kept == 1
+                        return (
+                            f"{kept} of "
+                            f"{count_of(total, 'exhibit', 'exhibits')} "
+                            f"still {'has its' if one else 'have their'} "
+                            f"bytes in the object store, so "
+                            f"{'that row is' if one else 'those rows are'} NOT "
+                            f"marked purged. Unlike the scheduled sweep, nothing "
+                            f"will retry {'it' if one else 'them'}: `due()` "
+                            f"returns only evidence whose case retention has "
+                            f"expired, and this purge is out of schedule, so "
+                            f"{'that exhibit is' if one else 'those exhibits are'} "
+                            f"not due and will not come back due when the lock "
+                            f"lifts. "
+                            f"The four-eyes approval has been CONSUMED and "
+                            f"cannot be reused: a second attempt needs a new "
+                            f"one. A tombstone recording the refusal was "
+                            f"written. Do not report this as a completed "
+                            f"destruction.")
+                    result.warn_about(
+                        kept_warning,
+                        storage.locked_ids + storage.failed_ids, evidence_ids)
                 if evidence_ids:
                     self._evidence_tombstones(
                         result, storage, case_id=case_id, authority=authority,
@@ -1730,7 +1747,8 @@ class RetentionService:
                 WHERE d.id = ANY(%s) AND d.body_html_key IS NOT NULL""",
             (unheld,)).fetchall()
         failed_ids: set[UUID] = set()
-        deleted = failed = shared = 0
+        deleted_ids: set[UUID] = set()
+        shared = 0
         if keys and self._document_raw is None:
             raise RetentionError(_NO_DOCUMENT_RAW_STORE)
         for document_id, key in keys:
@@ -1744,9 +1762,8 @@ class RetentionService:
                 continue
             try:
                 self._document_raw.delete(key)
-                deleted += 1
+                deleted_ids.add(document_id)
             except Exception as exc:  # noqa: BLE001 - counted, and the row kept
-                failed += 1
                 failed_ids.add(document_id)
                 result.warnings.append(
                     f"the object store refused to delete collected markup "
@@ -1789,12 +1806,17 @@ class RetentionService:
                 WHERE h.document_id = ANY(%s)
                   AND jsonb_typeof(h.matched_on) = 'array'""", (purged,))
         result.documents_purged += len(purged)
-        outcome = (STORAGE_FAILED if failed else STORAGE_DELETED if deleted
-                   else STORAGE_NA)
-        self._stone(
-            result, case_id=None, object_type="document", ids=purged,
-            authority=authority, actor_id=actor_id, rule="retention_rule",
-            storage_outcome=outcome)
+        # One tombstone per outcome, as for exhibits: a refused sibling is not purged and so is in neither, and
+        # a document whose markup is shared or absent had no object of its own to destroy.
+        removed = [i for i in purged if i in deleted_ids]
+        no_object = [i for i in purged if i not in deleted_ids]
+        for outcome, stone_ids in ((STORAGE_DELETED, removed),
+                                   (STORAGE_NA, no_object)):
+            if stone_ids:
+                self._stone(
+                    result, case_id=None, object_type="document",
+                    ids=stone_ids, authority=authority, actor_id=actor_id,
+                    rule="retention_rule", storage_outcome=outcome)
 
     def set_document_legal_hold(self, document_id: UUID, *, actor_id: UUID,
                                 on: bool, reason: str | None, clearance: str,

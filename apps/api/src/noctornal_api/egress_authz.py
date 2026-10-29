@@ -33,7 +33,6 @@ this build does not know.
 """
 from __future__ import annotations
 
-import ipaddress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
@@ -641,11 +640,3 @@ def recheck(conn, claim: WireClaim, decision: Decision, *, production: bool,
     except Refused as refused:
         return close_reason_for(refused.code)
     return None
-
-
-def is_literal(host: str) -> bool:
-    try:
-        ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    return True

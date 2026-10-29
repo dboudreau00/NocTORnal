@@ -1872,11 +1872,6 @@ class LookupService:
         return list(out.values())
 
 
-def lookup_words(n: int) -> str:
-    """Agreed counts for the console's answer lines."""
-    return f"{count_of(n, 'proposal', 'proposals')} raised in Triage"
-
-
 # ---------------------------------------------------------------------------
 # The drain: housekeeping always, sends only with the switch on
 # ---------------------------------------------------------------------------

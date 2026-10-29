@@ -88,7 +88,7 @@ def sign_in(conn):
     after the fact and never spends it; must_change_password is read only
     after both factors verified, so an unauthenticated shell user learns
     nothing about an account's reset state."""
-    from noctornal_api.security.auth import AuthOutcome, AuthService
+    from noctornal_api.security.auth import AuthService
     from noctornal_api.stores import PgUserStore
 
     email = input("Email: ").strip()
@@ -98,9 +98,8 @@ def sign_in(conn):
         email, password, code, spend_recovery=False)
     # Every refusal below is stored as one (outcome DENIED), as the console's
     # sign-in stores its own (docs/17, "refusals are recorded as SUCCESS").
-    if result.outcome is AuthOutcome.SECOND_FACTOR_UNAVAILABLE or not result.ok:
-        _audit(conn, result.user_id if result.outcome is
-               AuthOutcome.SECOND_FACTOR_UNAVAILABLE else None, "AUTH_FAILED",
+    if not result.ok:
+        _audit(conn, None, "AUTH_FAILED",
                "auth", None, {"reason": result.audit_reason, "email": email,
                               "via": VIA}, outcome="DENIED")
         raise Refused(NOT_VERIFIED)

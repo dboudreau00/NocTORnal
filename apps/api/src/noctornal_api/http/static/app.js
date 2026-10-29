@@ -14219,8 +14219,15 @@ async function adoptSessionFromFragment() {
     if (hash) history.replaceState(null, '', window.location.pathname);
     return null;
   }
-  const token = decodeURIComponent(match[1]);
+  /* Erased before the decode: a bad percent-escape throws, and the bearer must not stay in the
+     address bar or the history entry because of it. */
   history.replaceState(null, '', window.location.pathname);
+  let token;
+  try {
+    token = decodeURIComponent(match[1]);
+  } catch (_err) {
+    return signInLinkRefused('The link is damaged: it was cut short or altered when it was copied.');
+  }
 
   /* A fragment must never replace a session this browser already holds: cookies are per
      profile, not per tab, so a link carrying someone else's token would swap the cookie under
@@ -14282,6 +14289,9 @@ async function adoptSessionFromFragment() {
   state.token = token;
   try {
     await api('/auth/cookie', { method: 'POST', bearer: token });
+    /* With the readable CSRF cookie in place the HttpOnly cookie is the session; a bearer kept
+       in memory would only be readable to script and sent in the live hello. */
+    if (csrfCookie()) state.token = null;
     return null;
   } catch (err) {
     state.token = null;
@@ -14295,8 +14305,12 @@ async function adoptSessionFromFragment() {
  *  cannot hide its odd characters. */
 function signInLinkQuestion(who) {
   const w = who || {};
-  const name = visibleText(w.display_name || w.user_id || 'an account');
-  const email = w.email ? ' (' + visibleText(w.email) + ')' : '';
+  /* `visibleText` keeps line breaks and tabs, so they are flattened here: a name with its own
+     paragraphs could rewrite the question it sits in. */
+  const name = visibleText(w.display_name || w.user_id || 'an account')
+    .replace(/[\r\n\t\u2028\u2029]+/g, ' ');
+  const email = w.email
+    ? ' (' + visibleText(w.email).replace(/[\r\n\t\u2028\u2029]+/g, ' ') + ')' : '';
   return 'This link signs this browser in as ' + name + email + '.\n\n'
     + 'Everything you do afterwards is recorded against that account, and '
     + 'its owner can read it. Only continue if you were expecting a link '
@@ -27261,7 +27275,7 @@ function reportList(box, title, rows, render, none) {
 /** A preview row: the text, then any flags as chips. */
 function reportRow(text, flags) {
   const row = el('div', 'entry-row');
-  row.appendChild(el('span', null, text));
+  row.appendChild(el('span', null, visibleText(text)));
   for (const [label, cls] of flags || []) {
     row.appendChild(el('span', 'chip small' + (cls ? ' ' + cls : ''), label));
   }
@@ -27319,7 +27333,8 @@ function renderReportBody(body) {
   box.appendChild(auth);
 
   /* Named lists, so an analyst can see what survived the redaction, not only how much was
-     removed; `textContent` throughout, since these labels came from a forum. A relationship
+     removed; `visibleText` throughout, since these labels came from a forum and `textContent`
+     leaves a bidi override in force. A relationship
      (`type`, `src`, `dst`) names its ends through the actor list, which always holds both:
      the projection admits a tie only when both ends are visible at this classification. */
   const labelOf = new Map((body.actors || []).map((a) => [a.id, a.label]));
@@ -27381,7 +27396,7 @@ function renderReportBody(body) {
     full.appendChild(el('summary', null,
       'The full text as it would be saved (a saved copy\'s "Generated" line '
       + 'gives the time it was cleared)'));
-    full.appendChild(el('pre', 'rep-document-text', body.document));
+    full.appendChild(el('pre', 'rep-document-text', visibleText(body.document)));
     box.appendChild(full);
   }
 }

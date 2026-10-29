@@ -275,12 +275,14 @@ class MergeService:
             # docs/01: "Merges ... generate an audit event AND a case-owner notification." The
             # notification is inside the transaction on purpose: a merge that succeeded with no
             # notification is a case owner who never finds out.
+            seen_repointed, seen_between, seen_folded = self._counts_for_owner(
+                case_id, merge_id, source_node_id, target_node_id)
             notify_events.merge_performed(
                 self._c, case_id=case_id, merge_id=merge_id,
                 source_label=src["label"], target_label=dst["label"],
-                edges_repointed=repointed,
-                self_loops_deleted=self_loops_deleted,
-                duplicates_folded=folded, reason=reason.strip(),
+                edges_repointed=seen_repointed,
+                self_loops_deleted=seen_between,
+                duplicates_folded=seen_folded, reason=reason.strip(),
                 actor_id=merged_by,
                 # The body names both nodes, so the notification is at least
                 # as classified as the more restricted of them.
@@ -533,6 +535,36 @@ class MergeService:
             {"edge": edge_id, "other": other_id, "clr": clearance,
              "held": sorted(compartments)}).fetchone()
         return bool(row and row[0])
+
+    def _counts_for_owner(self, case_id: UUID, merge_id: UUID, source_id: UUID,
+                          target_id: UUID) -> tuple[int, int, int]:
+        """(re-pointed, between the two, set aside) ties of this merge that the case owner may read: the
+        tie and both its original ends within the owner's clearance and compartments. The notice is
+        labelled at the two entities only, so a count of ties above the owner would tell them those ties
+        exist. With no owner to read them, nothing is counted."""
+        return self._c.execute(
+            """SELECT count(*) FILTER (WHERE NOT e.deleted_by_merge),
+                      count(*) FILTER (WHERE e.deleted_by_merge AND pair.is_pair),
+                      count(*) FILTER (WHERE e.deleted_by_merge AND NOT pair.is_pair)
+                 FROM core.node_merge_edge e
+                 JOIN core.edge x ON x.id = e.edge_id
+                 JOIN core.node a ON a.id = e.original_src_node_id
+                 JOIN core.node b ON b.id = e.original_dst_node_id
+                 JOIN iam.case_facts(%(case)s) f ON true
+                 JOIN iam.app_user u ON u.id = f.owner_user_id
+                 CROSS JOIN LATERAL (SELECT
+                        e.original_src_node_id IN (%(src)s, %(dst)s)
+                        AND e.original_dst_node_id IN (%(src)s, %(dst)s)
+                        AS is_pair) pair
+                WHERE e.merge_id = %(merge)s
+                  AND x.classification <= u.tlp_clearance
+                  AND x.compartments <@ u.compartments
+                  AND a.classification <= u.tlp_clearance
+                  AND a.compartments <@ u.compartments
+                  AND b.classification <= u.tlp_clearance
+                  AND b.compartments <@ u.compartments""",
+            {"case": case_id, "merge": merge_id, "src": source_id,
+             "dst": target_id}).fetchone()
 
     def _node(self, case_id: UUID, node_id: UUID, which: str) -> dict:
         row = self._c.execute(

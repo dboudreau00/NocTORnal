@@ -48,7 +48,6 @@ import psycopg
 from psycopg.types.json import Json
 
 from noctornal_api.config import declared_cap
-from noctornal_api.wording import count_of
 
 log = logging.getLogger("noctornal.screening")
 
@@ -1136,10 +1135,6 @@ def policy_block(conn: psycopg.Connection) -> dict:
             "last_pass_at": last.isoformat() if last else None,
             "last_pass_window_hours": int(POLICY_PASS_WINDOW.total_seconds() // 3600),
             "sentence": EXACT_HASH_SENTENCE}
-
-
-def lists_words(n: int) -> str:
-    return count_of(n, "hash list", "hash lists")
 
 
 __all__ = [

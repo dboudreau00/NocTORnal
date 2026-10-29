@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import UUID
@@ -236,25 +237,41 @@ class ParsedEntry:
         }
 
 
+#: Single letters that look like a Latin letter, and Latin letters that look like a Cyrillic one. NFKC
+#: does not fold across scripts, so "Еscrow" with a Cyrillic Е or "гаpант" with a Latin p would miss
+#: the word list while reading as the word. Lowercase only: the text is casefolded first.
+_TO_LATIN = str.maketrans("авекмнорстухіјѕԁһӏԛԝαβεηικμνορτυχζ",
+                          "abekmhopctyxijsdhlqwabehikmnoptyxz")
+_TO_CYRILLIC = str.maketrans("abcehkmoptxy", "авсенкмортху")
+
+
+def _readings(text: str) -> tuple[str, ...]:
+    """The text as written, lowercased, and as it reads: NFKC-casefolded (fullwidth and other
+    compatibility letters), then with lookalike letters folded to each script. The original stays
+    in the set so a word in the list matches as written."""
+    folded = unicodedata.normalize("NFKC", text).casefold()
+    return (text.lower(), folded, folded.translate(_TO_LATIN), folded.translate(_TO_CYRILLIC))
+
+
 def _looks_third_party(label: str | None, whole_line: str) -> str | None:
     """Return the reason this line names somebody else, or None."""
     if label:
-        # Split on non-WORD characters, not on non-[a-z]. The ASCII split
-        # reduced any Cyrillic label to {""}, so the whole word list was
-        # unreachable for it -- see `_LINE`.
-        words = {w for w in re.split(r"[\W_]+", label.lower()) if w}
-        hit = words & _THIRD_PARTY_LABEL_WORDS
-        if hit or label.lower().strip() in _THIRD_PARTY_LABEL_WORDS:
-            named = sorted(hit) or [label.lower().strip()]
+        # Split on non-WORD characters, not on non-[a-z]: an ASCII split reduces a Cyrillic label to
+        # nothing, and the word list would never be reached for it.
+        readings = _readings(label)
+        words = {w for r in readings for w in re.split(r"[\W_]+", r) if w}
+        whole = {r.strip() for r in readings}
+        hit = (words | whole) & _THIRD_PARTY_LABEL_WORDS
+        if hit:
             return (f"the label {label!r} names a third-party role "
-                    f"({', '.join(named)}). Attributing the "
+                    f"({', '.join(sorted(hit))}). Attributing the "
                     f"escrow's identifier to the vendor is a serious and "
                     f"easy error")
-    low = whole_line.lower()
-    for marker in _THIRD_PARTY_MARKERS:
-        if marker in low:
-            return (f"the line says {marker!r}, which disclaims the "
-                    f"identifier rather than publishing it")
+    for low in _readings(whole_line):
+        for marker in _THIRD_PARTY_MARKERS:
+            if marker in low:
+                return (f"the line says {marker!r}, which disclaims the "
+                        f"identifier rather than publishing it")
     return None
 
 
@@ -383,11 +400,19 @@ def _durable_for(platform_key: str | None, selector_type: str | None,
 #: enumerates code points because it has to SHOW what it found, while a parser only has to refuse to
 #: be fooled, and an enumeration must be extended whenever Unicode adds a character. Whitespace is
 #: not in scope: `\s` already matches it and `_LINE` handles it.
+#:
+#: The default-ignorable code points outside Cf also render as nothing: the combining grapheme
+#: joiner, the variation selectors, the Hangul fillers and the reserved ranges. Between two letters
+#: of a label they split the word or stop `_LINE` matching, so they are removed as well.
+_IGNORABLE = re.compile(
+    "[\u034f\u115f\u1160\u17b4\u17b5\u180b-\u180f\u2065\u3164"
+    "\ufe00-\ufe0f\uffa0\ufff0-\ufff8\U000e0000-\U000e0fff]")
+
+
 def _strip_invisible(line: str) -> str:
-    import unicodedata
-    return "".join(ch for ch in line
-                   if unicodedata.category(ch) not in ("Cf", "Cc")
-                   or ch in "\t")
+    return _IGNORABLE.sub("", "".join(
+        ch for ch in line
+        if unicodedata.category(ch) not in ("Cf", "Cc") or ch in "\t"))
 
 
 def parse(text: str) -> list[ParsedEntry]:

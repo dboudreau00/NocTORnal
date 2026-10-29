@@ -4,8 +4,8 @@ written in the same transaction (invariant 1).
 Three ways take something out of the live graph, and they are not interchangeable: retracting an
 assertion (the element goes only if that was its last live support), retiring the element
 (`DELETE`, a soft delete that sets `deleted_at` and hides it from every as-of view too), and
-`valid_to` (it stopped being true in the world, so an as-of query into its period still shows
-it). None destroys a row (invariant 5).
+`valid_to`, set by a correction (it stopped being true in the world, so an as-of query into its
+period still shows it). None destroys a row (invariant 5).
 """
 from __future__ import annotations
 
@@ -464,14 +464,6 @@ def _gate_endpoints(conn: psycopg.Connection, user: CurrentUser,
 
 
 # --- assertions on an existing element ----------------------------------
-
-def _element_case(conn: psycopg.Connection, table: str, element_id: UUID) -> UUID | None:
-    if table not in ("node", "edge"):  # not `assert`: stripped under python -O, and this guards SQL text
-        raise ValueError("refused identifier outside the allow-list")
-    row = conn.execute(
-        f"SELECT case_id FROM core.{table} WHERE id = %s", (element_id,)
-    ).fetchone()
-    return row[0] if row else None
 
 
 def _element_labels(conn: psycopg.Connection, table: str,

@@ -31,10 +31,14 @@ Checks: CONTENT (`row_hash` is not what the row's columns hash to: edited in pla
 claims to be first; more is what a truncation leaves, none means the first row is gone, and no
 application code writes `prev_hash`).
 
+Of the three positions a row can be deleted from, the MIDDLE is caught (LINK, raised on its orphaned
+successor), the FIRST is caught (NO_GENESIS), and the LAST is not caught at all. An edit in place is
+caught (CONTENT), and a removed or duplicated anchor is caught (NO_GENESIS / GENESIS).
+
 What it cannot see: every check is RELATIVE, so a TAIL DELETION orphans nothing and reads
 `intact=True` with only `checked` moving. It costs one DELETE and no hashing, and the tail is what
-an export or a destruction writes last. A pure renumbering is invisible too (`id` is not hashed),
-and so is a re-chaining attack (edit row k, recompute every hash to the tail). All three want an
+an export or a destruction writes last. A pure renumbering is invisible too (`id` is not
+hashed), and so is a re-chaining attack (edit row k, recompute every hash to the tail). All three want an
 EXTERNAL ANCHOR: `CustodyReport.tail_id` and `tail_row_hash` are the values to record out of band
 and hand back as a `CustodyAnchor`, which turns a removed or rewritten anchored row into an
 `ANCHOR_*` break. This module does not persist them, and until somebody does a tail deletion goes

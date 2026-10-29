@@ -818,7 +818,11 @@ def purge_out_of_schedule(
             case_id=body.case_id, evidence_ids=ids)
     except RetentionError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
-    return _purge_response(result, dry_run=False)
+    # The caller may name an exhibit above their own labels, so the answer covers only those they may
+    # know of, as the scheduled run's does. The tombstone still records the whole destruction.
+    out = _purge_response(result, dry_run=False)
+    _answer_over(out, result, _visible_ids(conn, user, body.case_id, result))
+    return out
 
 
 def _purge_response(result: PurgeResult, *, dry_run: bool) -> dict:

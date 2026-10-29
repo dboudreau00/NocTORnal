@@ -962,8 +962,8 @@ class GraphWriteService:
     def _set_field(self, kind: str, element: UUID, field_name: str,
                    value: object) -> bool:
         """Write one restored value onto the element; False when the value is not one the column can hold
-        (nothing is written then), or carries a password, token or key in a URL: a withdrawn correction's
-        prior value must not put back onto the graph what the graph no longer keeps."""
+        (nothing is written then), or carries a password, token or key in a URL, or a real name on a persona:
+        a withdrawn correction's prior value must not put back onto the graph what the graph no longer keeps."""
         if kind == "node" and field_name == "label":
             if not isinstance(value, str) or not value.strip():
                 return False
@@ -973,6 +973,16 @@ class GraphWriteService:
         elif field_name == "attrs":
             if not isinstance(value, dict) or _carries_credential(value):
                 return False
+            if kind == "node":
+                # The correction being withdrawn may be the one that took a real name off a persona. An
+                # entity whose type cannot be read is treated as a persona.
+                row = self._c.execute(
+                    "SELECT node_type FROM core.node WHERE id = %s",
+                    (element,)).fetchone()
+                try:
+                    _refuse_real_name(row[0] if row else "IDENTITY", value)
+                except GraphWriteError:
+                    return False
             sql, arg = "attrs = %s::jsonb", Json(value)
         elif field_name == "valid_to":
             if value is not None and not isinstance(value, str):

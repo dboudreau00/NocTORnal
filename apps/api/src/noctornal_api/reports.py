@@ -194,10 +194,17 @@ class Redaction:
                     f"level and have been withheld." if withheld else "")
         return (
             f"This document is marked TLP:{self.built_at_tlp} and was prepared "
-            f"to include material up to TLP:{self.ceiling_tlp}, from a case "
-            f"classified TLP:{self.case_tlp}.{header}{elements}{matrix} "
+            f"to include material up to TLP:{self.ceiling_tlp}"
+            f"{self._from_case()}.{header}{elements}{matrix} "
             f"**Every figure below is computed over the redacted graph** and "
             f"is therefore a lower bound, not a measurement of the case.")
+
+    def _from_case(self) -> str:
+        """The case's own level, named only when the header is in the document. A withheld header means that
+        level is above the mark the egress gate judges, so naming it would carry it out with the file."""
+        if self.header_withheld:
+            return ""
+        return f", from a case classified TLP:{self.case_tlp}"
 
     def _header_sentences(self) -> str:
         """What is said when the case's own header is above the ceiling, and
@@ -236,8 +243,8 @@ class Redaction:
         nothing was: the same sentence whether or not the case holds anything above the ceiling."""
         return (
             f"This document is marked TLP:{self.built_at_tlp} and was prepared "
-            f"to include material up to TLP:{self.ceiling_tlp}, from a case "
-            f"classified TLP:{self.case_tlp}.{self._header_sentences()} It "
+            f"to include material up to TLP:{self.ceiling_tlp}"
+            f"{self._from_case()}.{self._header_sentences()} It "
             f"contains nothing above that ceiling, and this case does not say "
             f"whether any material above it exists. **Every figure below is "
             f"computed over the redacted graph** and is therefore a lower "

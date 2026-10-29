@@ -75,8 +75,12 @@ $noc$;
 """
 
 
+#: Repeatable: `scripts/runtime_roles.py ensure` replays it.
+PRIVILEGES_SQL = _block(_each("REVOKE", "FROM"))
+
+
 def upgrade() -> None:
-    run(_block(_each("REVOKE", "FROM")))
+    run(PRIVILEGES_SQL)
 
 
 def downgrade() -> None:

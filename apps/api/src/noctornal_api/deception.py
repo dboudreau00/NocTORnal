@@ -269,6 +269,7 @@ _RECEIVED_FROM = re.compile(r"\bfrom\s+([^\s;()]+)", re.I)
 _RECEIVED_BY = re.compile(r"\bby\s+([^\s;()]+)", re.I)
 _RECEIVED_WITH = re.compile(r"\bwith\s+([A-Za-z0-9/]+)", re.I)
 _RECEIVED_IP = re.compile(r"[\[(]\s*(?:IPv6:)?([0-9a-fA-F:.]{3,45})\s*[\])]")
+_HELO_MARK = re.compile(r"\bhelo\s*=?\s*$", re.I)
 _TLS_HINT = re.compile(r"\b(ESMTPS|ESMTPSA|TLS|SSL|version=TLS)\b", re.I)
 
 
@@ -311,6 +312,19 @@ def trusted_mta_suffixes() -> tuple[str, ...]:
     return tuple(h.strip().lower().lstrip(".") for h in raw.split(",") if h.strip())
 
 
+def _connecting_ip(flat: str, by_at: int) -> str | None:
+    """The address the receiving MTA saw connect, from the part of the hop before `by`.
+
+    An address after `by` is the receiving MTA's own. Before it, Postfix and Exchange put the sender's
+    EHLO literal first and the peer last, and Exim and qmail mark the EHLO literal with `helo`, so the
+    peer is the last address that is not marked as the sender's EHLO argument."""
+    found = None
+    for match in _RECEIVED_IP.finditer(flat, 0, by_at):
+        if not _HELO_MARK.search(flat, max(0, match.start() - 12), match.start()):
+            found = match.group(1)
+    return found
+
+
 def parse_received_chain(headers: list[str],
                          trusted: tuple[str, ...] | None = None) -> list[Hop]:
     """Parse `Received:` headers into hops, RECIPIENT-FIRST.
@@ -339,7 +353,6 @@ def parse_received_chain(headers: list[str],
                 received_at = parsedate_to_datetime(flat.rsplit(";", 1)[1].strip())
             except (ValueError, TypeError, IndexError):
                 received_at = None      # invariant 12: recorded as absent
-        ip_match = _RECEIVED_IP.search(flat)
         from_match = _RECEIVED_FROM.search(flat)
         by_match = _RECEIVED_BY.search(flat)
         with_match = _RECEIVED_WITH.search(flat)
@@ -347,7 +360,7 @@ def parse_received_chain(headers: list[str],
             seq=seq,
             raw=raw[:4000],
             from_host=from_match.group(1).lower() if from_match else None,
-            from_ip=ip_match.group(1) if ip_match else None,
+            from_ip=_connecting_ip(flat, by_match.start() if by_match else len(flat)),
             by_host=by_match.group(1).lower() if by_match else None,
             protocol=with_match.group(1).upper() if with_match else None,
             tls_used=bool(_TLS_HINT.search(flat)) or None,

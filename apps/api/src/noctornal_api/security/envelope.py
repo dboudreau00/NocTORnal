@@ -102,7 +102,7 @@ class MalformedBlob(ValueError):
 
 #: What a caller catches when a stored secret cannot be opened, whichever
 #: of the three reasons applies. `AuthService.authenticate` turns it into
-#: a refusal a client can act on rather than a 500.
+#: the refusal a wrong password gets rather than a 500.
 UNOPENABLE: tuple[type[Exception], ...] = (
     KeyUnavailable, InvalidTag, MalformedBlob)
 

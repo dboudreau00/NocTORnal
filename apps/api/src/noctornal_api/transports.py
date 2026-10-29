@@ -519,13 +519,6 @@ def route_state(channel: str, conn, *, route_for: Callable | None = None) -> Rou
     return RouteState(name, True, bool(route.proxied), None, route)
 
 
-def route_problem(channel: str, conn, *, route_for: Callable | None = None) -> str | None:
-    """None when the channel's route exists and permits its endpoint;
-    otherwise the sentence saying why it is held."""
-    state = route_state(channel, conn, route_for=route_for)
-    return None if state.ok else state.why
-
-
 def route_line(state: RouteState) -> str:
     """The route in words, for readiness evidence and the overview."""
     if not state.ok:

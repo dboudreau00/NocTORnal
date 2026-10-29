@@ -51,7 +51,6 @@ from noctornal_api.collection import (
     _utc,
     default_adapters,
 )
-from noctornal_api.wording import agree, count_of
 
 PUBLIC_READ = "PUBLIC_READ"
 MEMBER_READ = "MEMBER_READ"
@@ -1099,9 +1098,3 @@ def _reason(reason: str) -> str:
     if not 5 <= len(reason) <= 1000:
         raise CollectionError("Stopping an authority says why, in 5 to 1000 characters.")
     return reason
-
-
-def pending_summary(count: int) -> str:
-    """'{n} authorities wait for a second person', agreed."""
-    return (f"{count_of(count, 'collection authority', 'collection authorities')} "
-            f"{agree(count, 'waits', 'wait')} for a second person")

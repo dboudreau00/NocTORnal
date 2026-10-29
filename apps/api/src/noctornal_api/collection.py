@@ -1746,8 +1746,10 @@ def fetch(url: str, *, etag: str | None = None,
     down under a read still going when it runs out, so a body drip-fed one byte at a time ends on
     time (`pinned_http.Deadline`).
 
-    `route` is the route from egress.route_for; None is the direct public route, refused once a
-    proxy is configured. This is a thin wrapper over pinned_http, the one outbound client; it keeps
+    No proxy is consulted from the environment (HTTP_PROXY, HTTPS_PROXY, the Windows system
+    setting): a forward proxy resolves the name itself, so a check made here would say nothing about
+    where it connected. `route` is the route from egress.route_for; None is the direct public route,
+    refused once a proxy is configured. This is a thin wrapper over pinned_http, the one outbound client; it keeps
     the collector's signature, return tuple and messages.
 
     The check and the connect are one lookup: each hop's name is resolved once and the answers that

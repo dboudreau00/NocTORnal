@@ -1,7 +1,7 @@
 -- =====================================================================
 -- NocTORnal -- db/schema.sql
 --
--- GENERATED MIRROR of the schema at Alembic revision 0182.
+-- GENERATED MIRROR of the schema at Alembic revision 0183.
 -- Produced by scripts/dump_schema.py from
 --   pg_dump --schema-only --no-owner --no-privileges
 -- with session SET lines, version comments and pg_dump's per-run
@@ -26,7 +26,7 @@
 -- superseded, never overwritten; edges are signed and time-bounded;
 -- the ontology lives in reference tables, not enums.
 --
--- Alembic revision: 0182
+-- Alembic revision: 0183
 -- =====================================================================
 
 --
@@ -1838,6 +1838,32 @@ BEGIN
   RAISE EXCEPTION 'core.purge_tombstone is append-only: the record of '
                   'destruction survives the data (docs/08)';
 END $$;
+
+--
+-- Name: classification_never_lowered(); Type: FUNCTION; Schema: core; Owner: -
+--
+
+CREATE FUNCTION core.classification_never_lowered() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'pg_temp'
+    AS $$
+BEGIN
+  IF iam.rls_caller_exempt() THEN
+    RETURN NEW;
+  END IF;
+  IF NEW.classification < OLD.classification THEN
+    RAISE EXCEPTION '%: classification % may not be lowered to %',
+      TG_TABLE_NAME, OLD.classification, NEW.classification
+      USING ERRCODE = '42501';
+  END IF;
+  RETURN NEW;
+END $$;
+
+--
+-- Name: FUNCTION classification_never_lowered(); Type: COMMENT; Schema: core; Owner: -
+--
+
+COMMENT ON FUNCTION core.classification_never_lowered() IS 'The request role may raise a node''s or a tie''s classification and never lower it, so an element filed above the case floor is not shown to readers cleared only to the floor. The owner and the system role (row security exempt) are left as they were (0183).';
 
 --
 -- Name: custody_chain_hash(); Type: FUNCTION; Schema: core; Owner: -
@@ -12178,6 +12204,12 @@ CREATE TRIGGER edge_announce_ins AFTER INSERT ON core.edge REFERENCING NEW TABLE
 CREATE TRIGGER edge_announce_upd AFTER UPDATE ON core.edge REFERENCING OLD TABLE AS oldrows NEW TABLE AS newrows FOR EACH STATEMENT EXECUTE FUNCTION core.announce_change('edge');
 
 --
+-- Name: edge edge_classification_kept; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER edge_classification_kept BEFORE UPDATE OF classification ON core.edge FOR EACH ROW EXECUTE FUNCTION core.classification_never_lowered();
+
+--
 -- Name: edge edge_confidence_is_derived; Type: TRIGGER; Schema: core; Owner: -
 --
 
@@ -12278,6 +12310,12 @@ CREATE TRIGGER node_announce_ins AFTER INSERT ON core.node REFERENCING NEW TABLE
 --
 
 CREATE TRIGGER node_announce_upd AFTER UPDATE ON core.node REFERENCING OLD TABLE AS oldrows NEW TABLE AS newrows FOR EACH STATEMENT EXECUTE FUNCTION core.announce_change('node');
+
+--
+-- Name: node node_classification_kept; Type: TRIGGER; Schema: core; Owner: -
+--
+
+CREATE TRIGGER node_classification_kept BEFORE UPDATE OF classification ON core.node FOR EACH ROW EXECUTE FUNCTION core.classification_never_lowered();
 
 --
 -- Name: node node_requires_assertion; Type: TRIGGER; Schema: core; Owner: -

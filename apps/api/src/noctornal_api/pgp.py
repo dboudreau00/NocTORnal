@@ -119,11 +119,11 @@ MAX_STATUS_CHARS = 8_000
 #: strings appear inside longer numbers by coincidence, and a coincidence
 #: that reads as cryptographic proof is worse than no answer.
 MIN_CONFIRMABLE_LENGTH = 4
-#: A value at least this long may match as a PREFIX of a longer token --
-#: which is the normal Tox case, where the actor prints the full 76-hex ID
-#: and the durable value is its 64-hex head. Below it, both ends must be
-#: delimited.
-PREFIX_MATCH_LENGTH = 32
+#: The one value that may match as the PREFIX of a longer token: a 64-hex Tox public key followed by
+#: exactly the twelve hex digits of nospam and checksum, because the actor prints the 76-hex ID and
+#: the durable value is its head. Every other value needs a token boundary at both ends.
+_TOX_PUBLIC_KEY = re.compile(r"[0-9a-f]{64}")
+_TOX_ID_TAIL = re.compile(r"[0-9a-f]{12}(?![0-9a-z])")
 
 #: The signature classes a document signature carries: 00 over binary bytes, 01 over canonical text
 #: (a clearsigned message is always 01). Anything else (a certification, a key binding, a timestamp)
@@ -890,10 +890,10 @@ def _payload_contains(payload_text: str, value: str) -> tuple[bool, str]:
     holder publishing that identifier, which is false. The same collision happens by accident, with
     nothing looking like an attack.
 
-    The rule: the match must START at a token boundary, and must also END at one unless the value is
-    long enough to be unambiguous on its own. The exception is load-bearing: an actor normally
-    prints the full 76-hex Tox ID while the durable value is its 64-hex head, so demanding a
-    boundary at both ends would refuse the commonest legitimate case.
+    The rule: the match must START and END at a token boundary. The one exception is load-bearing:
+    an actor normally prints the full 76-hex Tox ID while the durable value is its 64-hex head, so a
+    64-hex value followed by exactly twelve hex digits and then a boundary also matches. Length
+    alone is no exception: a fingerprint at the head of a longer token is not the fingerprint.
     """
     needle = (value or "").strip()
     if len(needle) < MIN_CONFIRMABLE_LENGTH:
@@ -904,12 +904,14 @@ def _payload_contains(payload_text: str, value: str) -> tuple[bool, str]:
             f"as cryptographic proof is worse than no answer.")
 
     hay, low = payload_text.lower(), needle.lower()
+    tox_key = _TOX_PUBLIC_KEY.fullmatch(low) is not None
     start = hay.find(low)
     while start != -1:
         left_ok = start == 0 or not _TOKEN_CHAR.match(hay[start - 1])
         end = start + len(low)
-        right_ok = end == len(hay) or not _TOKEN_CHAR.match(hay[end])
-        if left_ok and (right_ok or len(needle) >= PREFIX_MATCH_LENGTH):
+        right_ok = (end == len(hay) or not _TOKEN_CHAR.match(hay[end])
+                    or (tox_key and _TOX_ID_TAIL.match(hay, end) is not None))
+        if left_ok and right_ok:
             return True, ""
         start = hay.find(low, start + 1)
     return False, (

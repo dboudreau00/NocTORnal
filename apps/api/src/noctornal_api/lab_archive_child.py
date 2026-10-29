@@ -28,7 +28,8 @@ The rules, in the order they are applied to a member:
 
 1. A directory entry is recorded and holds nothing.
 2. A symbolic link, a hard link or a device file is refused: each is an instruction to a filesystem, and
-   nothing here has one.
+   nothing here has one. A zip entry marked as a link or a device that holds bytes is read as the file
+   an extractor writes from it.
 3. The name: NUL or an unprintable character, over `MAX_PATH_CHARS`, an absolute path (a leading slash, a
    drive letter, a UNC prefix) or a `..` component is refused. The normalised path (forward slashes, no
    `.` components) is what the child sample records.
@@ -41,7 +42,8 @@ The rules, in the order they are applied to a member:
    under the cap anyway (a size field can lie); an empty member is refused (an empty submission is not a
    sample); a zip member's compression ratio is checked against the cap, and the whole walk's ratio
    against the archive's own size.
-7. The running total of uncompressed bytes is checked against its cap after every member; past it the
+7. The running total of uncompressed bytes, tar header bodies included, is checked against its cap after
+   every member; past it the
    whole expansion is refused, because a partial answer to "what is in this archive" is the kind that gets
    trusted.
 """
@@ -164,7 +166,7 @@ class _Walk:
         self.refused: list[dict] = []
         self.entries = 0
         self.total = 0
-        #: Bytes decompressed to get past members refused over the per-member cap in a streaming tar: the
+        #: Bytes decompressed to get past refused members and tar header bodies in a streaming tar: the
         #: reader must still decompress them, so they count against the total and the ratio like any other
         #: byte.
         self.skipped = 0
@@ -253,6 +255,19 @@ class _Walk:
             if held / self.archive_len > self.max_ratio:
                 raise Refused("ratio", ratio=round(held / self.archive_len, 1),
                               cap=self.max_ratio)
+
+    def header_body(self, declared: int) -> None:
+        """A GNU long-name or long-link body, or a pax body, about to be read whole by tarfile before it
+        yields the member it describes. Its decompressed blocks count like a skipped member's, and the
+        declared size is refused before the read, so a tiny header cannot inflate past the caps."""
+        blocks = -(-max(declared, 0) // tarfile.BLOCKSIZE) * tarfile.BLOCKSIZE
+        held = self.total + self.skipped + blocks
+        if held > self.max_total:
+            raise Refused("total_bytes", total=held, cap=self.max_total)
+        if held / self.archive_len > self.max_ratio:
+            raise Refused("ratio", ratio=round(held / self.archive_len, 1),
+                          cap=self.max_ratio)
+        self.skipped += blocks
 
     def keep(self, path: str, data: bytes, *, compressed: int | None) -> None:
         self.total += len(data)
@@ -354,23 +369,18 @@ def zip_preflight(data: bytes, max_members: int) -> int:
     return max(total, _count_directory(data, cd_end - cd_size, cd_size, max_members))
 
 
-#: The most a zip entry marked as a symbolic link may hold and still be one:
-#: its bytes are the link's target, a path.
-MAX_LINK_TARGET = 1024
-
-
 def _zip_kind(info: zipfile.ZipInfo) -> str | None:
     """A refusal code for a zip entry that is not a plain file, read from the Unix mode in the external
     attributes, else None.
 
     In a zip that mode is a bit beside an entry that carries bytes, which Windows and most extractors
-    write out as an ordinary file. So an entry marked as a device that holds any bytes, or as a link that
-    holds more than a link target, is read as the file it is: refusing it as content-free would hide a
-    payload from expansion and screening."""
+    write out as an ordinary file. So an entry marked as a device or a link that holds any bytes is read
+    as the file it is: refusing it as content-free would hide a payload from expansion and screening,
+    however short the payload."""
     if info.is_dir():
         return "directory"
     mode = (info.external_attr >> 16) & 0xF000
-    if mode == 0xA000 and info.file_size <= MAX_LINK_TARGET:
+    if mode == 0xA000 and info.file_size == 0:
         return "symlink"
     if mode in (0x2000, 0x6000, 0x1000, 0xC000) and info.file_size == 0:
         return "device"
@@ -523,6 +533,21 @@ def _rest_is_padding(tf: tarfile.TarFile, walk: _Walk) -> bool:
                           cap=walk.max_ratio)
 
 
+def _counted_tarinfo(walk: _Walk) -> type[tarfile.TarInfo]:
+    """A TarInfo whose long-name, long-link and pax header bodies are held to the walk's caps before
+    tarfile reads them, since tarfile consumes them inside `next()` where the member loop cannot."""
+    class _Counted(tarfile.TarInfo):
+        def _proc_gnulong(self, tarfile):
+            walk.header_body(self.size)
+            return super()._proc_gnulong(tarfile)
+
+        def _proc_pax(self, tarfile):
+            walk.header_body(self.size)
+            return super()._proc_pax(tarfile)
+
+    return _Counted
+
+
 def walk_tar(data: bytes, walk: _Walk) -> None:
     """A streaming read (`r|`) over `_tar_stream`: gzip, bzip2 and xz are
     decompressed as the members are read, never into one buffer first, so a
@@ -532,7 +557,8 @@ def walk_tar(data: bytes, walk: _Walk) -> None:
     (`_Walk.skip_over_cap`): the skip is a decompression too. Anything but
     padding after the last member read refuses the whole archive."""
     try:
-        tf = tarfile.open(fileobj=_tar_stream(data), mode="r|")
+        tf = tarfile.open(fileobj=_tar_stream(data), mode="r|",
+                          tarinfo=_counted_tarinfo(walk))
     except tarfile.ReadError:
         raise Refused("not_tar" if data[:2] in (b"\x1f\x8b", b"BZ", b"\xfd7")
                       else "corrupt") from None

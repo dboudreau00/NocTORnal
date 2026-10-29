@@ -1,9 +1,9 @@
 """Authentication service: password + mandatory TOTP.
 
-Single-step: the caller submits password and TOTP code together and gets back OK or INVALID_CREDENTIALS, or
-SECOND_FACTOR_UNAVAILABLE when the stored secret cannot be opened, which is a server fault and is answered
-as one. The specific reason (wrong password, wrong code, locked, inactive, not enrolled, replay, unknown
-user) is carried in `audit_reason` for the server-side audit trail only and must never reach the client,
+Single-step: the caller submits password and TOTP code together and gets back OK or INVALID_CREDENTIALS.
+The specific reason (wrong password, wrong code, locked, inactive, not enrolled, replay, unknown user, a
+stored secret no key opens) is carried in `audit_reason` for the server-side audit trail only and must never
+reach the client,
 otherwise the response becomes a password/enumeration oracle (a correct-password-without-code that returned
 a distinct "now enter your code" would confirm the password for free).
 
@@ -44,14 +44,7 @@ def _utcnow() -> datetime:
 
 class AuthOutcome(Enum):
     OK = "ok"
-    INVALID_CREDENTIALS = "invalid_credentials"  # the only CREDENTIAL failure the caller sees
-    # The password verified and the second factor could not be checked: the stored TOTP secret did not
-    # open under any key this process holds (`envelope.UNOPENABLE`: a rotated KEK, a secrets file from the
-    # wrong backup). A server fault, answered as one (503 at the router), not folded into "invalid
-    # credentials", which would send an analyst to re-type a right password. Reachable only after the
-    # password verified on a real, active, unlocked account, so it tells a guesser nothing the password
-    # check did not.
-    SECOND_FACTOR_UNAVAILABLE = "second_factor_unavailable"
+    INVALID_CREDENTIALS = "invalid_credentials"  # the only failure the caller sees
 
 
 @dataclass(frozen=True)
@@ -163,23 +156,25 @@ class AuthService:
             else:
                 reason = "bad_recovery_code"  # a concurrent login spent it first
         else:
+            unopenable = False
             try:
                 secret = self._users.get_totp_secret(user.id)  # decrypt only when needed
             except envelope.UNOPENABLE as exc:
-                # Not a lockout attempt: nothing the caller sent was wrong.
-                # Logged with the type (InvalidTag carries no message) and
-                # never the secret, which does not exist in plaintext here.
+                # Answered and counted as any other failure: only the right password reaches here, so
+                # an answer of its own would confirm the password with no lockout. The operator reads
+                # the cause here and in the audit row. Logged with the type (InvalidTag has no message).
                 log.error("TOTP secret for user %s cannot be opened (%s: %s); "
                           "see readiness check kek_ring_opens_stored_secrets",
                           user.id, type(exc).__name__, exc)
-                return AuthResult(AuthOutcome.SECOND_FACTOR_UNAVAILABLE,
-                                  user.id, "totp_secret_unopenable")
+                secret, unopenable = None, True
             result = (
                 totp.verify(secret, totp_code, int(now.timestamp()), user.totp_last_counter)
                 if secret is not None
                 else totp.TotpResult(False)
             )
-            if not result.ok:
+            if unopenable:
+                reason = "totp_secret_unopenable"
+            elif not result.ok:
                 reason = "bad_totp"
             elif not self._users.advance_totp_counter(user.id, result.new_last_counter):
                 reason = "replay"  # a concurrent login already consumed this code

@@ -1002,7 +1002,7 @@ def _expand(conn, storage, c, data: bytes, analysis,
     refused = [{"path": r["path"], "reason": r["reason"]} for r in expansion.refused]
     # Entries refused with bytes behind them were not compared by anything; the derived "members were not
     # compared" gap says so. A link, a device, a directory and an empty entry hold no content (a zip entry
-    # marked as one that carries more than a link target is read as a member:
+    # marked as a link or a device that carries any bytes is read as a member:
     # lab_archive_child._zip_kind).
     unscreened = sum(1 for r in expansion.refused
                      if r["code"] not in CONTENT_FREE_REFUSALS)
