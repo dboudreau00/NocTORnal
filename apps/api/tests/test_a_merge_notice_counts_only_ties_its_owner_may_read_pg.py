@@ -33,10 +33,10 @@ def _world(owner, keeper_clearance: str):
     """A case owned by `keeper`, merged by an AMBER case owner, with RED ties
     recorded by a RED colleague."""
     keeper = s.user(owner, keeper_clearance, prefix=g.PREFIX)
-    merger = s.user(owner, "AMBER", prefix=g.PREFIX)
+    caller = s.user(owner, "AMBER", prefix=g.PREFIX)
     boss = s.user(owner, "RED", prefix=g.PREFIX)
     case_id = s.case(owner, keeper)
-    for uid in (keeper, merger, boss):
+    for uid in (keeper, caller, boss):
         s.assign(owner, case_id, uid, "CASE_OWNER")
     left = s.node(owner, case_id, boss, "mn left")
     right = s.node(owner, case_id, boss, "mn right")
@@ -50,12 +50,12 @@ def _world(owner, keeper_clearance: str):
         s.edge(owner, case_id, boss, src, dst, "RED")
     s.edge(owner, case_id, boss, left, far, "RED")
     s.edge(owner, case_id, boss, left, visible, "AMBER")
-    return keeper, merger, case_id, left, right
+    return keeper, caller, case_id, left, right
 
 
-def _merge(client, owner, merger, case_id, source, target):
+def _merge(client, owner, caller, case_id, source, target):
     made = client.post(
-        f"/api/v1/cases/{case_id}/merges", headers=g.auth(owner, merger),
+        f"/api/v1/cases/{case_id}/merges", headers=g.auth(owner, caller),
         json={"source_node_id": str(source), "target_node_id": str(target),
               "reason": "same handle, two spellings"})
     assert made.status_code == 201, made.text
@@ -73,8 +73,8 @@ def _notice(owner, keeper):
 
 def test_an_amber_owner_is_not_told_of_red_ties_the_merge_touched(owner, client):
     from noctornal_api.merges import MergeService
-    keeper, merger, case_id, left, right = _world(owner, "AMBER")
-    merge_id = _merge(client, owner, merger, case_id, left, right)
+    keeper, caller, case_id, left, right = _world(owner, "AMBER")
+    merge_id = _merge(client, owner, caller, case_id, left, right)
 
     system = MergeService(owner).get(merge_id)
     assert system.edges_repointed == 2
@@ -90,8 +90,8 @@ def test_an_amber_owner_is_not_told_of_red_ties_the_merge_touched(owner, client)
 
 def test_a_red_owner_is_told_of_every_tie(owner, client):
     """The counts follow the owner's labels, not a blanket cut."""
-    keeper, merger, case_id, left, right = _world(owner, "RED")
-    _merge(client, owner, merger, case_id, left, right)
+    keeper, caller, case_id, left, right = _world(owner, "RED")
+    _merge(client, owner, caller, case_id, left, right)
 
     _, summary, body = _notice(owner, keeper)
     assert "re-pointed 2 relationships." in summary
