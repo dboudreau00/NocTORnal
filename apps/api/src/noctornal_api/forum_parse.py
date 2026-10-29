@@ -1,79 +1,50 @@
-"""Reading collected forum pages: the toolkit the XenForo and MyBB adapters
-share (F3 and F4, 2026-09-24).
+"""Reading collected forum pages: the toolkit the XenForo and MyBB adapters share.
 
-Pure: bytes in, plain data out. No database, no socket, no environment
-read (the one exception is the child entry at the bottom, which reads its
-own stdin). The adapters in `forum_adapters.py` fetch through the poll's
-RunContext and hand each page here; only the selector tables, the URL
-shapes and the time handling differ between the two platforms.
+Pure: bytes in, plain data out. No database, no socket, no environment read (the one exception is the child
+entry at the bottom, which reads its own stdin). The adapters in `forum_adapters.py` fetch through the poll's
+RunContext and hand each page here; only the selector tables, the URL shapes and the time handling differ
+between the two platforms.
 
-## The two things a forum parser must get right (docs/04)
+Quotes and signatures (docs/04). A quoted block is somebody else's words, so every `blockquote` is cut out of a
+post's body before its text is taken, and the quoted post ids are kept (`quoted`), never the quoted text: a
+Jabber address in a quote is not attributed to whoever quoted it. A signature is repeated on every post its
+author writes, so it is cut out too and kept once per post in `signature`, where it is intelligence about the
+author and not an observation per post.
 
-Quotes and signatures. A quoted block is somebody else's words, so every
-`blockquote` is cut out of a post's body before its text is taken, and the
-quoted post ids are kept (`quoted`), never the quoted text: a Jabber
-address in a quote is not attributed to whoever quoted it. A signature is
-repeated on every post its author writes, so it is cut out too and kept
-once per post in `signature`, where it is intelligence about the author
-and not an observation per post (the same address on 4,000 posts is one
-fact, not 4,000).
+Ids are validated and namespaced. Post, member and thread ids are integers on both platforms. Each is read as
+ASCII digits only (a Unicode digit such as U+0663 is refused), must be above zero and below 2**53, and is typed
+on the way out ('post:12', 'member:42', 'thread:7'), so the profile of member 42 can never become version 2 of
+post 42 in the collector's version chain.
 
-## Ids are validated and namespaced
+No address from a page is ever fetched. Every URL the walk asks for is BUILT here, from a validated numeric id
+on the source's own scheme, host, port and install path, with a fixed template per platform (`thread_page_url`,
+`board_page_url`, `member_page_url`). Hrefs on a page are read for the ids in them and nothing else, so a hostile
+board cannot steer the collector to a canary or a third party. Pagination is a hint: the page number stored is
+the one the fetched page says it is, and the walk moves one page past the last page it actually read.
 
-Post, member and thread ids are integers on both platforms. Each is read
-as ASCII digits only (a Unicode digit such as U+0663 is refused), must be
-above zero and below 2**53, and is typed on the way out ('post:12',
-'member:42', 'thread:7'), so the profile of member 42 can never become
-version 2 of post 42 in the collector's version chain.
+Times are an instant or nothing. XenForo prints a machine-readable instant (`<time datetime>`, and the epoch in
+`data-time`), read as UTC. MyBB prints the board's own zone in the board's own format with no offset, so a MyBB
+time is converted only when the source declares both the zone and the formats; otherwise the post is stored with
+no posting time. docs/10 names confident false attribution as the worst error in this domain, and a guessed zone
+is one. MyBB's relative forms ('Today', '5 Minutes Ago') carry the absolute date in the span's title, which is
+read first.
 
-## No address from a page is ever fetched
+The parser is a hostile-input surface, and is bounded. The pages are written by the people under investigation.
+lexbor resolves no external reference and HTML5 has no entity expansion, so the XXE class parse_rss refuses does
+not arise. What does arise is WORK: with selectolax 0.4.12, lexbor's tree builder is quadratic on several
+markups a hostile board can serve (repeated unclosed `<a>`, `<nobr>`, `<button>`, `<form>` and `<option>`,
+headings closing each other, very deep nesting, thousands of distinct attributes on one tag): 4 MiB of `<a>` did
+not finish in 25 seconds, and 200,000 nested `<div>` took 107. No pre-scan can list every such shape, so the
+adapters parse each page in a child process (`_child_main`, started by `forum_adapters.parse_bounded` through
+lab_triage's bounded runner) that limits its own CPU and memory before it reads a byte, under a wall clock the
+parent enforces by killing it. A page that does not parse within the limits is abandoned and reported as parser
+drift. The residual, a memory safety defect in lexbor itself, is docs/17's, with decision 53 (the RSS parser's
+DOCTYPE refusal) as the precedent. A production deployment starts that child in the isolated analysis worker, a
+container with no secrets and no network, so such a defect reaches neither; the child is this module either way.
 
-Every URL the walk asks for is BUILT here, from a validated numeric id on
-the source's own scheme, host, port and install path, with a fixed
-template per platform (`thread_page_url`, `board_page_url`,
-`member_page_url`). Hrefs on a page are read for the ids in them and
-nothing else, so a hostile board cannot steer the collector to a canary
-or a third party. Pagination is a hint: the page number stored is the one
-the fetched page says it is, and the walk moves one page past the last
-page it actually read.
-
-## Times: an instant or nothing
-
-XenForo prints a machine-readable instant (`<time datetime>`, and the
-epoch in `data-time`), read as UTC. MyBB prints the board's own zone in
-the board's own format with no offset, so a MyBB time is converted only
-when the source declares both the zone and the formats; otherwise the
-post is stored with no posting time. docs/10 names confident false
-attribution as the worst error in this domain, and a guessed zone is one.
-MyBB's relative forms ('Today', '5 Minutes Ago') carry the absolute date
-in the span's title, which is read first.
-
-## The parser is a hostile-input surface, and is bounded
-
-The pages are written by the people under investigation. lexbor resolves
-no external reference and HTML5 has no entity expansion, so the XXE class
-parse_rss refuses does not arise. What does arise is WORK: measured on
-2026-09-24 with selectolax 0.4.12, lexbor's tree builder is quadratic on
-several markups a hostile board can serve (repeated unclosed `<a>`,
-`<nobr>`, `<button>`, `<form>` and `<option>`, headings closing each
-other, very deep nesting, thousands of distinct attributes on one tag):
-4 MiB of `<a>` did not finish in 25 seconds, and 200,000 nested `<div>`
-took 107. No pre-scan can list every such shape, so the adapters parse
-each page in a child process (`_child_main`, started by
-`forum_adapters.parse_bounded` through lab_triage's bounded runner) that
-limits its own CPU and memory before it reads a byte, under a wall clock
-the parent enforces by killing it. A page that does not parse within the
-limits is abandoned and reported as parser drift. The residual, a memory
-safety defect in lexbor itself, is docs/17's, with decision 53 (the RSS
-parser's DOCTYPE refusal) as the precedent. Since 2026-10-02 (docs/17 F42)
-a production deployment starts that child in the isolated analysis
-worker, a container with no secrets and no network, so such a defect
-reaches neither; the child is this module either way.
-
-Everything else is bounded too: a page is at most 4 MiB, at most 200 posts
-or threads are read from one page, a body at most 200,000 characters, a
-signature 4,000, 50 quoted ids and 50 reactor names, 40 profile fields,
-and a stored fragment 1 MiB. Nothing here recurses over the tree.
+Everything else is bounded too: a page is at most 4 MiB, at most 200 posts or threads are read from one page, a
+body at most 200,000 characters, a signature 4,000, 50 quoted ids and 50 reactor names, 40 profile fields, and a
+stored fragment 1 MiB. Nothing here recurses over the tree.
 """
 from __future__ import annotations
 
@@ -87,9 +58,8 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 PLATFORMS = ("xenforo", "mybb")
-#: `login` and `session` (the authenticated forum path, 2026-10-02) are
-#: read as pages that were asked for: a sign-in page is not a wall when
-#: the member adapter asked for one.
+#: `login` and `session` are read as pages that were asked for: a sign-in page is not a wall when the member
+#: adapter asked for one.
 PAGE_KINDS = ("thread", "board", "member", "login", "session")
 SESSION_KINDS = ("login", "session")
 
@@ -657,8 +627,7 @@ def board_page_url(loc: Located, page: int = 1) -> str:
 
 
 def login_page_url(loc: Located) -> str:
-    """The forum's own sign-in page, on the source's origin and install
-    path (the authenticated forum path, 2026-10-02)."""
+    """The forum's own sign-in page, on the source's origin and install path."""
     if loc.platform == "xenforo":
         return _xf_url(loc, LOGIN_PATH["xenforo"])
     return f"{loc.origin}{loc.prefix}{LOGIN_PATH['mybb']}"
@@ -1260,18 +1229,13 @@ _PARSERS = {
     ("mybb", "thread"): lambda tree, config, now: parse_mybb_thread(tree, config=config, now=now),
     ("mybb", "board"): lambda tree, config, now: parse_mybb_board(tree, config=config, now=now),
     ("mybb", "member"): lambda tree, config, now: parse_mybb_member(tree),
-    # The authenticated forum path (2026-10-02): the sign-in form, and what
-    # a page says about the session it was read with.
+    # The sign-in form, and what a page says about the session it was read with.
     ("xenforo", "login"): lambda tree, config, now: parse_login_form("xenforo", tree),
     ("mybb", "login"): lambda tree, config, now: parse_login_form("mybb", tree),
     ("xenforo", "session"): lambda tree, config, now: parse_session_state("xenforo", tree),
     ("mybb", "session"): lambda tree, config, now: parse_session_state("mybb", tree),
 }
 
-
-# ---------------------------------------------------------------------------
-# The sign-in form and the session (the authenticated forum path, 2026-10-02)
-# ---------------------------------------------------------------------------
 
 #: What a form may carry back: at most this many hidden fields, each name
 #: and value capped, so a hostile sign-in page cannot grow the child's
@@ -1304,17 +1268,13 @@ _ERROR_SELECTORS = {"xenforo": ".blockMessage--error, .error, .errorOverlay",
                     "mybb": ".error, #error, .red_alert"}
 _LOGOUT_KEY = re.compile(r"(?:[?&](?:amp;)?logoutkey=)([A-Za-z0-9]{1,64})")
 
-#: Where other people's words live on each platform's pages: a post and its
-#: author block, a signature, a thread title and its preview in a listing, a
-#: profile's blurb. The session reader decides what a page says about the
-#: persona's sign-in from the board's own chrome ONLY (2026-10-03): a post that reads "my
-#: password has expired", mentions a
-#: CAPTCHA or an authenticator app, or links to /logout/ was making a
-#: signed-in page read as a forced password change and a guest page read as a
-#: signed-in one (a dead session then passed the probe and the run was
-#: stored as read by the member). Anything of the board's that a poster can
-#: write sits under one of these; a theme this list does not know leaves a
-#: poster's words in the chrome's reading, which docs/17 records.
+#: Where other people's words live on each platform's pages: a post and its author block, a signature, a thread
+#: title and its preview in a listing, a profile's blurb. The session reader decides what a page says about the
+#: persona's sign-in from the board's own chrome ONLY: a post that reads "my password has expired", mentions a
+#: CAPTCHA or an authenticator app, or links to /logout/ would make a signed-in page read as a forced password
+#: change and a guest page read as a signed-in one (a dead session then passes the probe and the run is stored as
+#: read by the member). Anything of the board's that a poster can write sits under one of these; a theme this
+#: list does not know leaves a poster's words in the chrome's reading, which docs/17 records.
 _USER_CONTENT = {
     "xenforo": ("article.message, .message, .message-body, .bbWrapper, "
                 ".message-userContent, .message-signature, .message-cell--user, "
@@ -1522,8 +1482,7 @@ def parse_page(platform: str, page_kind: str, body: bytes, *,
     if is_challenge(platform, text, tree):
         return {"state": "challenge"}
     if page_kind in SESSION_KINDS:
-        # A sign-in page is what the member adapter asked for (2026-10-02);
-        # the session reader states the page's own verdict.
+        # A sign-in page is what the member adapter asked for; the session reader states the page's own verdict.
         out = _PARSERS[(platform, page_kind)](tree, dict(config or {}), now)
         out.setdefault("state", "ok")
         return out

@@ -1,12 +1,9 @@
-"""Shared helpers for the collection foundation's tests (2026-09-24).
+"""Shared helpers for the collection foundation's tests. Importable, no test functions.
 
-Importable, no test functions. Every collection foundation test file names
-its rows with its own prefix and tears down with `teardown(conn, prefix)`.
-Rows the guards forbid deleting (collection authorities and their targets,
-personas bound to a platform) are LEFT, and the sources they reference are
-deactivated, so nothing a later test reads (the due list, the readiness
-rows) sees them: an append-only ledger would otherwise carry one test's
-rows into the next test's answers.
+Every collection foundation test file names its rows with its own prefix and tears down with
+`teardown(conn, prefix)`. Rows the guards forbid deleting (collection authorities and their targets,
+personas bound to a platform) are left, and the sources they reference are deactivated, so nothing a
+later test reads (the due list, the readiness rows) sees them.
 """
 from __future__ import annotations
 
@@ -69,9 +66,8 @@ def client():
 
 def egress_profile(conn, prefix: str, *, active: bool = True,
                    persona_capable: bool = False):
-    """A profile with no exit, which no persona can be created on since F35
-    (2026-10-02). `persona_capable=True` gives it an HTTPS exit (placeholder
-    sealed bytes: nothing here dials it), the one a persona may be created
+    """A profile with no exit, which no persona can be created on. `persona_capable=True` gives it
+    an HTTPS exit (placeholder sealed bytes: nothing here dials it), the one a persona may be created
     on."""
     pid = conn.execute(
         """INSERT INTO collect.egress_profile (name, kind, key_id, is_active)

@@ -1,47 +1,30 @@
-"""Guard against the corruption modes this repo has actually suffered.
+"""Guard against the corruption modes this repository has suffered.
 
-Four checks, all cheap, each encoding something that has actually gone
-wrong in this repository.
+Four checks, all cheap:
 
-**NUL bytes.** The editing tools on the development machine have more than
-once corrupted a non-ASCII literal into a NUL byte. In Python that is a
-`SyntaxError` you find immediately; in a served `.js` file it is a blank
-screen with nothing in the console, and in a `.sql` migration it is a
-statement that silently truncates. Nothing legitimate in this tree
-contains one.
+**NUL bytes.** The editing tools have corrupted a non-ASCII literal into a NUL byte. In Python
+that is a `SyntaxError`; in a served `.js` file it is a blank screen with nothing in the console,
+and in a `.sql` migration a statement that silently truncates. Nothing legitimate here contains
+one.
 
-**Other control bytes.** The same corruption with a different byte: a
-backslash followed by `b`, typed into a Windows path, was written out as
-a literal BACKSPACE (0x08). `release/INSTALL.md` shipped two of them in
-every tagged release from Alpha 1 to Alpha 5.2, seven in all, in both
-Windows recovery commands, which printed as `scriptsootstrap.py` and
-could not be run as copied (Alpha 6 pre-release check, 2026-09-23). Tab,
-line feed and carriage return are text; every other byte from 0x01 to
-0x1F is refused.
+**Other control bytes.** The same corruption with another byte: a backslash and a `b` typed into
+a Windows path can be written out as a BACKSPACE (0x08), which prints as a missing letter and
+breaks a command copied from the docs. Tab, line feed and carriage return are text; every other
+byte from 0x01 to 0x1F is refused.
 
-**Bidirectional and invisible Unicode.** A right-to-left override or a
-zero-width character inside a string or comment renders as one thing and
-compiles as another (CVE-2021-42574, "Trojan Source"). In a platform
-whose whole premise is that the audit trail says what happened, source
-that does not read the way it executes is a category of problem worth
-refusing outright rather than reviewing carefully.
+**Bidirectional and invisible Unicode.** A right-to-left override or a zero-width character
+inside a string or comment renders as one thing and compiles as another (CVE-2021-42574, "Trojan
+Source"). In a platform whose premise is that the audit trail says what happened, source that
+does not read the way it executes is refused outright. Deliberately not an all-ASCII rule:
+legitimate text uses characters such as box drawing, and banning them would mean a wall of
+escapes or a rule everyone disables.
 
-Deliberately NOT an all-ASCII rule: the docs and the UI legitimately use
-em dashes and box-drawing characters, and banning them would mean either
-a wall of escapes or a rule everyone disables.
+**A private identity in the tree.** The project is published under one name, and its owner's
+private alias must never appear in public, so file contents are read for it, not only commit
+authors. The forbidden strings are assembled from fragments below, as the codepoints are spelled
+numerically, because a checker must pass its own check.
 
-**A private identity in the tree.** The project is published under one
-name and its owner has a private alias that must never appear in public.
-On 2026-08-25 every commit in the history was rewritten to remove that
-alias from commit AUTHORS -- and NOTICE.md, the licence page, kept it in
-the copyright line through Alpha 2, 3 and 4, because the sweep read
-authors and the release checks read for tool attribution, and nothing
-read file contents. This check does. The forbidden strings are
-assembled from fragments below for the same reason the codepoints are
-spelled numerically: a checker must pass its own check.
-
-Exit code 1 on any finding, with the file, line and codepoint named --
-"something is wrong somewhere" is not an error message.
+Exit code 1 on any finding, with the file, line and codepoint named.
 """
 from __future__ import annotations
 
@@ -51,17 +34,12 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-# Text we author. Binary and vendored trees are skipped wholesale rather
-# than filtered, so a new binary format cannot trip this by accident.
-#
-# The second line of suffixes and the NAMES set bring in every other kind
-# of text file the repository tracks: `start.cmd` (a Windows batch file of
-# backslash paths, the exact place a BACKSPACE hides), the Dockerfile and
-# Caddyfile, the requirements and Alembic template, the PGP fixtures, the
-# SVGs and the ignore files. The walk used to stop at the first line, so a
-# control byte in any of those was never looked for (Alpha 6 pre-release
-# check, 2026-09-23). `test_source_hygiene.py` compares this set with what
-# git itself calls text, so a new kind of tracked file cannot slip past.
+# Text we author. Binary and vendored trees are skipped wholesale rather than filtered, so a new
+# binary format cannot trip this by accident. The second line of suffixes and the NAMES set bring
+# in every other kind of tracked text file: `start.cmd` (backslash paths, where a BACKSPACE
+# hides), the Dockerfile and Caddyfile, the requirements and Alembic template, the PGP fixtures,
+# the SVGs and the ignore files. A test compares this set with what git calls text, so a new
+# kind of tracked file cannot slip past.
 SUFFIXES = {".py", ".js", ".css", ".html", ".sql", ".md", ".toml", ".yml",
             ".yaml", ".ps1", ".sh", ".ini", ".json", ".ts",
             ".cmd", ".bat", ".txt", ".mako", ".asc", ".svg", ".example"}
@@ -71,12 +49,9 @@ SKIP_DIRS = {".git", ".claude", ".venv", "node_modules", "__pycache__", ".next",
              ".pytest_cache", ".ruff_cache", "dist", "build", ".mypy_cache",
              "egg-info"}
 
-# Trojan Source (CVE-2021-42574) plus the zero-width characters that make
-# two different identifiers look identical.
-#
-# Written as CODEPOINTS, not literals, and that is not fussiness: with the
-# characters spelled out this file fails its own check. A linter that
-# cannot be run against itself is a linter nobody trusts.
+# Trojan Source (CVE-2021-42574) plus the zero-width characters that make two different
+# identifiers look identical. Written as codepoints, not literals: spelled out, the characters
+# would fail this file's own check.
 BOM = 0xFEFF
 DANGEROUS = {
     0x202A: "LEFT-TO-RIGHT EMBEDDING",
@@ -133,14 +108,9 @@ def files() -> list[Path]:
         if not path.is_file() or (path.suffix.lower() not in SUFFIXES
                                   and path.name not in NAMES):
             continue
-        # RELATIVE parts, never absolute ones. On 2026-09-09 `.claude` was
-        # added to SKIP_DIRS and matched against `path.parts` -- the whole
-        # absolute path -- so from a checkout that itself lives under
-        # `.claude/worktrees/<name>/` every file matched the skip, the
-        # script scanned nothing, and printed "0 files clean" with exit 0.
-        # Two reviewers caught it the same afternoon. A skip list is about
-        # directories INSIDE the tree, so it is compared against the path
-        # inside the tree.
+        # Relative parts, never absolute ones: a skip list names directories inside the tree,
+        # and matched against the whole path, a checkout under `.claude/worktrees/<name>/` would
+        # skip every file and report "0 files clean".
         if any(part in SKIP_DIRS or part.endswith(".egg-info")
                for part in path.relative_to(REPO).parts):
             continue
@@ -224,9 +194,6 @@ def main() -> int:
         return 1
 
     if problems:
-        # Agreed with the count rather than bracketed, as every other
-        # message the scripts print now is (Alpha 6 pre-release check,
-        # 2026-09-23).
         noun = "problem" if len(problems) == 1 else "problems"
         print(f"Source hygiene: {len(problems)} {noun} in {checked} files.\n",
               file=sys.stderr)

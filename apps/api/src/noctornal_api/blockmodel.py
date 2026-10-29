@@ -1,58 +1,36 @@
-"""CONCOR structural-equivalence blockmodelling: the Roles card (F1,
-2026-09-24).
+"""CONCOR structural-equivalence blockmodelling: the Roles card (docs/03).
 
-docs/03 lists CONCOR and blockmodelling for "the second money launderer,
-the replacement developer": entities in the same POSITION have the same
-pattern of ties to the same others, whether or not they are tied to each
-other. Centrality asks who is important; this asks who is
-interchangeable, which is the question a takedown that leaves the role
-filled has failed to ask.
+Entities in the same position have the same pattern of ties to the same others, whether or not they
+are tied to each other. Centrality asks who is important; this asks who is interchangeable, which a
+takedown that leaves the role filled has failed to ask.
 
-The method (Breiger, Boorman and Arabie 1975). Each entity's profile is its
-ties sent and received, one relation per valence (positive, negative, and
-ties with no valence), direction kept. The profiles are correlated pairwise,
-LEAVING OUT the entries that describe the pair themselves (Wasserman and
-Faust's correction: otherwise a tie between two entities makes them less
-alike, since each sees the other and not itself). That matrix is correlated
-again and again until every entry settles at plus or minus one, and the
-entities are split on its sign. Each half is split the same way, to the
-depth asked for.
+Method (Breiger, Boorman and Arabie 1975): each entity's profile is its ties sent and received, one
+relation per valence (positive, negative, none), direction kept. Profiles are correlated pairwise,
+leaving out the entries that describe the pair themselves (see `profile_correlation`), and that
+matrix is correlated again until every entry settles at plus or minus one. The entities split on its
+sign, and each half splits the same way, to the depth asked for. Rules:
 
-Four rules shape it:
+- Only actors hold positions. A forum or wallet on a two-mode view stays a column of every profile
+  but is not partitioned; the card counts those vertices so none disappears silently.
+- Ties are present or absent: weights and decay do not move positions, and a derived tie counts as a
+  whole tie (the payload says so).
+- The fit is always said. CONCOR always splits in two, so the number of positions is set by the
+  depth and not found in the data. R squared between the ties and the block densities is in the
+  payload, and a split that does not settle within the round limit is made and reported, as UCINET
+  does.
+- Refused before it allocates: at most 1,000 vertices with ties, counted before any matrix exists.
+  `precheck` is what the service calls before it writes a RUNNING row, so a view with fewer than two
+  tied entities is a 422 with no run left behind.
 
-- **Only actors hold positions.** A forum or wallet on a two-mode view stays
-  a column of every profile, so it shapes who is alike, but it is not
-  partitioned. The card counts those vertices so none disappears silently.
-- **Ties are present or absent.** Weights and decay do not move positions,
-  and with venues projected (F2) a derived tie counts as a whole tie; the
-  payload says so, because a pair that once shared a 40-member forum then
-  counts like a pair who share a wallet.
-- **The fit is always said.** CONCOR ALWAYS splits in two, so the number of
-  positions is set by the depth and not found in the data. R squared
-  between the ties and the block densities is in the payload, and a split
-  that did not settle within the round limit is made and reported, as
-  UCINET does.
-- **Refused before it allocates.** 1,000 vertices with ties at most,
-  counted before any matrix exists, and `precheck` is what the service
-  calls BEFORE it writes a RUNNING row, so a view with fewer than two tied
-  entities is a 422 with no run left behind.
+numpy's OpenBLAS starts one thread per core, and four worker processes each running a worst case
+took 47 to 51 s uncapped against 6.3 s at one thread (16-core host). So importing this module caps
+the process's BLAS at `CONCOR_BLAS_THREADS` for as long as the process lives, on purpose: through
+threadpoolctl when installed, otherwise through the OpenBLAS numpy bundles (its own
+set_num_threads). Neither caps Apple's Accelerate; production is Linux with OpenBLAS. `BLAS_CAP`
+records the path that took effect and `blas_threads()` reads the count back.
 
-BLAS threads. numpy's OpenBLAS starts one thread per core. Measured on a
-16-core development host: four worker processes each running a worst case
-took 47 to 51 s apiece uncapped and 6.3 s capped at one thread, while one
-thread costs a typical run nothing. So this module caps the process's BLAS
-to `CONCOR_BLAS_THREADS` on import, for as long as the process lives: any
-later numpy user in the API process inherits the cap, on purpose. It uses
-threadpoolctl when it is installed, and otherwise tells the OpenBLAS numpy
-bundles directly, through the library's own set_num_threads (the call
-threadpoolctl itself makes). Neither caps Apple's Accelerate, which the
-macOS arm64 wheels use; production is Linux with OpenBLAS, which is the
-platform that matters (2026-09-24). `BLAS_CAP` records which
-path took effect and `blas_threads()` reads the count back.
-
-Pure and database-free, like `analytics.py`. Every value in the payload is
-a Python scalar rounded through `analytics._clean`, so NaN never reaches
-jsonb (the CR8 lesson).
+Pure and database-free, like `analytics.py`: every payload value is a Python scalar rounded through
+`analytics._clean`, so NaN never reaches jsonb.
 """
 from __future__ import annotations
 
@@ -173,14 +151,12 @@ BLAS_CAP = _cap_blas()
 
 
 def blas_cap_report() -> tuple[bool, str]:
-    """`(capped, evidence)` for the readiness register's
-    role_analysis_thread_capped row, which fails whenever role analysis
-    runs without its cap (2026-09-24).
+    """`(capped, evidence)` for the readiness register's role_analysis_thread_capped row, which
+    fails whenever role analysis runs without its cap.
 
-    Capped means the path taken on import can be read back at one thread
-    now: threadpoolctl's own report of every BLAS it controls, or the
-    count numpy's OpenBLAS gives. threadpoolctl can be installed and still
-    find nothing to cap (Apple's Accelerate), so its path alone is not
+    Capped means the path taken on import can be read back at one thread now: threadpoolctl's own
+    report of every BLAS it controls, or the count numpy's OpenBLAS gives. threadpoolctl can be
+    installed and still find nothing to cap (Apple's Accelerate), so its path alone is not
     enough."""
     one = CONCOR_BLAS_THREADS
     if BLAS_CAP == "threadpoolctl":
@@ -213,19 +189,17 @@ def blas_cap_report() -> tuple[bool, str]:
 # --------------------------------------------------------------------------
 
 def is_directed(edge: dict) -> bool:
-    """A derived tie (F2) carries its own flag; a stored one takes its
-    type's, and an unknown type counts as directed, the reading that keeps
-    more information."""
+    """A derived tie carries its own flag; a stored one takes its type's, and an unknown type counts
+    as directed, the reading that keeps more information."""
     if edge.get("derived"):
         return bool(edge.get("directed"))
     return _DIRECTED.get(edge.get("edge_type"), True)
 
 
 def direction_rows(sub: Subgraph) -> list[tuple[str, str, str, str]]:
-    """Every tie's ends, type and direction, for CONCOR's cache key: the
-    graph hash carries no edge type, so an undirected tie swapped for a
-    directed one of the same sign, weight, dates, review and evidence left
-    it unchanged, and CONCOR's relations depend on direction."""
+    """Every tie's ends, type and direction, for CONCOR's cache key: the graph hash carries no edge
+    type, so an undirected tie swapped for a directed one of the same sign, weight, dates, review
+    state and evidence would leave it unchanged, and CONCOR's relations depend on direction."""
     ids = {n["id"] for n in sub.nodes}
     return sorted((str(e["src_node_id"]), str(e["dst_node_id"]), str(e["edge_type"]),
                    "d" if is_directed(e) else "u")
@@ -298,22 +272,19 @@ def build_relations(sub: Subgraph) -> tuple[list, list[tuple[str, str, numpy.nda
 # --------------------------------------------------------------------------
 
 def profile_correlation(mats: list[numpy.ndarray]) -> numpy.ndarray:
-    """Pearson correlation between every two vertices' tie profiles,
-    leaving out the entries that describe the two of them.
+    """Pearson correlation between every two vertices' tie profiles, leaving out the entries that
+    describe the two of them.
 
-    A profile is the vertex's ties sent and received in every relation:
-    the rows of R and of R transposed, side by side (a symmetric R once,
-    since a copy of every entry does not move a correlation). For the pair
-    (i, j) the entries at columns i and j of every block are left out,
-    and the sums are taken from whole-matrix products rather than by
-    materialising the stack. The diagonal is zero by construction, so the
-    left-out cross products are zero too.
+    A profile is the vertex's ties sent and received in every relation: the rows of R and of R
+    transposed, side by side (a symmetric R once, since a copy of every entry does not move a
+    correlation). For the pair (i, j) the entries at columns i and j of every block are left out,
+    and the sums are taken from whole-matrix products rather than by materialising the stack. The
+    diagonal is zero by construction, so the left-out cross products are zero too.
 
-    Undefined cases (2026-09-24): two constant left-out
-    profiles correlate 1 when they are equal and 0 when not; one constant
-    against a varying one is 0; anything else not finite is 0. Two hubs
-    tied to every other vertex of an undirected view correlated 0 under a
-    naive reading and correlate 1 here, which is what they are.
+    Undefined cases: two constant left-out profiles correlate 1 when they are equal and 0 when not;
+    one constant against a varying one is 0; anything else not finite is 0. Two hubs tied to every
+    other vertex of an undirected view correlate 1, which is what they are, where a naive reading
+    gives 0.
     """
     blocks: list[numpy.ndarray] = []
     for r in mats:

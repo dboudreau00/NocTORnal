@@ -1,34 +1,22 @@
-"""The production migration job: refuse what must not migrate, then run
-`alembic upgrade head` as the schema owner (docs/17 F52, 2026-10-02).
+"""The production migration job: refuse what must not migrate, then run `alembic upgrade head` as
+the schema owner.
 
     python scripts/migrate_job.py
 
-infra/production/compose.yml runs this as the `migrate` service, which
-reads migrate.env and nothing else. It is not for a development stack,
-where `alembic upgrade head` is run directly against .env.local.
+infra/production/compose.yml runs this as the `migrate` service, which reads migrate.env and
+nothing else. It is not for a development stack, where `alembic upgrade head` runs directly against
+.env.local.
 
-## Why a script and not the two lines of shell it replaces
+The owner's DSN is in a file only this job reads, so its refusals are made here or nowhere:
+`config.migration_job_problems`, one line each, naming the fix and never a value. The
+published-credential refusal is the one every job makes (`config.refuse_unsafe_job_environment`),
+with the owner half off because this job holds the owner's DSN. Any refusal exits 1, which keeps
+every service that waits on this job from starting; db/migrations/env.py repeats the
+published-credential refusal (exit 2), so a bare `alembic` is held to it too.
 
-Until 2026-10-02 the service's shell copied NOCTORNAL_MIGRATION_DATABASE_URL
-into DATABASE_URL and exec'd Alembic, and the owner's DSN sat in
-secrets.env, where the API's boot check refused a published owner password
-for it. F52 moved the DSN into a file only this job reads, so that refusal
-has to be made here or nobody makes it. And on a host whose secrets were
-not moved yet, an empty variable would have reached Alembic as an empty
-DATABASE_URL, whose message is about .env.local and a laptop's shell. The
-refusals are `config.migration_job_problems`, one line each, naming the fix
-and never a value. The published-credential one is the helper every other
-job makes (`config.refuse_unsafe_job_environment`, infra-12), with the
-owner half switched off because this job is the one that holds the owner's
-DSN. Any refusal exits 1, which keeps every service that waits on this job
-from starting. Alembic's own environment (db/migrations/env.py) makes the
-same published-credential refusal once more when it starts, so a bare
-`alembic` is held to it too; that one exits 2, as every other job's does.
-
-When there is nothing to refuse, DATABASE_URL is replaced in this
-process's environment with the owner's DSN (Alembic and the application
-read the same variable, and must not be the same role) and Alembic is
-exec'd in this process's place, so its exit status is the job's.
+Otherwise DATABASE_URL is replaced in this process's environment with the owner's DSN (Alembic and
+the application read the same variable and must not be the same role) and Alembic is exec'd in
+this process's place, so its exit status is the job's.
 """
 from __future__ import annotations
 
@@ -64,10 +52,7 @@ def main(env=None, *, execvpe=os.execvpe, err=sys.stderr) -> int:
 
 
 if __name__ == "__main__":
-    # Every script here reads .env.local the one way (scripts/_env.py). In
-    # the container there is none (.dockerignore keeps it out of the
-    # image), and it never overrides a variable already set, so on a host
-    # it can add a DATABASE_URL this job then replaces and never an owner
-    # DSN: .env.local does not carry one.
+    # .env.local never overrides a variable already set and never carries an owner DSN, so at most
+    # it adds a DATABASE_URL this job replaces. The image has none (.dockerignore).
     load_env_local()
     sys.exit(main())

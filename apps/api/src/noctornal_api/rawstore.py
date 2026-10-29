@@ -1,47 +1,26 @@
 """Raw ingest batches in object storage, separate from evidence.
 
-docs/12's "raw before parse, always": `accept()` writes the bytes and
-returns 202 before anything is parsed, so when the parser turns out to be
-wrong -- and it will -- you re-parse from the original rather than asking a
+docs/12's "raw before parse, always": `accept()` writes the bytes and returns 202 before anything is
+parsed, so when the parser turns out to be wrong you re-parse from the original rather than asking a
 partner to resend three months of feed.
 
-Until now that was aspirational. `IngestService` took a `storage` argument,
-the router constructed it with `None`, and `accept()` skipped the write
-silently. The batch row recorded a `raw_key` pointing at nothing, `parse`
-had nothing to read, and the dead-letter redactor's claim that "the
-verbatim bytes remain in the batch's raw object" was false. Found while
-writing that claim down and then checking it.
+This is NOT `EvidenceStorage`, for three reasons:
 
-## Why this is NOT `EvidenceStorage`
+- No object lock. `EvidenceStorage` writes with COMPLIANCE-mode retention, which is right for an
+  exhibit and wrong here: a raw batch is somebody else's unvetted bytes arriving on a machine key
+  with a SHORT category clock (docs/12), and a COMPLIANCE lock would make an over-retained
+  credential dump undeletable by anybody, including in response to a deletion order (docs/00
+  decision 50).
+- Its own bucket, `INGEST_BUCKET`, defaulting to `noctornal-raw`. An exhibit and a partner's
+  submission have different retention, access and evidential weight, and one bucket policy cannot
+  express both.
+- It is not evidence. A raw batch has no chain of custody, acquisition method or `core.evidence`
+  row. Material that becomes evidence is ingested through `EvidenceService` deliberately, by a
+  human, with a provenance record, so a partner's HTTP POST cannot create an exhibit.
 
-Three differences, and each one matters:
-
-**No object lock.** `EvidenceStorage` writes with COMPLIANCE-mode
-retention: not even root can delete before the deadline. That is right for
-an exhibit and wrong here. A raw batch is somebody else's unvetted bytes
-arriving on a machine key, and docs/12 gives it a SHORT category clock;
-COMPLIANCE lock would make an over-retained credential dump undeletable by
-anybody, including in response to a deletion order. decision 50 already
-records that object lock can refuse a lawful delete -- inviting that on a
-stealer-log feed would be a choice, not an accident.
-
-**Its own bucket.** `INGEST_BUCKET`, defaulting to `noctornal-raw`. An
-exhibit and a partner's submission have different retention, different
-access and different evidential weight, and one bucket policy cannot
-express both.
-
-**It is not evidence.** A raw batch has no chain of custody, no acquisition
-method and no `core.evidence` row. Material that becomes evidence is
-ingested through `EvidenceService` deliberately, by a human, with a
-provenance record. Blurring that would let a partner's HTTP POST create an
-exhibit.
-
-## Content-addressed, so a resend costs nothing
-
-The key is the SHA-256 of the bytes, which means a partner replaying the
-same batch overwrites itself rather than accumulating copies -- and the
-digest is already stored on the batch row, so the object is verifiable
-against it without a second index.
+The key is the SHA-256 of the bytes, so a partner replaying the same batch overwrites itself rather
+than accumulating copies, and the digest already stored on the batch row verifies the object without
+a second index.
 """
 from __future__ import annotations
 
@@ -168,25 +147,19 @@ class InMemoryRawStorage:
         return self._objects[key]
 
 
-# ---------------------------------------------------------------------------
-# Collected raw markup (collection foundation, 2026-09-24)
-# ---------------------------------------------------------------------------
+# Collected raw markup. A forum adapter keeps each item's OWN markup fragment, so a parser that
+# turns out to be wrong can re-parse what was read rather than read the site again. Beside the
+# ingest store, not in it:
 #
-# A forum adapter keeps each item's OWN markup fragment, so a parser that
-# turns out to be wrong can re-parse what was read rather than read the
-# site again. Beside the ingest store, not in it, for three reasons:
-#
-# - **No object lock.** A forum page is unvetted bytes written by the people
-#   under investigation, and it holds other people's personal data. A
-#   retention clock or a deletion order must be able to remove it, and the
-#   purge deletes it with its document (retention.py, docs/00 decision
-#   74). Decision 50's reasoning for the ingest bucket, applied again.
-# - **Its own bucket**, COLLECT_RAW_BUCKET (default noctornal-collect-raw):
-#   collected pages and a partner's submissions have different retention
-#   and different access.
-# - **Content-addressed per source.** The key is the SHA-256 of the source's
-#   id and the fragment, so identical fragments from two sources never
-#   share an object, and a re-fetch of the same fragment overwrites itself.
+# - No object lock. A forum page is unvetted bytes written by the people under investigation, and it
+#   holds other people's personal data. A retention clock or a deletion order must be able to remove
+#   it, and the purge deletes it with its document (retention.py, docs/00 decision 74), as for the
+#   ingest bucket (decision 50).
+# - Its own bucket, COLLECT_RAW_BUCKET (default noctornal-collect-raw): collected pages and a
+#   partner's submissions have different retention and different access.
+# - Content-addressed per source. The key is the SHA-256 of the source's id and the fragment, so
+#   identical fragments from two sources never share an object, and a re-fetch of the same fragment
+#   overwrites itself.
 
 #: The default name, spelled once for the store, the compose files and the
 #: readiness caveat.

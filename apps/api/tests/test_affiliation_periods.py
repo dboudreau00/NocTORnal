@@ -1,27 +1,18 @@
-"""F2: when two memberships count as at the same time, and what that may
-cost (2026-09-24), without a database.
+"""When two memberships count as at the same time, and what that may cost, without a database.
 
-core.edge keeps one live row per (src, dst, type, valid_from), so one
-entity's membership of one venue, or one wallet's leg of one transaction,
-may be recorded by many parallel dated rows, and ANY of them may make two
-members contemporaneous. An earlier version did that by trying one interval
-from every constituent in every combination, which grows as the product
-of the parallel rows and sat outside the derived-tie limit (measured: 50
-posters with 100 dated rows each took 6.85 s; one flow leg with 200 rows
-on each of its four constituents took 4.29 s, on every one-mode read
-route).
+core.edge keeps one live row per (src, dst, type, valid_from), so one entity's membership of one
+venue, or one wallet's leg of one transaction, may be recorded by many parallel dated rows, and any of
+them may make two members contemporaneous. Trying one interval from every constituent in every
+combination grows as the product of the parallel rows (measured: 50 posters with 100 dated rows each
+took 6.85 s). So each constituent's rows are merged once into disjoint periods, two constituents meet
+in one linear pass, and `MAX_PERIOD_STEPS` bounds every pass by arithmetic before any is made. What is
+tested here:
 
-Now each constituent's rows are merged once into disjoint periods, two
-constituents meet in one linear pass, and `MAX_PERIOD_STEPS` bounds every
-pass by arithmetic before any is made. What is tested here:
-
-- the three period helpers against a brute-force reference on a grid of
-  half days, over random intervals with open ends, touching ends and
-  rows dated to end before they start;
+- the three period helpers against a brute-force reference on a grid of half days, over random
+  intervals with open ends, touching ends and rows dated to end before they start;
 - the two measured worlds finish well inside a second;
-- the step bound is a true upper bound on the steps the transform takes,
-  over random forum, wallet and payment worlds, and refuses before any
-  step or derived tie;
+- the step bound is a true upper bound on the steps the transform takes, over random forum, wallet and
+  payment worlds, and refuses before any step or derived tie;
 - an undated view at the derived-tie limit never meets the step limit.
 
 Pure: no database.

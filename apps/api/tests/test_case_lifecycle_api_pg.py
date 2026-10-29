@@ -1,39 +1,32 @@
 """The case-lifecycle router over HTTP: what it applies, and what it refuses.
 
-`cases.py` exposes four operations that existed in `CaseService` since
-Phase 1 and that no endpoint reached (migration 0053 recorded the gap:
-`case.update`, `case.close` and `case.grant` were seeded, granted, and
-checked by nothing). Everything reachable is now a place a mistake can be
-made, so the tests that carry this file are the refusals:
+`cases.py` exposes four operations of `CaseService` (migration 0053 seeded `case.update`,
+`case.close` and `case.grant`). Everything reachable is a place a mistake can be made, so the tests
+that carry this file are the refusals:
 
-- a caller with no relationship to a case gets the SAME 404 a nonexistent
-  case gives, on every case-scoped verb — never 403 (which would confirm
-  the case exists) and never 200,
+- a caller with no relationship to a case gets the same 404 a nonexistent case gives, on every
+  case-scoped verb, never 403 (which would confirm the case exists) and never 200,
 - a caller who is assigned but lacks the verb gets 403, not 200,
-- the classification may be raised and never lowered, and a raise is
-  capped by the caller's own clearance,
-- a grant that would confer nothing is refused rather than written and
-  then silently filtered away by every read path,
-- `ARCHIVED -> PURGED` re-enters the gate under `case.delete`, so a
-  permission holding neither step-up nor dual control cannot set the flag
-  that authorises destroying a case file,
-- nothing is answered 200 having done nothing (invariant 12): a no-op
-  PATCH is refused, a replaced grade is named, and the assignees a
-  classification raise evicts are reported rather than discovered.
+- the classification may be raised and never lowered, and a raise is capped by the caller's own
+  clearance,
+- a grant that would confer nothing is refused rather than written and then silently filtered away by
+  every read path,
+- `ARCHIVED -> PURGED` re-enters the gate under `case.delete`, so a permission holding neither
+  step-up nor dual control cannot set the flag that authorises destroying a case file,
+- nothing is answered 200 having done nothing (invariant 12): a no-op PATCH is refused, a replaced
+  grade is named, and the assignees a classification raise evicts are reported rather than
+  discovered.
 
-**The email prefix is `clc-` and must stay unique.** Every fixture in this
-suite tears down by deleting on an email pattern, so two files sharing a
-prefix delete each other's rows — which surfaces as a foreign-key error in
-whichever file tears down second, pointing at a table neither test
-touched. `cs-` belongs to test_cases_pg.py and `e2e-` to test_http_e2e.py.
+The email prefix is `clc-` and must stay unique. Every fixture in this suite tears down by deleting
+on an email pattern, so two files sharing a prefix delete each other's rows, which surfaces as a
+foreign-key error in whichever file tears down second, pointing at a table neither test touched. `cs-`
+belongs to test_cases_pg.py and `e2e-` to test_http_e2e.py.
 
-**Two throwaway ROLES are created here** (`CLC_CLOSER`, `CLC_EMPTY`),
-because two properties cannot be reproduced with the seeded matrix at all:
-0021 grants `case.close` to CASE_OWNER alone, and CASE_OWNER also holds
-`case.delete` — so proving the re-gating needs a principal holding one and
-not the other. Both are deleted in teardown, AFTER the assignments and
-user_roles that reference `role(key)`. They are new rows with unused keys,
-not edits to seeded ones, so no other suite can observe them.
+Two throwaway roles are created here (`CLC_CLOSER`, `CLC_EMPTY`), because two properties cannot be
+reproduced with the seeded matrix: 0021 grants `case.close` to CASE_OWNER alone, and CASE_OWNER also
+holds `case.delete`, so proving the re-gating needs a principal holding one and not the other. Both
+are deleted in teardown, after the assignments and user_roles that reference `role(key)`. They are new
+rows with unused keys, not edits to seeded ones, so no other suite can observe them.
 
 Env-gated on DATABASE_URL.
 """
@@ -62,10 +55,9 @@ os.environ.setdefault("NOCTORNAL_TOTP_KEK", "A" * 43 + "=")
 #: Throwaway roles, keyed so they can never collide with the seeded set.
 TEST_ROLES = ("CLC_CLOSER", "CLC_EMPTY")
 
-#: The one compartment this file files a case under. 0057 (2026-09-02) made
-#: `iam.compartment` a closed vocabulary and `CaseService.create` refuses a
-#: key that is not in it, so the fixture has to widen the vocabulary before
-#: it can use it — see `_register_compartment`.
+#: The one compartment this file files a case under. `iam.compartment` is a closed vocabulary (0057)
+#: and `CaseService.create` refuses a key that is not in it, so the fixture widens the vocabulary
+#: first: see `_register_compartment`.
 TEST_COMPARTMENT = "OP_CLC"
 
 
@@ -79,11 +71,10 @@ def conn():
     roles = ",".join(f"'{r}'" for r in TEST_ROLES)
     with c.transaction():
         c.execute(f"DELETE FROM iam.case_assignment WHERE case_id IN {csub}")
-        # Belt and braces before the roles go: iam.case_assignment and
-        # iam.user_role both reference role(key) with no ON DELETE, so ONE
-        # leaked row from a previously-failed teardown would make the role
-        # delete below fail forever — and a failing teardown leaks fixtures
-        # into every later test in the run.
+        # Belt and braces before the roles go: iam.case_assignment and iam.user_role both reference
+        # role(key) with no ON DELETE, so one leaked row from a previously failed teardown would make
+        # the role delete below fail for ever, and a failing teardown leaks fixtures into every later
+        # test in the run.
         c.execute(f"DELETE FROM iam.case_assignment WHERE role_key IN ({roles})")
         c.execute(f"DELETE FROM iam.user_role WHERE role_key IN ({roles})")
         c.execute(f'DELETE FROM core."case" WHERE id IN {csub}')
@@ -93,12 +84,10 @@ def conn():
         # role_permission before role: it references role(key).
         c.execute(f"DELETE FROM iam.role_permission WHERE role_key IN ({roles})")
         c.execute(f"DELETE FROM iam.role WHERE key IN ({roles})")
-    # `TEST_COMPARTMENT` is deliberately left registered. Widening the
-    # vocabulary is monotone; withdrawing a key while any case is still
-    # filed under it produces exactly the state
-    # `test_compartment_registry_pg.py` asserts can never exist (an in-use
-    # value with no registry entry), and a leaked case would do that
-    # silently on some later run rather than here.
+    # `TEST_COMPARTMENT` is deliberately left registered. Widening the vocabulary is monotone;
+    # withdrawing a key while any case is still filed under it produces the state
+    # `test_compartment_registry_pg.py` asserts can never exist (an in-use value with no registry
+    # entry), and a leaked case would do that silently on some later run rather than here.
     c.close()
 
 
@@ -158,14 +147,10 @@ def empty_role(conn):
 def _make_user(conn, *, clearance="AMBER", global_roles=(), compartments=()):
     """A user with TOTP enrolled, returning (user_id, email, totp_secret).
 
-    The secret is still enrolled because an account without a second
-    factor is not the account this file is about, but nothing here signs
-    in with it any more: `_session` mints. That lifts a constraint this
-    file used to carry -- a user could log in AT MOST ONCE per test,
-    because the TOTP counter advance is a compare-and-set that rejects a
-    replay, so a second login inside the same 30-second step failed on
-    the code rather than on the policy under test. Two sessions for one
-    account are now free.
+    The secret is enrolled because an account without a second factor is not the account this file is
+    about, but nothing here signs in with it: `_session` mints. A user can therefore have several
+    sessions in one test, where a login can happen at most once per 30-second step (the TOTP counter
+    advance is a compare-and-set that rejects a replay).
     """
     from noctornal_api.security import totp
     from noctornal_api.stores import PgUserStore
@@ -174,10 +159,9 @@ def _make_user(conn, *, clearance="AMBER", global_roles=(), compartments=()):
     uid = store.create_user(email, "Case Lifecycle", PASSWORD)
     secret = totp.generate_secret()
     store.enroll_totp(uid, secret)
-    # Since 0059 every compartment column is bound to iam.compartment. This
-    # helper writes whatever it is handed, so it registers it first rather
-    # than trusting the caller to have done so -- two helpers of this shape
-    # were refused on CI's fresh database on 2026-09-09 while passing here.
+    # Every compartment column is bound to iam.compartment (0059). This helper writes whatever it is
+    # handed, so it registers it first rather than trusting the caller: a helper that did not was
+    # refused on CI's fresh database.
     for key in compartments:
         conn.execute(
             "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
@@ -195,29 +179,20 @@ def _make_user(conn, *, clearance="AMBER", global_roles=(), compartments=()):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
-    is off in these tests.
+    """A signed-in caller, minted the way `scripts/bootstrap.py session` mints one: the account looked
+    up by email, then `SessionService` against the same store the API validates against.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Unbound (no address, no User-Agent), which 0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING`
+    refuses; it is off in these tests. It is not `POST /auth/login`, which answers 204 and leaves the
+    token only in `__Host-session`; nothing in this file is about the sign-in path. TOTP codes are
+    single-use, so two sign-ins for one account inside one 30-second step would fail on the code.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as both real mint sites pass: a session that never satisfied MFA is refused
+    # by every step-up gated route.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token
@@ -244,10 +219,9 @@ def _create_case(client, token, **overrides) -> str:
 def _register_compartment(conn) -> None:
     """Widen the vocabulary before filing a case under it.
 
-    0057 closed `iam.compartment` and `CaseService.create` now refuses an
-    unregistered key. Before 2026-09-02 the compartment test below passed
-    only where the 0057 backfill had happened to find `OP_CLC` already in
-    an array, and failed on every fresh database, CI's included.
+    0057 closed `iam.compartment` and `CaseService.create` refuses an unregistered key. Without this
+    the compartment test passes only where the 0057 backfill happened to find `OP_CLC` already in an
+    array, and fails on every fresh database, CI's included.
     """
     conn.execute(
         "INSERT INTO iam.compartment (key, label) VALUES (%s, %s) "
@@ -258,9 +232,8 @@ def _register_compartment(conn) -> None:
 def _assign(conn, case_id, user_id, role_key, granted_by, expires_at=None):
     """A raw assignment row, bypassing `assign_user_checked`.
 
-    Used to MANUFACTURE the broken states the roster endpoint has to
-    report — an expired grant, an under-cleared assignee — which the API
-    correctly refuses to create.
+    Used to manufacture the broken states the roster endpoint has to report (an expired grant, an
+    under-cleared assignee), which the API correctly refuses to create.
     """
     conn.execute(
         """INSERT INTO iam.case_assignment
@@ -378,11 +351,10 @@ def test_a_metadata_edit_applies_and_is_audited_exactly_once(conn, client):
 
 
 def test_lowering_the_classification_is_refused(conn, client):
-    """Declassification is not "raising with a different sign". It cannot
-    be undone by raising it back — whoever read it in the meantime has
-    read it — and everything protected ONLY by the case label drops in one
-    statement with no review and no second signature. `case.update` is
-    "Edit case metadata" and was never meant to carry that.
+    """Declassification is not "raising with a different sign". It cannot be undone by raising it
+    back, because whoever read it in the meantime has read it, and everything protected only by the
+    case label drops in one statement with no review and no second signature. `case.update` is "Edit
+    case metadata" and is not meant to carry that.
     """
     _, email, secret = _make_user(conn, clearance="RED",
                                   global_roles=("CASE_OWNER",))
@@ -463,9 +435,8 @@ def test_an_unknown_classification_is_400_not_500(conn, client):
 
 
 def test_a_no_op_patch_is_refused_rather_than_answered_200(conn, client):
-    """`update_metadata` returns early and writes no audit row when nothing
-    changed, so each of these would otherwise answer 200 having done
-    nothing and left no trace it was attempted (invariant 12)."""
+    """`update_metadata` returns early and writes no audit row when nothing changed, so each of these
+    would otherwise answer 200 having done nothing and left no trace it was attempted (invariant 12)."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
     token = _session(conn, email)
     case_id = _create_case(client, token)                       # AMBER
@@ -522,9 +493,8 @@ def test_the_durable_identifier_and_the_status_are_not_metadata(conn, client):
 
 
 def test_a_purged_case_cannot_be_edited(conn, client):
-    """Editing the governance record of a case marked for destruction
-    rewrites the very metadata a retention review reads to justify the
-    purge."""
+    """Editing the governance record of a case marked for destruction rewrites the very metadata a
+    retention review reads to justify the purge."""
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
     token = _session(conn, email)
     case_id = _create_case(client, token)
@@ -604,9 +574,8 @@ def test_an_assignee_without_the_verb_is_403_not_404(conn, client):
 # ---------------------------------------------------------------------------
 
 def test_a_grant_reports_what_it_confers_and_what_it_replaced(conn, client):
-    """Invariant 12 on the UPSERT: `_grant` is `ON CONFLICT (case_id,
-    user_id) DO UPDATE`, so demoting a colleague looks identical to adding
-    a new one unless the replaced grade is named."""
+    """Invariant 12 on the UPSERT: `_grant` is `ON CONFLICT (case_id, user_id) DO UPDATE`, so demoting
+    a colleague looks identical to adding a new one unless the replaced grade is named."""
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
     owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
@@ -745,8 +714,7 @@ def test_a_grant_cannot_be_born_already_dead(conn, client):
 
 
 def test_a_liaison_grant_must_end(conn, client):
-    """docs/05: an external liaison is time-boxed, `expires_at` required.
-    The route accepted a LIAISON grant with no end until 2026-10-07."""
+    """docs/05: an external liaison is time-boxed, `expires_at` required."""
     _, owner_email, _ = _make_user(conn, global_roles=("CASE_OWNER",))
     owner = _session(conn, owner_email)
     case_id = _create_case(client, owner)
@@ -766,12 +734,10 @@ def test_a_liaison_grant_must_end(conn, client):
     assert _assignment_count(conn, case_id, liaison_id) == 1
 
 
-# --- a liaison holds one case at a time -------------------------------------
+# A liaison holds one case at a time.
 #
-# docs/05: the external liaison reads a single case. One account could be
-# assigned LIAISON on any number of them until 2026-10-08 (docs/17, "LIAISON
-# is not single-case"; decision 185 had made the grant carry an end and left
-# this open).
+# docs/05: the external liaison reads a single case (docs/17, "LIAISON is not single-case"; decision
+# 185 made the grant carry an end).
 
 def _grant_liaison(client, token, case_id, *, user_id=None, email=None, days=7):
     body = {"role_key": "LIAISON",
@@ -885,8 +851,8 @@ def test_the_service_refuses_a_second_live_liaison_whoever_calls_it(conn):
         svc.assign_user_checked(case_b, liaison_id, "LIAISON", granted_by=owner_b,
                                 expires_at=end)
     assert _assignment_count(conn, case_b, liaison_id) == 0
-    # The refusal rolled its transaction back whole: the connection is usable
-    # and the first grant is as it was.
+    # The refusal rolled its transaction back whole: the connection is usable and the first grant is
+    # as it was.
     assert _assignment_count(conn, case_a, liaison_id) == 1
 
     svc.revoke_user(case_a, liaison_id, revoked_by=owner_a)
@@ -957,20 +923,15 @@ def test_two_leads_granting_one_liaison_at_once_cannot_both_succeed(conn):
 def test_an_expiry_with_no_offset_is_refused_and_not_guessed(conn, client):
     """`2027-03-14T17:00:00` is valid ISO 8601 with no offset.
 
-    Pydantic parses it into a NAIVE datetime, and the past-expiry check
-    compared it to an aware `_now()`:
+    Pydantic parses it into a naive datetime, and comparing that with an aware `_now()` raises
+    `TypeError: can't compare offset-naive and offset-aware datetimes`. The most ordinary client
+    mistake there is must not be a 500 on an access-control path, and the existing
+    `test_a_grant_cannot_be_born_already_dead` never reaches it because every timestamp it sends is
+    already `tzinfo=timezone.utc`.
 
-        TypeError: can't compare offset-naive and offset-aware datetimes
-
-    Nothing caught it, so the most ordinary client mistake there is was a
-    500 on an access-control path. Found 2026-08-07; the existing
-    `test_a_grant_cannot_be_born_already_dead` never reached it because
-    every timestamp it sends is already `tzinfo=timezone.utc`.
-
-    A 400 rather than an assumed UTC. This value decides the instant
-    somebody LOSES access to a case, and a grant meant to end at 17:00
-    local read as 17:00Z is up to thirteen hours of unintended access with
-    nothing in the response saying which reading was taken.
+    A 400 rather than an assumed UTC. This value decides the instant somebody loses access to a case,
+    and a grant meant to end at 17:00 local read as 17:00Z is up to thirteen hours of unintended access
+    with nothing in the response saying which reading was taken.
     """
     _, owner_email, owner_secret = _make_user(conn, global_roles=("CASE_OWNER",))
     owner = _session(conn, owner_email)
@@ -1071,15 +1032,12 @@ def test_granting_on_another_users_case_is_404(conn, client):
 # ---------------------------------------------------------------------------
 
 def test_the_roster_answers_the_whole_gate_not_one_check(conn, client):
-    """An assignment row is only half of access. A row that fails any of
-    the other four checks is invisible in its effects and
-    indistinguishable from a working one in the table — which is how
-    somebody ends up asking why a colleague they "added last week" cannot
-    open the case.
+    """An assignment row is only half of access. A row that fails any of the other four checks has no
+    visible effect and is indistinguishable from a working one in the table, which is how somebody ends
+    up asking why a colleague they "added last week" cannot open the case.
 
-    Both broken rows are inserted directly: the API correctly refuses to
-    create either, and the point of `effective` is the rows that already
-    exist.
+    Both broken rows are inserted directly: the API correctly refuses to create either, and the point
+    of `effective` is the rows that already exist.
     """
     owner_id, owner_email, owner_secret = _make_user(
         conn, global_roles=("CASE_OWNER",))
@@ -1176,14 +1134,12 @@ def test_the_lifecycle_moves_and_refuses_an_illegal_move(conn, client):
 
 def test_marking_a_case_purged_is_regated_onto_case_delete(
         conn, client, closer_role):
-    """`ARCHIVED -> PURGED` marks a case for destruction. Reaching it
-    through the close verb would let a permission with neither step-up nor
-    dual control set the flag that authorises destroying a case file, while
-    `case.delete` sits in the seed with BOTH.
+    """`ARCHIVED -> PURGED` marks a case for destruction. Reaching it through the close verb would let
+    a permission with neither step-up nor dual control set the flag that authorises destroying a case
+    file, while `case.delete` sits in the seed with both.
 
-    0021 grants `case.close` and `case.delete` to CASE_OWNER and to nobody
-    else, so this needs a principal holding one and not the other —
-    otherwise the re-gate is untested by construction.
+    0021 grants `case.close` and `case.delete` to CASE_OWNER and to nobody else, so this needs a
+    principal holding one and not the other, or the re-gate is untested by construction.
     """
     owner_id, owner_email, owner_secret = _make_user(
         conn, global_roles=("CASE_OWNER",))
@@ -1220,14 +1176,12 @@ def test_marking_a_case_purged_is_regated_onto_case_delete(
 
 
 def test_purging_demands_a_fresh_second_factor_when_closing_does_not(conn, client):
-    """The half of `case.delete` that IS enforced. `evaluate()` reads
-    `requires_step_up` off the permission row, so re-entering the gate
-    under `case.delete` buys a re-challenge that `case.close` (and the
-    `case.update` this endpoint used to ask for) would not have.
+    """The half of `case.delete` that is enforced. `evaluate()` reads `requires_step_up` off the
+    permission row, so re-entering the gate under `case.delete` buys a re-challenge that `case.close`
+    would not have.
 
-    Dual control is NOT bought and is not asserted here: it is the
-    approvals subsystem's job and is not wired to this transition. A single
-    authoriser can still mark a case PURGED.
+    Dual control is not bought and is not asserted here: it is the approvals subsystem's job and is not
+    wired to this transition. A single authoriser can still mark a case PURGED.
     """
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))
     token = _session(conn, email)
@@ -1297,14 +1251,10 @@ def test_every_case_route_needs_a_session(client):
     assert client.post(f"/api/v1/cases/{case_id}/status", json={}).status_code == 401
 
 
-# --- retention may be extended, never shortened --------------------------
-#
-# Found by an adversarial pass on 2026-08-07. `retention.py` selects
-# evidence for destruction with `c.retention_until <= today`, and
-# `evidence.purge` is dual-controlled (decision 44). Backdating this field
-# under `case.update` therefore let ONE person schedule the destruction
-# that TWO are required to authorise -- and the audit trail would record a
-# metadata edit rather than a destruction.
+# Retention may be extended, never shortened. `retention.py` selects evidence for destruction with
+# `c.retention_until <= today`, and `evidence.purge` is dual-controlled (decision 44), so backdating
+# this field under `case.update` would let one person schedule the destruction that two must
+# authorise, and the audit trail would record a metadata edit rather than a destruction.
 
 def _open_case(conn, client):
     _, email, secret = _make_user(conn, global_roles=("CASE_OWNER",))

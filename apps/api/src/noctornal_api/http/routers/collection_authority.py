@@ -1,17 +1,11 @@
-"""The collection authority over HTTP (the collection foundation,
-2026-09-24; docs/00 decision 69).
+"""The collection authority over HTTP (docs/00 decision 69).
 
-A collection manager (`collection.authority.record`) records a written
-authority and the sources under it; a security officer
-(`collection.authority.confirm`) confirms it, and each source, as the second
-person. Both permissions are step-up. Either side may stop an authority or
-one source under it at any time, through its own route, because a route
-takes one permission and either side may stop one.
-
-Every route passes the caller's own ceiling: an authority above it is a 404
-as for a missing id, a listing withholds whole rows and says only that some
-were withheld, and a source above it is hidden from an authority's list.
-The authority itself exists outside this system, and every answer says so.
+A collection manager (`collection.authority.record`) records a written authority and its sources;
+a security officer (`collection.authority.confirm`) confirms it, and each source, as the second
+person. Both permissions are step-up, and either side may stop an authority or one of its sources
+through its own route. Every route passes the caller's ceiling: an authority above it is a 404, a
+listing says only that rows were withheld, and a source above it is hidden. The authority itself
+exists outside this system, and every answer says so.
 """
 from __future__ import annotations
 
@@ -40,9 +34,9 @@ AUTHORITY_NOTICE = AUTHORITY_NOTICE_LEAD + L3_NOTICE
 
 RECORD = "collection.authority.record"
 CONFIRM = "collection.authority.confirm"
-# Every write lands on a system connection (`_CONFIG`, 0179, Beta 1.1):
-# authorities are read-only to the request role, so a statement injected
-# into a request cannot record, confirm or stop one past these gates.
+# Every write lands on a system connection (`_CONFIG`, 0179): authorities are read-only to the
+# request role, so a statement injected into a request cannot record, confirm or stop one past
+# these gates.
 
 
 def _service(conn: psycopg.Connection, adapters: dict) -> CollectionAuthorityService:

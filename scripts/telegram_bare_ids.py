@@ -1,12 +1,10 @@
 """List the Telegram ids recorded under the assumption that a bare positive
 number is a user.
 
-Until 2026-09-11 `telegram_id_norm` stamped a bare positive id `u:<id>` on
-the reasoning that most bare positives are users. It now refuses one, and
-nothing can recompute a type that was never observed: the rows written
-under the assumption keep their `u:`, and this lists them so an analyst
-can confirm each against its source -- an MTProto channel observation
-recorded as a bare number is a channel wearing a user's row -- and
+`telegram_id_norm` refuses a bare positive id, but rows written before it did
+carry `u:<id>`, and nothing can recompute a type that was never observed. This
+lists them so an analyst can confirm each against its source (an MTProto
+channel recorded as a bare number is a channel wearing a user's row) and
 re-record it typed (`c:<id>`) where it was wrong. Report only; it changes
 nothing.
 

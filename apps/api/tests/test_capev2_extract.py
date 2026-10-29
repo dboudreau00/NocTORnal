@@ -1,16 +1,12 @@
-"""The CAPE report reader, on hostile and drifting input (F14,
-2026-09-24). Pure.
+"""The CAPE report reader, on hostile and drifting input. Pure.
 
-Private, loopback and link-local hosts are dropped; payload configuration
-values come out with source config; a family detection lands in the
-findings, never a family assessment; CAPE's YARA names land in
-findings.cape_yara; the caps hold and a long hostile string is cut; a
-report of another file says so; an unknown shape, a non-JSON body and a
-nesting bomb each become an extraction gap instead of an exception; a
-section of the wrong type (network.hosts an object, a count where a list
-belongs) is a named gap and the other sections are still read; no
-mutation of any section of a report raises; a structure is never
-stringified; a NUL or a lone surrogate never reaches the database.
+Private, loopback and link-local hosts are dropped; payload configuration values come out with source
+config; a family detection lands in the findings, never a family assessment; CAPE's YARA names land in
+findings.cape_yara; the caps hold and a long hostile string is cut; a report of another file says so;
+an unknown shape, a non-JSON body and a nesting bomb each become an extraction gap instead of an
+exception; a section of the wrong type (network.hosts an object, a count where a list belongs) is a
+named gap and the other sections are still read; no mutation of any section of a report raises; a
+structure is never stringified; a NUL or a lone surrogate never reaches the database.
 """
 from __future__ import annotations
 
@@ -122,15 +118,15 @@ def test_the_values_are_normalised_for_proposal():
     assert ("HASH_SHA256", "cd" * 32) in _types(out, "dropped")
 
 
-# --- the verifier's report shapes (2026-09-24) -----------------------------------
+# Report shapes.
 
 def _gaps(out) -> str:
     return " | ".join(out.findings["extraction_gaps"])
 
 
 def test_a_network_section_of_the_wrong_type_is_a_gap_and_the_rest_is_read():
-    """Until 2026-09-24 an object at network.hosts raised KeyError (a slice
-    of a dict), which aborted the worker's pass at that row for good."""
+    """An object at network.hosts must not raise KeyError (a slice of a dict), which would abort the
+    worker's pass at that row for good."""
     for hosts, domains, http in (({"ip": "8.8.8.8"}, 5, "GET /"),
                                  (7, {"domain": "x.example"}, {"uri": "u"}),
                                  ("8.8.8.8", "evil.example.net", 1.5)):
@@ -172,9 +168,8 @@ FINDING_KEYS = ("detections", "signatures", "cape_yara", "dropped",
 
 
 def test_no_mutation_of_any_section_raises():
-    """Every value at every path of a well-formed report, replaced in turn
-    by each hostile shape, reads without an exception and keeps every key
-    of the finding."""
+    """Every value at every path of a well-formed report, replaced in turn by each hostile shape,
+    reads without an exception and keeps every key of the finding."""
     paths = list(_paths(json.loads(_report())))
     assert len(paths) > 40
     for path in paths:
@@ -216,9 +211,8 @@ def test_a_structure_is_never_stringified():
 
 
 def test_a_nul_or_a_lone_surrogate_never_reaches_the_database():
-    """jsonb refuses a NUL and UTF-8 a lone surrogate: either in a finding
-    failed its insert on every pass. json.dumps writes both as escapes, as
-    a hostile CAPE would."""
+    """jsonb refuses a NUL and UTF-8 a lone surrogate: either in a finding would fail its insert on
+    every pass. json.dumps writes both as escapes, as a hostile CAPE would."""
     nul, lone = "\x00", "\ud800"
     raw = json.dumps({
         "info": {"id": 9, "version": f"2.4{nul}x", "machine": {"name": f"w{lone}"}},

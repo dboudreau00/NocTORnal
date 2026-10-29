@@ -1,10 +1,9 @@
-"""Four-eyes approval: the lifecycle, and the four properties that make it
-a control rather than a form to fill in.
+"""Four-eyes approval: the lifecycle, and the four properties that make it a control rather than a
+form to fill in.
 
-docs/05: "Dual control for the genuinely irreversible ... Two distinct
-humans, enforced by constraint." The constraint is asserted here against a
-real database, because that is where it lives -- a test of the Python guard
-alone would pass on a service that had been refactored around it.
+docs/05: "Dual control for the genuinely irreversible ... Two distinct humans, enforced by
+constraint." The constraint is asserted here against a real database, because that is where it lives:
+a test of the Python guard alone would pass on a service that had been refactored around it.
 
 Env-gated on DATABASE_URL like every other _pg suite.
 """
@@ -484,22 +483,16 @@ def test_the_approver_permission_matches_the_operation():
 
 
 def test_a_refusal_is_recorded_even_when_the_caller_rolls_back(conn, svc):
-    """The test above calls `consume()` directly on the autocommit fixture
-    connection with no enclosing transaction, so its audit row survives --
-    there, and only there.
+    """The test above calls `consume()` directly on the autocommit fixture connection with no
+    enclosing transaction, so its audit row survives there, and only there.
 
-    BOTH production callers wrap `consume()` in `with conn.transaction():`
-    and catch ApprovalError OUTSIDE the block, deliberately, so that a
-    refused consume destroys nothing. The refusal row therefore went in on
-    the same connection and was rolled back by the very exception it was
-    written to explain: `audit.event` held ZERO
-    APPROVAL_CONSUME_REFUSED rows in production, however many replay or
-    payload-substitution attempts occurred.
-
-    The single detection signal for the attack this module exists to stop
-    -- take a signature for merging two obvious spam bots, then execute
-    the two nodes the case turns on -- was generated and immediately
-    destroyed. This reproduces the caller's shape.
+    Both production callers wrap `consume()` in `with conn.transaction():` and catch ApprovalError
+    outside the block, deliberately, so that a refused consume destroys nothing. The refusal row is
+    written on the same connection and would be rolled back by the very exception it explains, leaving
+    `audit.event` with no APPROVAL_CONSUME_REFUSED rows however many replay or payload-substitution
+    attempts occur. That is the single detection signal for the attack this module exists to stop
+    (take a signature for merging two obvious spam bots, then execute the two nodes the case turns on).
+    This reproduces the caller's shape.
     """
     from noctornal_api.approvals import ApprovalError
 

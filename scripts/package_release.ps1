@@ -84,9 +84,6 @@ try {
     $dirty = git status --porcelain
     if ($dirty) {
         Warn 'The working tree has uncommitted changes. They will NOT be'
-        # Colons and full stops where two hyphens stood in for a dash, in
-        # this and every other printed line (Alpha 6 pre-release check,
-        # 2026-09-23).
         Warn 'packaged, because git archive exports the commit, not the directory:'
         $dirty -split "`n" | Select-Object -First 12 | ForEach-Object {
             if ($_) { Write-Host "      $_" -ForegroundColor DarkYellow }
@@ -103,17 +100,9 @@ try {
     New-Item -ItemType Directory -Force $Destination | Out-Null
 
     Say "Packaging $Ref"
-    # `git archive --format=zip` + Expand-Archive, NOT tar.
-    #
-    # `tar` is not reliably the one you think on Windows. With Git for
-    # Windows on PATH ahead of System32 -- which is the normal result of
-    # installing it -- `tar` is the MSYS build, and it interprets a
-    # `C:/...` destination as a REMOTE HOST, failing with "Cannot connect
-    # to C: resolve failed". Found by running this script rather than by
-    # reading it.
-    #
-    # zip has no such ambiguity: git writes it, and Expand-Archive ships
-    # with PowerShell 5.1, so neither depends on PATH order.
+    # `git archive --format=zip` + Expand-Archive, not tar: with Git for Windows ahead of System32
+    # on PATH, `tar` is the MSYS build, which reads a `C:/...` destination as a remote host. git
+    # writes the zip and Expand-Archive ships with PowerShell 5.1, so neither depends on PATH order.
     $tmpZip = Join-Path ([System.IO.Path]::GetTempPath()) "noctornal-$(Get-Random).zip"
     git archive --format=zip --output="$tmpZip" $Ref
     if ($LASTEXITCODE -ne 0) { Die "git archive failed for ref '$Ref'." }
@@ -139,8 +128,7 @@ try {
     }
     Good 'no .env.local, no .venv, no .git, no screenshots'
 
-    # constraints.txt since 2026-09-23 (sec-pin-dependencies): both
-    # installers refuse to run without it.
+    # Both installers refuse to run without constraints.txt.
     foreach ($needed in @('alembic.ini', 'release/install.ps1',
                           'release/install.sh', 'release/START-HERE.md',
                           'release/start.sh', 'release/start.ps1',
@@ -161,12 +149,8 @@ try {
     }
     Good 'install.sh is LF'
 
-    # BOTH INSTALLERS MUST PARSE. Added after this script happily packaged
-    # an install.ps1 that did not: an edit put a literal newline inside a
-    # comment, so the continuation line stopped being a comment and
-    # PowerShell tried to run `at`. The failure appeared only when somebody
-    # ran the packaged artefact. A syntax check is free; a recipient
-    # discovering it is not.
+    # Both installers must parse: a syntax error otherwise surfaces only when a recipient runs the
+    # packaged artefact.
     $psErrors = $null
     [System.Management.Automation.Language.Parser]::ParseFile(
         (Join-Path $Destination 'release\install.ps1'),
@@ -177,26 +161,10 @@ try {
     }
     Good 'install.ps1 parses'
 
-    # `bash` on Windows is not the bash you meant.
-    #
-    # This ran `& bash -n ...` against whatever `Get-Command bash` returned,
-    # and on a machine with the Windows Subsystem for Linux feature enabled
-    # but NO distribution installed, that is C:\Windows\System32\bash.exe --
-    # a shim which fails with
-    #
-    #   WSL (...) ERROR: CreateProcessCommon:818: execvpe(/bin/bash) failed
-    #
-    # Two things then went wrong at once. The shim writes that to stderr,
-    # and under $ErrorActionPreference = 'Stop' a native command writing to
-    # stderr raises NativeCommandError -- so the script died with a raw .NET
-    # exception BEFORE reaching its own error handling, and produced no zip
-    # at all. install.ps1 and launch.ps1 both carry Invoke-Capture for
-    # exactly this hazard; this script did not.
-    #
-    # Second, even reaching the check, a shim that cannot start any shell is
-    # not evidence that install.sh is malformed. An absent interpreter must
-    # SKIP the check, loudly. Only a bash that actually ran and said no is a
-    # reason to refuse to package.
+    # `bash` on Windows may be System32\bash.exe, a WSL shim that fails when no distribution is
+    # installed and writes to stderr, which under $ErrorActionPreference = 'Stop' raises
+    # NativeCommandError. So Git's bash is looked for first, and the check is skipped loudly when
+    # no bash runs: only a bash that ran and said no is a reason to refuse to package.
     $bash = $null
     foreach ($candidate in @(
         (Join-Path $env:ProgramFiles 'Git\bin\bash.exe'),
@@ -237,30 +205,11 @@ try {
     if ($Zip) {
         $zipPath = "$Destination.zip"
         if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
-        # ARCHIVE THE DIRECTORY, NOT ITS CONTENTS.
-        #
-        # `-Path "$Destination\*"` produces a zip whose entries sit at the
-        # ROOT, so unzipping it scatters twenty-two top-level files and
-        # folders loose into whatever directory the recipient happened to
-        # be in -- typically Downloads, mixed in with everything else.
-        # Getting that back out is manual and irritating, and it is the
-        # first thing they experience.
-        #
-        # Passing the directory itself wraps everything in one folder,
-        # which is what every release archive a developer has ever
-        # downloaded does.
-        # One entry per file, named by this script with forward slashes,
-        # not ZipFile.CreateFromDirectory and not Compress-Archive.
-        #
-        # CreateFromDirectory stores the PLATFORM separator under Windows
-        # PowerShell 5.1 (.NET Framework keeps backslashes for an app that
-        # targets it), and only pwsh 7 writes forward slashes. A 5.1 package
-        # carried `pkg\release\install.sh` in all 1108 entries: Info-ZIP
-        # unzip warned "appears to use backslashes as path separators" and
-        # exited 1, and Python's zipfile wrote 1108 loose files with
-        # backslashes in their names and no release/ folder (Beta 1 clean
-        # machine, 2026-10-07). The wrapper directory is the first segment
-        # of every name, as `includeBaseDirectory` made it.
+        # Archive the directory, not its contents: every entry sits under one wrapper folder, so
+        # unzipping does not scatter the release into the recipient's Downloads. One entry per file,
+        # named here with forward slashes, not ZipFile.CreateFromDirectory or Compress-Archive:
+        # under Windows PowerShell 5.1 CreateFromDirectory stores backslashes, which unzip on Linux
+        # rejects and Python's zipfile turns into loose files.
         Add-Type -AssemblyName System.IO.Compression
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $wrapper = Split-Path -Leaf $Destination
@@ -277,12 +226,8 @@ try {
         }
         finally { $writer.Dispose() }
 
-        # Confirm the wrapper is actually there rather than assuming it.
-        # This script has already shipped one artefact it had "verified"
-        # without executing -- see the install.ps1 parse check above.
-        #
-        # Split on EITHER separator, so a backslash name is counted below
-        # rather than reported as hundreds of roots.
+        # Confirm the wrapper is there rather than assuming it. Split on either separator, so a
+        # backslash name is counted below rather than reported as hundreds of roots.
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
         try {
@@ -299,10 +244,8 @@ try {
                  "have exactly one wrapper directory: " + ($roots -join ', '))
         }
 
-        # The stored separators ARE checked. ZipArchiveEntry.FullName is the
-        # name as stored, under 5.1 and 7 alike (measured 2026-10-07); the
-        # comment here used to say it reported the platform separator, which
-        # is how a 5.1 zip full of backslashes was passed as good.
+        # ZipArchiveEntry.FullName is the name as stored, under 5.1 and 7 alike, so this checks the
+        # stored separators.
         if ($backslashed) {
             Die ("the zip has $backslashed entry names with a backslash; " +
                  "unzip on Linux and macOS would not rebuild the folders.")

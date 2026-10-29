@@ -48,8 +48,6 @@ $EnvLocal = Join-Path $RepoRoot '.env.local'
 $Python   = Join-Path $RepoRoot '.venv\Scripts\python.exe'
 
 if (-not (Test-Path -LiteralPath $Python)) {
-    # A colon where two hyphens stood in for a dash, as in every other
-    # printed line (Alpha 6 pre-release check, 2026-09-23).
     Write-Error "No virtualenv at .venv. Run scripts\launch.ps1 first: it creates one."
     exit 1
 }
@@ -65,13 +63,10 @@ if (Test-Path -LiteralPath $EnvLocal) {
         $name  = $trimmed.Substring(0, $split).Trim()
         $value = $trimmed.Substring($split + 1).Trim().Trim('"').Trim("'")
         if (-not $name) { continue }
-        # A name that changes how programs start is left out, as in
-        # launch.ps1 (2026-10-03): `PATH` or `PYTHONPATH` in
-        # a handed-over file would redirect the python started below. The
-        # same list is in scripts/_env.py, release/install.sh,
-        # scripts/launch.sh and scripts/launch.ps1; a test holds all five
-        # together. -contains and -like are case-insensitive, as Windows
-        # names are.
+        # A name that changes how programs start is left out: `PATH` or `PYTHONPATH` in a
+        # handed-over file would redirect the python started below. A test holds this list equal to
+        # the ones in scripts/_env.py, release/install.sh, scripts/launch.sh and scripts/launch.ps1.
+        # -contains and -like are case-insensitive, as Windows names are.
         $refusedExact    = @('PATH', 'PATHEXT', 'HOME', 'COMSPEC', 'IFS', 'ENV', 'CDPATH', 'GLOBIGNORE', 'SHELLOPTS', 'BASHOPTS', 'PROMPT_COMMAND', 'PS1', 'PS2', 'PS3', 'PS4', 'PSMODULEPATH')
         $refusedPrefixes = @('BASH_', 'LD_', 'DYLD_', 'PYTHON', 'DOCKER_', 'COMPOSE_', 'GIT_', 'PIP_', 'NODE_')
         $refused = ($refusedExact -contains $name)
@@ -87,12 +82,9 @@ if (Test-Path -LiteralPath $EnvLocal) {
     }
 }
 
-# The same dev-only default launch.ps1 uses, 127.0.0.1 for the same reason:
-# the compose file publishes on 127.0.0.1 only, and Windows tries ::1 first
-# for localhost and waits about two seconds for the refusal (Alpha 6
-# pre-release check, 2026-09-23). It only ever addresses a container on
-# this machine; a real deployment supplies this from the environment or
-# Vault.
+# The dev-only default launch.ps1 uses: 127.0.0.1, not localhost, because compose publishes on
+# 127.0.0.1 only and Windows tries ::1 first and waits about two seconds for the refusal. A real
+# deployment supplies this from the environment or Vault.
 if ([string]::IsNullOrWhiteSpace($env:DATABASE_URL)) {
     $env:DATABASE_URL =
         'postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:5432/noctornal'

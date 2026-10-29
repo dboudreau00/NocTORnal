@@ -1,15 +1,12 @@
-"""Case CRUD — the unit of access control and governance (docs/09 Phase 1).
+"""Case CRUD: the unit of access control and governance (docs/09).
 
-A case cannot exist without a lawful basis, a retention date and a review
-date (the schema makes all three NOT NULL; this service adds the sanity
-that a review must fall on or before retention). Creating a case is atomic
-with granting its owner CASE_OWNER access — otherwise the owner could not
-act on their own case, because the five-part gate reads a user's role off
-case_assignment, not off case.owner_user_id.
+A case cannot exist without a lawful basis, a retention date and a review date (the schema makes all
+three NOT NULL; this service adds that the review date must fall on or before retention). Creating a
+case is atomic with granting its owner CASE_OWNER access, otherwise the owner could not act on their
+own case: the five-part gate reads a user's role off case_assignment, not off case.owner_user_id.
 
-Status moves along a validated lifecycle; every create, metadata edit,
-status change and access grant/revoke is written to the hash-chained audit
-log (docs/05: every case mutation is audited).
+Status moves along a validated lifecycle; every create, metadata edit, status change and access
+grant or revoke is written to the hash-chained audit log (docs/05).
 """
 from __future__ import annotations
 
@@ -23,8 +20,8 @@ from psycopg.types.json import Json
 from noctornal_api.security.access import Tlp
 from noctornal_api.wording import agree
 
-# Valid case_status transitions. PURGED is terminal (the actual data purge
-# is Phase 6; this only marks intent). closed_at is stamped on -> CLOSED.
+# Valid case_status transitions. PURGED is terminal and only marks intent; closed_at is stamped on
+# CLOSED.
 _TRANSITIONS: dict[str, set[str]] = {
     "DRAFT": {"ACTIVE", "ARCHIVED"},
     "ACTIVE": {"DORMANT", "CLOSED"},
@@ -34,21 +31,16 @@ _TRANSITIONS: dict[str, set[str]] = {
     "PURGED": set(),
 }
 
-#: The states in which a case's CONTENT is read-only: the graph,
-#: assertions, evidence and its links, captures, proposals, comms, ACH and
-#: assumptions, tags and sets, and samples attached to it. Governance is
-#: not content and keeps working in them: the status move (reopen
-#: included), legal holds, retention and purge, sharing and assignments,
-#: break-glass, report builds and releases (which write no content), and
-#: comms minimisation, which docs/16 L4 performs AT closure.
+#: The states in which a case's content is read-only: the graph, assertions, evidence and its links,
+#: captures, proposals, comms, ACH and assumptions, tags and sets, and samples attached to it.
+#: Governance is not content and keeps working in them: the status move (reopen included), legal
+#: holds, retention and purge, sharing and assignments, break-glass, report builds and releases
+#: (which write no content), and comms minimisation, which docs/16 L4 performs at closure.
 #:
-#: gap-closed-case-writes (2026-09-23): until then a CLOSED or ARCHIVED
-#: case accepted every write the gate allowed, and material added after
-#: `closed_at` matters for disclosure. The console said so in a strip and
-#: the server did nothing. `http/deps.py` enforces this set at the one
-#: gate every content write passes; the console reads it as the case
-#: record's `read_only` rather than keeping a second copy. PURGED is in
-#: it because it only follows ARCHIVED and is marked for destruction.
+#: Material added after `closed_at` matters for disclosure, so `http/deps.py` enforces this set at
+#: the one gate every content write passes; the console reads it as the case record's `read_only`
+#: rather than keeping a second copy. PURGED is in it because it only follows ARCHIVED and is marked
+#: for destruction.
 CONTENT_READ_ONLY_STATES: frozenset[str] = frozenset(
     {"CLOSED", "ARCHIVED", "PURGED"})
 
@@ -60,12 +52,8 @@ _LIFECYCLE_ORDER = ("DRAFT", "ACTIVE", "DORMANT", "CLOSED", "ARCHIVED", "PURGED"
 def allowed_transitions(status: str) -> list[str]:
     """The statuses a case in `status` may move to, in lifecycle order.
 
-    Read out through `CaseOut.allowed_transitions` so the console's Status
-    dialog offers only the legal moves. It was a free-text prompt that
-    listed all six and pre-filled CLOSED, and the analyst learned which
-    were legal from a refusal
-    (ux02-cases:status-prompt-free-text-one-way-transitions, 2026-09-23).
-    `transition_status` still decides; this is the same table, read."""
+    Read out through `CaseOut.allowed_transitions` so the console's Status dialog offers only the
+    legal moves. `transition_status` still decides; this is the same table, read."""
     allowed = _TRANSITIONS.get(status, set())
     return [s for s in _LIFECYCLE_ORDER if s in allowed]
 
@@ -105,9 +93,9 @@ class CaseRow:
     review_due: date
     created_at: datetime
     closed_at: datetime | None
-    #: Whether the case is under a legal hold, and the reason it was placed
-    #: for. The reason is for those who hold `retention.manage` on the case,
-    #: and the route that draws the record decides who they are.
+    #: Whether the case is under a legal hold, and the reason for it. The reason is for those who
+    #: hold `retention.manage` on the case, and the route that draws the record decides who they
+    #: are.
     legal_hold: bool = False
     legal_hold_reason: str | None = None
 
@@ -142,12 +130,9 @@ class CaseService:
         self._require_clearance(owner_user_id, classification, "owner")
         if deputy_user_id is not None:
             self._require_clearance(deputy_user_id, classification, "deputy")
-        # Compartments are need-to-know locks. A key must exist in the
-        # registry first (0057): until 2026-09-02 the array was free text,
-        # so a typo'd compartment was a lock nobody held, and the only
-        # symptom was that the case vanished from every listing. Then the
-        # creator must be read into it, or they would be locked out of the
-        # case they just made.
+        # Compartments are need-to-know locks. A key must exist in the registry first (0057), or a
+        # typo'd compartment is a lock nobody holds and the case vanishes from every listing. Then
+        # the creator must be read into it, or they would be locked out of the case they just made.
         self._require_registered(compartments or [])
         self._require_compartments(owner_user_id, compartments or [], "owner")
         if deputy_user_id is not None:
@@ -266,21 +251,16 @@ class CaseService:
                         {"user_id": str(user_id)})
 
     def list_for_user(self, user_id: UUID) -> list[CaseRow]:
-        """Cases the user may actually READ — the listing must return exactly
-        the set for which the five-part gate would allow case.read, or the
-        list becomes a disclosure channel for cases the detail endpoint
-        denies. All four applicable checks are in the SQL: the verb (via the
-        assignment's role), the unexpired assignment, clearance dominance,
-        and compartment subset. (Step-up does not apply: case.read is not a
-        step-up permission.)
+        """Cases the user may actually read: exactly the set for which the five-part gate would
+        allow case.read, or the list becomes a disclosure channel for cases the detail endpoint
+        denies. All four applicable checks are in the SQL: the verb (via the assignment's role), the
+        unexpired assignment, clearance dominance and compartment subset. (Step-up does not apply:
+        case.read is not a step-up permission.)
 
-        Clearance dominance counts a live break-glass grant, as the gate
-        does (`PgAccessResolver.resolve`): one on this case or a global one,
-        at its level. Until 2026-09-23 this read `u.tlp_clearance` alone, so
-        an analyst assigned to a case above their own clearance could have
-        the gate opened by a grant and still not find the case to open: the
-        list, which is the console's only way in, said no while the gate
-        said yes (verifier follow-up to ux15 breakglass-grant-raises-nothing).
+        Clearance dominance counts a live break-glass grant, as the gate does
+        (`PgAccessResolver.resolve`): one on this case or a global one, at its level. Otherwise an
+        analyst assigned to a case above their own clearance could have the gate opened by a grant
+        and still not find the case to open, since the list is the console's only way in.
         Compartments are not widened, by a grant or here."""
         rows = self._c.execute(
             """SELECT c.id, c.code, c.title, c.summary, c.status, c.classification,
@@ -313,36 +293,19 @@ class CaseService:
     def _grant(self, case_id, user_id, role_key, granted_by, expires_at=None):
         """Grant or re-grant a case role.
 
-        `COALESCE` ON `expires_at`: AN OMITTED EXPIRY PRESERVES THE EXISTING
-        TIME-BOX rather than removing it.
+        An omitted expiry preserves the existing time-box (`COALESCE` on `expires_at`) rather than
+        removing it. Re-granting without naming an expiry is ordinary (changing a colleague's role,
+        re-running a grant that appeared not to take), and silently turning a time-boxed assignment
+        permanent fails open and is invisible until an audit asks why a secondment from March still
+        reads the case in November, whereas keeping a limit fails safe. So this path cannot clear an
+        expiry; removing a time limit is a deliberate act and deserves its own verb.
 
-        This was `expires_at = EXCLUDED.expires_at`, so re-granting somebody
-        without naming an expiry wrote NULL over theirs and silently turned
-        a time-boxed assignment into a permanent one. The two ways in are
-        ordinary: changing a colleague's role from ANALYST to REVIEWER, and
-        re-running a grant that appeared not to take. Neither reads as
-        "remove the expiry", and nothing in the response said it had
-        happened — the access simply stopped ending.
-
-        The asymmetry is deliberate. Silently KEEPING a limit fails safe:
-        the assignment expires, somebody notices, they re-grant. Silently
-        REMOVING one fails open and is invisible until an audit asks why a
-        secondment from March still reads the case in November.
-
-        The cost is that this path cannot clear an expiry at all. That is
-        the right trade for now — removing a time limit is a deliberate act
-        and deserves its own verb rather than being the accidental effect of
-        omitting a field.
-
-        **A role in `SINGLE_CASE_ROLES` is refused while the account holds a
-        live assignment of it on another case** (docs/17 "LIAISON is not
-        single-case", closed 2026-10-08). Re-granting on the same case is
-        not a second assignment and still works, so a liaison's end date can
-        be moved. "Live" is the gate's own test, no end or an end in the
-        future (`CHECK_ASSIGNMENT`). The check and the write are one
-        transaction under a lock per account and role: two leads granting
-        the same liaison at the same moment would otherwise each find
-        nothing held and each write.
+        A role in `SINGLE_CASE_ROLES` is refused while the account holds a live assignment of it on
+        another case (docs/17 "LIAISON is not single-case"). Re-granting on the same case still
+        works, so a liaison's end date can be moved. "Live" is the gate's own test
+        (`CHECK_ASSIGNMENT`). The check and the write are one transaction under a lock per account
+        and role, or two leads granting the same liaison at the same moment would each find nothing
+        held and each write.
         """
         with self._c.transaction():
             if role_key in SINGLE_CASE_ROLES:
@@ -398,16 +361,13 @@ class CaseService:
             )
 
     def _require_registered(self, compartments: list[str]) -> None:
-        """Every key must be in `iam.compartment` (0057), and the refusal
-        NAMES the unknown ones: the whole defect was that a wrong key
-        produced a correct-looking denial with no indication of why.
+        """Every key must be in `iam.compartment` (0057), and the refusal names the unknown ones: a
+        wrong key otherwise produces a correct-looking denial with no indication of why.
 
-        `create` is the only write site. `update_metadata` deliberately has
-        no `compartments` parameter (its router body says why: adding a
-        compartment locks out every assignee not read into it, and needs
-        its own endpoint with "who loses access" reporting), and the test
-        pins that absence on both halves, so whoever adds it must bring
-        this check along.
+        `create` is the only write site. `update_metadata` deliberately has no `compartments`
+        parameter (its router body says why: adding a compartment locks out every assignee not read
+        into it, and needs its own endpoint with "who loses access" reporting), and a test pins that
+        absence, so whoever adds it must bring this check along.
         """
         if not compartments:
             return
@@ -416,21 +376,16 @@ class CaseService:
             (list(compartments),)).fetchall()}
         unknown = sorted(set(compartments) - known)
         if unknown:
-            # Agreed with the keys it names rather than hedged with a
-            # bracketed plural, which the console printed verbatim (README
-            # screenshot set review, 2026-09-23).
+            # Agreed with the keys it names rather than hedged with a bracketed plural, which the
+            # console prints verbatim.
             n = len(unknown)
             raise CaseError(
                 f"{agree(n, 'compartment', 'compartments')} "
                 f"{', '.join(unknown)} {agree(n, 'is', 'are')} not "
                 f"registered. A compartment "
-                # The route is spelled with its mount prefix because the
-                # operator pastes it. Until 2026-09-09 this said
-                # `POST /compartments`, a path the router (mounted under
-                # `/api/v1`) does not serve, while the 0059 trigger said
-                # `POST /api/v1/compartments` for the same rule;
-                # `test_compartment_binding_pg.py` holds all three
-                # refusals to the migration constant and the route table.
+                # The route is spelled with its mount prefix (`/api/v1`) because the operator pastes
+                # it. `test_compartment_binding_pg.py` holds all three refusals to the migration
+                # constant and the route table.
                 f"must be registered (POST /api/v1/compartments, user.manage) "
                 f"before "
                 f"a case can be filed under it, because an unregistered key "

@@ -1,43 +1,31 @@
-"""Jira as a notification channel (F7, 2026-09-24).
+"""Jira as a notification channel.
 
-JIRA stays what migration 0029 made it: a per-recipient channel on the
-existing ledger, one notify.delivery row per notification per channel. A
-recipient opts in on their own preference (audited); an administrator
-decides WHERE (one destination), WHAT (a ceiling, a field exposure and the
-routed kinds) and HOW it leaves (the integration route "jira", created
-in Administration, Egress); a case owner can keep a case out entirely.
+JIRA stays what migration 0029 made it: a per-recipient channel on the existing ledger, one
+notify.delivery row per notification per channel. A recipient opts in on their own preference (audited);
+an administrator decides where (one destination), what (a ceiling, a field exposure and the routed kinds)
+and how it leaves (the integration route "jira", created in Administration, Egress); a case owner can
+keep a case out entirely.
 
-The drain maps each due JIRA delivery to create-or-comment on ONE Jira
-issue per work item (`notify.jira_link`), and records per event whether
-that event is already on the issue (`notify.jira_event`), so N recipients
-of one event make one post and two identical events make two. Nothing
-comes back from Jira and nothing is written to the graph.
+The drain maps each due JIRA delivery to create-or-comment on one Jira issue per work item
+(`notify.jira_link`), and records per event whether that event is already on the issue
+(`notify.jira_event`), so N recipients of one event make one post and two identical events make two.
+Nothing comes back from Jira and nothing is written to the graph.
 
-## Reach (docs/00 decisions 68 and 72)
+Reach (docs/00 decisions 68 and 72): this module never opens a socket. Every call is
+`pinned_http.fetch_response(..., route=egress.route_for("integration", "jira", ...))`: which host may be
+reached is the route's allowlist, written by an administrator with step-up and audited; a private Data
+Center address is reachable only when an allowlist entry names it; egress_policy is the one classifier;
+nothing follows a redirect, so the credential never reaches a target it was not meant for.
 
-This module never opens a socket. Every call is
-`pinned_http.fetch_response(..., route=egress.route_for("integration",
-"jira", ...))`: which host may be reached is the route's allowlist, written
-by an administrator with step-up and audited; a private Data Center
-address is reachable only when an allowlist entry names it; egress_policy
-is the one classifier; nothing follows a redirect, so the credential never
-reaches a target it was not meant for.
-
-## Idempotency without an uncertain-write flag
-
-A create or a comment whose outcome is unknown is never repeated blind.
-Every create carries a random ref label (`noctornal-ref-<16 chars>`) and
-every post ends "NocTORnal ref <marker>"; a retry after an attempt first
-waits SETTLE for Jira's search index and then looks for its own label or
-marker. A duplicate issue is possible only when the index lags by more than
+Idempotency without an uncertain-write flag: a create or a comment whose outcome is unknown is never
+repeated blind. Every create carries a random ref label (`noctornal-ref-<16 chars>`) and every post ends
+"NocTORnal ref <marker>"; a retry after an attempt first waits SETTLE for Jira's search index and then
+looks for its own label or marker. A duplicate issue is possible only when the index lags by more than
 SETTLE, and it is visible: two issues carrying one ref label.
 
-## Never
-
-No body, entity names, selectors, compartments, recipient or actor
-identity, internal ids, assignee, reporter mapping or custom field ever
-reaches Jira. At STUB exposure not even the case code or the grouping of
-work by case does. A notification about no case is never routed.
+Never sent to Jira: body, entity names, selectors, compartments, recipient or actor identity, internal
+ids, assignee, reporter mapping or custom field. At STUB exposure not even the case code or the grouping
+of work by case. A notification about no case is never routed.
 """
 from __future__ import annotations
 
@@ -99,17 +87,15 @@ JIRA_TASKS: dict[str, str] = {
 #: docs/07's work items.
 DEFAULT_KINDS = ("APPROVAL_REQUESTED", "APPROVAL_DECIDED", "PROPOSAL_QUEUED",
                  "CASE_REVIEW_DUE")
-#: Kinds deliberately never routed, named so the Jira card can say so. It
-#: may name kinds not registered yet; routability is JIRA_TASKS alone.
-#: ESCALATION is here because escalation_to_owner's summary names the
-#: original kind, which for BREAK_GLASS_INVOKED is the emergency-access
-#: pattern itself.
+#: Kinds deliberately never routed, named so the Jira card can say so. It may name kinds not registered
+#: yet; routability is JIRA_TASKS alone. ESCALATION is here because escalation_to_owner's summary names
+#: the original kind, which for BREAK_GLASS_INVOKED is the emergency-access pattern itself.
 JIRA_NEVER_KINDS = frozenset({
     "BREAK_GLASS_INVOKED", "ESCALATION", "COLLECTION_AUTHORITY_PENDING",
     "PERSONA_SUSPENDED", "PERSONA_SESSION_DUPLICATED", "SAMPLE_SCREENING_MATCH",
     "DETONATION_REQUESTED", "DETONATION_SIGNOFF_REQUESTED",
     "DETONATION_SIGNOFF_DECIDED", "SANDBOX_RESULT", "SAMPLE_WITHDRAWN",
-    # The outbound credential vault's own (F15).
+    # The outbound credential vault's own.
     "PROVIDER_CHANGE_REQUESTED", "LOOKUP_SIGNOFF_REQUESTED",
     "LOOKUP_SIGNOFF_DECIDED",
 })
@@ -121,11 +107,10 @@ JIRA_PASS_SECONDS = 60.0
 REQUEST_SECONDS = 20.0
 TEST_SECONDS = 30.0
 MAX_RESPONSE_BYTES = 1024 * 1024
-#: Jira's answers nest a handful of levels (createmeta is the deepest, about
-#: eight). json.loads recurses once per level, so a megabyte of brackets
-#: raised RecursionError, which is not a ValueError: it escaped the pass and
-#: the drain, silencing the review and escalation producers on every cron
-#: pass (2026-09-25). Anything deeper is not an answer.
+#: Jira's answers nest a handful of levels (createmeta is the deepest, about eight). json.loads recurses
+#: once per level, so a megabyte of brackets raises RecursionError, which is not a ValueError and would
+#: escape the pass and the drain, silencing the review and escalation producers on every cron pass.
+#: Anything deeper is not an answer.
 MAX_JSON_DEPTH = 32
 RETRY_AFTER_FLOOR_S = 60
 RETRY_AFTER_CAP_S = 3600
@@ -143,10 +128,8 @@ RECONCILE_PER_PASS = 10
 CEILING_ENV = "NOCTORNAL_JIRA_CEILING"
 CA_FILE_ENV = "NOCTORNAL_JIRA_CA_FILE"
 ALLOW_HTTP_ENV = "NOCTORNAL_JIRA_ALLOW_HTTP"
-#: The network a Data Center Jira answers from, when it is on one: the
-#: declared rule carries it (docs/20 section 9, the Jira row), so a
-#: private instance is reachable by name and nothing else in that range is
-#: (2026-09-25).
+#: The network a Data Center Jira answers from, when it is on one: the declared rule carries it (docs/20
+#: section 9, the Jira row), so a private instance is reachable by name and nothing else in that range is.
 NETWORK_ENV = "NOCTORNAL_JIRA_NETWORK"
 
 
@@ -343,11 +326,10 @@ def effective_ceiling(dest: Dest) -> str:
 
 
 def configured_ceiling(conn: psycopg.Connection) -> str | None:
-    """What this deployment lets Jira hold, for a judgement that sends
-    nothing (a report's release, 2026-10-08): the live destination's ceiling
-    under the host cap, as `effective_ceiling` makes it for the pass that
-    sends; the host cap alone when no destination exists; None when neither
-    is set. Reads the ceiling and nothing else of the destination."""
+    """What this deployment lets Jira hold, for a judgement that sends nothing (a report's release): the
+    live destination's ceiling under the host cap, as `effective_ceiling` makes it for the pass that
+    sends; the host cap alone when no destination exists; None when neither is set. Reads the ceiling and
+    nothing else of the destination."""
     row = conn.execute(
         "SELECT ceiling::text FROM notify.jira_destination "
         "WHERE state <> 'RETIRED'").fetchone()
@@ -905,11 +887,10 @@ class _Stop(Exception):
 
 
 class JiraPass:
-    """One capped, time-bounded pass over the due JIRA rows (F7).
+    """One capped, time-bounded pass over the due JIRA rows.
 
-    Serialised by transports.dispatch_due's session advisory lock, so two
-    passes never race for a posting row; the guarded UPDATEs protect
-    against the configuration routes (retire, pause) acting mid-pass."""
+    Serialised by transports.dispatch_due's session advisory lock, so two passes never race for a posting
+    row; the guarded UPDATEs protect against the configuration routes (retire, pause) acting mid-pass."""
 
     def __init__(self, conn: psycopg.Connection, *, client_factory: Callable | None = None,
                  route_for: Callable | None = None, clock: Callable = time.monotonic,
@@ -968,10 +949,9 @@ class JiraPass:
                     circuit = True
                     continue
                 except Exception as exc:  # noqa: BLE001 - one row, never the whole drain
-                    # Anything else is an answer this client did not expect,
-                    # or a bug: the row records it and the pass stops, so
-                    # email, webhooks and the review and escalation producers
-                    # after the pass still run (2026-09-25).
+                    # Anything else is an answer this client did not expect, or a bug: the row records it and
+                    # the pass stops, so email, webhooks and the review and escalation producers after the
+                    # pass still run.
                     log.exception("the Jira pass failed on delivery %s", out.delivery_id)
                     self._failed(dest, out, JiraHttpError(
                         "SERVER", f"the Jira pass failed on this delivery "
@@ -1363,7 +1343,7 @@ def _base_url() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Administration (F7)
+# Administration
 # ---------------------------------------------------------------------------
 
 def _check_base_url(url: str) -> tuple[str, str, int]:
@@ -1897,14 +1877,13 @@ def _cursor(text: str) -> tuple[datetime, UUID]:
 
 
 # ---------------------------------------------------------------------------
-# The case owner's veto (F7)
+# The case owner's veto
 # ---------------------------------------------------------------------------
 
 def case_routing(conn: psycopg.Connection, case_id: UUID, *, clearance: str) -> dict:
-    """The veto and the issues already raised. The count is of the links
-    the reader is cleared for: a reader below a link's marking is not told
-    that an issue exists about it (2026-09-25; links carry
-    no compartments, because compartmented material never reaches Jira)."""
+    """The veto and the issues already raised. The count is of the links the reader is cleared for: a
+    reader below a link's marking is not told that an issue exists about it (links carry no compartments,
+    because compartmented material never reaches Jira)."""
     row = conn.execute(
         """SELECT b.reason, u.display_name, b.blocked_at
              FROM notify.case_route_block b JOIN iam.app_user u ON u.id = b.blocked_by
@@ -1949,7 +1928,7 @@ def set_case_routing(conn: psycopg.Connection, case_id: UUID, *, blocked: bool,
 
 
 # ---------------------------------------------------------------------------
-# Retention (F7)
+# Retention
 # ---------------------------------------------------------------------------
 
 def purge_note(conn: psycopg.Connection, case_ids, *, actor_id: UUID | None,
@@ -1978,8 +1957,7 @@ def purge_note(conn: psycopg.Connection, case_ids, *, actor_id: UUID | None,
 
 
 def readiness_verdict(conn: psycopg.Connection, *, route_for: Callable | None = None):
-    """(ok, evidence, action, caveat) for the jira_destination readiness row
-    (F7)."""
+    """(ok, evidence, action, caveat) for the jira_destination readiness row."""
     dest = live_destination(conn)
     if dest is None:
         return True, "No Jira destination is configured, so nothing is sent to Jira.", "", ""

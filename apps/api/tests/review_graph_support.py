@@ -1,14 +1,9 @@
-"""Shared fixtures for the 2026-10-03 graph review tests.
+"""Shared fixtures for the graph tests on claims, corrections, selectors and `valid_to`.
 
-The five findings this covers (claims mutable by the request role, a
-retracted correction that stays in force, selector index drift, URL
-credentials in selectors, and `valid_to` that could not be set) all need a
-case with analysts at different clearances, a client over the real app, and
-a cleanup that also lets go of what `rls_support.cleanup` does not know
-about: the selector index, proposals and the documents a capture made.
-
-Each test file passes its own e-mail prefix, so one file's teardown never
-removes another's rows.
+They all need a case with analysts at different clearances, a client over the real app, and a cleanup
+that also lets go of what `rls_support.cleanup` does not know about: the selector index, proposals and
+the documents a capture made. Each test file passes its own e-mail prefix, so one file's teardown
+never removes another's rows.
 """
 from __future__ import annotations
 

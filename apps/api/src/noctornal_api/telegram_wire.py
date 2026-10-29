@@ -1,47 +1,37 @@
-"""The one module that speaks to Telethon (roadmap F5.2 and F5.3, telegram,
-2026-09-24; docs/20 sections 4.2, 8.4 and 9).
+"""The one module that speaks to Telethon (docs/20 sections 4.2, 8.4 and 9).
 
-Telethon is imported ONLY inside the functions below, so this module, and
-telegram.py above it, import on a build without the optional `telegram`
-extra; `library_version()` says whether it is there.
+Telethon is imported only inside the functions below, so this module, and telegram.py above it, import on a
+build without the optional `telegram` extra; `library_version()` says whether it is there.
 
 ## The only way out
 
-`proxy_for(route)` is the ONE place a route is read. A DIRECT route (no
-egress proxy configured) is refused in EVERY environment, the stricter
-reading docs/20 section 10, point 1, allows a consumer: a direct
-connection would show Telegram this server's own address, and a persona
-seen once from the unit's address is burnt. Otherwise it returns
-`route.telethon_proxy()`: SOCKS5 to the one listener, with the route's wire
-username (persona.<profile>~run.<id>, ~act.<id> or ~stop.<id>) and token as
-RFC 1929 credentials. Nothing here builds a username or appends a suffix.
+`proxy_for(route)` is the one place a route is read. A DIRECT route (no egress proxy configured) is refused
+in every environment, the stricter reading docs/20 section 10, point 1, allows a consumer: a direct
+connection would show Telegram this server's own address, and a persona seen once from the unit's address
+is burnt. Otherwise it returns `route.telethon_proxy()`: SOCKS5 to the one listener, with the route's wire
+username (persona.<profile>~run.<id>, ~act.<id> or ~stop.<id>) and token as RFC 1929 credentials. Nothing
+here builds a username or appends a suffix.
 
-`CheckedConnection` is the connection class Telethon is given. Before any
-socket exists it refuses: no proxy, a proxy other than the one build_client
-set for this client, a local address, an address the egress classifier
-refuses, one outside Telegram's published networks, or a port that is not
-443, 80 or 5222. The proxy applies the profile's policy too; this is the
-client's half of the same rule, so a mis-set policy fails closed on both
-sides.
+`CheckedConnection` is the connection class Telethon is given. Before any socket exists it refuses: no
+proxy, a proxy other than the one build_client set for this client, a local address, an address the egress
+classifier refuses, one outside Telegram's published networks, or a port that is not 443, 80 or 5222. The
+proxy applies the profile's policy too; this is the client's half of the same rule, so a mis-set policy
+fails closed on both sides.
 
 ## Reading the proxy's refusal
 
-Telethon replaces python-socks' ProxyError with a ConnectionError of its
-own, and its connect loop swallows every IOError and raises a bare
-ConnectionError, so the SOCKS5 reply byte never reaches a caller
-(reproduced 2026-09-24). CheckedConnection records the reply byte, or the
-authentication stage's failure, on the client's wire state BEFORE
-Telethon sees it, the client is built with connection_retries
-0 (one attempt, one tunnel per connect), and translate() reads that record
-first. The reply's text is never read into an error.
+Telethon replaces python-socks' ProxyError with a ConnectionError of its own, and its connect loop swallows
+every IOError and raises a bare ConnectionError, so the SOCKS5 reply byte never reaches a caller.
+CheckedConnection records the reply byte, or the authentication stage's failure, on the client's wire state
+before Telethon sees it, the client is built with connection_retries 0 (one attempt, one tunnel per
+connect), and translate() reads that record first. The reply's text is never read into an error.
 
 ## Logging
 
-Telethon logs on per-module child loggers, with request reprs, proxy
-addresses and exception text. A scrubbing handler on the 'telethon' logger,
-with propagation off, re-logs only 'telethon LEVEL in LOGGER', with no
-message, no arguments and no exc_info (a Filter on the parent would not
-reach the children's records).
+Telethon logs on per-module child loggers, with request reprs, proxy addresses and exception text. A
+scrubbing handler on the 'telethon' logger, with propagation off, re-logs only 'telethon LEVEL in LOGGER',
+with no message, no arguments and no exc_info (a Filter on the parent would not reach the children's
+records).
 """
 from __future__ import annotations
 

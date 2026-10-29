@@ -1,9 +1,7 @@
-"""Phase 2 graph endpoints: projections, ego networks, paths, metrics and
-saved layouts.
+"""Graph view endpoints: projections, ego networks, paths, metrics and saved layouts.
 
-Everything is derived from a Projection so the parameters that produced a
-number travel with it — docs/03 is emphatic that a metric without its
-projection is meaningless.
+Everything is derived from a Projection so the parameters that produced a number travel with it:
+a metric without its projection is meaningless (docs/03).
 """
 from __future__ import annotations
 
@@ -31,10 +29,8 @@ router = APIRouter(prefix="/cases/{case_id}/graph", tags=["graph-view"])
 
 
 def _svc(conn: psycopg.Connection, user: CurrentUser, case_id: UUID) -> GraphService:
-    # The projection is of ONE case, so a break-glass grant scoped to it
-    # raises what is drawn. Without the case, the default "this case"
-    # grant opened an exhibit by id and left the graph as it was (ux15
-    # breakglass-grant-raises-nothing, 2026-09-23).
+    # The projection is of one case, so the ceiling is asked for that case and a break-glass grant
+    # scoped to it raises what is drawn.
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     return GraphService(conn, clearance=clearance.name, compartments=compartments)
 
@@ -55,9 +51,8 @@ def presets(
     case_id: UUID,
     _: CurrentUser = Depends(require("case.read")),
 ) -> dict:
-    """The four projection presets, with the reason each exists — the point
-    is that leadership differs between them, and that difference is a
-    finding."""
+    """The four projection presets, with the reason each exists: leadership differs between them,
+    and that difference is a result in its own right."""
     return {
         "presets": [
             {"key": k, "label": v["label"], "description": v["description"],
@@ -75,9 +70,8 @@ def projected_graph(
     include_inferred: bool = Query(False),
     min_confidence: str = Query("LOW"),
     as_of: datetime | None = Query(None),
-    # le=5000 is a deliberate exception to the 1000 cap (CONVENTIONS.md,
-    # http_ui-015, 2026-10-03): the sociogram draws the whole projection
-    # and the answer says `truncated` when it is cut.
+    # le=5000 is a deliberate exception to the 1000 cap (CONVENTIONS.md): the sociogram draws the
+    # whole projection, and the answer says `truncated` when it is cut.
     limit: int = Query(2000, ge=1, le=5000),
     user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
@@ -155,8 +149,8 @@ def path(
     try:
         found = _svc(conn, user, case_id).shortest_path(p, src, dst)
     except PathSearchLimit as exc:
-        # Not "not connected": the search did not finish, and the console
-        # keeps that apart from the finding that no path exists.
+        # Not "not connected": the search did not finish, and the console keeps that apart from an
+        # answer that no path exists.
         raise Problem(422, "Search limit reached", safe_detail(exc)) from exc
     except ProjectionError as exc:
         raise Problem(404, "Not found", "both endpoints must be visible") from exc
@@ -166,12 +160,8 @@ def path(
             "connected": bool(found)}
 
 
-# Adversarial review found this unmetered while `analytics.suite` was
-# metered, and it was then put on the suite's budget. The console fetches
-# it with every projection it draws, so that budget ran out in ordinary
-# navigation and took the Analysis pane's Run with it (ux03
-# metrics-rate-limit-degrades-view, 2026-09-23). It has its own meter now,
-# `graph.metrics`, sized to the projection it describes: see ratelimit.py.
+# Its own meter, `graph.metrics` (ratelimit.py): the console fetches it with every projection it
+# draws, so sharing the `analytics.suite` budget would exhaust it in ordinary navigation.
 @router.get("/metrics", response_model=dict,
             dependencies=[Depends(rate_limit("graph.metrics"))])
 def metrics(
@@ -203,11 +193,9 @@ class LayoutPosition(BaseModel):
 
 
 class LayoutBody(BaseModel):
-    # Bounded. An unbounded list meant one request could pin megabytes of
-    # JSON in memory and drive an unbounded loop of INSERTs, all behind a
-    # permission an ordinary analyst holds. 20k is far above the largest
-    # case this tool is built for (docs/03 bands stop at 5k nodes) and far
-    # below anything that hurts.
+    # Bounded, so one request cannot pin megabytes of JSON and drive an unbounded loop of INSERTs
+    # behind a permission an ordinary analyst holds. 20k is far above the largest case this tool is
+    # built for (docs/03 bands stop at 5k nodes).
     positions: list[LayoutPosition] = Field(max_length=20_000)
 
 
@@ -217,11 +205,8 @@ def _layout_projection_id(conn: psycopg.Connection, case_id: UUID,
     '__layout__' backs the saved canvas, so an analyst's spatial memory
     survives a reload without needing the full projection-management UI
     (docs/06: people navigate these graphs spatially)."""
-    # One atomic statement, not SELECT-then-INSERT. Migration 0026 added
-    # UNIQUE (case_id, name), which turned this read-modify-write's race
-    # from a duplicate row into a unique violation: two concurrent layout
-    # saves for a case with no layout row would leave the loser with an
-    # unhandled integrity error.
+    # One atomic statement, not SELECT-then-INSERT: under UNIQUE (case_id, name) (migration 0026),
+    # two concurrent first saves of a layout would leave the loser with an integrity error.
     return conn.execute(
         """INSERT INTO analytics.projection
                (id, case_id, name, edge_types, created_by)
@@ -256,8 +241,7 @@ def get_layout(
 
 @router.put("/layout", status_code=204,
             dependencies=[Depends(rate_limit("graph.view"))])
-# 20,000 positions run past the default body ceiling (http_ui-005,
-# 2026-10-03).
+# 20,000 positions run past the default body ceiling.
 @raise_body_ceiling(4 * 1024 * 1024, what="a saved layout")
 def save_layout(
     case_id: UUID, body: LayoutBody,

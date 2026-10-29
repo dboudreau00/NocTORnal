@@ -1,16 +1,12 @@
-"""Exhibit and live-claim similarity, case-scoped and exact (F6.4,
-embeddings, 2026-09-24).
+"""Exhibit and live-claim similarity, case-scoped and exact.
 
-An exact scan inside one case with every label predicate applied before
-ordering: a reader outside a compartment neither sees nor is displaced by
-compartmented exhibits; nothing comes from another case; a claim on a tie
-with a hidden end is never returned; retracted claims are kept and left
-out. The MEANING gate of a claim takes the cited material's labels and
-withholds a claim whose material was purged; items of a closed case are
-withheld outside this host and indexed on it; one EMBED_BATCH_SENT per case
-per batch names exactly that case's items. The claim visibility rule is
-one constant (curation.LIVE_CLAIMS_SQL) the text search and the similarity
-search both read.
+An exact scan inside one case with every label predicate applied before ordering: a reader outside a
+compartment neither sees nor is displaced by compartmented exhibits; nothing comes from another case;
+a claim on a tie with a hidden end is never returned; retracted claims are kept and left out. The
+MEANING gate of a claim takes the cited material's labels and withholds a claim whose material was
+purged; items of a closed case are withheld outside this host and indexed on it; one EMBED_BATCH_SENT
+per case per batch names exactly that case's items. The claim visibility rule is one constant
+(curation.LIVE_CLAIMS_SQL) the text search and the similarity search both read.
 
 Env-gated on DATABASE_URL. Prefix `eci-`.
 """

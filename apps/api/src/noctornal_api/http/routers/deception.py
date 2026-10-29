@@ -1,50 +1,11 @@
-"""Social-engineering evidence over HTTP: captures, BEC email, vishing calls.
+"""Social-engineering evidence over HTTP: captures, BEC email, vishing calls (docs/19).
 
-docs/19. Structurally this is the samples router's sibling — **metadata
-renders, bytes do not** — with one deliberate exception that is the most
-security-sensitive endpoint added to this platform since `/download`:
-
-## `/captures/{id}/screenshot` is the first inline exhibit path
-
-Every other exhibit route in NocTORnal serves `application/octet-stream`
-with `Content-Disposition: attachment`, so nothing has ever been handed to
-the browser to interpret. A phishing screenshot has to be, or the subsystem
-is useless. Five things guard it, and all five are load-bearing:
-
-1. The five-part access gate, twice: against the CAPTURE's composed labels
-   and again against the EXHIBIT's own. Both are needed — a RED exhibit can
-   be referenced by an AMBER capture, and the exhibit's labels are the ones
-   `EvidenceService.view()` does not check (it has no authorisation at all).
-2. The evidence id is read from the capture row, and every id a caller
-   supplies at CREATE time is verified to be in-case and readable by them
-   first.
-
-   > This guard was originally written as "a caller cannot name one, so the
-   > 'attach any exhibit to a capture I can see' pivot does not exist."
-   > **That was false**: `CaptureIn.screenshot_evidence_id` is
-   > caller-supplied. An adversarial pass on 2026-07-26 showed an AMBER
-   > analyst attaching a known RED exhibit id to their own AMBER capture and
-   > having the RED image rendered inline. The pivot existed; guard 1's
-   > second half and the create-time check are what actually close it.
-
-3. `is_hostile_markup` refuses outright — checked AFTER the case and label
-   checks, so it cannot become an oracle about a row the caller may not see.
-4. The content type is re-derived from the MAGIC BYTES and the response is
-   labelled with what was found — never with `media_type`, which is
-   `UploadFile.content_type` and therefore whatever the uploading client
-   said. An HTML document labelled `image/png` is the exact attack, and
-   believing the column is how it lands.
-5. `Content-Security-Policy: default-src 'none'; sandbox`, `nosniff`, and
-   `Cross-Origin-Resource-Policy: same-origin` — so even if 1–4 were all
-   wrong at once, the browser has no scripting context to execute in.
-
-## Permissions are reused, not invented
-
-`evidence.read` and `evidence.upload`. A capture, a parsed message and a
-CDR are provenance records ABOUT evidence, and the authority to see the
-exhibit and the authority to see the row describing it should not be two
-different grants that can drift apart. Adding `deception.*` permissions
-would also mean every existing role silently holds none of them.
+Metadata renders, bytes do not, except `/captures/{id}/screenshot`, the one inline exhibit path.
+It is guarded five ways: the gate at the capture's labels and again at the exhibit's own; exhibit
+ids checked in-case and readable at create; hostile markup refused, but only after those checks;
+the content type taken from the magic bytes, never the uploader's `media_type`; and a sandboxing
+CSP with `nosniff` and same-origin CORP. Permissions are `evidence.read` and `evidence.upload`, so
+the exhibit and the row describing it cannot drift apart.
 """
 from __future__ import annotations
 
@@ -93,39 +54,21 @@ def _svc(conn: psycopg.Connection) -> DeceptionService:
 
 
 def _ceiling(conn: psycopg.Connection, user: CurrentUser, case_id: UUID):
-    # Captures, emails and calls all belong to the case in the path, so a
-    # break-glass grant scoped to it counts here as it does on the graph
-    # (ux15 breakglass-grant-raises-nothing, 2026-09-23).
+    # Captures, emails and calls all belong to the case in the path, so a break-glass grant scoped
+    # to it counts here as it does on the graph.
     tlp, comps = user_ceiling(conn, user.user_id, case_id=case_id)
     return tlp.name, comps
 
 
 def _gate_the_item(conn: psycopg.Connection, user: CurrentUser,
                    case_id: UUID, row: dict) -> None:
-    """The gate again, against ONE capture's or message's own labels.
+    """The gate again, against one capture's or message's own labels.
 
-    The route's first gate runs at the CASE's labels, before anything is
-    fetched, so that existence is never revealed to the unassigned. The
-    row is then fetched under `_ceiling`, which a break-glass grant on
-    this case raises, and served. A RED message in an AMBER case, opened
-    by an AMBER analyst under a RED grant, reached them body and all
-    without ever passing the gate at RED, and the gate is where a grant's
-    use is counted. So it went uncounted, while the officer's card said
-    items opened one by one are (2026-09-23). Asked
-    after the fetch, which already applied the same ceiling, this refuses
-    nothing new; it is the use being recorded, as the screenshot route
-    and the exhibit routes already record it. Lists stay uncounted, as
-    everywhere.
-
-    On a case classified above the caller's own clearance the route's
-    first gate was passable only through the grant, so it has already
-    counted this request, and asking again counted one open as two: the
-    inflation U19 removed from the inspector, brought back here by the
-    first U23 fix (fix-round verifier, 2026-09-23). That fix skipped this
-    gate there. It is asked everywhere now, as a SECOND gate
-    (`after_case_gate`), which counts only what the case's gate did not
-    (sec-breakglass-double-count, 2026-09-23): the item's own labels are
-    checked on every open, and the count is the same."""
+    The route's first gate runs at the case's labels, before anything is fetched; the row is then
+    read under `_ceiling`, which a break-glass grant raises. This refuses nothing new: it records
+    the grant's use when an item above the case's labels is opened, as the screenshot and exhibit
+    routes do. As a second gate (`after_case_gate`) it counts only what the case's gate did not,
+    so one open is one use. Lists stay uncounted."""
     authorize_object(conn, user, case_id=case_id,
                      permission_key="evidence.read", after_case_gate=True,
                      classification=row["classification"],
@@ -136,11 +79,8 @@ def _gate_the_item(conn: psycopg.Connection, user: CurrentUser,
 # Captures
 # ---------------------------------------------------------------------------
 
-#: Mirrored from the `_known` CHECK constraints in migrations 0048/0050.
-#: Without these a caller-supplied string reached the driver and came back
-#: as a raw CheckViolation -- a 500 -- from an endpoint whose every other
-#: refusal is a 422 with a sentence. The constraints stay: they are what
-#: holds when a migration or a psql session does the write.
+#: Mirrored from the `_known` CHECK constraints in migrations 0048/0050, so a bad value is a 422
+#: with a sentence rather than a CheckViolation 500. The constraints still hold for other writers.
 _CAPTURE_METHODS = frozenset({
     "MANUAL_BROWSER", "HEADLESS", "VENDOR_API", "ANALYST_UPLOAD",
     "VICTIM_SUPPLIED", "PASSIVE_FEED"})
@@ -170,13 +110,11 @@ def _one_of(value, allowed, field):
 
 
 def _spki_sha256(value: str | None) -> bytes | None:
-    """The key hash as the 32 bytes the table holds, or a sentence.
+    """The key hash as the 32 bytes the table holds, or a sentence naming the field.
 
-    Final review u16 (2026-09-24): the console's form sends the field as
-    typed, and hex of any other length (a SHA-1 pin, a hash cut short in
-    the copying) reached the capture_spki_is_a_sha256 CHECK as a 500 that
-    named no field. The colons and spaces a certificate viewer prints the
-    hash with are dropped first, since they are how it is copied."""
+    The console sends the field as typed, so hex of another length (a SHA-1 pin, a hash cut short)
+    is refused here rather than at the capture_spki_is_a_sha256 CHECK. The colons and spaces a
+    certificate viewer prints are dropped first, since that is how the hash is copied."""
     raw = "".join((value or "").replace(":", " ").split())
     if not raw:
         return None
@@ -204,10 +142,8 @@ def _clean_hops(hops: list[dict]) -> list[dict]:
             raise Problem(422, "Invalid field",
                           f"hops[{i}] needs a non-empty url")
         _one_of(hop.get("hop_kind"), _HOP_KINDS, f"hops[{i}].hop_kind")
-        # The two typed columns, checked here for the same reason: the
-        # console's capture form sends them (ux14-deception:no-deception-
-        # ingest-ui, 2026-09-23), and a bad address reached the driver as
-        # an inet cast error, which is a 500.
+        # The two typed columns, checked here for the same reason: the console's form sends them,
+        # and a bad address would reach the driver as an inet cast error, a 500.
         if hop.get("resolved_ip") not in (None, ""):
             try:
                 ipaddress.ip_address(str(hop["resolved_ip"]).strip())
@@ -250,11 +186,7 @@ class CaptureIn(BaseModel):
     tls_subject: str | None = None
     tls_issuer: str | None = None
     tls_spki_sha256: str | None = None
-    #: The certificate's validity window. The table always had the columns
-    #: and this body had no field for either, so no capture recorded
-    #: through the API could carry the issue date the console now reads
-    #: against the first lure (ux14-deception:web-durable-ids-missing,
-    #: 2026-09-23).
+    #: The certificate's validity window; the console reads the issue date against the first lure.
     tls_not_before: date | None = None
     tls_not_after: date | None = None
     #: docs/19 §6, legal item L5. Entering credentials — including canary
@@ -279,14 +211,9 @@ def create_capture(
     authorize_object(conn, user, case_id=case_id, permission_key="evidence.upload")
     check_writable_labels(conn, user, classification=body.classification,
                           compartments=frozenset(body.compartments))
-    # Every referenced exhibit must be IN THIS CASE and readable BY THIS
-    # CALLER, checked before the row is written.
-    #
-    # The three evidence columns are only FK-constrained, which means a
-    # caller could name any id in `core.evidence`: a nonexistent one gave a
-    # `ForeignKeyViolation` (a 500), and one from another case was accepted
-    # — an existence oracle over the whole table, and the way the
-    # screenshot endpoint's missing label check was reachable.
+    # Every referenced exhibit must be in this case and readable by this caller, checked before
+    # the row is written: the three evidence columns are only FK-constrained, so any id in
+    # `core.evidence` would otherwise do, including one the screenshot route would then render.
     for field in ("screenshot_evidence_id", "dom_evidence_id",
                   "har_evidence_id"):
         raw = getattr(body, field)
@@ -296,23 +223,17 @@ def create_capture(
             exhibit_id = UUID(raw)
         except ValueError as exc:
             raise Problem(422, "Invalid field", f"{field} is not a UUID") from exc
-        # The element's case and labels as facts (`deps.element_labels`,
-        # S1 2026-09-25), so the gate below still answers an element above the
-        # caller's labels with its 403 and AUTHZ_DENIED row, not a silent 404 from
-        # row-level security. Content is read only after the gate.
-        # Same answer for "does not exist", "belongs to a case you cannot
-        # see" and "is above your labels" (2026-10-07): a status code must not be an
-        # existence oracle. The
-        # verb is `evidence.read`, which the route's own gate did not ask,
-        # so it is asked first whether or not the exhibit exists.
+        # One answer for an exhibit that does not exist, belongs to a case the caller cannot see,
+        # or is above their labels, so the status is no existence oracle; the refusal still writes
+        # its AUTHZ_DENIED row. `evidence.read`, which the route's gate did not ask, is asked first
+        # whether or not the exhibit exists. Content is read only after the gate.
         gate_element(conn, user, case_id=case_id, kind="evidence",
                      element_id=exhibit_id, permission_key="evidence.read",
                      missing_detail=f"no such exhibit for {field}",
                      case_gated=False)
     _one_of(body.capture_method, _CAPTURE_METHODS, "capture_method")
-    # The table refuses an ACTIVE capture with no egress profile; said
-    # here as a sentence, because the console's form now posts to this
-    # route and a CHECK violation is a 500 (2026-09-23).
+    # The table refuses an active capture with no egress profile; said here as a sentence, as the
+    # console's form posts to this route and a CHECK violation is a 500.
     if (body.capture_method not in _PASSIVE_METHODS
             and not body.egress_profile_id):
         raise Problem(422, "Invalid field",
@@ -370,9 +291,8 @@ def list_captures(
     authorize_object(conn, user, case_id=case_id, permission_key="evidence.read")
     clearance, comps = _ceiling(conn, user, case_id)
     svc = _svc(conn)
-    # `also_seen` and `proposable` on every row (ux14-deception:ecrime-no-
-    # cross-channel-pivot, 2026-09-23), computed over what THIS caller
-    # may see, like the rows themselves.
+    # `also_seen` and `proposable` on every row, computed over what this caller may see, like the
+    # rows themselves.
     return {"captures": svc.annotate(
         case_id, "capture",
         svc.captures(case_id, clearance=clearance, compartments=comps,
@@ -398,8 +318,7 @@ def get_capture(
     svc = _svc(conn)
     svc.annotate(case_id, "capture", [capture], clearance=clearance,
                  compartments=comps)
-    # What the certificate's issue date is read against: the earliest
-    # message or call in the case (ux14-deception:web-durable-ids-missing).
+    # What the certificate's issue date is read against: the earliest message or call in the case.
     capture["first_lure"] = svc.first_lure(case_id, clearance=clearance,
                                            compartments=comps)
     return capture
@@ -424,47 +343,23 @@ def capture_screenshot(
     if not evidence_id:
         raise Problem(404, "Not found", "this capture has no screenshot")
 
-    # The exhibit's case and labels as facts (`deps.element_labels`,
-    # S1 2026-09-25), so an exhibit above the caller's labels still meets
-    # the gate below rather than reading as missing; whether it is hostile
-    # is content, read only after the gate.
+    # The exhibit's case and labels as facts (`deps.element_labels`), so an exhibit above the
+    # caller's labels meets the gate below rather than reading as missing; whether it is hostile is
+    # content, read only after the gate.
     facts = element_labels(conn, "evidence", UUID(evidence_id))
     if facts is None:
         raise Problem(404, "Not found", "the screenshot exhibit is missing")
     row = (None, facts[0], facts[1], facts[2])
 
-    # THE EXHIBIT'S OWN CASE, FIRST. Before anything else is revealed about
-    # it, including whether it is hostile.
-    #
-    # Found by an adversarial pass, 2026-07-26. The hostile check used to
-    # run before this one, which made the endpoint a three-way oracle over
-    # `core.evidence` for a caller holding an id out of band:
-    #   409 -> the row exists and is hostile
-    #   404 "no such capture" -> exists, not hostile, another case
-    #   404 "the screenshot exhibit is missing" -> does not exist
-    # Rule (b) of the access gate: authorisation is decided BEFORE
-    # existence is revealed.
+    # The exhibit's own case first, before anything else about it is revealed, including whether
+    # it is hostile, or the answers become an oracle over `core.evidence` (gate rule (b)).
     if row[1] != case_id:
         raise Problem(404, "Not found", "no such capture")
 
-    # THE EXHIBIT'S OWN LABELS. `EvidenceService.view()` has no
-    # authorisation of its own -- `_fetch_verified` is `WHERE id = %s` and
-    # nothing more -- so the gate has to happen here, exactly as
-    # `routers/evidence._authorize_exhibit` does it.
-    #
-    # This was missing, and it was reachable. `screenshot_evidence_id` is
-    # caller-supplied on `POST /captures`, so an AMBER analyst who knew a
-    # RED exhibit's id (from a former clearance, a report, a custody trail)
-    # could attach it to their own AMBER capture and have the RED image
-    # rendered inline in their browser. The capture's labels were composed
-    # correctly and the exhibit's were never consulted at all -- rule (a),
-    # "an element is protected by BOTH its own labels and its case's",
-    # violated on the one path in the product that hands bytes to a browser
-    # to interpret.
-    #
-    # A second gate, after the route's own at the case's labels, so it
-    # counts a break-glass use only when that one did not: one screenshot
-    # served is one use (sec-breakglass-double-count, 2026-09-23).
+    # The exhibit's own labels: `EvidenceService.view()` has no authorisation of its own, and a
+    # capture can cite an exhibit above its labels, so the gate runs here as in
+    # `routers/evidence._authorize_exhibit` (gate rule (a)). As a second gate it counts a
+    # break-glass use only when the route's gate did not: one screenshot served is one use.
     authorize_object(conn, user, case_id=case_id,
                      permission_key="evidence.read", after_case_gate=True,
                      classification=row[2],
@@ -537,18 +432,13 @@ async def upload_email(
 
     authorize_object(conn, user, case_id=case_id, permission_key="evidence.upload")
     check_writable_labels(conn, user, classification=classification)
-    # Checked BEFORE the exhibit is written. An unknown direction was a
-    # CHECK violation in `record_email`, after the .eml had already been
-    # stored write-once with nothing recording it (2026-09-23, now that
-    # the console's upload form posts here).
+    # Checked before the exhibit is written: an unknown direction would fail a CHECK in
+    # `record_email` after the .eml was already stored write-once with nothing recording it.
     _one_of(direction, _EMAIL_DIRECTIONS, "direction")
 
-    # The body was capped at MAX_EML_BYTES by BodyCappedRoute before the
-    # multipart parser saw it (the marker above); `parse_eml` re-checks
-    # the length as its own precondition. Until 2026-09-09 a private
-    # chunked read did this after the parser had spooled the body whole.
-    # The empty check stays: an empty exhibit is a mistake, and 422 says
-    # which mistake.
+    # BodyCappedRoute capped the body at MAX_EML_BYTES before the multipart parser saw it (the
+    # marker above), and `parse_eml` re-checks the length. An empty exhibit is a mistake the 422
+    # names.
     data = await file.read()
     if not data:
         raise Problem(422, "Empty", "no bytes were uploaded")
@@ -574,10 +464,8 @@ async def upload_email(
     except DeceptionError as exc:
         raise Problem(422, "Not recorded", safe_detail(exc)) from exc
     except psycopg.DataError as exc:
-        # http_ui-009 (2026-10-03): the parser now replaces what a column
-        # cannot hold, so this is the backstop. The exhibit is lodged, a
-        # retry deduplicates onto it, and the analyst is told so rather
-        # than handed a 500.
+        # A backstop: the parser swaps out what a column cannot hold. The exhibit is lodged and a
+        # retry deduplicates onto it, so the analyst is told that rather than handed a 500.
         raise Problem(
             422, "Not recorded",
             f"the message was lodged as exhibit {result.evidence_id}, but a "
@@ -679,8 +567,7 @@ def create_call(
     _one_of(body.disposition, _DISPOSITIONS, "disposition")
     _one_of(body.stir_shaken_attestation, _ATTESTATIONS,
             "stir_shaken_attestation")
-    # Two more of the table's CHECKs, said as sentences for the console's
-    # form rather than surfacing as 500s (2026-09-23).
+    # Two more of the table's CHECKs, said as sentences for the console's form rather than 500s.
     if body.stir_shaken_verified and not body.stir_shaken_attestation:
         raise Problem(422, "Invalid field",
                       "a verified STIR/SHAKEN signature needs the attestation "
@@ -725,9 +612,8 @@ def list_calls(
     calls = svc.calls(case_id, clearance=clearance,
                       compartments=comps, limit=min(limit, 500))
     for call in calls:
-        # One row per selector, reasons merged: the same SIP URI arriving
-        # as From and as P-Asserted-Identity was listed twice (ux14-
-        # deception:calls-vouched-and-tooltip-only, 2026-09-23).
+        # One row per selector, reasons merged, so a SIP URI arriving as From and as
+        # P-Asserted-Identity is listed once.
         call["selector_candidates"] = merge_candidates(
             selector_candidates_for_call({
                 **call["durable"], **{
@@ -758,19 +644,12 @@ def propose_from_record(
     user: CurrentUser = Depends(current_user),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """Propose an INFRA or LURE entity from one capture's, message's or
-    call's durable fields, into this case's triage queue.
+    """Propose an INFRA or LURE entity from one capture's, message's or call's durable fields,
+    into this case's triage queue.
 
-    The overlap a record's "also seen in" shows reaches the graph through
-    the normal path: a proposal an analyst accepts or rejects in Triage
-    (ux14-deception:ecrime-no-cross-channel-pivot, 2026-09-23). Gated like
-    `/proposals/capture`, on `evidence.upload`: feeding the queue is a
-    collection act, and accepting stays `proposal.review`'s. The record
-    is fetched under the caller's labels, so a key cannot reach a record
-    they could not open, and the proposal is held to what they could
-    author (`check_writable_labels`, against their own ceiling, which a
-    break-glass grant does not raise): a proposal is a suggestion somebody
-    else will act on, and it is not written above its author's labels.
+    Gated like `/proposals/capture`, on `evidence.upload`; accepting stays `proposal.review`'s. The
+    record is fetched under the caller's labels, and the proposal is held to what they could author
+    (`check_writable_labels`, which a break-glass grant does not raise): others will act on it.
     """
     if kind not in _PROPOSE_CHANNELS:
         raise Problem(404, "Not found", "no such record kind")
@@ -807,14 +686,11 @@ def search_records(
     user: CurrentUser = Depends(current_user),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """The captures, messages and calls in this case whose hosts, addresses
-    or URLs contain `q` (defanged forms accepted), for the Search pane.
+    """The captures, messages and calls in this case whose hosts, addresses or URLs contain `q`
+    (defanged forms accepted), for the Search pane.
 
-    ux14-deception:ecrime-no-cross-channel-pivot (2026-09-23): "index
-    deception hosts, IPs and URLs in case search". Gated as the three lists
-    are, on `evidence.read`, filtered by the caller's own ceiling on this
-    case, and metered on the `search` meter with the pane's other columns.
-    The query cap is `routers/search.py`'s `MAX_QUERY`, for its reason."""
+    Gated as the three lists are, on `evidence.read`, filtered by the caller's own ceiling on this
+    case, and metered on the `search` meter. The query cap is `routers/search.py`'s `MAX_QUERY`."""
     authorize_object(conn, user, case_id=case_id, permission_key="evidence.read")
     clearance, comps = _ceiling(conn, user, case_id)
     return _svc(conn).search(case_id, q, clearance=clearance,

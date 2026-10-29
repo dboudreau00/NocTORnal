@@ -1,32 +1,25 @@
 """Authentication service: password + mandatory TOTP.
 
-Single-step: the caller submits password AND TOTP code together and gets
-back OK or INVALID_CREDENTIALS -- or, since 2026-09-11,
-SECOND_FACTOR_UNAVAILABLE when the stored secret cannot be opened, which
-is a server fault and is answered as one. The specific reason (wrong
-password, wrong code, locked, inactive, not enrolled, replay, unknown
-user) is carried in `audit_reason` for the server-side audit trail ONLY
-and must never reach the client — otherwise the response becomes a
-password/enumeration oracle (a correct-password-without-code that returned
+Single-step: the caller submits password and TOTP code together and gets back OK or INVALID_CREDENTIALS, or
+SECOND_FACTOR_UNAVAILABLE when the stored secret cannot be opened, which is a server fault and is answered
+as one. The specific reason (wrong password, wrong code, locked, inactive, not enrolled, replay, unknown
+user) is carried in `audit_reason` for the server-side audit trail only and must never reach the client,
+otherwise the response becomes a password/enumeration oracle (a correct-password-without-code that returned
 a distinct "now enter your code" would confirm the password for free).
 
 Defences, all exercised by tests:
-- Constant work: every attempt runs one Argon2id verify (the real hash if
-  the user exists, a fixed dummy hash otherwise) BEFORE any state branch,
-  so timing and outcome do not reveal whether an account exists or its
-  state (active/locked). Enumeration-resistant.
-- Mandatory MFA: a correct password alone never authenticates, and a
-  correct-password/no-code probe still consumes a lockout attempt, so it
-  is not a free password oracle.
-- Replay protection is atomic at the store: the TOTP counter advance is a
-  compare-and-set; if a concurrent login already consumed the code the
-  advance reports failure and authentication fails.
-- Lockout is computed from the post-increment value in the store, never a
-  stale read, and never clears an existing lock.
+- Constant work: every attempt runs one Argon2id verify (the real hash if the user exists, a fixed dummy
+  hash otherwise) before any state branch, so timing and outcome do not reveal whether an account exists or
+  its state (active/locked).
+- Mandatory MFA: a correct password alone never authenticates, and a correct-password/no-code probe still
+  consumes a lockout attempt, so it is not a free password oracle.
+- Replay protection is atomic at the store: the TOTP counter advance is a compare-and-set; if a concurrent
+  login already consumed the code the advance reports failure and authentication fails.
+- Lockout is computed from the post-increment value in the store, never a stale read, and never clears an
+  existing lock.
 
-A two-step "password first, then code" UX would need a short-lived opaque
-MFA ticket issued indistinguishably whether or not the password was
-correct; that is deferred (see docs/00 backlog).
+A two-step "password first, then code" UX would need a short-lived opaque MFA ticket issued
+indistinguishably whether or not the password was correct; that is deferred (see docs/00 backlog).
 """
 from __future__ import annotations
 
@@ -52,15 +45,12 @@ def _utcnow() -> datetime:
 class AuthOutcome(Enum):
     OK = "ok"
     INVALID_CREDENTIALS = "invalid_credentials"  # the only CREDENTIAL failure the caller sees
-    # The password verified and the second factor could not be CHECKED:
-    # the stored TOTP secret did not open under any key this process
-    # holds (`envelope.UNOPENABLE` -- a rotated KEK, a secrets file from
-    # the wrong backup). A server fault, answered as one (503 at the
-    # router) rather than folded into "invalid credentials", which would
-    # send an analyst to re-type a password that was right -- and never
-    # a 500, which is what it was until 2026-09-11. Reachable only AFTER
-    # the password verified on a real, active, unlocked account, so it
-    # tells a guesser nothing the password check did not.
+    # The password verified and the second factor could not be checked: the stored TOTP secret did not
+    # open under any key this process holds (`envelope.UNOPENABLE`: a rotated KEK, a secrets file from the
+    # wrong backup). A server fault, answered as one (503 at the router), not folded into "invalid
+    # credentials", which would send an analyst to re-type a right password. Reachable only after the
+    # password verified on a real, active, unlocked account, so it tells a guesser nothing the password
+    # check did not.
     SECOND_FACTOR_UNAVAILABLE = "second_factor_unavailable"
 
 
@@ -119,16 +109,13 @@ class AuthService:
 
     def authenticate(self, email: str, password: str, totp_code: str | None,
                      *, spend_recovery: bool = True) -> AuthResult:
-        """`spend_recovery=False` verifies a recovery code and leaves it
-        unspent, returning its hash for `spend` to use.
+        """`spend_recovery=False` verifies a recovery code and leaves it unspent, returning its hash for
+        `spend` to use.
 
-        Sign-in passes False (2026-09-24): its must-change
-        and no-change-pending refusals come AFTER this, and a recovery code
-        spent on a refusal is gone for good. Finishing one reset cost two
-        codes, and a person down to their last code could never finish it.
-        A TOTP code is still spent here either way: that is its replay
-        protection, it costs nothing to wait for the next one, and the
-        console asks for a fresh one. Every other caller spends at once.
+        Sign-in passes False: its must-change and no-change-pending refusals come after this, and a
+        recovery code spent on a refusal is gone for good, so a person down to their last code could never
+        finish a reset. A TOTP code is still spent here either way: that is its replay protection, and it
+        costs nothing to wait for the next one. Every other caller spends at once.
         """
         now = self._now()
         recovery_hash: str | None = None
@@ -160,11 +147,9 @@ class AuthService:
         elif not totp_code:
             reason = "no_totp"
         elif recovery.looks_like_code(totp_code):
-            # A recovery code, told apart from a TOTP code by SHAPE. This
-            # branch is only reachable once the password has already been
-            # verified on a real, active, unlocked account, so the extra
-            # Argon2id work it does is not an enumeration oracle -- a caller
-            # who reaches it already knows the password.
+            # A recovery code, told apart from a TOTP code by shape. Only reachable once the password has
+            # been verified on a real, active, unlocked account, so the extra Argon2id work is not an
+            # enumeration oracle: a caller who reaches it already knows the password.
             matched = self._match_recovery(user.id, totp_code)
             if matched is None:
                 reason = "bad_recovery_code"
@@ -239,16 +224,12 @@ class AuthService:
     def _match_recovery(self, user_id: UUID, submitted: str) -> str | None:
         """The stored hash a recovery code matches, or None.
 
-        Every stored hash is checked rather than stopping at the first
-        match, so the work done does not depend on WHICH code was
-        submitted -- the position of a code in the set is not something a
-        caller should be able to time.
+        Every stored hash is checked rather than stopping at the first match, so the work done does not
+        depend on which code was submitted: the position of a code in the set must not be timeable.
 
-        Matching does not spend. The atomic consume that follows (here or
-        in `spend`) is what actually decides the outcome: if it reports the
-        hash was already gone, a concurrent login spent it first and this
-        attempt fails. Single-use is enforced by the database, not by the
-        order of statements here.
+        Matching does not spend. The atomic consume that follows (here or in `spend`) decides the outcome:
+        if it reports the hash was already gone, a concurrent login spent it first and this attempt fails.
+        Single-use is enforced by the database, not by the order of statements here.
         """
         normalised = recovery.normalise(submitted)
         if not normalised:

@@ -16,54 +16,42 @@ import pytest
 os.environ.setdefault(
     "NOCTORNAL_TOTP_KEK", "A" * 43 + "="  # 32 zero-ish bytes, valid base64
 )
-# A collector process (2026-10-02): the persona ring's own deterministic
-# key, never the TOTP one (32 bytes of 0x01, which config refuses in
-# production as a published value), and the inline mode development runs
-# in, so the suites that drive persona acts over HTTP run them in the
-# request as before. test_persona_act_queue_pg.py turns it off to prove the
-# queue and the collector.
+# A collector process: the persona ring's own deterministic key, never the TOTP one (32 bytes of
+# 0x01, which config refuses in production as a published value), and the inline mode development
+# runs in, so the suites that drive persona acts over HTTP run them in the request.
+# test_persona_act_queue_pg.py turns it off to prove the queue and the collector.
 os.environ.setdefault("NOCTORNAL_PERSONA_KEK", "AQEB" * 10 + "AQE=")
 os.environ.setdefault("NOCTORNAL_COLLECTOR_INLINE", "1")
 
-# Every exhibit a test ingests is written under a COMPLIANCE object lock,
-# and a COMPLIANCE retention cannot be shortened, lifted or overridden by
-# any credential -- that is the point of the mode. `evidence.DEFAULT_RETENTION`
-# is read from EVIDENCE_RETENTION_DAYS at IMPORT time and defaulted to 365,
-# so until 2026-09-02 every run of the evidence-writing tests added another
-# year of undeletable objects to the dev bucket. One day is the shortest
-# whole-day value; the live lock test uses seconds via `put(retain_until=)`
-# and does not depend on this. Must run before the first import of
-# `noctornal_api.evidence`, which is why it sits up here with the KEK.
+# Every exhibit a test ingests is written under a COMPLIANCE object lock, which no credential can
+# shorten, lift or override. `evidence.DEFAULT_RETENTION` is read from EVIDENCE_RETENTION_DAYS at
+# import time and defaults to 365, so one day (the shortest whole-day value) keeps test runs from
+# piling up undeletable objects in the dev bucket. The live lock test uses seconds via
+# `put(retain_until=)`. This must run before the first import of `noctornal_api.evidence`, which is
+# why it sits up here with the KEK.
 os.environ.setdefault("EVIDENCE_RETENTION_DAYS", "1")
-# Since 2026-09-24 a lodging locks to the CASE's retention date when that
-# is later (x-lock-extension), up to `evidence.LOCK_HORIZON`, and test
-# cases are retained to 2027 and 2028: without this every ingest against
-# the dev bucket would lock its object for years. One day, as above; the
-# tests about the horizon set their own.
+# A lodging locks to the case's retention date when that is later (x-lock-extension), up to
+# `evidence.LOCK_HORIZON`, and test cases are retained to 2027 and 2028: without this every ingest
+# against the dev bucket would lock its object for years. One day, as above; the tests about the
+# horizon set their own.
 os.environ.setdefault("EVIDENCE_LOCK_HORIZON_DAYS", "1")
 
-#: The tests that take the suite's own database down the migration chain and
-#: back up. They run FIRST: since 2026-09-24 later migrations refuse their
-#: downgrade while append-only history exists (collection authorities 0083,
-#: the egress binding history 0085, the connection ledger 0086), and the
-#: suites for those features write that history by design and cannot delete
-#: it. Alphabetical order put the collection and egress suites ahead of both
-#: round trips, in CI's fresh database as well (2026-09-25). On a
-#: database an earlier run has already written to, these two still stop at
-#: those refusals: run them on a fresh one, as CI does.
+#: The tests that take the suite's own database down the migration chain and back up. They run
+#: first: later migrations refuse their downgrade while append-only history exists (collection
+#: authorities 0083, the egress binding history 0085, the connection ledger 0086), and the suites for
+#: those features write that history by design and cannot delete it. On a database an earlier run has
+#: already written to, these two still stop at those refusals: run them on a fresh one, as CI does.
 _RUN_FIRST = frozenset({
     "test_downgrade_to_0058_and_upgrade_to_head_round_trip",
     "test_downgrade_to_0067_and_upgrade_to_head_round_trip",
 })
 
 
-#: Test modules that import an optional extra at module level. A module-level
-#: `pytest.importorskip` is reported as SKIPPED even when `-m` deselects every
-#: test in it, and CI's no-skip gate refuses a skip; so on the leg that runs
-#: without the extras (`-m extras_absent`, exactly), these modules are not
-#: collected at all. On every other run they are collected as usual, so a
-#: missing extra on the full leg still skips and still fails the gate
-#: (2026-09-25).
+#: Test modules that import an optional extra at module level. A module-level `pytest.importorskip`
+#: is reported as SKIPPED even when `-m` deselects every test in it, and CI's no-skip gate refuses a
+#: skip; so on the leg that runs without the extras (`-m extras_absent`, exactly), these modules are
+#: not collected at all. On every other run they are collected as usual, so a missing extra on the
+#: full leg still skips and still fails the gate.
 _NEEDS_EXTRA = {
     "test_telegram_wire.py": "telethon",
     "test_telegram_live_check_script.py": "telethon",
@@ -87,13 +75,13 @@ def pytest_collection_modifyitems(config, items):
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
-    """After a run with failures, say so when the database's clock and this
-    host's disagree by seconds (2026-10-08). A host whose clock steps stamps
-    a row of the suites that write several within a second five or six
-    seconds ahead of the next, so a test that reads "the newest" or "the
-    oldest" of them fails now and then, alone as well as in the suite, and a
-    failure list read without this line looks like state one suite leaves for
-    another. A run with no failure says nothing (db_clock.py)."""
+    """After a run with failures, say so when the database's clock and this host's disagree by
+    seconds.
+
+    A host whose clock steps stamps rows written within a second several seconds apart, so a test
+    that reads "the newest" or "the oldest" of them fails now and then, and the failure list would
+    look like state one suite leaves for another. A run with no failure says nothing (db_clock.py).
+    """
     if not terminalreporter.stats.get("failed") or not os.environ.get("DATABASE_URL"):
         return
     try:
@@ -230,8 +218,7 @@ class InMemorySessionStore(SessionStore):
         self.by_hash[record.token_hash] = record
 
     def slide(self, session_id: UUID, at: datetime, idle_floor: datetime):
-        """Mirrors PgSessionStore.slide: only a live session moves, and
-        never backwards (authz-session-revoke-bypass, 2026-10-03)."""
+        """Mirrors PgSessionStore.slide: only a live session moves, and never backwards."""
         from dataclasses import replace
         for h, rec in list(self.by_hash.items()):
             if (rec.id == session_id and rec.revoked_at is None
@@ -276,10 +263,9 @@ def new_uuid():
 
 @pytest.fixture
 def invalid_names_fail_fast(monkeypatch):
-    """A name under `.invalid` fails to resolve at once, as RFC 6761 asks of
-    a resolver, instead of through the host's: on the development machine
-    that asked upstream and answered after 11 seconds, and a test that
-    "does not touch the network" sent a DNS query out (2026-10-07). Every other name resolves as before."""
+    """A name under `.invalid` fails to resolve at once, as RFC 6761 asks of a resolver, instead of
+    through the host's, which can take seconds and sends a DNS query out from a test that "does not
+    touch the network". Every other name resolves as before."""
     import socket
 
     real = socket.getaddrinfo

@@ -1,260 +1,72 @@
-"""Poll every source whose OWN schedule says it is due. This is the cron entry.
+"""Poll every source whose own schedule says it is due: one pass, as the collector's child.
 
-Since 2026-10-02 (A collector process) it runs inside the collector:
-`scripts/collector.py` starts one pass of it on its schedule, in the one
-process that holds the persona key, and in production it refuses to run
-anywhere else. Until then there was no collector process, deliberately --
-decisions 30 and 46, and `collection.py`'s own "what is NOT built"
-note: a collector that runs itself on a timer nobody watches is how a
-persona gets burnt at 3am. That reasoning still holds of the cadence
-below: the collector LOOKS on a schedule, and each source's own jittered
-`next_due_at` decides when it is polled. `due_sources()` reports and `run_once()` acts,
-and until now the only thing that called either outside a test was the
-Feeds pane, which needs an analyst with `collection.run` sitting at a
-keyboard. So a source with a five-minute interval was polled when somebody
-happened to press a button, and a watch on a live forum was as timely as
-whoever was awake.
-
-This script is the honest worker for that, in `notify_drain.py`'s shape:
-one process, one connection, one pass, an exit code.
+`scripts/collector.py` starts one pass on its schedule, in the one process that holds the
+persona key, and in production this refuses to run anywhere else. One process, one connection,
+one pass, an exit code, in `notify_drain.py`'s shape. `.env.local` is loaded as every script here
+loads it (`_env.load_env_local`), and an exported DATABASE_URL still wins.
 
     python scripts/collection_poll.py
-    python scripts/collection_poll.py --dry-run      # list, touch nothing
+    python scripts/collection_poll.py --dry-run      # list, poll nothing
     python scripts/collection_poll.py --limit 5      # bound this pass
 
-Cron, every five minutes, from the install directory:
+## The pass's cadence is not the collection's
 
-    */5 * * * *  cd /opt/noctornal && apps/api/.venv/bin/python \\
-                 scripts/collection_poll.py >> /var/log/noctornal/collection.log 2>&1
+Each source carries its own `poll_interval_s`, its own `jitter_pct` and a stored `next_due_at`
+that `_reschedule` rolls once when a poll finishes, and this script polls exactly what
+`due_sources()` reports ready. Five minutes is a resolution, not an interval, so most passes poll
+nothing. A runner that polled everything it could see would flatten every source's jitter onto
+its own period and hand a forum admin the evenly spaced signature in an access log that the
+jitter hides (docs/04), and nothing would report that the timing became regular.
 
-Windows Task Scheduler: the same command, from the same directory, with
-the venv's python.exe. `.env.local` at the project root is loaded exactly
-as every other script here loads it (`_env.load_env_local`), so the entry
-needs no environment of its own; an exported DATABASE_URL still wins.
+## The readiness register
 
-## The cadence of the CRON is not the cadence of the COLLECTION
+The pass is refused while any blocking readiness check fails (`readiness.BLOCKING_CHECKS`),
+exactly as `POST /collection/sources/{id}/run` is: the unattended path must not collect where
+the attended one may not. It is asked once per pass, before `due_sources()`: `blocking_failures`
+runs only the cheap probes, and the answer is about the deployment, not a source. `--dry-run` is
+refused too, because `due_sources()` writes. There is no bypass switch: it would live in a
+crontab line, set while every check is red and never edited again. A refused pass prints its
+refusal and no counters line, so it cannot read as a quiet pass.
 
-This is the thing to understand before changing anything here, because
-every instinct about cron entries is wrong for this one.
+## Bounds
 
-docs/04, general hygiene: "Randomised intervals with jitter, never a clean
-cron cadence". Each source carries its own `poll_interval_s`, its own
-`jitter_pct` and a stored `next_due_at` that `_reschedule` rolls ONCE when
-a poll finishes. This script imposes no rhythm of its own: it asks
-`due_sources()` what is ready at this instant and polls exactly that.
+`--limit` caps the requests leaving personas for third-party sites in one pass. `--max-seconds`
+stops a pass starting polls once it has run that long, and reserves a long poll's budget
+(`CollectionService.poll_seconds`) except for the first poll of a pass; a poll under way is never
+abandoned. A source not reached keeps its overdue `next_due_at` and sorts first next pass
+(`deferred`), so the cost is delay, never omission; a `deferred` above zero on every pass usually
+means a source that answers slowly. A source whose budget alone exceeds `--max-seconds` is
+counted `too_long`. `--max-seconds 0` is no limit.
 
-So the five minutes above is a RESOLUTION, not an interval. Most passes
-will report `due=0` and poll nothing at all, and that is the design
-working rather than a broken cron -- six hours is seventy-two of these
-passes, so such a source is due on one of them and quiet on the other
-seventy-one. Run it often and let the sources decide.
+## What `--dry-run` still writes
 
-The failure this arrangement exists to prevent is a runner that wakes up
-and polls everything it can see. That flattens every source's jitter back
-onto the cron's period, and hands a forum admin the clean, evenly spaced
-signature in an access log that the jitter was there to hide -- one
-afternoon's work to spot, and a burnt persona is expensive and slow to
-replace. It would also be invisible: the polls succeed, the data arrives,
-and nothing in this system reports that the timing became regular.
+It polls nothing, but `due_sources()` persists a `next_due_at` for a source that has none (or it
+would never be due), and moves the `next_due_at` of a source held outside its persona's active
+hours to the window's opening plus a jitter of its own.
 
-## It refuses on the readiness register, exactly as the route does
+## Output and exit codes
 
-`POST /collection/sources/{id}/run` will not poll while any BLOCKING
-readiness check fails (`readiness.BLOCKING_CHECKS`: no prohibited-content
-policy and no named person to escalate to, retention periods still on
-their seeded placeholders, no security officer to review a break-glass or
-read the audit trail, no sample origin so nothing collected can be
-retrieved). This script asks the same question, once, before
-`due_sources()` is asked anything, and refuses the whole pass on the same
-answer.
+One counters line (`due=7 selected=7 polled=6 ...`). On a pass that polls, polled + skipped +
+deferred + failed + blocked + rate_limited + too_long == selected; a dry run reports polled=0.
+Sources are named by id only and a poll's error text is never printed: the log has no
+classification, and the details are in `collect.collection_run`, redacted, behind the API's
+ceiling.
 
-The gate was on the route alone when it was written, and that made the
-register's central claim false rather than merely incomplete. The route
-is the ATTENDED path: an analyst pressed a button and is reading the
-reply. This is the unattended one -- infra/production/compose.yml runs it
-every five minutes, against every source that is due, with nobody reading
-anything. A control that stops the analyst and waves the cron through has
-refused the collection somebody was watching and permitted the collection
-nobody was, which is worse than not having the control, because the
-register would go on claiming that a red check stops a poll.
+1 when a poll failed or was blocked (a person is needed), a source is too long for the pass, or
+the pass was refused on the register; 0 otherwise. A rate-limited poll leaves the exit alone.
+2 when, under NOCTORNAL_ENV=production, the environment holds a published credential or the
+schema owner's password or DSN: one line per variable on stderr, never a value, before anything
+else is read (`config.JOB_REFUSAL_EXIT`, as for every job). It is 2 and not 1 so that an alert
+can tell a job that would not start from a pass that ran and failed.
 
-One call per pass, not one per source. `blocking_failures` runs the four
-blocking probes and nothing else -- no Redis PING, no MinIO round trip --
-and the question is about the DEPLOYMENT, so its answer cannot differ
-between two sources in the same pass.
-
-`--dry-run` is refused too, and the refusal is the honest answer to what
-it asks: on a deployment in this state the list of sources that would be
-polled is empty. It also keeps the gate a single path. An exemption here
-would leave `due_sources()` running -- which writes, see below -- on a
-deployment that may not collect, and an exemption is the thing a later
-change widens.
-
-There is deliberately no bypass switch, under any spelling. A flag that
-skipped this gate would live in a crontab line, written once, by whoever
-was setting the machine up, at exactly the moment every check is red and
-getting collection to run is the job in front of them -- and then never
-edited again, with nothing anywhere reporting that the gate is off. That
-is precisely the quiet green the blocking tier was created to end,
-reintroduced with a switch on it. The way to make this script poll is to
-settle the four.
-
-## `--limit`, and why a source it does not reach is not lost
-
-One pass polls at most `--limit` sources, `MAX_PER_DRAIN`'s reasoning in
-`transports.py` applied to fetches instead of mail: the cap bounds the
-blast radius of anything that makes a great many sources due at once --
-an operator adding forty feeds, a restore, a clock jump -- when the thing
-being bounded is requests leaving personas towards third-party sites.
-
-Nothing starves. A source that is not reached keeps its `next_due_at`,
-which is already in the past, and `due_sources` orders by it, so the most
-overdue are first on the next pass. The cost of the cap is delay, never
-omission.
-
-## `--max-seconds`, and why a pass has a clock as well as a count
-
-`--limit` bounds how many polls a pass makes and says nothing about how
-long they take. Each fetch is held to `collection.MAX_FETCH_SECONDS`, but
-twenty five sources at a minute each is still most of half an hour, and
-infra/production/compose.yml runs `notify_drain.py` in the same loop,
-after this pass returns. Before c2 (2026-09-24) one source drip-feeding
-its answer held a pass for ever and stopped every notification with it.
-So a pass stops STARTING polls once it has run `--max-seconds`, and the
-sources it did not reach are counted `deferred` and are, exactly as
-above, the most overdue on the next pass. A poll already under way is
-never abandoned by this: it ends inside its own fetch allowance.
-
-Since 2026-09-24 the clock also RESERVES a long poll's budget: a
-forum or Telegram poll may take its adapter's whole `run_seconds`
-(`CollectionService.poll_seconds`), so a poll is not started when the time
-the pass has run plus that budget would pass `--max-seconds`, except the
-first poll of a pass, which always starts when it fits alone. A source whose
-budget alone is longer than `--max-seconds` is never started and is counted
-`too_long`, on its own line with the seconds it needs, and the pass exits 1:
-an operator who set the clock below an adapter's budget is told, rather than
-the source being deferred for ever. RSS polls reserve nothing, so their
-passes are clocked exactly as before. `--max-seconds 0` is still no limit.
-
-## The two writes `--dry-run` cannot avoid
-
-It polls nothing: no fetch, no `collection_run` row, no reschedule of
-anything it lists. But `due_sources()` itself persists a `next_due_at` for
-a source that has none -- one added before migration 0042, or one whose
-schedule was never set -- because a missing schedule read as "not due" is
-a source that is never polled at all. That roll happens on any call, dry
-or not, and it is what makes such a source due in the first place. Saying
-"touches nothing" would be a lie in exactly the case an operator reaches
-for a dry run: a newly added source that has not been collected from.
-
-The second (2026-09-24): a source held only because its persona is
-outside its active hours has its `next_due_at` moved to the window's
-opening plus a jitter of its own, so the polls after a night's rest do not
-all fire on the first pass after the opening, at the same time every day.
-
-## What waits on a person is not polled
-
-`due_sources()` leaves out a source that would be refused before any
-request (no ceiling declared, no exit bound), whose persona cannot be used
-now, or that no confirmed collection authority covers. Such a source is not
-polled and not rescheduled, so it cannot fill this pass's `--limit`; it is
-counted `held` and never makes the exit non-zero, because nothing failed:
-somebody has to act, and the Feeds pane lists what and why.
-
-## What it prints, and what it will not print
-
-One counters line, `due=7 selected=7 polled=6 ...`, in `notify_drain.py`'s
-shape. `due` is what was ready, `selected` is what `--limit` left of it,
-and on a pass that actually polls, `polled + skipped + deferred + failed +
-blocked + rate_limited + too_long == selected`, so a quiet pass
-(`due=0`) is distinguishable at a glance from one that was locked out
-(`skipped=selected`), one that ran out of time (`deferred` above zero) or
-one that is failing. A `--dry-run`
-selects and then does nothing, so it reports `polled=0` and that sum is
-the one thing it does not satisfy.
-
-A pass refused on the register prints its refusal and NO counters line at
-all. `due=0` would be indistinguishable from the quiet pass above, and a
-refusal that reads as a quiet Tuesday is a refusal nobody notices.
-
-Sources are named by ID and by nothing else, and a poll's error text is
-never printed. That is not brevity. This runner reads with no clearance
-ceiling, because a collector has no user and one that saw only TLP:CLEAR
-sources would silently collect nothing; a log file has no classification,
-no compartments and no retention, and it is the artefact that gets shipped
-to an aggregator and pasted into tickets. A source's name and base URL are
-precisely what its label protects, and the SSRF guard's messages quote the
-hostname. Every one of those details is in `collect.collection_run` for
-any poll that got as far as a run row -- redacted, behind the API's own
-ceiling, which is where it belongs -- so the run id is what this prints
-instead. The exit code below names the one failure that reaches no row at
-all, and therefore has nowhere else to be read.
-
-## The exit code
-
-1 when a poll FAILED in this pass, when a poll was BLOCKED (a person is
-needed: an authority to confirm, an exit to bind, a suspended persona to
-replace), when a source is too long for the pass, or when the pass was
-REFUSED on the readiness register, 0 otherwise. A RATE_LIMITED poll leaves
-the exit alone: the site asked for a wait and got one. The exit code is the one channel a cron
-job has back to its operator, and a pass that failed every source and
-exited 0 would be a failure reported as nothing at all.
-
-2 when, under NOCTORNAL_ENV=production, the environment is one this job will
-not run on (docs/17 F52 and infra-12, 2026-10-02 and 2026-10-03): a
-credential that carries a value this repository publishes, or the schema
-owner's password or DSN, which no runtime process may hold. The pass prints
-one line per variable on stderr, `collection_poll: refusing to run: <NAME>
-...`, naming the variable and never its value, and touches nothing: it
-refuses before it reads its arguments, connects or asks the register
-anything, which is the one helper every job calls first
-(`config.refuse_unsafe_job_environment`), as the API does at boot.
-
-It is 2 and not 1, the register's code, because 1 here means a pass RAN and
-something in it failed, and an alert should be able to tell that from a job
-that would not start. `argparse` spends 2 on a usage error as well, and the
-first words of the line say which it was; to an alert both mean the same
-thing: this pass did not collect, and it will not start collecting on its
-own. Every job gives this refusal the same code (`config.JOB_REFUSAL_EXIT`).
-
-A non-zero exit does NOT mean the runner stopped: every selected source
-was attempted, and a poll that got as far as its `collection_run` row is
-in the ledger with its redacted reason and raised `consecutive_failures`
-on the source, so a genuinely broken parser reaches DEGRADED and then
-BROKEN on the health rollup.
-
-One counted failure leaves no trace anywhere but this log, and it is
-worth recognising because it is the one that does not heal. `run_once`
-refuses a source whose `parser_key` has no adapter in this build, and one
-deleted between the listing and the poll, BEFORE it inserts the run row:
-so there is nothing to read back through the API, `consecutive_failures`
-does not move, and the health rollup goes on calling that source OK. A
-missing adapter is a configuration state rather than a fault that passes,
-so it fails identically on every pass and holds the exit code at 1 until
-somebody changes the source. `failed` that never falls, with no matching
-run rows, is that and not a site that is down.
-
-`skipped` is NOT a failure and does not affect the exit code. It means
-another runner -- a second cron, or an analyst who pressed Run -- holds
-that source's advisory lock, so this pass correctly did nothing to it. A
-cron that overlaps itself for a minute would otherwise mail its operator
-about a system that is working exactly as designed, and an alert that
-cries wolf is the alert people turn off.
-
-`deferred` is not a failure either, for the same reason: nothing was
-tried, and the sources it counts are first on the next pass. A `deferred`
-that is above zero on every pass is worth reading, though, because it
-means passes routinely run out of time, and the usual cause is a source
-that answers slowly on every poll.
-
-`interrupted` is not a failure of this pass and does not affect the exit
-code. It counts runs an earlier pass left RUNNING because its process was
-stopped where Python could not finish them (the collector stops the poll
-child with a terminate request the child does not catch): they are marked
-FAILED with the class Interrupted before this pass looks at what is due, only
-when no runner holds their source's lock, and the source is not counted as
-having failed. The source's schedule was never rolled, so the same pass polls
-it again. A `--dry-run` marks nothing.
+A non-zero exit does not mean the runner stopped: every selected source was tried, and a failed
+poll's run row raises `consecutive_failures` towards DEGRADED and BROKEN. The exception is a
+source with no adapter for its `parser_key`, or one deleted mid-pass: refused before a run row
+exists, it fails identically every pass, so a `failed` that never falls with no matching run rows
+is that. `skipped` (another runner holds the source's lock), `deferred`, `held` (waiting on a
+person: no ceiling, no exit, no usable persona or no confirmed authority) and `interrupted` (runs
+an earlier pass left RUNNING, marked FAILED as Interrupted when no runner holds their lock, and
+polled again) are not failures.
 """
 from __future__ import annotations
 
@@ -288,11 +100,10 @@ load_env_local()
 
 
 def connect():
-    """Every script connects as the system role (S1, 2026-09-25). A
-    script serves no request and binds no user, so on the request role it
-    would see nothing under row-level security; `db.connect_system` refuses
-    rather than hand it a connection that silently sees part of the data.
-    Named `connect` so the tests that replace it still find it."""
+    """Every script connects as the system role. A script serves no request and binds no user,
+    so on the request role it would see nothing under row-level security; `db.connect_system`
+    refuses rather than hand it a connection that silently sees part of the data. Named
+    `connect` so the tests that replace it still find it."""
     return connect_system(SystemPurpose.COLLECTION)
 
 #: Sources polled in one pass. Small on purpose: what is being bounded is
@@ -301,31 +112,22 @@ def connect():
 #: the next pass takes (see the `--limit` note above).
 DEFAULT_LIMIT = 25
 
-#: How long one pass keeps STARTING polls (see `--max-seconds` above).
-#: Four minutes, so that with the one fetch still in flight a pass ends
-#: inside the five minute resolution this docstring recommends, and the
-#: compose loop's notification drain is never more than a pass behind
-#: (c2, 2026-09-24).
+#: How long one pass keeps starting polls (see `--max-seconds` above). Four minutes, so that with
+#: one fetch still in flight a pass ends inside the five-minute resolution.
 DEFAULT_MAX_SECONDS = 240
 
-#: The pass polls as the SYSTEM (2026-09-24). A poll now audits
-#: persona use and records who asked for it on the run, and `actor_id=None`
-#: is how both say "the system": the run's `requested_by` is NULL and every
-#: audit row it causes has actor_kind SYSTEM. A nil UUID recorded as a USER
-#: would be a person who does not exist; naming a real user would put that
-#: user on work they did not ask for.
+#: The pass polls as the system. A poll audits persona use and records who asked for it on the
+#: run, and `actor_id=None` is how both say "the system": the run's `requested_by` is NULL and
+#: every audit row it causes has actor_kind SYSTEM. A nil UUID would record a user who does not
+#: exist, and a real user's id would put that user on work they did not ask for.
 SYSTEM_ACTOR = None
 
 
 def main() -> int:
-    # First, before anything is read or connected to (docs/17 F52 and infra-12,
-    # 2026-10-02 and 2026-10-03): under NOCTORNAL_ENV=production a published
-    # credential or the schema owner's refuses the pass, the same two refusals
-    # every cron job makes through the one helper (config.py); the persona
-    # half is not asked of this job, which runs as the collector's child and
-    # makes the collector's own half below. Before the
-    # arguments are read, and a dry run refuses too, for the reason the
-    # readiness gate below gives. See "The exit code" above for 2.
+    # First, before the arguments are read or anything is connected to, so a dry run refuses
+    # too: in production a published credential or the schema owner's refuses the pass, as for
+    # every job (config.py). The persona half is not asked of this job, which runs as the
+    # collector's child and makes the collector's own half below. Exit 2 (see the docstring).
     refusals = refuse_unsafe_job_environment("collection_poll", holds_persona_key=True)
     if refusals:
         print("\n".join(refusals), file=sys.stderr)
@@ -351,14 +153,10 @@ def main() -> int:
              f"are counted deferred, stay due and are first on the next "
              f"pass.")
     args = parser.parse_args()
-    # S2, the egress proxy (2026-09-24). A production cron with
-    # outbound uses and no egress proxy stops here, as the API does.
-    # A collector process (2026-10-02): in production a pass runs in the
-    # collector, the one process that holds the persona key and carries
-    # NOCTORNAL_COLLECTOR; anywhere else a persona's poll could not open
-    # its credential, and the cron loop must not hold it. Each refusal is
-    # this job's refusal, exit 2 with its sentence, where it was a traceback
-    # and exit 1, the code of a pass that ran (2026-10-07).
+    # In production a pass with outbound uses and no egress proxy stops here, as the API does,
+    # and so does a pass outside the collector, the one process that holds the persona key and
+    # carries NOCTORNAL_COLLECTOR. Each is this job's refusal: exit 2 with its sentence, not a
+    # traceback and the 1 of a pass that ran.
     from noctornal_api.config import enforce_persona_key_boundary
     from noctornal_api.egress_routes import enforce_production_egress
     try:
@@ -389,13 +187,9 @@ def main() -> int:
                 "watch_hits": 0, "warnings": 0, "interrupted": 0}
     conn = connect()
     try:
-        # ONCE per pass, and before `due_sources()` is asked anything, so
-        # nothing here has read a source or written a `next_due_at` on a
-        # deployment that may not collect at all. The four probes are the
-        # cheap tier (`blocking_failures` runs no Redis PING and no MinIO
-        # round trip), and the question is about this DEPLOYMENT, so
-        # re-asking it per source would run them once per due row to get
-        # the same list back.
+        # Once per pass, before `due_sources()` reads a source or writes a `next_due_at` on a
+        # deployment that may not collect. The probes are the cheap tier (no Redis PING, no
+        # MinIO round trip), and the answer is about the deployment, not a source.
         unsettled = blocking_failures(conn)
         if unsettled:
             # The route's own sentence, deliberately word for word: an
@@ -420,14 +214,12 @@ def main() -> int:
             # Not a failure: it is the previous pass that was cut short.
             counters["interrupted"] = getattr(
                 service, "mark_interrupted_runs", lambda: 0)()
-        # No `clearance`, which is the worker's reading and applies no
-        # filter: a collector has no user, and a NULL ceiling read as "see
-        # nothing" would be a runner that polls nothing and reports no
-        # error. Nothing below prints what that privilege lets it see.
-        # Held sources were left out of `due` and are counted, not polled.
-        # Both from ONE reading of the schedule (2026-09-25):
-        # the first reading moves a source resting outside its persona's
-        # hours, so a second one no longer counted it held.
+        # No `clearance`, which is the worker's reading and applies no filter: a collector has no
+        # user, and a NULL ceiling read as "see nothing" would poll nothing and report no error.
+        # Nothing below prints what that privilege lets it see. Held sources are left out of
+        # `due` and counted, not polled. Both come from one reading of the schedule: a reading
+        # moves a source resting outside its persona's hours, so a second would not count it
+        # held.
         schedule = getattr(service, "due_and_held", None)
         if schedule is not None:
             due, held = schedule()
@@ -463,11 +255,9 @@ def main() -> int:
             elapsed = time.monotonic() - began
             if args.max_seconds and (elapsed >= args.max_seconds or (
                     started and elapsed + needs > args.max_seconds)):
-                # Out of time for this pass. Nothing is attempted, so
-                # nothing failed: the source keeps its overdue
-                # `next_due_at` and sorts first next time (c2, 2026-09-24).
-                # A long poll's budget is reserved, except for the first
-                # poll of a pass, which starts when it fits alone.
+                # Out of time for this pass. Nothing is attempted, so nothing failed: the source
+                # keeps its overdue `next_due_at` and sorts first next time. A long poll's budget
+                # is reserved, except for a pass's first poll, which starts when it fits alone.
                 counters["deferred"] += 1
                 print(f"deferred {source['id']}  the pass ran out of time")
                 continue
@@ -488,24 +278,17 @@ def main() -> int:
                 print(f"skipped {source['id']}  waits on a person or its hours")
                 continue
             except CollectionError as exc:
-                # A source with no adapter for its `parser_key`, or one
-                # deleted between the listing and the poll. No run row
-                # exists for either, so the class name is all there is --
-                # and it is not sensitive, where the message may name the
-                # source.
+                # A source with no adapter for its `parser_key`, or one deleted between the
+                # listing and the poll. No run row exists for either, so the class name is all
+                # there is, and unlike the message it cannot name the source.
                 counters["failed"] += 1
                 print(f"failed  {source['id']}  {type(exc).__name__}")
                 continue
             except Exception as exc:  # noqa: BLE001 - counted, not fatal
-                # `run_once` re-raises a failure to PERSIST what it fetched,
-                # on purpose: that is a defect, not a site being down, and
-                # the caller must not be told the poll succeeded. Caught
-                # here rather than allowed out of `main` because one such
-                # source would otherwise end the whole pass -- and being
-                # the most overdue it sorts first, so the runner would stop
-                # at the same row every five minutes, for ever, and every
-                # other source would go uncollected. The FAILED run row is
-                # already written, with the redacted reason.
+                # `run_once` re-raises a failure to persist what it fetched: a defect, not a site
+                # being down. Caught here because one such source, sorting first as the most
+                # overdue, would otherwise end every pass at the same row and starve every other
+                # source. The FAILED run row is already written, with the redacted reason.
                 counters["failed"] += 1
                 print(f"failed  {source['id']}  {type(exc).__name__}")
                 continue
@@ -538,14 +321,9 @@ def main() -> int:
 
     print(" ".join(f"{key}={value}" for key, value in counters.items()))
     if args.dry_run:
-        # A dry run polled nothing, so it can have failed nothing. Reporting
-        # the previous pass's health here would make `--dry-run` unusable
-        # from a shell that stops on a non-zero exit.
-        #
-        # A register refusal still exits 1 from a dry run, and returns above
-        # without reaching this line. That is not this pass's health: it is
-        # the statement that the invocation did not happen, which a shell
-        # that stops on it has stopped for exactly the right reason.
+        # A dry run polled nothing, so it can have failed nothing, and it must stay usable from
+        # a shell that stops on a non-zero exit. A register refusal still exits 1 from a dry
+        # run, returning above: the invocation did not happen, and such a shell should stop.
         return 0
     return 1 if (counters["failed"] or counters["blocked"]
                  or counters["too_long"]) else 0

@@ -1,21 +1,16 @@
-"""The isolated analysis worker and the runner that chooses it (docs/17
-F42, 2026-10-02).
+"""The isolated analysis worker and the runner that chooses it (docs/17 F42).
 
-Static triage and forum parsing hand hostile bytes to a bounded child.
-In production that child runs in a container with no secrets and no
-network, reached over a Unix socket; here the worker is the real
-`analysis_worker.Worker` on a loopback TCP listener standing in for the
-socket (Windows' CPython has no AF_UNIX), so every test below runs on
-every platform. The same wire on a real Unix socket, with the worker as
-its own process, is test_analysis_worker_unix.py; the container is
+Static triage and forum parsing hand hostile bytes to a bounded child. In production that child runs
+in a container with no secrets and no network, reached over a Unix socket; here the worker is the real
+`analysis_worker.Worker` on a loopback TCP listener standing in for the socket (Windows' CPython has no
+AF_UNIX), so every test below runs on every platform. The same wire on a real Unix socket, with the
+worker as its own process, is test_analysis_worker_unix.py; the container is
 infra/production/compose.yml, held by test_analysis_worker_compose.py.
 
-Covered: the choice and its refusals (production never falls back to a
-local child), the same child answering through the worker as here, a
-hostile child that hangs, floods or exhausts memory, a worker that dies
-mid-request or answers garbage, a slow or malformed peer, oversize frames
-both ways, concurrent requests, the slot and connection caps, and that no
-secret reaches the worker or its child.
+Covered: the choice and its refusals (production never falls back to a local child), the same child
+answering through the worker as here, a hostile child that hangs, floods or exhausts memory, a worker
+that dies mid-request or answers garbage, a slow or malformed peer, oversize frames both ways,
+concurrent requests, the slot and connection caps, and that no secret reaches the worker or its child.
 
 Pure: no database. The children are real processes.
 """
@@ -165,8 +160,8 @@ def fresh_verdicts():
 SUPERVISED = {"euid": 0, "pid": 7, "capabilities": ["kill", "setgid", "setuid"],
               "no_new_privileges": True, "read_only_root": True, "pids_max": 128,
               "state_left_open": []}
-#: What a worker started as compose.yml starts it says of itself, beside
-#: what the in-process stand-in reports (F42 review, 2026-10-02).
+#: What a worker started as compose.yml starts it says of itself, beside what the in-process stand-in
+#: reports.
 CLEAN_ACCOUNT = {"environment_keys": ["HOME", "PATH", ar.SOCKET_ENV],
                  "environment_count": 3, "uid": 0,
                  "children": {"isolation": "own_uid", "uids": [10100, 10101],
@@ -261,9 +256,8 @@ def test_an_unusable_setting_is_refused_by_name_never_by_value(monkeypatch, env,
 
 
 def test_production_boot_refuses_a_malformed_setting_and_not_an_absent_one():
-    """An unset socket refuses every analysis at the point of use and
-    readiness says so; it does not stop the console starting. A value SET
-    and unusable is refused at boot, by its name (the F42 decision)."""
+    """An unset socket refuses every analysis at the point of use and readiness says so; it does not
+    stop the console starting. A value set and unusable is refused at boot, by its name."""
     from noctornal_api.config import verify_environment
     base = {"NOCTORNAL_ENV": "production"}
     assert not any("NOCTORNAL_ANALYSIS" in p for p in verify_environment(base))
@@ -736,8 +730,8 @@ def test_the_worker_refuses_a_variable_nobody_named(monkeypatch):
 
 
 def test_a_secret_carrying_the_workers_prefix_is_still_foreign():
-    """F42 review (2026-10-02): the allow-list named a prefix, so any
-    NOCTORNAL_ANALYSIS_ name passed. It names the three settings now."""
+    """The allow-list names the three settings, not a prefix, so any other NOCTORNAL_ANALYSIS_ name is
+    foreign."""
     sneaky = ["NOCTORNAL_ANALYSIS_TOKEN", "NOCTORNAL_ANALYSIS_LOCAL",
               "NOCTORNAL_ANALYSIS_WORKER_SECRET"]
     assert ar.foreign_environment(sneaky + sorted(ar.WORKER_OWN_ENV)) == sorted(sneaky)
@@ -759,20 +753,18 @@ def test_the_worker_refuses_a_missing_socket(monkeypatch):
     ({"no_new_privileges": None}, "no-new-privileges"),
     ({"pid": 1}, "init: true"),
     ({"pids_max": 64}, "pids limit is 64"),
-    # F42 verify 3 (2026-10-03): absent, unreadable or enormous used to start.
+    # Absent, unreadable or enormous must not start.
     ({"pids_max": None}, "no pids limit it can read"),
     ({"pids_max": 100000}, "above the"),
-    # F42 verify 2 (2026-10-03): state a child could leave behind.
+    # State a child could leave behind.
     ({"state_left_open": None}, "could not read whether a child can leave"),
     ({"state_left_open": ["kernel.shmmax", "/tmp"]}, "kernel.shmmax, /tmp"),
 ])
 def test_a_supervising_worker_starts_only_as_compose_starts_it(monkeypatch, change,
                                                               says):
-    """F42 review (2026-10-02): each child is a user of its own, which
-    needs root with setuid and setgid (and kill, to stop a child of
-    another uid), no other capability, no-new-privileges so no setuid
-    program hands one back, an init to reap, and room for every slot's
-    tasks."""
+    """Each child is a user of its own, which needs root with setuid and setgid (and kill, to stop a
+    child of another uid), no other capability, no-new-privileges so no setuid program hands one back,
+    an init to reap, and room for every slot's tasks."""
     monkeypatch.setattr(ar, "HAS_UNIX", True)
     env = {ar.SOCKET_ENV: SOCK}
     assert aw.start_problems(env, facts=SUPERVISED) == []
@@ -790,9 +782,8 @@ def test_the_pids_limit_must_hold_every_slot_at_its_task_limit(monkeypatch):
     assert aw.start_problems(env, facts={**SUPERVISED, "pids_max": need}) == []
     # compose.yml's 128 holds its two slots, and is under the ceiling.
     assert aw.pids_needed(2) <= 128 <= aw.pids_ceiling(2)
-    # F42 verify 3 (2026-10-03): "max" (no limit) is read as None, which
-    # used to refuse nothing; an enormous limit did not either. Both do now,
-    # and so does the ceiling's edge.
+    # "max" (no limit) is read as None and refused; so is an enormous limit, and so is the ceiling's
+    # edge.
     ceiling = aw.pids_ceiling(16)
     assert aw.start_problems(env, facts={**SUPERVISED, "pids_max": ceiling}) == []
     for bad in (None, ceiling + 1, 38393, True, "128"):
@@ -883,10 +874,9 @@ def test_a_triage_pass_with_no_worker_touches_nothing(monkeypatch):
 
 
 def test_an_on_demand_run_and_a_compile_wait_for_the_worker(monkeypatch):
-    """Both functions swallow every exception (they run in the background
-    with no caller), so a stub that raised could not fail this test: the
-    F42 review's mutation removing both refusals passed it. The stub
-    records instead, and the control below shows it is reached."""
+    """Both functions swallow every exception (they run in the background with no caller), so a stub
+    that raised could not fail this test. The stub records instead, and the control below shows it is
+    reached."""
     from uuid import uuid4
 
     from noctornal_api import db
@@ -1021,7 +1011,7 @@ def test_readiness_fails_a_silent_worker(monkeypatch, isolated):
     ({"environment_count": 500}, "whole environment"),
     ({"versions": {"pefile": "0.0.1", "yara_x": None}}, "different parser versions"),
     ({"max_request_bytes": 1 << 20}, "NOCTORNAL_ANALYSIS_WORKER_MAX_BYTES"),
-    # F42 review (2026-10-02): each of these passed, or was never asked.
+    # Each of these must be judged, not passed or left unasked.
     ({"network_interfaces": ["eth0", "lo"]}, "besides loopback (eth0)"),
     ({"network_interfaces": None}, "did not report its network interfaces"),
     ({"network_interfaces": "lo"}, "did not report its network interfaces"),
@@ -1038,7 +1028,7 @@ def test_readiness_fails_a_silent_worker(monkeypatch, isolated):
     ({"no_new_privileges": None}, "no-new-privileges"),
     ({"read_only_root": False}, "writable"),
     ({"read_only_root": None}, "writable"),
-    # F42 verify round (2026-10-03): each of these was claimed and not judged.
+    # Each of these must be judged, not just claimed.
     ({"pids_max": None}, "no pids limit it can read"),
     ({"pids_max": 64}, "pids limit is 64"),
     ({"pids_max": 38393}, "above the"),
@@ -1167,10 +1157,7 @@ def test_readiness_fails_a_worker_whose_child_reaches_the_database(monkeypatch, 
     assert "network_mode" in check.action
 
 
-# ---------------------------------------------------------------------------
-# F42 review (2026-10-02): what a hostile child, or a worker in trouble,
-# could do to everybody else
-# ---------------------------------------------------------------------------
+# What a hostile child, or a worker in trouble, could do to everybody else.
 
 def test_the_accept_loop_survives_a_thread_that_cannot_start(monkeypatch):
     """A child that spent the container's tasks made Thread.start raise in
@@ -1270,9 +1257,8 @@ def test_the_worker_is_asked_once_for_many_sources_and_briefly(monkeypatch):
 
 
 def test_payloads_are_read_only_once_a_slot_is_held(tmp_path, monkeypatch):
-    """At most `concurrency` payloads are in memory: a request waiting for
-    a slot has had none of its payload read (the F42 review's mutation
-    reading it first passed every test)."""
+    """At most `concurrency` payloads are in memory: a request waiting for a slot has had none of its
+    payload read."""
     monkeypatch.setitem(aw.KIND_ARGV, "lab_static", _script(tmp_path, "echo.py", _ECHO))
     reads = []
     real_recv = ar.recv_exact
@@ -1301,10 +1287,8 @@ def test_payloads_are_read_only_once_a_slot_is_held(tmp_path, monkeypatch):
 
 
 def test_a_peer_that_stalls_mid_frame_is_dropped_at_the_idle_limit(monkeypatch):
-    """The idle limit, not the deadline, drops a peer that stops sending:
-    the deadline here is 30 seconds and the idle limit half of one (the
-    review's mutation removing the idle limit passed every test, because
-    they shrank both)."""
+    """The idle limit, not the deadline, drops a peer that stops sending: the deadline here is 30
+    seconds and the idle limit half of one."""
     monkeypatch.setattr(ar, "IDLE_S", 0.5)
     assert ar.TRANSFER_BASE_S >= 30
     with tcp_worker() as (_w, connect):
@@ -1341,8 +1325,8 @@ def test_a_worker_failure_during_a_poll_is_not_parser_drift(reason):
 
 
 def test_a_busy_worker_during_a_poll_is_reported_busy_not_drift(monkeypatch, isolated):
-    """The review's reproduction: one slot, held; the page goes to the
-    worker and the poll ends BLOCKED, saying the worker was busy."""
+    """One slot, held: the page goes to the worker and the poll ends BLOCKED, saying the worker was
+    busy."""
     from test_forum_adapters import FakeContext
     monkeypatch.setattr(ar, "QUEUE_WAIT_S", 0.5)
     with tcp_worker(concurrency=1) as (w, connect):
@@ -1415,9 +1399,8 @@ def test_a_pass_stops_at_the_first_interrupted_run(monkeypatch):
 
 
 def test_a_yara_scan_the_worker_never_ran_is_not_a_crashed_scan(monkeypatch):
-    """The review: a refused, busy or unreachable worker was stored on the
-    sample as a crashed scan. It interrupts the run instead; a child that
-    crashed is still a crashed scan."""
+    """A refused, busy or unreachable worker is not stored on the sample as a crashed scan; it
+    interrupts the run instead. A child that crashed is still a crashed scan."""
     from uuid import uuid4
 
     from noctornal_api import yara_rules
@@ -1519,8 +1502,7 @@ def test_a_supervising_worker_runs_each_slot_as_its_uid_and_empties_it_first(
 
     def run_local(header, payloads=(), **kw):
         events.append(("run", kw["user"], kw["max_tasks"]))
-        # run_local calls the worker's reap once the child is gone and before
-        # it waits on any pipe (F42 verify 1, 2026-10-03).
+        # run_local calls the worker's reap once the child is gone and before it waits on any pipe.
         kw["reap"]()
         return ar.ChildResult(True, b'{"ok":true}', returncode=0)
 
@@ -1567,9 +1549,7 @@ def test_a_worker_with_shared_children_says_so():
         listener.close()
     assert status["children"] == {"isolation": "shared_uid", "uids": None,
                                   "max_tasks": None}
-    # F42 verify 3 and 2 (2026-10-03): the pids limit and the state a child
-    # could leave behind were named in the docstring and the report, and
-    # the hello carried neither.
+    # The pids limit and the state a child could leave behind are in the hello.
     for key in ("capabilities", "no_new_privileges", "read_only_root",
                 "slots_retired", "pids_max", "state_left_open"):
         assert key in status
@@ -1578,9 +1558,8 @@ def test_a_worker_with_shared_children_says_so():
 
 
 def test_the_pids_limit_is_read_from_the_cgroup_the_container_sees(tmp_path):
-    """F42 verify 3 (2026-10-03): the hello now carries the limit, so the
-    reading is held: v2 then v1 at the container's own root, then the path
-    /proc/self/cgroup names, and "max" is no limit."""
+    """The hello carries the pids limit, so the reading is held: v2 then v1 at the container's own
+    root, then the path /proc/self/cgroup names, and "max" is no limit."""
     root = tmp_path / "cg"
     root.mkdir()
     listing = tmp_path / "cgroup"
@@ -1622,9 +1601,8 @@ _CLOSED = {"kernel__shmmax": 0, "kernel__msgmni": 0,
 
 
 def test_state_a_child_could_leave_behind_is_read_from_the_running_process(tmp_path):
-    """F42 verify 2 (2026-10-03): SysV shared memory, queues and semaphores
-    and POSIX queues are closed by sysctls, and each is named when it is
-    not, or cannot be read."""
+    """SysV shared memory, queues and semaphores and POSIX queues are closed by sysctls, and each is
+    named when it is not, or cannot be read."""
     closed = _sysctls(tmp_path, **_CLOSED)
     assert aw.state_left_open(sys_root=closed, dirs=()) == []
     for name, value, shown in (
@@ -1717,12 +1695,10 @@ def test_the_application_reads_bytes_from_either_runner(monkeypatch, settings):
 
 @pytest.mark.skipif(sys.platform == "win32", reason="a CPU-time limit is POSIX's")
 def test_a_child_its_own_cpu_limit_stops_is_a_timeout_not_a_crash(tmp_path):
-    """A runaway child meets the CPU-time limit it set itself
-    (`lab_static.apply_limits`) before the wall clock. The kernel ends it
-    with SIGXCPU, which is the time limit it is, never a crash: a
-    catastrophic watch regex was told as a matcher that "stopped without an
-    answer" (2026-10-07). With the soft and hard limits equal the kernel
-    sends SIGKILL instead, which reads like any other kill."""
+    """A runaway child meets the CPU-time limit it set itself (`lab_static.apply_limits`) before the
+    wall clock. The kernel ends it with SIGXCPU, which is the time limit it is, never a crash: a
+    catastrophic watch regex must not be told as a matcher that "stopped without an answer". With the
+    soft and hard limits equal the kernel sends SIGKILL instead, which reads like any other kill."""
     src = str(Path(ar.__file__).resolve().parents[1])
     argv = _script(tmp_path, "spin.py",
                    f"import sys\nsys.path.insert(0, {src!r})\n"
@@ -1738,12 +1714,10 @@ def test_a_child_its_own_cpu_limit_stops_is_a_timeout_not_a_crash(tmp_path):
 @pytest.mark.skipif(sys.platform == "win32", reason="a uid of its own is POSIX's")
 def test_a_child_of_a_uid_of_its_own_is_started_as_that_user_behind_the_launcher(
         tmp_path, monkeypatch):
-    """The supervised worker's wiring (the switch itself needs root with
-    setuid): Popen is wrapped to record what it is asked and to start the
-    child without the switch. Removing the user, the group, the empty
-    group list, the new session or the launcher from run_local fails this;
-    a container shows the switch itself (the review's reproductions, re-run
-    on 2026-10-03)."""
+    """The supervised worker's wiring (the switch itself needs root with setuid): Popen is wrapped to
+    record what it is asked and to start the child without the switch. Removing the user, the group,
+    the empty group list, the new session or the launcher from run_local fails this; a container shows
+    the switch itself."""
     import subprocess
     seen = {}
     real = subprocess.Popen
@@ -1778,14 +1752,12 @@ def test_a_child_of_a_uid_of_its_own_is_started_as_that_user_behind_the_launcher
 
 
 def test_the_workers_allow_list_holds_what_the_dockerfile_sets():
-    """The worker is the application image running one more command, and it
-    refuses to start holding any variable it cannot name: a variable added
-    to the Dockerfile's ENV would make every analysis refuse until the
-    list learned it (the F42 review's brittleness finding). This holds the
-    two together for what this repository sets; what the base image sets
-    (GPG_KEY, PYTHON_VERSION) is listed by hand, and a base-image bump that
-    adds one shows as a refused worker on the worker's first start, said
-    by name in its log and on the readiness row."""
+    """The worker is the application image running one more command, and it refuses to start holding
+    any variable it cannot name, so a variable added to the Dockerfile's ENV would make every analysis
+    refuse until the list learned it. This holds the two together for what this repository sets; what
+    the base image sets (GPG_KEY, PYTHON_VERSION) is listed by hand, and a base-image bump that adds
+    one shows as a refused worker on its first start, said by name in its log and on the readiness
+    row."""
     import re
     text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     text = re.sub(r"\\\r?\n", " ", text)
@@ -1828,10 +1800,7 @@ def test_the_demo_seeder_stops_at_a_run_the_worker_interrupted(monkeypatch):
     assert seed.triage_seeded(None, None, None, [object()]) == (2, False)
 
 
-# ---------------------------------------------------------------------------
-# F42 verify round (2026-10-03), finding 1: a process the child leaves
-# running that keeps the child's stdout or stderr open
-# ---------------------------------------------------------------------------
+# A process the child leaves running that keeps the child's stdout or stderr open.
 
 _LINGER_HELPER = (
     "import os, sys, time\n"
@@ -1843,11 +1812,9 @@ _LINGER_HELPER = (
     "sys.stdout.write('LATE')\n"
     "sys.stdout.flush()\n"
     "time.sleep(hold)\n")
-#: What a parser exploit does without any care: it starts a helper that
-#: INHERITS the child's stdout and stderr (no redirect), waits until the
-#: helper runs, then answers `{}` and exits 0. The stand-ins of the earlier
-#: rounds all sent their helpers' stdio to /dev/null, which is why none of
-#: them found that a pipe held open wedged the run.
+#: What a parser exploit does without any care: it starts a helper that inherits the child's stdout and
+#: stderr (no redirect), waits until the helper runs, then answers `{}` and exits 0. A stand-in that
+#: sent its helpers' stdio to /dev/null would never show that a pipe held open wedges the run.
 _LINGER_CHILD = (
     "import os, subprocess, sys, time\n"
     "sys.stdin.buffer.readline()\n"
@@ -1905,12 +1872,10 @@ def _helper_gone(pid: int, seconds: float) -> bool:
 
 def test_a_helper_left_holding_the_childs_pipes_is_stopped_before_the_run_waits_on_them(
         tmp_path, monkeypatch):
-    """The worker's `reap` (the purge of the slot's uid) must run BEFORE
-    run_local joins its threads and closes the pipes: a pipe a helper holds
-    open blocks the close for as long as the helper lives, and the purge
-    that could stop it used to run only after run_local returned. The grace
-    is long here, so only an end of file after the reap lets the run finish
-    in time."""
+    """The worker's `reap` (the purge of the slot's uid) must run before run_local joins its threads
+    and closes the pipes: a pipe a helper holds open blocks the close for as long as the helper
+    lives, and the purge that could stop it must not wait for run_local to return. The grace is long
+    here, so only an end of file after the reap lets the run finish in time."""
     monkeypatch.setattr(ar, "PIPE_GRACE_S", 30.0)
     argv, pidfile = _linger(tmp_path, session=True, late=60, hold=60)
     reaped = []
@@ -1933,10 +1898,9 @@ def test_a_helper_left_holding_the_childs_pipes_is_stopped_before_the_run_waits_
 
 def test_a_helper_nobody_can_stop_does_not_hold_the_run_or_change_its_answer(
         tmp_path, monkeypatch):
-    """The local runner has no uid to purge: a helper that left the child's
-    session (and on Windows every helper) keeps the pipes for as long as it
-    lives. The run no longer waits for it, and what the helper writes later
-    is never added to the answer already handed back."""
+    """The local runner has no uid to purge: a helper that left the child's session (and on Windows
+    every helper) keeps the pipes for as long as it lives. The run does not wait for it, and what the
+    helper writes later is never added to the answer already handed back."""
     monkeypatch.setattr(ar, "PIPE_GRACE_S", 0.5)
     argv, pidfile = _linger(tmp_path, session=True, late=4, hold=40)
     began = time.monotonic()
@@ -1956,8 +1920,8 @@ def test_a_helper_nobody_can_stop_does_not_hold_the_run_or_change_its_answer(
                     reason="a process group is POSIX's, and /proc is Linux's")
 def test_a_helper_left_in_the_childs_own_group_is_killed_by_the_run_itself(
         tmp_path, monkeypatch):
-    """A normal exit used to leave the group alone (it was killed only on a
-    timeout), so a helper started without setsid outlived the run."""
+    """A normal exit kills the child's group too, not only a timeout, so a helper started without
+    setsid does not outlive the run."""
     monkeypatch.setattr(ar, "PIPE_GRACE_S", 30.0)
     argv, pidfile = _linger(tmp_path, session=False, late=30, hold=30)
     began = time.monotonic()

@@ -1,48 +1,30 @@
-"""The cookie session over HTTP: set as designed, guarded by the CSRF
-double-submit, deleted in a form a browser will honour, and reachable from
-a bearer hand-off.
+"""The cookie session over HTTP: set as designed, guarded by the CSRF double-submit, deleted in a form
+a browser will honour, and reachable from a bearer hand-off.
 
-`POST /auth/login` has set `__Host-session` (HttpOnly) and `__Host-csrf`
-on every success since the CSRF work, and `deps.session_token` has
-demanded the `x-csrf-token` header for a cookie-authenticated unsafe
-method. Two things were wrong around that, found by the Alpha 4 product
-review on 2026-09-09:
+`POST /auth/login` sets `__Host-session` (HttpOnly) and `__Host-csrf` on every success, and
+`deps.session_token` demands the `x-csrf-token` header for a cookie-authenticated unsafe method.
 
-- **Logout could not delete the cookies.** `delete_cookie(name, path="/")`
-  emits `Max-Age=0` with NO `Secure` attribute, and a browser matches a
-  deletion against the cookie's attributes -- a `__Host-` cookie without
-  `Secure` is refused outright -- so the revoked token kept being
-  presented on every request until the tab closed. The server said 204
-  and the browser kept the credential: a failure reported as success.
-  The set and the delete now share one attribute declaration
-  (`deps.COOKIE_ATTRS`), and one test here reads both headers.
+- Logout must delete the cookies. `delete_cookie(name, path="/")` emits `Max-Age=0` with no `Secure`
+  attribute, and a browser matches a deletion against the cookie's attributes (a `__Host-` cookie
+  without `Secure` is refused outright), so the revoked token would be presented on every request
+  until the tab closed: the server says 204 and the browser keeps the credential. The set and the
+  delete share one attribute declaration (`deps.COOKIE_ATTRS`), and one test here reads both headers.
+- The console runs on the cookie pair, and the `#token=` hand-off from `scripts/bootstrap.py session`
+  is exchanged for the pair through `POST /auth/cookie`, which is tested here from the bearer side.
+- The exchange must not swap the session under every open tab. `session_token` prefers the bearer, so
+  a `#token=` link carrying another account's token, opened by a signed-in analyst, would replace the
+  browser-wide cookie with that account's session while every open tab kept showing the analyst.
+  `adopt_cookie` refuses that with 409 and an audit row; the same account may still re-mint its pair
+  (that is how a tab left with the session cookie and no readable half recovers).
 
-- **Nothing used the cookie.** The console kept the bearer token in
-  `sessionStorage`. It now runs on the cookie pair, and the `#token=`
-  hand-off from `scripts/bootstrap.py session` is exchanged for the pair
-  through `POST /auth/cookie`, which is tested here from the bearer side.
+The pair is the whole of a successful login: `POST /auth/login` answers 204 and returns no token in a
+body, because the two paths that cannot read the cookie (the live websocket and the cross-origin Lab
+download) take the cookie and a one-shot ticket instead. The claim "the cookie is the token" is
+therefore asserted against `iam.session` rather than against a second field of the same response.
 
-- **The exchange could swap the session under every open tab.** Found by
-  the second review pass the same day: `session_token` prefers the bearer,
-  so a `#token=` link carrying ANOTHER account's token, opened by a
-  signed-in analyst, replaced the browser-wide cookie with that account's
-  session while every open tab kept showing the analyst. `adopt_cookie`
-  now refuses that with 409 and an audit row; the same account may still
-  re-mint its pair (that is how a tab left with the session cookie and no
-  readable half recovers).
-
-Since 2026-09-10 the pair is the WHOLE of a successful login: `POST
-/auth/login` answers 204 and returns no token in a body, because the two
-paths that could not read the cookie -- the live websocket and the
-cross-origin Lab download -- now take the cookie and a one-shot ticket
-instead. This file is where that is asserted, and it is the reason the
-"the cookie IS the token" claim below is now made against `iam.session`
-rather than against a second field of the same response.
-
-Cookies are passed as an explicit `cookie` header rather than through the
-client's jar: httpx will not send a `Secure` cookie over the test client's
-plain-http base URL, and a test that silently sent no cookie would pass
-the CSRF check for the wrong reason.
+Cookies are passed as an explicit `cookie` header rather than through the client's jar: httpx will not
+send a `Secure` cookie over the test client's plain-http base URL, and a test that silently sent no
+cookie would pass the CSRF check for the wrong reason.
 
 Env-gated on DATABASE_URL. Email prefix `ck-`, unique to this file.
 """
@@ -104,10 +86,9 @@ def _login(client, email, secret):
     r = client.post("/api/v1/auth/login", json={
         "email": email, "password": PASSWORD,
         "totp_code": totp.code_at(secret, int(time.time()))})
-    # 204 since 2026-09-10: the pair IS the response. Asserted on the
-    # status alone here and on the body itself below, because a handler
-    # that answered 204 and set no cookie would be a login that signed
-    # nobody in and said nothing about it.
+    # 204: the pair is the response. Asserted on the status alone here and on the body itself below,
+    # because a handler that answered 204 and set no cookie would be a login that signed nobody in and
+    # said nothing about it.
     assert r.status_code == 204, r.text
     return r
 
@@ -135,19 +116,14 @@ def _cookie_header(session: str, csrf: str | None = None) -> str:
 
 
 def test_login_sets_both_host_cookies_as_designed(conn, client):
-    """The session cookie is unreadable from script and the CSRF cookie is
-    readable on purpose; both carry what the `__Host-` prefix demands
-    (Secure, Path=/, no Domain) and SameSite=strict. The cookie IS the
-    bearer token -- one session, two transports -- which is what lets the
-    console adopt a bearer hand-off as a cookie without a second login.
+    """The session cookie is unreadable from script and the CSRF cookie is readable on purpose; both
+    carry what the `__Host-` prefix demands (Secure, Path=/, no Domain) and SameSite=strict. The cookie
+    is the bearer token (one session, two transports), which lets the console adopt a bearer hand-off
+    as a cookie without a second login.
 
-    "The cookie IS the token" was asserted against the login body until
-    2026-09-10, when the body went (Wave 2). The claim did not go with
-    it, so it is now asserted against the row: the cookie's value,
-    hashed, is the `token_hash` of this analyst's live session. That is
-    the stronger reading of the same fact -- the old one only ever proved
-    that two halves of one response agreed with each other, and would
-    have passed just as well if BOTH had been some other string.
+    That is asserted against the row: the cookie's value, hashed, is the `token_hash` of this analyst's
+    live session. A comparison of two halves of one response would pass just as well if both were some
+    other string.
     """
     from noctornal_api.http.deps import CSRF_COOKIE, SESSION_COOKIE
     from noctornal_api.security.tokens import hash_token
@@ -219,12 +195,9 @@ def test_a_cookie_session_reads_freely_and_writes_only_with_the_csrf_header(conn
 def test_logout_deletes_the_cookies_with_the_attributes_they_were_set_with(conn, client):
     """Asserted on the raw Set-Cookie header, both sides at once.
 
-    Before 2026-09-09 logout emitted `__Host-session=""; Max-Age=0;
-    Path=/; SameSite=lax` -- no Secure. A browser refuses a `__Host-`
-    cookie without Secure and matches a deletion against the attributes
-    the cookie was stored with, so the deletion was dropped on the floor
-    and the dead token rode along on every later request. The server
-    returned 204 either way.
+    A deletion that omits Secure is dropped by the browser: it refuses a `__Host-` cookie without
+    Secure and matches a deletion against the attributes the cookie was stored with, so the dead token
+    would ride along on every later request. The server returns 204 either way.
     """
     from noctornal_api.http.deps import CSRF_COOKIE, CSRF_HEADER, SESSION_COOKIE
     _, email, secret = _make_user(conn)
@@ -302,18 +275,14 @@ def test_a_bearer_session_can_be_adopted_as_the_cookie_pair(conn, client):
 
 
 def test_adopting_a_cookie_needs_a_live_session(conn, client):
-    """A bogus bearer gets the same generic 401 every other endpoint gives
-    and sets nothing: the exchange must not be a way to plant a cookie.
+    """A bogus bearer gets the same generic 401 every other endpoint gives and sets nothing: the
+    exchange must not be a way to plant a cookie.
 
-    Extended 2026-09-09 with the browser's real situation: a stale
-    hand-off link opened in a tab that already holds a live cookie pair.
-    The bearer wins in `session_token`, so the 401 judges the BEARER and
-    nothing else -- no Set-Cookie, and the cookie session is untouched.
-    This pins what the server already did; the defect was on the
-    console, which routed that 401 through `endSession` and deleted the
-    readable CSRF cookie for a session the server kept
-    (`test_ui_invariants` holds the console's 401 exemptions to this
-    route).
+    It also covers a stale hand-off link opened in a tab that already holds a live cookie pair. The
+    bearer wins in `session_token`, so the 401 judges the bearer and nothing else: no Set-Cookie, and
+    the cookie session is untouched. The console must not route that 401 through `endSession`, which
+    would delete the readable CSRF cookie for a session the server kept (`test_ui_invariants` holds the
+    console's 401 exemptions to this route).
     """
     from noctornal_api.http.deps import CSRF_COOKIE, SESSION_COOKIE
     r = client.post("/api/v1/auth/cookie",
@@ -337,23 +306,20 @@ def test_adopting_a_cookie_needs_a_live_session(conn, client):
 
 
 def test_a_hand_off_cannot_replace_another_accounts_cookie_session(conn, client):
-    """Two accounts. The victim is signed in (cookie pair in the browser);
-    a link carries the attacker's token in its fragment. Until 2026-09-09
-    the exchange returned 204 with `Set-Cookie: __Host-session=<attacker's
-    token>`: every tab the victim had open kept rendering the victim,
-    `authHeaders()` in each read the fresh CSRF cookie live, and every
-    write from them was attributed to the attacker's user_id in the
-    hash-chained audit log -- SameSite=Strict does not help, because the
-    page's own same-origin fetches carry the cookies after a cross-site
-    top-level navigation.
+    """Two accounts. The victim is signed in (cookie pair in the browser); a link carries the
+    attacker's token in its fragment.
 
-    Now: 409, no Set-Cookie, the victim's session untouched and still the
-    victim's, an audit row under the attacker's id naming both sessions,
-    and the attacker's own session refused rather than revoked (an
-    attacker holding a token must not be able to make the server act on
-    it either way). The same account IS allowed, because that is how a
-    tab stranded with the session cookie and no readable half recovers
-    through its own `bootstrap.py session` link.
+    If the exchange returned 204 with `Set-Cookie: __Host-session=<attacker's token>`, every tab the
+    victim had open would keep rendering the victim, `authHeaders()` in each would read the fresh CSRF
+    cookie live, and every write from them would be attributed to the attacker's user_id in the
+    hash-chained audit log. SameSite=Strict does not help, because the page's own same-origin fetches
+    carry the cookies after a cross-site top-level navigation.
+
+    So: 409, no Set-Cookie, the victim's session untouched, an audit row under the attacker's id naming
+    both sessions, and the attacker's own session refused rather than revoked (an attacker holding a
+    token must not be able to make the server act on it either way). The same account is allowed,
+    because that is how a tab stranded with the session cookie and no readable half recovers through
+    its own `bootstrap.py session` link.
     """
     from noctornal_api.http.deps import CSRF_COOKIE, SESSION_COOKIE
     from noctornal_api.security.sessions import SessionService
@@ -407,11 +373,9 @@ def test_a_hand_off_cannot_replace_another_accounts_cookie_session(conn, client)
 
 def test_the_login_audit_names_the_address_the_session_is_bound_to(
         conn, client, monkeypatch):
-    """Behind a declared proxy `client_ip` is the address the session is
-    bound to (0058) and the limiter meters. Until 2026-09-09 the login
-    audit hashed `request.client.host` instead, so AUTH_SUCCEEDED named
-    the proxy for every analyst behind it -- a split between what the
-    audit said and what the session knew. One address, both places."""
+    """Behind a declared proxy `client_ip` is the address the session is bound to (0058) and the
+    limiter meters. The login audit hashes the same address, so AUTH_SUCCEEDED does not name the proxy
+    for every analyst behind it: one address, both places."""
     import hashlib
     import time
 

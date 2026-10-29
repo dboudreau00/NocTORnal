@@ -1,86 +1,12 @@
-"""Phase 7 -- communication channels and message-level capture (docs/10).
+"""Communication channels and message-level capture (docs/10).
 
-=====================================================================
-docs/16 L4 is BLOCKING and this module creates it. Interception law,
-one-party vs two-party consent, and the retention of uninvolved third
-parties' content in a group channel are all external determinations.
-
-`conversation.provenance_class` is NOT NULL so the distinction between
-"our persona was a party to this" and "we obtained it another way" is
-ALWAYS recorded -- but recording the distinction is not the same as
-having the authority for either.
-=====================================================================
-
-## Why this module is mostly normalisers
-
-docs/10 says where the value is, and it is not the message bodies:
-
-    Most captured chat is operationally worthless -- haggling, greetings,
-    filler. The value is in three things: the identifiers themselves, as
-    selectors that bind personas together; the co-declaration structure --
-    which identifiers an actor publishes together, in one artefact; and the
-    graph of who talks to whom, which is often derivable from metadata
-    alone.
-
-So the careful code is in `normalise()`, and the reason is stated bluntly
-in docs/10: "Getting this wrong is the single biggest source of false
-attribution in this domain."
-
-## The three traps, each with its own function
-
-**Tox.** A Tox ID is 76 hex: 32-byte public key, 4-byte nospam, 2-byte
-checksum. The nospam is user-changeable at will and actors change it
-specifically to shed unwanted contacts. Normalise to the first 64 hex.
-A tool that keys on the full 76 silently stops correlating the same actor
-the moment they rotate -- and silently is the whole problem, because the
-graph simply shows two people.
-
-**Telegram.** The numeric user id, never `@username`. Usernames are
-recycled, so matching on one can attribute a new person's traffic to an old
-investigation. `normalise` REFUSES to produce a durable value from a
-username alone rather than guessing.
-
-**SimpleX.** No persistent identifier exists. `normalise` returns None and
-`coverage_note` says so out loud, because an interface that shows nothing
-implies an absence of activity rather than an absence of visibility.
-
-## CLAIMED, OBSERVED, CONFIRMED
-
-An identifier in a signature block is a claim. One seen in use is an
-observation. One verified by a signature over it is confirmed. Treating a
-claim as a confirmation is how a rival's Jabber ID ends up attributed to
-the person who posted it as an insult -- which is a real pattern in these
-forums, not a hypothetical.
-
-## Canonical form comes from the ontology, not from here
-
-This module decides WHETHER an observed string has a durable part and what
-to say when it does not. It does NOT decide what the durable part looks
-like -- `noctornal_ontology.normalise` does, exactly as it does for
-`core.selector` (see `selectors.py`: "the ONE source of truth for canonical
-form").
-
-That split was not the original shape, and the drift it allowed is worth
-recording because all three divergences were silent:
-
-- **Matrix.** This module lowercased the whole MXID. The ontology folds
-  only the server part, because an MXID localpart is case-SENSITIVE and
-  two accounts on a historical homeserver may differ only by case.
-  Lowercasing merged them into one durable value -- the module written to
-  prevent confident false attribution was manufacturing it.
-- **Tox.** This module lowercased; the ontology uppercases. Self-
-  consistent within comms, so correlation worked -- right up until
-  anything joined a binding to `core.selector`, which is entity
-  resolution, i.e. the product. It would have returned nothing and read
-  as "no match".
-- **Telegram.** A numeric supergroup/channel id (`-100…`) was rejected as
-  though it were a username, with an error saying so. The ontology strips
-  the Bot-API `-100` prefix so the two forms of one channel collapse, and
-  keeps a bare minus so a chat id never collides with a user id.
-
-The lesson is the one `selectors.py` already stated and this file quietly
-broke: a second normaliser for the same thing is a correlation bug with a
-delay fuse.
+Mostly normalisers, because a wrong identifier is the largest source of false attribution.
+`normalise` decides whether an observed string has a durable part and what to say when it has none;
+the canonical form comes from `noctornal_ontology.normalise`, as for `core.selector` (see
+`selectors.py`), never from a second implementation. Tox keys on the first 64 hex, Telegram on the
+numeric id (never `@username`), and SimpleX has no persistent identifier. A claimed identifier is
+not an observed or a confirmed one. `conversation.provenance_class` is NOT NULL so how a capture was
+obtained is always recorded; the authority to capture is an external determination (docs/16 L4).
 """
 from __future__ import annotations
 
@@ -201,11 +127,9 @@ def normalise(platform_key: str, observed: str) -> Normalised:
             f"nothing durable survives normalisation of {observed!r} as "
             f"{selector_type}. Recording it as an empty value would make "
             f"every other empty value correlate with it.")
-    # A platform with no ontology type has no canonical form to appeal to.
-    # Case-folded so two sightings of one identifier still meet -- the raw
-    # passthrough meant `VendorX` and `vendorx` were two people -- and the
-    # caveat is carried on EVERY result, not only the empty one, because a
-    # silent best-effort is indistinguishable from a defined form.
+    # A platform with no ontology type has no canonical form. Case-fold so two sightings of one
+    # identifier still meet, and carry the caveat on every result, since a silent best-effort looks
+    # like a defined form.
     caveat = (f"{platform_key} has no canonical form defined in the "
               f"ontology; this is a case-folded trim and nothing stronger. "
               f"Correlation on it is weaker than on a platform with a "
@@ -217,15 +141,9 @@ def normalise(platform_key: str, observed: str) -> Normalised:
 def _durable_or_none(candidate: str | None, note: str) -> Normalised:
     """Refuse to store an EMPTY durable value.
 
-    An empty string is not "no value" to a database -- it is a value, and
-    every observation that normalises to it collides with every other one.
-    `correlate()` short-circuits on None and not on '', so
-    `normalise('DISCORD', 'coolvendor')` returning '' made a query for
-    `durable_value = ''` return every Discord binding whose handle had no
-    digits: an unbounded set of unrelated actors reported as one person.
-
-    Discord dropped the #0000 discriminator in 2023, so current handles
-    contain no digits at all and EVERY one of them hit this.
+    An empty string is a value to the database, so every observation that normalises to it would
+    collide with every other one. `correlate()` short-circuits on None, not on ''. Current Discord
+    handles carry no digits, so without this every one of them normalised to ''.
     """
     if candidate is None or not candidate.strip():
         return Normalised(None, note)
@@ -253,12 +171,8 @@ def _normalise_uuid_platform(value: str, selector_type: str,
 def _normalise_mxid(value: str) -> Normalised:
     """Fold the SERVER part only. The localpart is case-sensitive.
 
-    RFC-wise an MXID is `@localpart:server`, and while most homeservers
-    lowercase localparts on registration, historical ones did not -- so
-    `@Alice:example.org` and `@alice:example.org` can be two accounts.
-    Folding them produces one durable value for two people, which is a
-    merge nobody performed and nobody can see: `correlate` simply returns
-    both as the same actor.
+    Some historical homeservers did not lowercase localparts, so `@Alice:example.org` and
+    `@alice:example.org` can be two accounts; folding them would merge two people invisibly.
     """
     cleaned = value.strip()
     if not (cleaned.startswith("@") and ":" in cleaned):
@@ -274,14 +188,11 @@ def _normalise_mxid(value: str) -> Normalised:
 
 
 def _normalise_tox(value: str) -> Normalised:
-    """THE Tox trap.
+    """Index the first 64 hex of a Tox ID (docs/10).
 
-    76 hex = 32-byte public key + 4-byte nospam + 2-byte checksum. The
-    nospam is user-changeable at will, and actors change it specifically to
-    shed unwanted contacts. Index the first 64 hex.
-
-    docs/10: "This one detail is worth more than most of the extraction
-    pipeline."
+    76 hex = 32-byte public key + 4-byte nospam + 2-byte checksum. The nospam is user-changeable and
+    actors change it to shed unwanted contacts, so keying on the full ID stops correlating the same
+    actor.
     """
     cleaned = re.sub(r"[^0-9a-fA-F]", "", value)
     if len(cleaned) == 76 and _HEX.match(cleaned):
@@ -301,9 +212,7 @@ def _normalise_tox(value: str) -> Normalised:
 _TYPED_TELEGRAM = re.compile(r"^([ucg]):\s*(\d+)$", re.I)
 _TELEGRAM_SPACE = {"u": "user", "c": "channel", "g": "group"}
 
-#: Written as a sentence, capital first (README screenshot review,
-#: 2026-09-23): the console prints it after "No durable value, so nothing
-#: can correlate.", where the old lower-case clause began a sentence.
+#: A capitalised sentence: the console prints it after "No durable value, so nothing can correlate."
 _NOT_DURABLE_TELEGRAM = (
     "A Telegram @username is NOT durable: usernames are recycled, and "
     "matching on one can attribute a new person's traffic to an old "
@@ -313,22 +222,13 @@ _NOT_DURABLE_TELEGRAM = (
 def _normalise_telegram(value: str) -> Normalised:
     """The numeric ID, never @username.
 
-    Usernames are recycled. Matching on one can attribute a new person's
-    traffic to an old investigation, and the graph shows no sign of it.
-    So a username alone yields NO durable value rather than a guess.
-
-    Negative ids are numeric ids too, and rejecting them as "a username"
-    was both a refusal and a wrong explanation. The ontology handles the
-    two shapes: a Bot-API supergroup/channel id carries a `-100` prefix
-    that its MTProto form does not (strip it, or one channel is two), and
-    a basic-group chat id carries a bare minus that must SURVIVE, or a
-    chat id collides with an unrelated user id.
-
-    A bare POSITIVE id is refused (2026-09-11) with the ontology's own
-    sentence: MTProto user and channel ids are separate spaces and both
-    positive, and on a strong selector a guess is a merge lead. The
-    typed forms `u:<id>`, `c:<id>` and `g:<id>` are the way in for a
-    caller that knows.
+    Usernames are recycled, so a username alone yields NO durable value rather than a guess.
+    Negative ids are numeric ids too: a Bot-API supergroup/channel id carries a `-100` prefix its
+    MTProto form does not (the two forms of one channel must collapse), and a basic-group chat id
+    carries a bare minus that must survive, or it collides with an unrelated user id. A bare
+    POSITIVE id is refused with the ontology's own sentence: MTProto user and channel ids are
+    separate positive spaces, and on a strong selector a guess is a merge lead. The typed forms
+    `u:<id>`, `c:<id>` and `g:<id>` are the way in for a caller that knows.
     """
     cleaned = value.strip()
     if cleaned.startswith("@"):
@@ -340,41 +240,18 @@ def _normalise_telegram(value: str) -> Normalised:
             f"indexed in the {_TELEGRAM_SPACE[typed.group(1).lower()]} "
             f"namespace, as typed by the caller")
     digits = cleaned[1:] if cleaned.startswith("-") else cleaned
-    # ASCII digits ONLY. `str.isdigit()` is Unicode-aware and accepts
-    # fullwidth and Arabic-Indic forms; migration 0036's `^[0-9]+$` is
-    # not, so the two disagreed and a repaired row's stored durable would
-    # be NULL while the live code kept computing a value -- correlation
-    # then finds nothing and reads as "no match". A Telegram id is ASCII;
-    # refusing the rest costs nothing real.
+    # ASCII digits only: `str.isdigit()` accepts fullwidth and Arabic-Indic forms, which migration
+    # 0036's `^[0-9]+$` rejects, so a repaired row would store NULL while the live code kept
+    # computing a value.
     if not digits or not all("0" <= ch <= "9" for ch in digits):
         return Normalised(None, _NOT_DURABLE_TELEGRAM)
     if not cleaned.startswith("-"):
         return Normalised(None, refusal("TELEGRAM_ID", cleaned))
     canonical = _canonical("TELEGRAM_ID", cleaned)
     if cleaned.startswith("-100") and len(cleaned) > 4:
-        # RESOLVED by CR3 (2026-07-26). docs/16 D8 is closed.
-        #
-        # This block used to carry a "KNOWN UNRESOLVED COLLISION" warning:
-        # the ontology stripped the Bot-API `-100` prefix so the two
-        # encodings of one channel would collapse, and the result was then
-        # indistinguishable from the USER id of the same number. The note
-        # said so on every observation because the value could not be
-        # trusted.
-        #
-        # `telegram_id_norm` now decodes arithmetically (the encoding is
-        # `-(10**12 + id)`, not a text prefix) and namespaces the result by
-        # id space, so `c:1234567890` and `u:1234567890` are different
-        # values and cannot auto-merge. The collision is gone, and with it
-        # two silent MISSES the old string-strip also caused, for 9- and
-        # 11-digit channel ids.
-        #
-        # The note is kept but is now informational: a bare positive
-        # number remains ambiguous between a user and an MTProto channel,
-        # and only the collector knows which. It no longer warns about a
-        # merge that can happen. It is shown to the analyst as written, so
-        # it carries no review codes or dates: "(CR3)" and "(2026-09-11)"
-        # were on screen in the Comms pane (README screenshot review,
-        # 2026-09-23).
+        # The ontology decodes `-(10**12 + id)` arithmetically and namespaces the result by id
+        # space, so `c:1234567890` and `u:1234567890` are different values that never auto-merge.
+        # The note is shown to the analyst as written.
         return Normalised(
             canonical,
             "A Bot-API channel id, decoded to its MTProto form and indexed "
@@ -412,8 +289,7 @@ def _normalise_jid(value: str) -> Normalised:
 def coverage_note(platform_key: str) -> str:
     """What an analyst should understand about seeing little or nothing.
 
-    Surfaced in the UI rather than buried, because the failure this
-    prevents is silent: a SimpleX-using actor looks inactive, and an
+    Surfaced in the UI because the failure is silent: a SimpleX-using actor looks inactive, and an
     analyst reads inactivity as a finding.
     """
     return {
@@ -432,22 +308,14 @@ def coverage_note(platform_key: str) -> str:
 class CommsService:
     """Reads are filtered by the CALLER's own labels, not just the case's.
 
-    Every table in `comms` carries its own `classification` and
-    `compartments`, and `check_writable_labels` caps a writer at their OWN
-    clearance rather than the case's -- so a RED-cleared analyst can write
-    a RED binding into an AMBER case, and nothing in the schema stops a
-    row sitting above its case. `require("comms.read")` authorises against
-    the CASE only (`deps.effective_labels` returns the case's labels when
-    no element labels are supplied), so an AMBER-cleared reader on that
-    case received the RED row in full.
+    Every `comms` table carries its own `classification` and `compartments`, and
+    `check_writable_labels` caps a writer at their OWN clearance, so a row can sit above its case.
+    `require("comms.read")` authorises against the case only, so without the element-label filter a
+    reader cleared for the case would receive that row. `read.py`, `evidence.py`, `samples.py` and
+    `coparticipation.py` filter the same way.
 
-    `read.py`, `evidence.py`, `samples.py` and `coparticipation.py` all
-    filter on element labels. This service did not, and the omission was
-    invisible because the case gate passed.
-
-    Clearance is optional so the write paths and the platform catalogue --
-    which carry no case-scoped data -- can construct the service without
-    it. Every method that returns case content REQUIRES it and says so.
+    Clearance is optional so the write paths and the platform catalogue, which carry no case-scoped
+    data, can construct the service without it. Every method that returns case content REQUIRES it.
     """
 
     def __init__(self, conn: psycopg.Connection, *,
@@ -563,10 +431,8 @@ class CommsService:
     def co_declared(self, case_id: UUID, reference: str) -> list[dict]:
         """Every identifier published together in one artefact.
 
-        docs/10: the co-declaration structure is itself diagnostic. A vendor
-        running Jabber + Tox + Session with a PGP key is operating
-        differently from one running a Telegram bot and nothing else, and
-        the SET is the finding rather than any member of it.
+        The co-declaration structure is itself diagnostic (docs/10): the SET is the finding, not any
+        member.
         """
         clearance, comp = self._ceiling("co_declared")
         rows = self._c.execute(
@@ -617,14 +483,9 @@ class CommsService:
     def shared_devices(self, case_id: UUID) -> list[dict]:
         """Fingerprints seen against more than one identity.
 
-        docs/10: "Two different JIDs publishing the same device fingerprint
-        is the same physical device. That is a far stronger link than a
-        shared nickname and it is almost never collected."
-
-        Reported as a LEAD, never as a merge. The link is between an
-        identity and a device; concluding the identities are one person is
-        an attribution and belongs in an ATTRIBUTED_TO edge with a
-        confidence.
+        Two identities publishing one device fingerprint is a far stronger link than a shared
+        nickname (docs/10). Reported as a LEAD, never as a merge: concluding the identities are one
+        person is an attribution and belongs in an ATTRIBUTED_TO edge with a confidence.
         """
         clearance, comp = self._ceiling("shared_devices")
         rows = self._c.execute(
@@ -672,12 +533,10 @@ class CommsService:
                           compartments: frozenset[str] = frozenset()) -> UUID:
         """Start a conversation record.
 
-        `provenance_class` is mandatory and the checks around it are the
-        point: capturing a conversation a persona is a PARTY to is legally
-        distinct from capturing one it is not (docs/16 L4), so PERSONA_PARTY
-        must name the persona and anything obtained another way must carry
-        an authority. The software cannot judge whether the authority is
-        good; it can refuse to let there be none recorded.
+        `provenance_class` is mandatory: capturing a conversation a persona is a PARTY to is legally
+        distinct from capturing one it is not (docs/16 L4), so PERSONA_PARTY must name the persona
+        and anything obtained another way must carry an authority. The software cannot judge whether
+        the authority is good; it can refuse to let there be none recorded.
         """
         if provenance_class not in {
                 PERSONA_PARTY, SEIZED_DEVICE, PLATFORM_DISCLOSURE,
@@ -689,15 +548,12 @@ class CommsService:
                 "that claim is exactly the one interception law turns on, "
                 "and an unverifiable version of it is worse than none")
         if provenance_class in _NEEDS_AUTHORITY and not (legal_authority or "").strip():
-            # No "(docs/16 L4)": an analyst reads this, and a design
-            # document's section number tells them nothing (ux19-copy
-            # developer-speak-in-copy, 2026-09-23).
             raise CommsError(
                 f"{provenance_class} needs a written authority. Capturing a "
                 f"conversation nobody in it consented to is not something "
                 f"this system will record without one")
-        # As `bind` asks it: an unknown key was the foreign key's violation
-        # and a 500 (2026-10-07).
+        # Checked as `bind` does: an unknown key would otherwise surface as the foreign key's
+        # violation and a 500.
         exists = self._c.execute(
             "SELECT 1 FROM comms.platform WHERE key = %s", (platform_key,)
         ).fetchone()
@@ -791,12 +647,9 @@ class CommsService:
                         *, incidental: bool = True) -> bool:
         """Flag a participant as not a subject.
 
-        docs/08 and docs/16 L4: a third party in a group channel has rights,
-        and minimisation at closure has to be able to find them. Flagging is
-        cheap; discovering afterwards that nobody did is not.
-
-        False when no participant of the conversation has that handle, so a
-        mistyped handle is not reported as flagged (2026-10-07).
+        A third party in a group channel has rights, and minimisation at closure has to be able to
+        find them (docs/08, docs/16 L4). False when no participant of the conversation has that
+        handle, so a mistyped handle is not reported as flagged.
         """
         cur = self._c.execute(
             """UPDATE comms.participant SET is_incidental = %s

@@ -1,11 +1,7 @@
 """The Admin pane and the password flows, as the console ships them.
 
-The ux16-admin review of 2026-09-22 found fourteen things wrong with the
-Admin pane, closed 2026-09-23 together with the administrator-issued
-password reset (gap-password-reset). Each test names the finding it would
-have caught. The ones marked `needs_node` run the real functions under
-Node over a stub DOM and read what they draw; the rest read the shipped
-source, the way `test_ui_invariants.py` does.
+The tests marked `needs_node` run the real functions under Node over a stub DOM and read what they
+draw; the rest read the shipped source, the way `test_ui_invariants.py` does.
 
 Pure: no database.
 """
@@ -231,10 +227,10 @@ def test_the_pane_is_three_sections_and_readiness_is_one_of_them():
     pane = _pane_html()
     tabs = re.findall(r'data-subtab="(\w+)"', pane)
     assert tabs == ["readiness", "accounts", "compartments",
-                    "dual",    # Two-person controls (F9)
-                    "egress",      # Egress (S2)
-                    "embeddings",  # Embeddings (F6.3)
-                    "integrations", "providers"], tabs   # F8 and F15.2
+                    "dual",    # Two-person controls
+                    "egress",
+                    "embeddings",
+                    "integrations", "providers"], tabs
     assert pane.index('id="rdy-blocking"') < pane.index('id="adm-accounts"'), (
         "the blocking banner is below the account list again")
     assert 'id="adm-sub-badge"' in pane
@@ -247,7 +243,7 @@ def test_the_pane_is_three_sections_and_readiness_is_one_of_them():
 
 @needs_node
 def test_the_pane_opens_on_readiness_while_anything_blocks(tmp_path):
-    # F8: the default section is adminFirstSub's.
+    # The default section is adminFirstSub's.
     got = _run(["enterAdminPane", "adminFirstSub"], """
 let canAdmin = true;   // an account administrator still opens on Accounts
 const ADM = { blocking: [], userSub: null, auto: false };
@@ -282,11 +278,8 @@ def test_the_way_in_is_badged_from_the_access_answer():
     assert re.search(r"\.subtab-badge\.warn\s*\{[^}]*var\(--alert\)", css)
 
 
-# ---------------------------------------------------------------------------
-# A pass with a caveat (security-officer-false-green, the 2026-09-23
-# verifier's correction: the lone officer's warning sat in a passing row's
-# evidence, inside a fold nothing opens)
-# ---------------------------------------------------------------------------
+# A pass with a caveat: the lone officer's warning sat in a passing row's evidence, inside a fold
+# nothing opens.
 
 @needs_node
 def test_a_pass_with_a_caveat_is_drawn_outside_the_fold(tmp_path):
@@ -507,9 +500,7 @@ def test_credentials_are_named_placed_in_their_card_and_cleared():
         assert f"showAdminCreds(creds, {heading})" in _source(js, fn), fn
 
 
-# ---------------------------------------------------------------------------
-# The password flows (gap-password-reset)
-# ---------------------------------------------------------------------------
+# The password flows.
 
 def test_the_console_and_the_server_name_the_same_problem_type():
     from noctornal_api.http.routers.auth import PASSWORD_CHANGE_REQUIRED_TYPE
@@ -533,9 +524,7 @@ def test_sign_in_asks_for_a_new_password_and_keeps_the_old_one_only_in_memory():
         assert "Storage" not in src and "location" not in src, fn
     end = _source(js, "endPasswordChange")
     assert "PWCHANGE.password = ''" in end
-    # The in-place sign-in asks for the new password in its own sheet, so
-    # the screen behind it stays (2026-09-24; it handed
-    # over to the sign-in page's card, through endSession, until then).
+    # The in-place sign-in asks for the new password in its own sheet, so the screen behind it stays.
     assert "startReauthChange(json.password)" in _source(js, "submitReauth")
     for fn in ("startReauthChange", "endReauthChange", "reauthSignIn"):
         src = _source(js, fn)

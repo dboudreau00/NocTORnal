@@ -1,16 +1,12 @@
-"""When the isolated analysis worker fails during a pass, nothing is
-spent and nothing is misread (docs/17 F42 review, 2026-10-02).
+"""When the isolated analysis worker fails during a pass, nothing is spent and nothing is misread.
 
-The review found three: a triage step the worker never ran was stored as
-a crashed step on the sample, a compile the worker never ran spent one of
-its three attempts, and a forum page the worker never parsed was parser
-drift on a healthy parser. Now a run goes back to the queue at the same
-attempt with nothing written, a compile keeps its attempts, and a poll is
-BLOCKED (no failure counted, no drift) and keeps its cursor. Each test
-has a control that shows the child's own failure is still the child's.
+A triage step the worker never ran is not stored as a crashed step on the sample, a compile the
+worker never ran does not spend one of its three attempts, and a forum page the worker never parsed
+is not parser drift on a healthy parser. A run goes back to the queue at the same attempt with
+nothing written, a compile keeps its attempts, and a poll is BLOCKED (no failure counted, no drift)
+and keeps its cursor. Each test has a control that shows the child's own failure is still the child's.
 
-Email prefixes `anx-` (the Lab) and `test-anxc-` (collection).
-Env-gated on DATABASE_URL.
+Email prefixes `anx-` (the Lab) and `test-anxc-` (collection). Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -186,8 +182,7 @@ def test_the_runner_asks_the_worker_for_its_limit_and_only_the_isolated_runner_h
 
 
 def test_a_step_whose_child_crashed_is_still_a_failed_step(conn, monkeypatch):
-    """The control: the child's own failure finishes the run DONE with a
-    failed gap, as before the review."""
+    """The control: the child's own failure finishes the run DONE with a failed gap."""
     from noctornal_api.samples import SampleService
     store = MemoryStore()
     who = make_user(conn, PREFIX)

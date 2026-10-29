@@ -1,38 +1,28 @@
-"""Exposure-gated, quota-metered lookups (F15.3 and F15.4, 2026-09-24).
+"""Exposure-gated, quota-metered lookups.
 
-An analyst sends one selector from a case to one enabled provider only
-when every rule allows it; a lookup that sends case material to somebody
-else's system (VENDOR or PUBLIC) is sent only after a different, eligible
-person signs it off in the product (docs/00 decision 75, read strictly: see
-0099's docstring); what left the host is recorded per attempt; the answer
-is kept as case material never labelled below the question; the answer
-becomes proposals, never graph (invariant 3: this module holds a
+An analyst sends one selector from a case to one enabled provider only when every rule allows it; a
+lookup that sends case material to somebody else's system (VENDOR or PUBLIC) is sent only after a
+different, eligible person signs it off in the product (docs/00 decision 75, read strictly: see 0099's
+docstring); what left the host is recorded per attempt; the answer is kept as case material never
+labelled below the question; the answer becomes proposals, never graph (invariant 3: this module holds a
 ProposalStore and never a GraphWriteService).
 
-## The gates, in order (each refusal before a row exists is audited
-## LOOKUP_REFUSED with the keyed fingerprint, never the value)
+The gates, in order (each refusal before a row exists is audited LOOKUP_REFUSED with the keyed
+fingerprint, never the value): (0) the caller holds lookup.request on the case by assignment: emergency
+access is a read and never sends material out; (1) the host switch is on; (2) the provider is enabled,
+healthy, its adapter current, visible to the caller by its anchor source, and it offers the operation for
+the type; (3) its route is usable; (4) the case is not read-only, a typed VALUE is not declared below what
+the case already holds for it, and no hash of an unscreened sample leaves by any subject kind; (5) the
+egress gate at the subject's current labels and the provider's ceiling; (6) personal data is refused
+outright (docs/16 L2); (7) a SAMPLE subject leaves only once prohibited-content screening has cleared it
+(docs/16 L1); (8) a fresh cached answer at or above the subject's label is served and nothing is sent;
+(9) the exposure echo; (10) a lookup that is not NONE names an eligible authoriser with a note; (11) the
+row.
 
-(0) the caller holds lookup.request on the case BY ASSIGNMENT: emergency
-access is a read and never sends material out; (1) the host switch is on;
-(2) the provider is enabled, healthy, its adapter current, visible to the
-caller by its anchor source, and it offers the operation for the type;
-(3) its route is usable; (4) the case is not read-only, a typed VALUE is
-not declared below what the case already holds for it, and no hash of an
-unscreened sample leaves by any subject kind; (5) the egress gate at the
-subject's current labels and the provider's ceiling; (6) personal data is
-refused outright (docs/16 L2); (7) a SAMPLE subject leaves only once
-prohibited-content screening has cleared it (docs/16 L1); (8) a fresh cached answer at or above the
-subject's label is served and nothing is sent; (9) the exposure echo; (10)
-a lookup that is not NONE names an eligible authoriser with a note; (11)
-the row.
-
-## Quota
-
-Counted in Postgres from the append-only attempt rows under the provider's
-row lock: durable, exact calendar windows (day and month reset at UTC
-boundaries; minute and hour roll), auditable. An interactive send may fill
-a window; a queued one only its share, max(1, floor(quota * (100 -
-reserve) / 100)), so interactive work always has room.
+Quota is counted in Postgres from the append-only attempt rows under the provider's row lock: durable,
+exact calendar windows (day and month reset at UTC boundaries; minute and hour roll), auditable. An
+interactive send may fill a window; a queued one only its share, max(1, floor(quota * (100 - reserve) /
+100)), so interactive work always has room.
 """
 from __future__ import annotations
 
@@ -68,10 +58,9 @@ from noctornal_api.wording import count_of
 
 log = logging.getLogger("noctornal.lookups")
 
-#: docs/00 decision 75: every exposure that sends case material to
-#: somebody else's system waits for a named second person's sign-off.
-#: The sandbox follows the same rule (docs/00 decision 127); the CHECKs
-#: in 0099 are keyed on it, so this is not a switch.
+#: docs/00 decision 75: every exposure that sends case material to somebody else's system waits for a
+#: named second person's sign-off. The sandbox follows the same rule (docs/00 decision 127); the CHECKs in
+#: 0099 are keyed on it, so this is not a switch.
 SIGNOFF_REQUIRED = frozenset({"VENDOR", "PUBLIC"})
 LOOKUP_SIGNOFF_HOURS = 24
 ABANDONED_AFTER = timedelta(seconds=lookup_adapters.LOOKUP_MAX_SECONDS + 60)
@@ -165,10 +154,9 @@ def pii_shape(conn, selector_type: str, value: str) -> str | None:
         "SELECT key FROM core.selector_type WHERE is_pii").fetchall()}
     if any(hit.selector_type in pii_types for hit in find_selectors(value)):
         return PII_REFUSAL
-    # The extractor keeps the longest span, so an address inside a URL's
-    # path or query is one URL to it. The value is read again decoded, with
-    # the URL's separators as spaces, so the address inside is its own span
-    # (F15.3, 2026-09-24).
+    # The extractor keeps the longest span, so an address inside a URL's path or query is one URL to it.
+    # The value is read again decoded, with the URL's separators as spaces, so the address inside is its
+    # own span.
     try:
         decoded = urllib.parse.unquote_plus(value)
     except (TypeError, ValueError):
@@ -190,12 +178,11 @@ def pii_shape(conn, selector_type: str, value: str) -> str | None:
 
 
 def sample_screening(conn, sample_id: UUID) -> tuple[str | None, bool]:
-    """(None, False) when the sample, or its hash, may leave; otherwise the
-    sentence saying why not and whether the sample must stay unnamed.
+    """(None, False) when the sample, or its hash, may leave; otherwise the sentence saying why not and
+    whether the sample must stay unnamed.
 
-    screening.sample_may_leave is the one reader (F13, docs/00 decision 70;
-    2026-09-25). A MATCH is hidden: a matched sample is invisible outside
-    the Security Officer's section (LAB_EXCLUSIONS), so a lookup answers the
+    screening.sample_may_leave is the one reader (docs/00 decision 70). A MATCH is hidden: a matched
+    sample is invisible outside the Security Officer's section (LAB_EXCLUSIONS), so a lookup answers the
     generic restricted sentence and never confirms that it exists."""
     from noctornal_api import screening
 
@@ -227,13 +214,11 @@ class Subject:
 
 
 def window_counts(conn, provider, now: datetime | None = None) -> dict:
-    """Per quota window: the limit, how many attempts it holds, and the
-    queued share. Counts only.
+    """Per quota window: the limit, how many attempts it holds, and the queued share. Counts only.
 
-    Every attempt on the provider counts, whichever case it was for, so
-    they are counted as the LOOKUPS purpose (F51, 2026-10-02): the caller's
-    own view would count only the attempts of lookups they may read, and a
-    full window would read as having room."""
+    Every attempt on the provider counts, whichever case it was for, so they are counted as the LOOKUPS
+    purpose: the caller's own view would count only the attempts of lookups they may read, and a full
+    window would read as having room."""
     now = now or datetime.now(timezone.utc)
     limits = {window: limit for window, limit in provider.quotas.items() if limit}
     out = {}
@@ -282,9 +267,8 @@ class LookupService:
         self._vault = vault_factory
 
     def _on(self, conn: psycopg.Connection) -> LookupService:
-        """This service on `conn`, with the same fetcher, routes, adapters
-        and vault: the half of a request that runs as the LOOKUPS purpose
-        (F51, 2026-10-02). On an exempt connection that is `self`."""
+        """This service on `conn`, with the same fetcher, routes, adapters and vault: the half of a request
+        that runs as the LOOKUPS purpose. On an exempt connection that is `self`."""
         if conn is self._c:
             return self
         twin = copy.copy(self)
@@ -435,11 +419,10 @@ class LookupService:
         prior lookups of the same fingerprint, and pending NODE proposals
         naming it, at their own read labels."""
         labels, comps = self._held_by_rows(subject)
-        # Every earlier lookup of the value in the case, read as the LOOKUPS
-        # purpose (F51, 2026-10-02): this check permits on absence, and the
-        # caller's own view would miss a lookup above them, so a value looked
-        # up at AMBER could be declared GREEN and sent. What a refusal says
-        # is the one VALUE_RESTRICTED sentence whatever it found.
+        # Every earlier lookup of the value in the case, read as the LOOKUPS purpose: this check permits on
+        # absence, and the caller's own view would miss a lookup above them, so a value looked up at AMBER
+        # could be declared GREEN and sent. What a refusal says is the one VALUE_RESTRICTED sentence
+        # whatever it found.
         with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as sconn:
             prior = sconn.execute(
                 """SELECT greatest(l.classification, n.classification), n.compartments
@@ -472,11 +455,10 @@ class LookupService:
         column = _HASH_TYPES.get(subject.selector_type)
         if column is None or subject.kind == "SAMPLE":
             return None
-        # EVERY sample holding the hash, on a system connection (S1,
-        # 2026-09-25): the refusal is a legal control on what leaves, and
-        # under row-level security the caller's own view would miss a
-        # never-screened sample they cannot see and let its hash go. What
-        # the refusal SAYS is still decided by the caller's labels below.
+        # Every sample holding the hash, on a system connection: the refusal is a legal control on what
+        # leaves, and under row-level security the caller's own view would miss a never-screened sample
+        # they cannot see and let its hash go. What the refusal says is still decided by the caller's labels
+        # below.
         with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as sconn:
             rows = sconn.execute(
                 f"""SELECT s.id, greatest(s.classification,
@@ -495,11 +477,9 @@ class LookupService:
                 continue
             if hidden:
                 return "value_restricted"
-            # The sample sentence only for a sample of THIS case at labels the
-            # caller dominates: a sample elsewhere, even in a case they are
-            # assigned to, gets the generic refusal, so the gate never tells
-            # anybody that a hash is a lab sample somewhere they are not
-            # looking (2026-09-25).
+            # The sample sentence only for a sample of this case at labels the caller dominates: a sample
+            # elsewhere, even in a case they are assigned to, gets the generic refusal, so the gate never
+            # tells anybody that a hash is a lab sample somewhere they are not looking.
             visible = (same_case and not _above(cls, clearance)
                        and frozenset(comps or []) <= held)
             return "sample_unscreened" if visible else "value_restricted"
@@ -529,8 +509,8 @@ class LookupService:
         can_request = self.holds(user_id, case_id, "lookup.request", case_cls, case_comp)
         now = datetime.now(timezone.utc)
         out = []
-        # One LOOKUPS connection for every provider's windows (F51,
-        # 2026-10-02): availability counts every attempt, whichever case.
+        # One LOOKUPS connection for every provider's windows: availability counts every attempt, whichever
+        # case.
         with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as sconn:
             counter = self._on(sconn)
             for (pid,) in rows:
@@ -633,9 +613,8 @@ class LookupService:
             return ("case_read_only", f"This case is {status}, so nothing is sent from it.",
                     False)
         if subject.kind == "SELECTOR":
-            # A selector row is the labels of its own owner, and since 0134 a
-            # value another entity holds above it is a row of its own, so the
-            # row of the lower one no longer says what the value is held at.
+            # A selector row is the labels of its own owner, and a value another entity holds above it is a
+            # row of its own (0134), so the row of the lower one does not say what the value is held at.
             # Held to the stricter, in the VALUE kind's own sentence.
             held_labels, held_comps = self._held_by_rows(subject)
             if (_above(_max(*held_labels), subject.classification)
@@ -671,13 +650,12 @@ class LookupService:
 
     def _cached(self, subject: Subject, provider, operation: str,
                 fingerprint: bytes) -> UUID | None:
-        """A fresh answer at or above the subject's label (a lower-labelled
-        answer is a miss, never a trigger error).
+        """A fresh answer at or above the subject's label (a lower-labelled answer is a miss, never a
+        trigger error).
 
-        Read as the LOOKUPS purpose (F51, 2026-10-02): an answer above the
-        requester is served from the cache, and withheld from them by the
-        read that shows it, rather than sent for a second time because
-        their own view could not see the first."""
+        Read as the LOOKUPS purpose: an answer above the requester is served from the cache, and withheld
+        from them by the read that shows it, rather than sent for a second time because their own view
+        could not see the first."""
         with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as sconn:
             row = sconn.execute(
                 """SELECT id FROM ingest.lookup_result
@@ -703,15 +681,12 @@ class LookupService:
         if not self.holds(user_id, case_id, "lookup.request", subject.classification,
                           subject.compartments):
             raise LookupRefused("not_assigned", NO_ASSIGNMENT, status=403)
-        # F51 (2026-10-02): the subject, the provider and the assignment are
-        # the requester's to see, read above on the request connection at
-        # their labels. From the gates on, the request runs as the LOOKUPS
-        # purpose, as the drain does: the answer is stored at the label the
-        # provider decides (up to RED), proposals are raised from it, and
-        # the quota, the cache and the value check must see every row. What
-        # the requester is shown is read back on the request connection at
-        # their labels (routers/lookups._answer), the answer withheld above
-        # them exactly as before.
+        # The subject, the provider and the assignment are the requester's to see, read above on the
+        # request connection at their labels. From the gates on, the request runs as the LOOKUPS purpose, as
+        # the drain does: the answer is stored at the label the provider decides (up to RED), proposals are
+        # raised from it, and the quota, the cache and the value check must see every row. What the
+        # requester is shown is read back on the request connection at their labels
+        # (routers/lookups._answer), the answer withheld above them.
         with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as sconn:
             return self._on(sconn)._gate_and_send(
                 subject, provider, operation, fingerprint, user_id=user_id,
@@ -848,11 +823,9 @@ class LookupService:
                  now: datetime | None = None) -> None:
         """Inside the caller's transaction: lock the row and the provider,
         count the windows, record the attempt, move the row to SENDING."""
-        # F51 (2026-10-02): the windows count every attempt on the provider,
-        # whichever case it was for. A connection row security filters would
-        # count part of them and send past the quota, so a reservation is
-        # made on a LOOKUPS connection (a request, a sign-off, the provider
-        # test, the drain) or not at all.
+        # The windows count every attempt on the provider, whichever case it was for. A connection row
+        # security filters would count part of them and send past the quota, so a reservation is made on a
+        # LOOKUPS connection (a request, a sign-off, the provider test, the drain) or not at all.
         if not is_exempt(self._c):
             raise SystemContextUnavailable(
                 "a lookup's reservation counts every attempt on its provider and "
@@ -862,10 +835,9 @@ class LookupService:
             "FROM ingest.lookup WHERE id = %s FOR UPDATE", (lookup_id,)).fetchone()
         provider_id, attempts, _level, _kind, _state = row
         provider = providers.get_provider(self._c, provider_id, for_update=True)
-        # The clock is read once the provider is locked: read before it, a
-        # reservation that waited on the lock counted the windows up to a
-        # moment earlier than the attempt the holder had just written, missed
-        # it, and sent past a full quota (2026-10-07).
+        # The clock is read once the provider is locked: read before it, a reservation that waited on the
+        # lock would count the windows up to a moment earlier than the attempt the holder had just written,
+        # miss it, and send past a full quota.
         now = now or self._c.execute("SELECT clock_timestamp()").fetchone()[0]
         if provider.cooldown_until and provider.cooldown_until > now:
             raise CoolingDown("cooling_down", "The provider asked to slow down; it is "
@@ -1002,10 +974,8 @@ class LookupService:
         return {"hop": hop}
 
     def _result_label(self, case_id, provider, lookup_cls, node_id, extra=None) -> str:
-        # A provider test (a canary) has no case (F15.3, 2026-09-24). The
-        # case and the entity are read as facts (F51, 2026-10-02): a row
-        # hidden from the connection would read as none and the answer
-        # would be labelled below it.
+        # A provider test (a canary) has no case. The case and the entity are read as facts: a row hidden
+        # from the connection would read as none and the answer would be labelled below it.
         row = self._c.execute("SELECT classification FROM iam.case_facts(%s)",
                               (case_id,)).fetchone() if case_id else None
         case_cls = row[0] if row else None
@@ -1278,13 +1248,11 @@ class LookupService:
 
     def sign_off(self, case_id: UUID, lookup_id: UUID, *, user_id: UUID, approve: bool,
                  note: str | None = None, now: datetime | None = None) -> dict:
-        """The named authoriser's decision. It runs as the LOOKUPS purpose
-        (F51, 2026-10-02), as the drain does: it re-reads the subject at the
-        REQUESTER's labels, reserves against every attempt on the provider,
-        and stores the answer at the provider's label, none of which is the
-        signer's view. Who may decide is unchanged (the named authoriser,
-        eligible now, after the route's gate); what the signer is then shown
-        is read back on the request connection at their labels."""
+        """The named authoriser's decision. It runs as the LOOKUPS purpose, as the drain does: it re-reads
+        the subject at the requester's labels, reserves against every attempt on the provider, and stores
+        the answer at the provider's label, none of which is the signer's view. Who may decide is the named
+        authoriser, eligible now, after the route's gate; what the signer is then shown is read back on the
+        request connection at their labels."""
         with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as sconn:
             return self._on(sconn)._sign_off(case_id, lookup_id, user_id=user_id,
                                              approve=approve, note=note, now=now)
@@ -1338,12 +1306,9 @@ class LookupService:
                     gate = ("requester_withdrawn", "The requester may no longer send this.",
                             False)
                 elif provider.exposure_level != row[14]:
-                    # egress-lookup-signoff-exposure (2026-10-03): the
-                    # requester confirmed, and this person is signing, the
-                    # exposure the lookup recorded. A provider raised since
-                    # (VENDOR to PUBLIC) is a different disclosure, so the
-                    # drain's own refusal applies here too, whatever
-                    # re-enabled the provider in between.
+                    # The requester confirmed, and this person is signing, the exposure the lookup
+                    # recorded. A provider raised since (VENDOR to PUBLIC) is a different disclosure, so the
+                    # drain's own refusal applies here too, whatever re-enabled the provider in between.
                     gate = ("exposure_changed",
                             f"The exposure of this provider is now "
                             f"{provider.exposure_level}, and this was asked for at "
@@ -1427,13 +1392,11 @@ class LookupService:
 
     # -- reads (current labels) ----------------------------------------------------------------
 
-    #: The answer's label comes from `iam.lookup_result_facts` (F51,
-    #: 2026-10-02), not from the join to the answer: under row-level
-    #: security an answer above the reader drops out of that join, the
-    #: strictest-of below would read low, and the outcome, status and counts
-    #: this read exists to withhold would be served. The join stays for the
-    #: counts, which are served only when the reader dominates the answer,
-    #: and the answer is then visible to them.
+    #: The answer's label comes from `iam.lookup_result_facts`, not from the join to the answer: under
+    #: row-level security an answer above the reader drops out of that join, the strictest-of below would
+    #: read low, and the outcome, status and counts this read exists to withhold would be served. The join
+    #: stays for the counts, which are served only when the reader dominates the answer, and the answer is
+    #: then visible to them.
     _READ = """
         SELECT l.id, l.case_id, l.provider_id, p.display_name, l.exposure_level,
                l.operation, l.subject_kind, l.selector_type, l.query_value, l.state,
@@ -1465,11 +1428,9 @@ class LookupService:
         are withheld with the answer."""
         readable = r[29] is None or not _above(r[29], clearance)
         withheld = r[22] is not None and not readable
-        # Withheld means nothing about the answer: not its outcome, status or
-        # counts, and not whether it could be read, which the error class
-        # and FAILED against ANSWERED would each say (2026-09-25: an
-        # unreadable MISP answer is labelled RED, and the word 'unreadable'
-        # reached a reader below it).
+        # Withheld means nothing about the answer: not its outcome, status or counts, and not whether it
+        # could be read, which the error class and FAILED against ANSWERED would each say (an unreadable
+        # MISP answer is labelled RED, and the word 'unreadable' must not reach a reader below it).
         state = r[9]
         if withheld and state in ("ANSWERED", "FAILED"):
             state = "FINISHED"
@@ -1614,17 +1575,15 @@ class LookupService:
                         object_id=result_id, detail={"evidence_id": str(evidence_id)})
         return evidence_id
 
-    # -- the provider test (F15.3) ---------------------------------------------------------
+    # -- the provider test ---------------------------------------------------------
 
     def test_provider(self, provider_id: UUID, *, actor_id: UUID) -> dict:
-        """A CANARY with no case and no case material, so one administrator
-        runs it whatever the provider's exposure. Status only: never an
-        error detail, an excerpt or a body.
+        """A CANARY with no case and no case material, so one administrator runs it whatever the provider's
+        exposure. Status only: never an error detail, an excerpt or a body.
 
-        It runs as the LOOKUPS purpose (F51, 2026-10-02): the canary has no
-        case, so no request role sees its row, and its reservation counts
-        every attempt on the provider. The route's gate (integration.manage,
-        step-up) has run first."""
+        It runs as the LOOKUPS purpose: the canary has no case, so no request role sees its row, and its
+        reservation counts every attempt on the provider. The route's gate (integration.manage, step-up)
+        has run first."""
         with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as sconn:
             return self._on(sconn)._test_provider(provider_id, actor_id=actor_id)
 
@@ -1664,7 +1623,7 @@ class LookupService:
         return {"state": row[0], "http_status": row[1], "outcome": row[2],
                 "error_class": row[3]}
 
-    # -- batches (F15.4) ----------------------------------------------------------------------
+    # -- batches ----------------------------------------------------------------------
 
     def _selection(self, case_id: UUID, selection: dict, *, user_id: UUID) -> list:
         """Subjects resolved IN SQL under the caller's ceiling (the node
@@ -1709,10 +1668,8 @@ class LookupService:
             raise LookupRefused("too_many", f"More than {BATCH_MAX} would be planned; "
                                 "narrow the selection.")
         eligible, refused, cached = [], [], 0
-        # The subjects are the planner's, read at their labels on the
-        # request connection; the gates, the cache and the windows on one
-        # LOOKUPS connection for the whole plan (F51, 2026-10-02), as a
-        # request reads them.
+        # The subjects are the planner's, read at their labels on the request connection; the gates, the
+        # cache and the windows on one LOOKUPS connection for the whole plan, as a request reads them.
         with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as sconn:
             counter = self._on(sconn)
             for (selector_id,) in rows:
@@ -1801,9 +1758,8 @@ class LookupService:
         rows = self._selection(case_id, selection, user_id=user_id)
         refused_ids = {r["selector_id"] for r in planned["refused"]}
         queued = cached = 0
-        # The batch and its rows are the requester's own writes, at their
-        # labels, on the request connection; only the cache is read on a
-        # LOOKUPS connection, as `plan` read it (F51, 2026-10-02).
+        # The batch and its rows are the requester's own writes, at their labels, on the request
+        # connection; only the cache is read on a LOOKUPS connection, as `plan` reads it.
         with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as sconn, \
                 self._c.transaction():
             counter = self._on(sconn)
@@ -1852,13 +1808,10 @@ class LookupService:
                                 "cancels a batch.", status=403)
         if row[2] is not None:
             raise LookupRefused("already_cancelled", "This batch was already cancelled.")
-        # F51 (2026-10-02): a cancelled batch cancels EVERY queued row of it,
-        # a row above the person cancelling included, or the drain would send
-        # it later; so the cancel runs as the LOOKUPS purpose. The number it
-        # answers is the rows the canceller can read, as `batches` shows them
-        # (the conservative reading, docs/00 decision 149: a count of rows
-        # above the reader is withheld material); the audit row keeps the
-        # full count.
+        # A cancelled batch cancels every queued row of it, a row above the person cancelling included, or
+        # the drain would send it later; so the cancel runs as the LOOKUPS purpose. The number it answers is
+        # the rows the canceller can read, as `batches` shows them (docs/00 decision 149: a count of rows
+        # above the reader is withheld material); the audit row keeps the full count.
         clearance, held, _a, _n = self._user(user_id)
         readable = {r[0] for r in self._c.execute(
             """SELECT l.id FROM ingest.lookup l
@@ -1912,9 +1865,8 @@ class LookupService:
                 "cancelled_at": r[6].isoformat() if r[6] else None, "states": {},
                 "yours": r[9] == user_id, "can_cancel": False})
             item["states"][r[7]] = int(r[8])
-            # Cancel is offered where cancel_batch would take it: the
-            # requester or a lead, on a batch with queued rows the reader
-            # can see (2026-09-25).
+            # Cancel is offered where cancel_batch would take it: the requester or a lead, on a batch with
+            # queued rows the reader can see.
             if r[6] is None and r[7] == "QUEUED" and (r[9] == user_id or lead):
                 item["can_cancel"] = True
         return list(out.values())
@@ -1926,7 +1878,7 @@ def lookup_words(n: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# The drain (F15.4): housekeeping always, sends only with the switch on
+# The drain: housekeeping always, sends only with the switch on
 # ---------------------------------------------------------------------------
 
 def housekeeping(conn: psycopg.Connection) -> dict:
@@ -2091,10 +2043,9 @@ def _drain_one(conn, svc: LookupService, lookup_id: UUID, provider, *,
         return "cached"
     if dry_run:
         return "sent"
-    # The provider was read once for the pass, and a pass may run for minutes:
-    # an exposure raised, a provider disabled or a lookup cancelled since then
-    # is read again here, under the locks the reservation takes, so nothing is
-    # sent on a stale reading (2026-10-07).
+    # The provider was read once for the pass, and a pass may run for minutes: an exposure raised, a
+    # provider disabled or a lookup cancelled since then is read again here, under the locks the
+    # reservation takes, so nothing is sent on a stale reading.
     live = conn.execute(
         """SELECT l.state, p.enabled AND p.retired_at IS NULL, p.exposure_level::text
              FROM ingest.lookup l JOIN ingest.provider p ON p.id = l.provider_id

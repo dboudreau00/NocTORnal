@@ -1,15 +1,9 @@
 """The notification centre over HTTP, plus the outbox drain.
 
-Not case-scoped: an inbox spans every case its owner is on, so the gate
-here is "are you you", not "may you read this case". The content filter is
-inside `NotificationService.inbox`, which re-checks the CURRENT clearance
-in SQL -- a revoked clearance has to hide old notifications too, or the
-centre quietly becomes a retention loophole for everything the analyst used
-to be able to see.
-
-Reading and acknowledging are scoped to the recipient by the WHERE clause,
-not by a check the handler could forget: `mark_read(id, recipient_id)`
-cannot touch somebody else's row even if the id is guessed.
+Not case-scoped: an inbox spans every case its owner is on, so the gate is "are you you", not
+"may you read this case". `NotificationService.inbox` re-checks the current clearance in SQL, so a
+revoked clearance hides old notifications too. Reading and acknowledging are scoped to the
+recipient by the WHERE clause, so `mark_read(id, recipient_id)` cannot touch another's row.
 """
 from __future__ import annotations
 
@@ -58,13 +52,11 @@ class NotificationOut(BaseModel):
     created_at: datetime
     read_at: datetime | None
     acknowledged_at: datetime | None
-    #: When the drain escalates this unless it is acknowledged first, for
-    #: an unacknowledged priority-1 row; None otherwise
-    #: (ux08-triage:urgent-read-vs-ack-invisible, 2026-09-23).
+    #: For an unacknowledged priority-1 row, when the drain escalates it unless it is acknowledged
+    #: first; None otherwise.
     escalates_at: datetime | None = None
-    #: The case CODE, so a card about another case can say which one it
-    #: opens (ux08-triage:open-approvals-wrong-case, 2026-09-23). The
-    #: subject already carries it; this is the same fact as a field.
+    #: The case code, so a card about another case can say which one it opens. The subject
+    #: already carries it; this is the same fact as a field.
     case_code: str | None = None
 
 
@@ -113,10 +105,8 @@ def unread(
     user: CurrentUser = Depends(current_user),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """The badge. Polled, so it is deliberately two indexed COUNTs and
-    nothing else: unread, and urgent-but-unacknowledged, which the badge
-    marks apart because reading an alarm does not stop it escalating
-    (ux08-triage:urgent-read-vs-ack-invisible, 2026-09-23)."""
+    """The badge: unread, and urgent but unacknowledged, counted apart because reading an alarm
+    does not stop it escalating. Polled, so it is two indexed counts and nothing else."""
     svc = NotificationService(conn)
     return {"unread": svc.unread_count(user.user_id),
             "urgent_unacknowledged": svc.urgent_unacknowledged(user.user_id)}
@@ -128,16 +118,9 @@ def waiting(
     user: CurrentUser = Depends(current_user),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """What is waiting for this person, per case: proposals in the triage
-    queue, and approval requests they could sign.
-
-    ux08-triage:no-work-waiting-at-sign-in (2026-09-23). The case list
-    showed code, title, status and classification, and the first question
-    after sign-in ("what needs me now") was answered by opening each case
-    to read its badges; a request whose notification had been read left
-    no trace on any badge. Here, not under a case, because the case list
-    is where it is read. Counts only, and only over cases the person may
-    read (see `ProposalStore.waiting_by_case` and
+    """What is waiting for this person, per case: proposals in the triage queue, and approval
+    requests they could sign. Not under a case, because the case list reads it. Counts only, over
+    cases the person may read (`ProposalStore.waiting_by_case`,
     `ApprovalService.awaiting_signature`)."""
     from noctornal_api.approvals import ApprovalService
     from noctornal_api.http.deps import user_ceiling
@@ -217,9 +200,8 @@ def get_preferences(
                         for p in prefs.values()],
         "kinds": {k: {"priority": v.default_priority,
                       "description": v.description} for k, v in KINDS.items()},
-        # F8 and F7 (2026-09-24): whether each outbound channel can
-        # deliver at all, and why not, so a preference is never switched on
-        # into a channel that holds everything.
+        # Whether each outbound channel can deliver at all, and why not, so a preference is never
+        # switched on into a channel that holds everything.
         "channels": _channels(conn),
     }
 
@@ -250,8 +232,8 @@ def _channels(conn) -> dict:
 def set_preference(
     channel: str, body: PreferenceIn,
     user: CurrentUser = Depends(current_user),
-    # Written on a system connection, for this caller alone: the settings
-    # are read-only to the request role (0182, Beta 1.1).
+    # Written on a system connection, for this caller alone: the settings are read-only to the
+    # request role (migration 0182).
     sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.NOTIFY_PREFERENCE)),
 ) -> PreferenceOut:
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
@@ -275,26 +257,19 @@ class DrainOut(BaseModel):
     redacted: int
     refused: int
     failed: int
-    #: Rows made undeliverable by a clearance or assignment revoked AFTER
-    #: they were queued (transports.revoke_undeliverable). The drain has
-    #: always computed this; the model did not declare it, and pydantic
-    #: drops an undeclared key without a sound -- so the one counter that
-    #: says "these people were NOT told, on purpose" never reached the
-    #: operator who pressed the button. test_ui_invariants holds the model
-    #: to every key the drain returns.
+    #: Rows made undeliverable by a clearance or assignment revoked after they were queued
+    #: (transports.revoke_undeliverable). Pydantic drops an undeclared key silently, so
+    #: test_ui_invariants holds this model to every key the drain returns.
     revoked: int
-    #: F8 and F7 (2026-09-24): due rows of a channel whose route is
-    #: missing or refusing, left PENDING with their attempts untouched;
-    #: Jira rows left for a later pass (circuit open, budget spent, an
-    #: unsettled create); Jira rows withdrawn because nothing may route them
-    #: any more.
+    #: held: due rows of a channel whose route is missing or refusing, left PENDING with their
+    #: attempts untouched. deferred: Jira rows left for a later pass (circuit open, budget spent,
+    #: an unsettled create). withdrawn: Jira rows nothing may route any more.
     held: int = 0
     deferred: int = 0
     withdrawn: int = 0
-    #: N3 (2026-09-02): one drain does three things. How many case owners
-    #: were told a review is due (notify_events.case_reviews_due) and how
+    #: How many case owners were told a review is due (notify_events.case_reviews_due), and how
     #: many unacknowledged priority-1 notifications were escalated
-    #: (notifications.escalate_unacknowledged) in this pass.
+    #: (notifications.escalate_unacknowledged), in this pass.
     reviews_due: int
     escalated: int
 
@@ -304,28 +279,18 @@ class DrainOut(BaseModel):
 def dispatch(
     user: CurrentUser = Depends(require_global("integration.manage")),
     conn: psycopg.Connection = Depends(get_conn),
-    # The drain the cron runs, on the same system connection (F51,
-    # 2026-10-02): it sends every recipient's due rows, withdraws, revokes
-    # and escalates, and as the administrator's request role it would see
-    # only the administrator's own notifications and send nothing else.
+    # The drain the cron runs, on the same system connection: it sends every recipient's due rows,
+    # withdraws, revokes and escalates, and as the administrator's request role it would see only
+    # the administrator's own notifications.
     sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.NOTIFY)),
 ) -> DrainOut:
     """Drain the outbox once.
 
-    A function you call, not a loop that runs. There is no worker process in
-    this build -- decision 30 set that precedent for analytics and the same
-    reasoning applies: a queue adds a process, a runtime and a failure mode.
-    So the drain is driven by an operator, a cron entry or a test, and that
-    limitation is written down here rather than hidden behind a thread that
-    silently dies at 3am.
-
-    Gated on `integration.manage`, which is step-up, because draining sends
-    real email to real people. A cron entry cannot satisfy step-up;
-    `scripts/notify_drain.py` is the drain for one (N3, 2026-09-02).
-
-    Metered and audited (F8, 2026-09-24): a manual drain sends real
-    mail and real Jira issues, so it writes NOTIFY_DRAIN_RUN with the
-    caller and the counters. The cron drain writes nothing, as before.
+    There is no worker process (decision 30): a queue adds a process, a runtime and a failure mode,
+    so an operator, a cron entry or a test drives the drain. Gated on `integration.manage`, which
+    is step-up, because it sends real mail and Jira issues; a cron entry cannot satisfy step-up and
+    runs `scripts/notify_drain.py`. A manual drain is audited as NOTIFY_DRAIN_RUN with the caller
+    and the counters.
     """
     from noctornal_api.transports import dispatch_due
     counters = dispatch_due(sconn)
@@ -355,8 +320,8 @@ class DeliveryOut(BaseModel):
     #: preference override -- that is `address`, and the two differing is
     #: the case an operator most needs to be able to see.
     recipient: str
-    #: Whether that account is still active (F8): a delivery to an
-    #: account since deactivated is read differently.
+    #: Whether that account is still active: a delivery to an account since deactivated is read
+    #: differently.
     recipient_active: bool = True
     #: Where it actually went (`delivery.sent_to`, migration 0044): an
     #: address, a webhook endpoint with its path WITHHELD (0096; the path is
@@ -374,7 +339,7 @@ class DeliveryOut(BaseModel):
     attempted_at: datetime | None
     #: When the notification behind it was raised.
     raised_at: datetime
-    #: F8 (2026-09-24): why, as a stable code and a sentence.
+    #: Why, as a stable code and a sentence.
     cause: str | None = None
     cause_text: str | None = None
     #: What left: SUMMARY, SUBJECT, STUB or NOTHING; None while PENDING.
@@ -386,11 +351,10 @@ class DeliveryOut(BaseModel):
     jira_issue: str | None = None
 
 
-#: The rows that explain an absence the recipient did not choose (F8):
-#: refused, failed, revoked, withdrawn after queueing, and history from
-#: before causes. Routine standing choices (a channel turned off, a
-#: priority threshold, the Jira routing decisions) stay out and are
-#: reachable through the cause filter.
+#: The rows that explain an absence the recipient did not choose: refused, failed, revoked,
+#: withdrawn after queueing, and LEGACY rows from before causes were recorded. Routine standing
+#: choices (a channel turned off, a priority threshold, Jira routing) stay out and are reachable
+#: through the cause filter.
 _NOT_DELIVERED = ("REFUSED", "FAILED")
 _UNCHOSEN_CAUSES = ("REVOKED", "WITHDRAWN", "LEGACY")
 
@@ -447,32 +411,18 @@ def deliveries(
     before: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
     _: CurrentUser = Depends(require_global("integration.manage")),
-    # The ledger spans every recipient (F51, 2026-10-02): as the request
-    # role it would list the administrator's own deliveries and nothing
-    # else.
+    # The ledger spans every recipient: as the request role it would list only the administrator's
+    # own deliveries.
     conn: psycopg.Connection = Depends(system_conn(SystemPurpose.NOTIFY_ADMIN)),
 ) -> dict:
     """Read the delivery ledger back, newest first, a page at a time.
 
-    N4 (2026-09-02). `notify.delivery` has recorded every refusal with a
-    reason since migration 0029 and every destination since 0044, and
-    nothing rendered it. This is the read.
-
-    F8 (2026-09-24): every row carries a stable cause, so
-    `refused_only` no longer infers anything from free text and an
-    attempt time: it is REFUSED or FAILED, or a cause the recipient did not
-    choose (REVOKED, WITHDRAWN, LEGACY). `outbound` leaves the in-app rows
-    out (the console sends it by default). Order and cursor are
-    coalesce(last attempt, sent, queued) then id, served by
-    delivery_ledger_idx; `next` is null on the last page.
-
-    `kind` is not validated against `KINDS`: a kind that has since been
-    unregistered still has rows, and an operator asking about them should
-    get them, not a 400.
-
-    Under `integration.manage` because the ledger spans every case and
-    every recipient. It carries kinds, channels, addresses and reasons --
-    never subjects or summaries.
+    `refused_only` keeps REFUSED and FAILED rows and the causes the recipient did not choose
+    (REVOKED, WITHDRAWN, LEGACY); `outbound` leaves the in-app rows out. Order and cursor are
+    coalesce(last attempt, sent, queued) then id, served by delivery_ledger_idx; `next` is null on
+    the last page. `kind` is not validated against `KINDS`, so a kind since unregistered still
+    lists its rows. Under `integration.manage` because the ledger spans every case and recipient;
+    it carries kinds, channels, addresses and reasons, never subjects or summaries.
     """
     from noctornal_api.transports import CAUSES, cause_text
 
@@ -553,11 +503,10 @@ def deliveries(
 def deliveries_summary(
     hours: int = Query(24, ge=1, le=720),
     _: CurrentUser = Depends(require_global("integration.manage")),
-    # Counts across every recipient (F51, 2026-10-02).
+    # Counts across every recipient.
     conn: psycopg.Connection = Depends(system_conn(SystemPurpose.NOTIFY_ADMIN)),
 ) -> dict:
-    """Per-channel health over a window, and the outbox (F8). Counts
-    only: no subject, no recipient."""
+    """Per-channel health over a window, and the outbox. Counts only: no subject, no recipient."""
     from noctornal_api import jira, transports
 
     window = conn.execute(
@@ -634,8 +583,8 @@ _REQUEUE_REFUSALS = {
     "SENT": "It was delivered.",
 }
 
-#: A Jira row whose link's create, or whose event's post, is unsettled is
-#: not due again until Jira's index has had two minutes (F8).
+#: A Jira row whose link's create, or whose event's post, is unsettled is not due again until
+#: Jira's index has had two minutes.
 _SETTLE_SQL = """
 CASE WHEN d.channel = 'JIRA' AND d.jira_link_id IS NOT NULL THEN greatest(
     now(),
@@ -660,15 +609,12 @@ _OPTED_IN = """(d.channel <> 'JIRA' OR coalesce((
 def requeue(
     delivery_id: UUID,
     user: CurrentUser = Depends(require_global("integration.manage")),
-    # Any recipient's delivery, read, requeued and audited in one
-    # transaction on one connection (F51, 2026-10-02).
+    # Any recipient's delivery, read, requeued and audited in one transaction on one connection.
     conn: psycopg.Connection = Depends(system_conn(SystemPurpose.NOTIFY_ADMIN)),
 ) -> DeliveryOut:
-    """Put a FAILED or backing-off delivery back in the outbox (F8).
-    Attempts start again at zero, because a requeue after a fix that kept
-    its attempts would burn out on the first try. The drain re-applies
-    readable_predicate, the egress gate and Jira's routing, so a requeue
-    can never widen exposure; REFUSED and SUPPRESSED are never
+    """Put a FAILED or backing-off delivery back in the outbox, with its attempts reset so it does
+    not burn out on the first try. The drain re-applies readable_predicate, the egress gate and
+    Jira's routing, so a requeue cannot widen exposure; REFUSED and SUPPRESSED are never
     requeueable."""
     before = conn.execute(
         """SELECT d.state, d.attempts, d.cause, d.channel FROM notify.delivery d
@@ -733,7 +679,7 @@ class BulkRequeueIn(BaseModel):
     since: datetime
 
 
-#: Bounds on a bulk requeue (F8): one channel, thirty days, a thousand rows.
+#: Bounds on a bulk requeue: one channel, thirty days, a thousand rows.
 BULK_REQUEUE_DAYS = 30
 BULK_REQUEUE_MAX = 1000
 
@@ -743,7 +689,7 @@ BULK_REQUEUE_MAX = 1000
 def requeue_bulk(
     body: BulkRequeueIn,
     user: CurrentUser = Depends(require_global("integration.manage")),
-    # Every recipient's failed deliveries of the channel (F51, 2026-10-02).
+    # Every recipient's failed deliveries of the channel.
     conn: psycopg.Connection = Depends(system_conn(SystemPurpose.NOTIFY_ADMIN)),
 ) -> dict:
     """Every FAILED delivery of one channel since a time, at most thirty

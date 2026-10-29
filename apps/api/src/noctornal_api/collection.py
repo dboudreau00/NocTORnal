@@ -1,96 +1,37 @@
-"""Phase 4 -- collection: the adapter interface, the scheduler, the persona
-vault and watch matching (docs/04).
+"""Collection: the adapter interface, the scheduler, the persona vault and watch matching (docs/04).
 
-The `collect.*` schema has existed since Phase 0. This is the code, and it
-arrives LAST among the buildable phases on purpose. docs/09:
+Invariant 7: credentials never leave the vault. `collection_account.secret_*` is decrypted only
+inside the collection worker, never in the API process, never serialised to a response, never
+logged. So `PersonaVault.use()` is a context manager that hands a secret to a callback and drops it,
+and there is no `get_secret()`: a function that returns a plaintext credential gets called from a
+request handler, and then the secret is in a traceback, a log line and an error response. `redact()`
+is applied to every adapter error before it is stored, because a persona's password lands in an HTTP
+error body more often than anybody expects. The vault seals and opens with NOCTORNAL_PERSONA_KEK
+alone (security/persona_envelope.py), never the TOTP ring; in production only the collector
+(scripts/collector.py) holds that key, and the API queues persona acts (persona_acts.py) with no key
+that could open a credential.
 
-    The graph and assertion layer must work end to end before collection
-    is switched on. Pointing a firehose at a half-built model produces a
-    landfill you then have to clean by hand.
+Politeness is operational security: `next_due_at` jitters the interval and `RateLimiter` spaces
+requests per source, because a collector that polls exactly every 300 seconds can be picked out of
+an access log in an afternoon. One persona has one egress profile, checked by
+`check_egress_separation()` (a temporal condition, so not a database constraint).
 
-## Invariant 7 is the shape of this module
+Not in this module:
 
-    Credentials never leave the vault. `collection_account.secret_*`
-    is decrypted only inside the collection worker, never in the API
-    process, never serialised to a response, never logged.
-
-So `PersonaVault.use()` is a CONTEXT MANAGER that hands a secret to a
-callback and drops it, and there is no `get_secret()` anywhere. That is not
-politeness -- a function returning a plaintext credential is a function
-somebody will call from a request handler, and then the secret is in a
-traceback, a log line and an error response. A shape that cannot be misused
-is worth more than a rule that must be remembered.
-
-`redact()` exists for the same reason and is applied to every adapter error
-before it is stored: a persona's password lands in an HTTP error body far
-more often than anybody expects.
-
-Since 2026-10-02 (A collector process) the vault seals and opens with
-NOCTORNAL_PERSONA_KEK alone (security/persona_envelope.py), never the TOTP
-ring, and in production the collector (scripts/collector.py) is the one
-process that holds that key: the API queues every persona act
-(persona_acts.py) and holds no key that could open a persona credential.
-
-## The scheduler is polite by construction
-
-docs/04 asks for jitter and per-source `max_rps`, and the reason is
-operational security rather than courtesy. A collector that polls exactly
-every 300 seconds is a collector that a competent forum admin can pick out
-of an access log in an afternoon -- and a burnt persona is expensive and
-slow to replace.
-
-So `next_due_at` adds jitter as a PERCENTAGE of the interval, and
-`RateLimiter` spaces requests per source. Both are deliberately visible in
-the run record, because "why did this poll at 04:12" should be answerable.
-
-## Operational separation is enforced, not advised
-
-docs/04: "One persona ↔ one egress profile. Enforced with a constraint, not
-a convention. Two personas sharing an exit IP can be correlated by any
-competent forum admin, and you lose both at once."
-
-`check_egress_separation()` is that check. It is not a database constraint
-because an egress profile legitimately serves many personas across DIFFERENT
-sources over time -- what must not happen is two personas on the same
-profile being live simultaneously against the same source. That is a
-temporal condition, and stating it honestly as a check with a reason beats
-a constraint that is either wrong or unenforceable.
-
-## What is NOT built, and why
-
-- **No live adapters except RSS in this module.** The adapter contract and
-  every gate a forum or Telegram adapter passes through are here (docs/00
-  decision 69, 2026-09-24): one frozen `Adapter` contract and its
-  `RunContext`, per-item savepoints, raw markup per item, the persona gate
-  and lease, a two-person collection authority and a declared
-  classification ceiling (collection_authority.py) that every forum and
-  Telegram source needs, public boards included. The XenForo, MyBB and
-  Telegram adapters themselves live in forum_adapters.py and telegram.py,
-  and `default_adapters()` registers them. Whether a unit may read a forum
-  at all remains docs/16 L3's question: this code records who said it may.
-- **No scheduler PROCESS.** `due_sources()` still only reports and
-  `run_once()` still only acts; nothing in this module loops, and nothing
-  here runs itself. Same reasoning as decisions 30 and 46 -- a collector
-  that runs itself on a timer nobody watches is how a persona gets burnt
-  at 3am. What exists as of 2026-09-10 is `scripts/collection_poll.py`, a
-  cron ENTRY in the shape of `notify_drain.py`: one process, one
-  connection, one pass, an exit code. It asks `due_sources()` what is
-  ready and polls that, so the operator chooses how often to LOOK and each
-  source's own jittered `next_due_at` still decides when it is polled. A
-  runner that imposed its own cadence would be the timer this bullet
-  refuses.
-- **The egress proxy is not in this module** (2026-09-24). Watch
-  targets are user-supplied URLs, which is exactly the SSRF surface docs/09
-  names, and `fetch()` closes it at the connect: each hop's name is
-  resolved ONCE, every answer is classified by what the address is, and the
-  socket is opened to the address that was checked, so a resolver
-  answering public for the check and private for the connect (DNS
-  rebinding) has nothing left to rebind (sec-ssrf-rebinding, 2026-09-23).
-  Persona and passive traffic take a route from `egress.route_for`. In
-  development with no proxy the route is DIRECT and the pinned client
-  (pinned_http.py) applies egress_policy.py itself; with a proxy, the proxy
-  is the only resolver and the only exit, and it enforces the same policy
-  with the same functions (docs/00 decision 68, docs/17).
+- Live adapters other than RSS. The contract and every gate they pass through are here (docs/00
+  decision 69): the frozen `Adapter` and `RunContext`, per-item savepoints, the persona gate and
+  lease, and the two-person collection authority with a declared classification ceiling
+  (collection_authority.py). The XenForo, MyBB and Telegram adapters are in forum_adapters.py and
+  telegram.py, registered by `default_adapters()`. Whether a unit may read a forum at all is docs/16
+  L3's question; this code records who said it may.
+- A scheduler process. `due_sources()` only reports and `run_once()` only acts, because a collector
+  that runs itself on a timer nobody watches is how a persona gets burnt at 3am (docs/00 decisions
+  30 and 46). `scripts/collection_poll.py` is a cron entry: one pass, one connection, an exit code.
+- The egress proxy. Watch targets are user-supplied URLs, the SSRF surface docs/09 names, and
+  `fetch()` closes it at the connect: each hop's name is resolved once and the socket opens to an
+  address that was checked, so DNS rebinding has nothing to rebind. Persona and passive traffic take
+  a route from `egress.route_for`; with a proxy, the proxy is the only resolver and exit and
+  enforces the same policy (docs/00 decision 68, docs/17).
 """
 from __future__ import annotations
 
@@ -122,11 +63,10 @@ from noctornal_api.egress_policy import (
 )
 from noctornal_api.egress_policy import explain as egress_sentence
 
-# The collector's old names for what moved to egress_policy.py and
-# pinned_http.py (docs/20 section 5, 2026-09-24), kept as the SAME
-# objects: the suites patch `collection._is_blocked` and read `_Deadline`,
-# `_Hop`, `_dial` and `_cut` through this module, and PersonaVault.use
-# shares the one `_LIVE_SECRETS` ContextVar through `secret_in_scope`.
+# Aliases for what lives in egress_policy.py and pinned_http.py (docs/20 section 5), kept as the
+# same objects: the suites patch `collection._is_blocked` and read `_Deadline`, `_Hop`, `_dial` and
+# `_cut` through this module, and PersonaVault.use shares the one `_LIVE_SECRETS` ContextVar through
+# `secret_in_scope`.
 from noctornal_api.egress_policy import (  # noqa: F401
     BLOCKED_NETWORKS as _BLOCKED_NETWORKS,
 )
@@ -176,11 +116,10 @@ from noctornal_api.security import persona_envelope
 HEALTHY, COOLDOWN, LOCKED, BURNED = "HEALTHY", "COOLDOWN", "LOCKED", "BURNED"
 _TERMINAL = frozenset({BURNED})
 
-#: `collect.document.triage_state`, as 0011 declared it in a column comment
-#: and the Collected pane's filter offers it. A `text` column with no CHECK,
-#: so this tuple is the only thing standing between the dropdown and a
-#: fifth state the filter cannot select -- a document in one would have
-#: disappeared from every view without being deleted.
+#: `collect.document.triage_state`, as 0011 declares it in a column comment and the Collected pane's
+#: filter offers it. A `text` column with no CHECK, so this tuple is the only thing standing between
+#: the dropdown and a fifth state the filter cannot select: a document in one would vanish from
+#: every view without being deleted.
 TRIAGE_STATES = ("NEW", "TRIAGED", "LINKED", "DISCARDED")
 
 #: A suppression is a hit removed from the queue on somebody's say-so, and
@@ -188,17 +127,11 @@ TRIAGE_STATES = ("NEW", "TRIAGED", "LINKED", "DISCARDED")
 #: status route applies, for the same reason.
 MIN_SUPPRESS_REASON_LENGTH = 5
 
-# ---------------------------------------------------------------------------
-# The HTTP core (docs/20 section 5, 2026-09-24)
-# ---------------------------------------------------------------------------
-#
-# The address classifier moved to egress_policy.py, and the pinned client,
-# its deadline and its primitives to pinned_http.py, the one outbound HTTP
-# client every process uses (docs/00 decision 72). The old names imported
-# above are the SAME objects (`collection._Deadline is pinned_http.Deadline`),
-# so the suites that read them through this module, and PersonaVault.use,
-# are unchanged. What stays here is the collector's test seam and the two
-# thin wrappers every collector call goes through.
+# The HTTP core. The address classifier is in egress_policy.py, and the pinned client with its
+# deadline and primitives is in pinned_http.py, the one outbound HTTP client every process uses
+# (docs/00 decision 72). The names imported above are the same objects
+# (`collection._Deadline is pinned_http.Deadline`). What lives here is the collector's test seam and
+# the two thin wrappers every collector call goes through.
 
 
 def _live_is_blocked(address) -> bool:
@@ -215,13 +148,11 @@ def _live_is_blocked(address) -> bool:
 def _legacy_route() -> EgressRoute:
     """The route for a call that named none.
 
-    Once a proxy is configured it is refused (no_route): every outbound
-    connection takes its route from egress.route_for, and a forgotten one
-    must not go direct past the proxy. So is a production call once a route
-    provider exists (proxy_required). Otherwise it is the direct public
-    route fetch has always used, so nothing changes where there is no
-    proxy. RouteUnavailable rather than DestinationRefused, because the code
-    decides the class."""
+    Once a proxy is configured it is refused (no_route): every outbound connection takes its route
+    from egress.route_for, and a forgotten one must not go direct past the proxy. So is a production
+    call once a route provider exists (proxy_required). Otherwise it is the direct public route that
+    `fetch` uses. RouteUnavailable rather than DestinationRefused, because the code decides the
+    class."""
     if egress.proxy_settings() is not None:
         raise RouteUnavailable(
             "a proxy is configured, and this call named no route: every "
@@ -238,10 +169,9 @@ def _legacy_route() -> EgressRoute:
 
 
 def _resolve_and_check(url: str) -> _Hop:
-    """Validate ONE hop on the legacy route and pin it, for the callers and
-    the suites that used this name. The work is pinned_http.resolve's: one
-    lookup, every answer admitted, the answers the only addresses a
-    connection may use (docs/17 F15(f), sec-ssrf-rebinding)."""
+    """Validate one hop on the legacy route and pin it, under the name callers and suites use. The
+    work is pinned_http.resolve's: one lookup, every answer admitted, the answers the only addresses
+    a connection may use (docs/17)."""
     return pinned_http._resolve(url, route=_legacy_route(),
                                 _blocked_override=_live_is_blocked)
 
@@ -253,25 +183,19 @@ class PersonaUnavailable(CollectionError):
 
 
 class CollectionNotFound(CollectionError):
-    """The row does not exist, is not on the case named, or sits above
-    the caller's clearance -- and the caller is told none of which. A
-    distinct type because the router's answer differs: this is a 404,
-    where a bad argument (a triage state that is not one, a reason too
-    short to be one) is a 400. Before 2026-09-02 every `CollectionError`
-    from a hit route was a 404, so a refused ARGUMENT would have reported
-    as a missing ROW."""
+    """The row does not exist, is not on the case named, or sits above the caller's clearance, and
+    the caller is told none of which. A distinct type because the router answers 404 here, where a
+    bad argument (a triage state that is not one, a reason too short to be one) is a 400."""
 
 
 class CollectionBusy(CollectionError):
-    """Another poll of this same source is in flight, so this call did
-    nothing at all -- no fetch, no rows, not even a `collection_run`.
+    """Another poll of this same source is in flight, so this call did nothing at all: no fetch, no
+    rows, not even a `collection_run`.
 
-    A distinct type because "nothing was done" is not "something went
-    wrong": a FAILED run recorded here would libel a source that is being
-    collected from perfectly well at this very moment, and
-    `consecutive_failures` drives the health rollup the Feeds pane shows.
-    The caller decides what to do with it -- `scripts/collection_poll.py`
-    counts it as `skipped` and still exits 0."""
+    A distinct type because "nothing was done" is not "something went wrong": a FAILED run recorded
+    here would libel a source that is being collected from perfectly well at this moment, and
+    `consecutive_failures` drives the health rollup the Feeds pane shows. The caller decides what to
+    do with it: `scripts/collection_poll.py` counts it as `skipped` and still exits 0."""
 
 
 class CollectionConflict(CollectionError):
@@ -281,19 +205,17 @@ class CollectionConflict(CollectionError):
     the case that already holds the thing."""
 
 
-# Redaction -- `redact`, `secret_in_scope` and their patterns live in
-# pinned_http.py since 2026-09-24 (docs/20 section 5.8): the transport has
-# to redact what it reports. Re-exported above as the SAME objects, so
-# `PersonaVault.use` and every caller here share the one ContextVar.
+# Redaction: `redact`, `secret_in_scope` and their patterns live in pinned_http.py (docs/20 section
+# 5.8) because the transport has to redact what it reports. Re-exported above as the same objects,
+# so `PersonaVault.use` and every caller here share the one ContextVar.
 
 
 # ---------------------------------------------------------------------------
 # The persona vault (invariant 7)
 # ---------------------------------------------------------------------------
 
-#: Persona holds (2026-09-24): the machine's own columns. Only
-#: `PersonaVault.signal` writes them and the human `set_status` never does,
-#: so a platform's wait cannot be undone by hand in any number of steps
+#: Persona holds: the machine's own columns. Only `PersonaVault.signal` writes them and the human
+#: `set_status` never does, so a platform's wait cannot be undone by hand in any number of steps
 #: (guard_persona_holds, migration 0082, holds it against every writer).
 HOLD_RATE_LIMITED, HOLD_ABANDONED = "RATE_LIMITED", "ABANDONED"
 MACHINE_HOLD_REASONS = (HOLD_RATE_LIMITED, HOLD_ABANDONED)
@@ -303,13 +225,11 @@ MACHINE_LOCK_CODES = ("CREDENTIAL_REVOKED", "CREDENTIAL_DUPLICATED",
 #: The source kinds a persona can be an account on (the CHECK in 0082).
 PERSONA_PLATFORMS = ("XENFORO", "MYBB", "PHPBB", "TELEGRAM", "DISCORD")
 
-#: ONE reading of "this persona may be used now", as SQL over the alias `a`
-#: (2026-09-24): PersonaGate.check, the due list's persona
-#: hold and the egress proxy's `persona_unavailable` all evaluate this, so
-#: the gate and the proxy cannot disagree about a COOLDOWN with no end or a
-#: HEALTHY persona with a future cooldown. HEALTHY with no cooldown still
-#: running, or COOLDOWN whose end has passed, and no live machine hold or
-#: machine lock. BURNED, LOCKED and anything else are unusable.
+#: The one reading of "this persona may be used now", as SQL over the alias `a`: PersonaGate.check,
+#: the due list's persona hold and the egress proxy's `persona_unavailable` all evaluate this, so
+#: they cannot disagree about a COOLDOWN with no end or a HEALTHY persona with a future cooldown.
+#: Usable is HEALTHY with no cooldown still running, or COOLDOWN whose end has passed, and no live
+#: machine hold or machine lock. BURNED, LOCKED and anything else are unusable.
 PERSONA_USABLE_SQL = (
     "(a.status IN ('HEALTHY', 'COOLDOWN')"
     " AND coalesce(a.cooldown_until <= clock_timestamp(), a.status = 'HEALTHY')"
@@ -317,17 +237,13 @@ PERSONA_USABLE_SQL = (
     " OR a.machine_hold_until <= clock_timestamp())"
     " AND a.machine_lock_code IS NULL)")
 
-#: A persona is VISIBLE to a caller when no source it is registered on or
-#: bound to sits above the caller's ceiling (2026-09-24). The old
-#: predicate looked at the venue only, so an AMBER holder could burn, lock
-#: or unlock a persona whose chats or boards are RED. Since F43 (2026-10-03) a source's
-#: COMPARTMENTS count too: a persona bound
-#: to a source the caller does not hold every key of is as hidden as one
-#: bound above their ceiling, so it is not listed with its venue's name and
-#: address, cannot be locked, burnt or used, and answers as a missing one.
-#: Placeholders are named: `%(clearance)s` and `%(held)s` (the reader's own
-#: compartments; `_held()` of none fails closed). A NULL clearance is the
-#: worker's and sees every persona.
+#: A persona is visible to a caller when no source it is registered on or bound to sits above the
+#: caller's ceiling, so an AMBER holder cannot burn, lock or unlock a persona whose chats or boards
+#: are RED. A source's compartments count too: a persona bound to a source the caller does not hold
+#: every key of is as hidden as one bound above their ceiling, so it is not listed with its venue's
+#: name and address, cannot be locked, burnt or used, and answers as a missing one. Placeholders are
+#: named: `%(clearance)s` and `%(held)s` (the reader's own compartments; `_held()` of none fails
+#: closed). A NULL clearance is the worker's and sees every persona.
 PERSONA_VISIBLE_SQL = (
     "(%(clearance)s::core.tlp IS NULL OR NOT EXISTS ("
     "SELECT 1 FROM collect.source vs"
@@ -335,10 +251,9 @@ PERSONA_VISIBLE_SQL = (
     " AND (vs.classification > %(clearance)s::core.tlp"
     " OR NOT vs.compartments <@ %(held)s::text[])))")
 
-#: What a persona the caller may not see reads as, wherever a visible row
-#: would otherwise name it (2026-09-24). No id, no handle:
-#: the listing of personas omits it, so a name here would be a chip that
-#: leads nowhere and a PRESENCE signal per persona.
+#: What a persona the caller may not see reads as, wherever a visible row would otherwise name it.
+#: No id, no handle: the listing of personas omits it, so a name here would be a chip that leads
+#: nowhere and a presence signal per persona.
 HIDDEN_PERSONA = {"hidden": True, "label": "a persona you cannot see"}
 
 _ACTIVE_WINDOW = re.compile(r"^([01][0-9]|2[0-3]):([0-5][0-9])-([01][0-9]|2[0-3]):([0-5][0-9])$")
@@ -360,10 +275,8 @@ class Persona:
     burn_reason: str | None
 
     def is_usable(self, now: datetime | None = None) -> bool:
-        """PERSONA_USABLE_SQL's reading of the fields this row carries
-        (2026-09-25: it read a COOLDOWN with no end as usable, a second
-        rule beside the one the gate asks). It carries no machine
-        hold or lock, so the SQL, never this, decides a use."""
+        """PERSONA_USABLE_SQL's reading of the fields this row carries. It carries no machine hold
+        or lock, so the SQL, never this, decides a use."""
         now = now or datetime.now(timezone.utc)
         if self.status not in (HEALTHY, COOLDOWN):
             return False
@@ -468,18 +381,14 @@ class Lease:
 
 
 def persona_exit_refusal(exit_kind: str | None, is_passive_default: bool) -> str:
-    """The sentence for an egress profile that cannot carry persona traffic
-    (F35, 2026-10-02).
+    """The sentence for an egress profile that cannot carry persona traffic.
 
-    The words are the egress proxy's own, from `egress_policy.explain`, so a
-    persona refused here and a persona refused at the proxy are told the
-    same thing and the two cannot drift: no exit at all is `no_exit`, this
-    host's own address is `persona_needs_exit`, and the passive default,
-    which serves feeds and web runs and never a persona, is
-    `passive_route_misused`. The order is the order the proxy asks in. The
-    last line is a profile `persona_capable` refuses for a reason this
-    function does not know (the generated column grew a term): it fails
-    closed with the nearest sentence rather than letting the persona through.
+    The words are the egress proxy's own, from `egress_policy.explain`, so a persona refused here
+    and one refused at the proxy are told the same thing: no exit at all is `no_exit`, this host's
+    own address is `persona_needs_exit`, and the passive default, which serves feeds and web runs
+    and never a persona, is `passive_route_misused`. The order is the order the proxy asks in. The
+    last line covers a profile `persona_capable` refuses for a reason this function does not know:
+    it fails closed with the nearest sentence rather than letting the persona through.
     """
     if exit_kind is None:
         return egress_sentence("no_exit")
@@ -493,20 +402,13 @@ def persona_exit_refusal(exit_kind: str | None, is_passive_default: bool) -> str
 class PersonaVault:
     """Envelope-encrypted persona credentials.
 
-    **There is deliberately no `get_secret()`.** `lease()` is a context
-    manager that hands the plaintext to a block and drops it, and `use()`
-    is a thin wrapper over it. A function that RETURNS a credential is a
-    function somebody calls from a request handler, and then the secret is
-    in a traceback, a log line and an error response. Invariant 7 is easier
-    to hold with a shape that cannot be misused than with a rule that must
-    be remembered.
+    There is deliberately no `get_secret()` (invariant 7, see the module docstring): `lease()` hands
+    the plaintext to a block and drops it, and `use()` is a thin wrapper over it.
 
-    Since 2026-09-24 a persona is one account on one platform, created
-    here with no credential (an operator enrols it on the server); the
-    machine's holds and locks are written by `signal` alone; a credential
-    the platform moved is resealed by compare-and-set; `destroy_secret`
-    stops a persona for good; and every write names its actor, the system
-    when there is none.
+    A persona is one account on one platform, created here with no credential (an operator enrols it
+    on the server). The machine's holds and locks are written by `signal` alone, a credential the
+    platform moved is resealed by compare-and-set, `destroy_secret` stops a persona for good, and
+    every write names its actor, the system when there is none.
     """
 
     def __init__(self, conn: psycopg.Connection):
@@ -519,20 +421,15 @@ class PersonaVault:
                notes: str | None = None, venue_source_id: UUID | None = None,
                owner_user_id: UUID | None = None,
                actor_id: UUID | None) -> dict:
-        """A persona with NO credential. docs/04 one persona, one egress
-        profile: a profile any other persona holds, in any status, is
-        refused, because two personas seen from one exit are linked by any
-        competent site and a burnt persona's exit is the one a site has
-        already noticed. That is why a burnt persona keeps its exit for
-        good rather than freeing it (2026-09-24): there is no status that
-        hands an exit on.
+        """A persona with no credential. docs/04: one persona, one egress profile. A profile any
+        other persona holds, in any status, is refused, because two personas seen from one exit are
+        linked by any competent site and a burnt persona's exit is the one a site has already
+        noticed. So a burnt persona keeps its exit for good: there is no status that hands an exit
+        on.
 
-        A profile that cannot carry persona traffic (`persona_capable` is
-        false: no exit, this host's own address, or the passive default) is
-        refused here, with the proxy's own sentence (F35, 2026-10-02).
-        Before this the persona was created, the readiness register flagged
-        it and the proxy refused every connection it made, so an operator
-        believed a persona was ready that could never leave."""
+        A profile that cannot carry persona traffic (`persona_capable` is false: no exit, this
+        host's own address, or the passive default) is refused here, with the proxy's own sentence,
+        so an operator is not told a persona is ready that could never leave."""
         handle = (handle or "").strip()
         if not 2 <= len(handle) <= 64:
             raise CollectionError("A handle is between 2 and 64 characters.")
@@ -555,14 +452,11 @@ class PersonaVault:
                 "This egress profile already carries a persona. Two personas "
                 "sharing an exit can be linked by any competent site, so one "
                 "persona, one egress profile.")
-        # collection-shared-exit (2026-10-03): the other half of the rule
-        # `_check_binding` holds. A persona-less source (a public forum or
-        # web read) bound to this profile reads from this exit, so a persona
-        # placed on it would be seen from the same address as that public
-        # read and the two linked. collect.source is not under row-level
-        # security (the egress proxy reads it), so a source above the
-        # caller's clearance is counted too, and the sentence names no kind
-        # of source.
+        # The other half of the rule `_check_binding` holds. A persona-less source (a public forum
+        # or web read) bound to this profile reads from this exit, so a persona placed on it would
+        # be seen from the same address as that public read and the two linked. collect.source is
+        # not under row-level security (the egress proxy reads it), so a source above the caller's
+        # clearance is counted too, and the sentence names no kind of source.
         carried = self._c.execute(
             "SELECT 1 FROM collect.source WHERE egress_profile_id = %s LIMIT 1",
             (egress_profile_id,)).fetchone()
@@ -592,15 +486,13 @@ class PersonaVault:
 
     def store(self, persona_id: UUID, secret: str, *,
               actor_id: UUID | None, detail: dict | None = None) -> None:
-        """Seal a credential. A machine lock (the platform refused the old
-        credential) clears in the same UPDATE, because a new credential
-        enrolled after the lock is the one thing that lifts it. The clock is
-        `clock_timestamp()`, never the transaction's, so the rotation time
-        is always after a lock signalled earlier in the same session.
+        """Seal a credential. A machine lock (the platform refused the old credential) clears in the
+        same UPDATE, because a new credential enrolled after the lock is the one thing that lifts
+        it. The clock is `clock_timestamp()`, never the transaction's, so the rotation time is
+        always after a lock signalled earlier in the same session.
 
-        Sealed under the persona ring since 2026-10-02 (A collector
-        process), never the TOTP ring: in production only the collector
-        holds it, so an enrolment runs there."""
+        Sealed under the persona ring, never the TOTP ring: in production only the collector holds
+        it, so an enrolment runs there."""
         ciphertext, key_id = persona_envelope.encrypt(secret)
         updated = self._c.execute(
             """UPDATE collect.collection_account
@@ -634,14 +526,12 @@ class PersonaVault:
 
     def _drop_forum_session(self, persona_id: UUID, actor_id: UUID | None,
                             why: str) -> None:
-        """A stopped persona holds no sealed forum session (2026-10-03). A session cookie is
-        a credential (invariant 7's
-        shape, `forum_session`), so every way a persona STOPS clears it in
-        the same breath: a destroyed credential, a burn, a lock by a person
-        or by the platform. Database only and always possible: the board's
-        own sign-out is a network act (`forum_member.sign_out_persona`) that
-        may not be reached, and this does not wait for it. Audited when
-        something was held; silent when nothing was."""
+        """A stopped persona holds no sealed forum session. A session cookie is a credential
+        (invariant 7, `forum_session`), so every way a persona stops clears it: a destroyed
+        credential, a burn, a lock by a person or by the platform. Database only and always
+        possible: the board's own sign-out is a network act (`forum_member.sign_out_persona`) that
+        may not be reached, and this does not wait for it. Audited when something was held; silent
+        when nothing was."""
         from noctornal_api import forum_session
 
         if forum_session.clear_session(self._c, persona_id):
@@ -651,14 +541,11 @@ class PersonaVault:
     # -- using -------------------------------------------------------------
 
     def _refusal(self, row, *, stopping: bool) -> str | None:
-        """Why the credential may not be opened, or None. Sentences never
-        name a source.
+        """Why the credential may not be opened, or None. Sentences never name a source.
 
-        WHETHER is PERSONA_USABLE_SQL's answer (row[6]) and nothing else,
-        so the lease cannot open a persona the gate and the due list refuse
-        (2026-09-25: a COOLDOWN with no end was refused by
-        the gate and opened by use()). The branches below only choose the
-        sentence."""
+        Whether it may be opened is PERSONA_USABLE_SQL's answer (row[6]) and nothing else, so the
+        lease cannot open a persona the gate and the due list refuse. The branches below only choose
+        the sentence."""
         _secret, _kid, status, cooldown, hold_until, lock_code, usable = row
         if stopping or usable:
             return None
@@ -681,21 +568,17 @@ class PersonaVault:
               run_id: UUID | None = None, stopping: bool = False):
         """Yield a Lease for the duration of a block, then drop it.
 
-        Refuses as `use()` always did, and on a live machine hold or lock.
-        A STOPPING lease (a logout of a duplicated session) opens whatever
-        the status or the machine holds and refuses only a missing
-        credential: logging a session out is the one use a locked or burnt
-        persona still needs.
+        Refuses on status and on a live machine hold or lock. A stopping lease (a logout of a
+        duplicated session) opens whatever the status or the machine holds and refuses only a
+        missing credential: logging a session out is the one use a locked or burnt persona still
+        needs.
 
-        For exactly as long as the block runs, `redact` knows the whole
-        credential AND every string leaf of a JSON credential, verbatim and
-        in its wire forms. On exit, whether or not the block raised, a
-        credential the block resealed is written back by compare-and-set
-        against the bytes read at entry (sealed.rewrap_table's rule): one
-        row changed is PERSONA_SECRET_RESEALED, none is
-        PERSONA_SECRET_RESEAL_SKIPPED and the newer credential wins.
-        `secret_rotated_at` is not touched: a platform moving a session is
-        not a rotation."""
+        For exactly as long as the block runs, `redact` knows the whole credential and every string
+        leaf of a JSON credential, verbatim and in its wire forms. On exit, whether or not the block
+        raised, a credential the block resealed is written back by compare-and-set against the bytes
+        read at entry (sealed.rewrap_table's rule): one row changed is PERSONA_SECRET_RESEALED, none
+        is PERSONA_SECRET_RESEAL_SKIPPED and the newer credential wins. `secret_rotated_at` is not
+        touched: a platform moving a session is not a rotation."""
         row = self._c.execute(
             f"""SELECT a.secret_ciphertext, a.secret_key_id, a.status,
                        a.cooldown_until, a.machine_hold_until,
@@ -710,26 +593,22 @@ class PersonaVault:
         if not row[0]:
             raise CollectionError("this persona has no stored credential")
         read_at_entry = bytes(row[0])
-        # The persona ring alone, and no other ring on any path (A collector
-        # process, 2026-10-02). EVERY way the credential can fail to open is
-        # a PersonaUnavailable with a sentence that names the fix, so a poll
-        # records BLOCKED and an act answers 409 rather than a 500: no key
-        # in this process, a process that may not hold it (the API in
-        # production), a credential still sealed under the TOTP ring (named,
-        # never opened with it), a key id this ring lacks, a key that
-        # changed under its id, and bytes that are no envelope
-        # (2026-10-03: the last three were a generic 500).
+        # The persona ring alone, and no other ring on any path. Every way the credential can fail
+        # to open is a PersonaUnavailable with a sentence that names the fix, so a poll records
+        # BLOCKED and an act answers 409 rather than a 500: no key in this process, a process that
+        # may not hold it (the API in production), a credential still sealed under the TOTP ring
+        # (named, never opened with it), a key id this ring lacks, a key that changed under its id,
+        # and bytes that are no envelope.
         try:
             secret = persona_envelope.decrypt(read_at_entry, key_id=row[1])
         except (persona_envelope.PersonaKeyError,
                 *persona_envelope.UNOPENABLE) as exc:
             raise PersonaUnavailable(
                 persona_envelope.refusal_sentence(exc, row[1])) from None
-        # Audited once the credential has opened and before the block gets
-        # it, so the use is on record before any use is made, and a poll
-        # refused for want of a usable key (every five minutes per source,
-        # until the move or the key is fixed) writes no event for a use that
-        # never happened (2026-10-03).
+        # Audited once the credential has opened and before the block gets it, so the use is on
+        # record before any use is made, and a poll refused for want of a usable key (every five
+        # minutes per source, until the move or the key is fixed) writes no event for a use that
+        # never happened.
         self._audit(actor_id, "PERSONA_USED", persona_id,
                     {"purpose": purpose,
                      "run_id": str(run_id) if run_id else None,
@@ -773,9 +652,9 @@ class PersonaVault:
     def use(self, persona_id: UUID, *, actor_id: UUID | None, purpose: str):
         """Yield the plaintext for the duration of a block, then drop it.
 
-        Every use is audited with a purpose, because docs/05 requires
-        "every persona use" to be logged and a use with no stated purpose
-        is not reviewable. One code path since 2026-09-24: this is `lease()`.
+        Every use is audited with a purpose, because docs/05 requires "every persona use" to be
+        logged and a use with no stated purpose is not reviewable. It is `lease()` underneath, so
+        there is one code path.
         """
         with self.lease(persona_id, actor_id=actor_id, purpose=purpose) as held:
             yield held.value
@@ -839,32 +718,21 @@ class PersonaVault:
                    clearance: str | None = None, compartments=None) -> dict:
         """Move a persona through the lifecycle.
 
-        BURNED is terminal and requires a reason: the reason is what stops
-        the next analyst quietly reusing it, and "burnt" with no explanation
-        reads as "somebody was being careful once".
+        BURNED is terminal and requires a reason: the reason is what stops the next analyst quietly
+        reusing it.
 
-        Gated on the caller's ceiling against EVERY source the persona is
-        registered on or bound to (2026-09-24), exactly as
-        `personas()` lists them: the venue alone was the old rule, and it
-        let an AMBER holder burn, lock or unlock a persona whose chats or
-        boards are RED. `clearance=None` is the worker path and applies no
-        filter.
+        Gated on the caller's ceiling against every source the persona is registered on or bound to,
+        exactly as `personas()` lists them, so an AMBER holder cannot burn, lock or unlock a persona
+        whose chats or boards are RED. `clearance=None` is the worker path and applies no filter. A
+        row that does not exist or is hidden is refused with `CollectionNotFound`,
+        indistinguishably, and the UPDATE's row count is checked as well as the SELECT before it, so
+        a row that vanished or was relabelled between the two is refused rather than half-recorded.
 
-        Refuses with `CollectionNotFound` when the row does not exist OR is
-        hidden, and the two are indistinguishable. The UPDATE's row count is
-        checked as well as the SELECT before it, so a row that vanished or
-        was relabelled between the two is refused rather than
-        half-recorded.
-
-        This writes `status`, `status_changed_at` and `cooldown_until` and
-        NEVER a machine column. BURNED and LOCKED are reachable at any
-        moment whatever the platform holds (stopping is always allowed);
-        HEALTHY under a live machine hold or lock changes the human status
-        only, and the answer says the persona stays paused. A COOLDOWN with
-        no end is a person's open rest: it read as usable to the old gate
-        and as resting to the proxy (2026-09-24), and it now
-        reads unusable to every reader through PERSONA_USABLE_SQL until a
-        person lifts it.
+        This writes `status`, `status_changed_at` and `cooldown_until` and never a machine column.
+        BURNED and LOCKED are reachable whatever the platform holds (stopping is always allowed);
+        HEALTHY under a live machine hold or lock changes the human status only, and the answer says
+        the persona stays paused. A COOLDOWN with no end is a person's open rest and reads as
+        unusable through PERSONA_USABLE_SQL until a person lifts it.
         """
         if status not in {HEALTHY, COOLDOWN, LOCKED, BURNED}:
             raise CollectionError(f"unknown persona status {status!r}")
@@ -930,18 +798,16 @@ class PersonaVault:
 
     def personas(self, *, clearance: str | None = None,
                  compartments=None) -> list[dict]:
-        """Persona HEALTH, never a secret, under the set_status predicate.
+        """Persona health, never a secret, under the set_status predicate.
 
-        Every column named explicitly rather than selected with `*` so that
-        adding a secret-bearing column later cannot quietly start returning
-        it; `credential_stored` says whether one is sealed and nothing
-        about it. Each row still names its venue source, and the predicate
-        now also hides a persona bound to any source above the caller
-        (2026-09-24). `clearance=None` applies NO filter (the worker).
+        Every column is named explicitly rather than selected with `*`, so adding a secret-bearing
+        column later cannot quietly start returning it; `credential_stored` says whether one is
+        sealed and nothing about it. Each row names its venue source, and the predicate also hides a
+        persona bound to any source above the caller. `clearance=None` applies no filter (the
+        worker).
 
-        The authority state is taken among authorities within the caller's
-        clearance only, the LIVE one first: a RED
-        authority over an AMBER persona says nothing to an AMBER caller.
+        The authority state is taken among authorities within the caller's clearance only, the live
+        one first: a RED authority over an AMBER persona says nothing to an AMBER caller.
         """
         params = {"clearance": clearance, "held": _held(compartments)}
         rows = self._c.execute(
@@ -1028,11 +894,9 @@ class PersonaVault:
                  ORDER BY e.is_active DESC, e.name""", params).fetchall()
         return [{"id": str(r[0]), "name": r[1], "kind": r[2], "region": r[3],
                  "is_active": r[4], "available": bool(r[4]) and not r[5],
-                 # collection-shared-exit (2026-10-03): what a PERSONA may
-                 # be placed on. `available` is unchanged because a public
-                 # read may share an exit with another public read; a
-                 # persona may share it with neither, and a source above the
-                 # caller's clearance counts without being named.
+                 # What a persona may be placed on. `available` stays as it is because a public read
+                 # may share an exit with another public read; a persona may share it with neither,
+                 # and a source above the caller's clearance counts without being named.
                  "persona_available": bool(r[4]) and not r[5] and not r[10],
                  "personas": r[6], "sources": r[7],
                  "persona_platforms": sorted(r[8] or []),
@@ -1042,32 +906,24 @@ class PersonaVault:
     def check_egress_separation(self, source_id: UUID, *,
                                 clearance: str | None = None,
                                 compartments=None) -> list[dict]:
-        """docs/04: one persona, one egress profile.
+        """docs/04: one persona, one egress profile. Two personas sharing an exit IP can be
+        correlated by any competent forum admin, and you lose both at once.
 
-        "Two personas sharing an exit IP can be correlated by any competent
-        forum admin, and you lose both at once."
+        Not a database constraint over existing rows, which may already share: `create()` refuses a
+        taken exit for every new persona and the egress proxy refuses a shared profile. This reports
+        what is left: two live personas on one profile against the same source, and a persona-less
+        binding of the source that uses the exit of a live persona registered on or bound to it,
+        which links the public read to the persona just as surely.
 
-        NOT a database constraint over existing rows, which may already
-        share: `create()` refuses a taken exit for every new persona, and
-        the egress proxy refuses a shared profile. This reports what is
-        left: two live personas on one profile against the same source,
-        and (2026-09-24) a PERSONA-LESS binding of the source that
-        uses the exit of a live persona registered on or bound to it, which
-        links the public read to the persona just as surely.
+        With a `clearance`, a source above it (or one that does not exist) is refused rather than
+        answered with an empty list, because the route's notice says an empty result means no shared
+        egress was found.
 
-        With a `clearance`, a source above it (or one that does not exist)
-        is REFUSED rather than answered with an empty list: the route's
-        notice says an empty result means no shared egress was found.
-
-        A persona the caller may not see (PERSONA_VISIBLE_SQL: one bound
-        to a source above the caller) is never NAMED here, as it is not in
-        personas() or set_status (2026-09-25: the widened
-        predicate made this route the one place its handle still showed).
-        `handles` lists the visible ones, `persona_count` counts them, and
-        `some_hidden` is one bit, never a count: the correlation risk to
-        the visible persona is real, and the bit is the PRESENCE the exit
-        listing already discloses. A finding in which the caller can see
-        nobody is left out, because nothing in it is theirs to act on.
+        A persona the caller may not see (PERSONA_VISIBLE_SQL) is never named here, as it is not in
+        personas() or set_status. `handles` lists the visible ones, `persona_count` counts them, and
+        `some_hidden` is one bit, never a count: the correlation risk to the visible persona is
+        real, and the bit is the presence the exit listing already discloses. An entry in which the
+        caller can see nobody is left out.
         """
         if clearance is not None:
             visible = self._c.execute(
@@ -1096,11 +952,10 @@ class PersonaVault:
                         "two live personas share an exit against one source; "
                         "a forum admin correlating them loses you both")
                     for r in rows if r[1]]
-        # Registered on the source (its venue). A persona BOUND to it cannot
-        # be here as well: a source carries a persona or an exit, never
-        # both (source_one_egress_binding). The source's own public read is
-        # a party the caller can see, so a finding whose persona is hidden
-        # is kept, without the handle.
+        # Registered on the source (its venue). A persona bound to it cannot be here as well: a
+        # source carries a persona or an exit, never both (source_one_egress_binding). The source's
+        # own public read is a party the caller can see, so an entry whose persona is hidden is
+        # kept, without the handle.
         shared = self._c.execute(
             f"""SELECT s.egress_profile_id,
                        array_agg(a.handle ORDER BY a.handle)
@@ -1119,8 +974,7 @@ class PersonaVault:
                 "a public read and a persona share an exit against one "
                 "source; the site can link them")
             for r in shared)
-        # collection-shared-exit (2026-10-03): the persona need not be
-        # registered on THIS source. Any live persona holding the exit a
+        # The persona need not be registered on this source: any live persona holding the exit a
         # persona-less source reads through is seen from the same address.
         elsewhere = self._c.execute(
             f"""SELECT s.egress_profile_id,
@@ -1153,10 +1007,9 @@ class PersonaVault:
 
     def _audit(self, actor_id: UUID | None, action: str, persona_id: UUID,
                detail: dict) -> None:
-        """actor_kind SYSTEM with a NULL actor when there is no person
-        behind the write (the cron, an adapter's signal), the evidence.py
-        pattern: a nil UUID recorded as a USER would be a person who does
-        not exist (2026-09-24)."""
+        """actor_kind SYSTEM with a NULL actor when there is no person behind the write (the cron,
+        an adapter's signal), the evidence.py pattern: a nil UUID recorded as a USER would be a
+        person who does not exist."""
         self._c.execute(
             """INSERT INTO audit.event
                    (actor_id, actor_kind, action, object_type, object_id, detail)
@@ -1166,22 +1019,17 @@ class PersonaVault:
 
 
 def _utc(moment: datetime) -> str:
-    """'2026-09-24 17:05 UTC': every time a sentence carries is UTC and
-    says so, as the console's are."""
+    """Every time a sentence carries is UTC and says so, as the console's are (YYYY-MM-DD HH:MM
+    UTC)."""
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
 
 
-# ---------------------------------------------------------------------------
-# The adapter interface (docs/00 decision 69, 2026-09-24: one frozen contract)
-# ---------------------------------------------------------------------------
-#
-# Built once, in the collection foundation, so the forum and Telegram
-# adapters only IMPLEMENT and REGISTER one: two separate readings of this
-# layer would disagree. test_collection_contract.py pins every name here,
-# so a change to the contract fails where it is made, not in an adapter
-# later.
+# The adapter interface (docs/00 decision 69): one frozen contract, built once so the forum and
+# Telegram adapters only implement and register an adapter, since two separate readings of this
+# layer would disagree. test_collection_contract.py pins every name here, so a change to the
+# contract fails where it is made, not in an adapter later.
 
 class SourceRefused(CollectionError):
     """The source is configured so that it is not read: no ceiling
@@ -1271,22 +1119,19 @@ class RunWarning:
     text: str
 
 
-#: The one watch target kind the matcher acts on (F47, 2026-10-02).
-#: `collect.watch.target_kind` is free text (0010's comment lists BOARD,
-#: THREAD, USER, CHANNEL, FEED and SEARCH, and nothing reads them: a watch
-#: matches what its SOURCE collects). A TELEGRAM_CHAT watch names its chat by
-#: the typed id in `target_ref` (0130 holds that to `c:<id>` or `g:<id>`),
-#: fires only on messages collected from that chat, says so in its reasons
-#: (`chat:<id>` first), and with no keyword, selector or pattern fires on every
-#: message there, which is what "watch this chat" means and what the column's
-#: own comment ("NULL keywords = capture everything from the target") meant.
+#: The one watch target kind the matcher acts on. `collect.watch.target_kind` is free text (0010's
+#: comment lists BOARD, THREAD, USER, CHANNEL, FEED and SEARCH, and nothing reads them: a watch
+#: matches what its source collects). A TELEGRAM_CHAT watch names its chat by the typed id in
+#: `target_ref` (0130 holds that to `c:<id>` or `g:<id>`), fires only on messages collected from
+#: that chat, says so in its reasons (`chat:<id>` first), and with no keyword, selector or pattern
+#: fires on every message there, which is what "watch this chat" means and what the column's own
+#: comment ("NULL keywords = capture everything from the target") says.
 WATCH_TELEGRAM_CHAT = "TELEGRAM_CHAT"
 
-#: What a watch may be made with (F53, 2026-10-08). `target_kind` is free text
-#: in the database, so the creation path holds the list: the six kinds 0010
-#: names, and the one kind the matcher acts on. Exactly this spelling, upper
-#: case: 0130 refuses a TELEGRAM_CHAT written in any other case, and a kind
-#: outside the list is a watch the console has no word for.
+#: What a watch may be made with. `target_kind` is free text in the database, so the creation path
+#: holds the list: the six kinds 0010 names, and the one kind the matcher acts on. Exactly this
+#: spelling, upper case: 0130 refuses a TELEGRAM_CHAT written in any other case, and a kind outside
+#: the list is a watch the console has no word for.
 WATCH_TARGET_KINDS = ("BOARD", "THREAD", "USER", "CHANNEL", "FEED", "SEARCH",
                       WATCH_TELEGRAM_CHAT)
 #: How much one watch may carry. Every term is tried against every item the
@@ -1356,17 +1201,14 @@ _NAMESPACED_ID = re.compile(r"^[a-z][a-z0-9_]{0,15}:\S+$")
 
 @dataclass
 class Item:
-    """One thing a collector found. Deliberately flat and small: an adapter
-    that has to construct a graph element is an adapter that can write the
-    graph, and invariant 3 says it cannot.
+    """One thing a collector found. Deliberately flat and small: an adapter that has to construct a
+    graph element is an adapter that can write the graph, and invariant 3 says it cannot.
 
-    The adapter contract (2026-09-24) adds the identity fields a forum or a
-    chat needs: `author_uid` (the platform's durable account id, typed), `parent_ref`
-    (what this replies to), `category` (None is the adapter's default),
-    `meta` (adapter data handed to commit hooks and to identity watches,
-    never hashed or stored by the framework) and `raw_html` (the item's
-    OWN fragment, never the page, navigation and form tokens removed).
-    The digest is unchanged, so a meta-only change is never a new version.
+    The identity fields a forum or a chat needs are `author_uid` (the platform's durable account id,
+    typed), `parent_ref` (what this replies to), `category` (None is the adapter's default), `meta`
+    (adapter data handed to commit hooks and to identity watches, never hashed or stored by the
+    framework) and `raw_html` (the item's own fragment, never the page, with navigation and form
+    tokens removed). The digest is unchanged, so a meta-only change is never a new version.
     """
 
     external_id: str
@@ -1426,45 +1268,31 @@ class SourceRow:
     parser_config: dict
     blocked_reason: str | None
     cursor_reset_at: datetime | None
-    #: F43 (2026-10-02, 0163): the need-to-know lock the source and every
-    #: document it collects are read under.
+    #: The need-to-know lock the source and every document it collects are read under (0163).
     compartments: frozenset[str] = frozenset()
 
 
 class Adapter:
     """What a collector must implement.
 
-    `fetch` returns ITEMS, never graph elements. An adapter that could
-    construct a node would be an extractor writing the graph, and invariant
-    3 says extractors propose.
+    `fetch` returns items, never graph elements: an adapter that could construct a node would be an
+    extractor writing the graph, and invariant 3 says extractors propose.
 
-    Where an item actually goes -- corrected 2026-09-02. This docstring
-    used to say everything an adapter produces "reaches the graph only
-    through the proposal queue a human works". It does not reach the
-    graph at all. `CollectionService.run_once` stores each item as a
-    `collect.document` (versioned, deduplicated on content hash) and, when
-    a watch matches, a `collect.watch_hit`; it never calls `ProposalStore`
-    and no extractor runs over the document afterwards. The only path from
-    a source into `collect.proposal` is a MANUAL capture through
-    `CaptureService`, which is an analyst pasting a page, not a poll.
-
-    Wiring the collector into the proposal queue is a design decision
-    deliberately NOT made here. It would put a machine's suggestions into
-    an analyst's triage at the collector's rate rather than the analyst's,
-    which is the "landfill" docs/09 warns about, and it belongs with the
-    extractor work rather than with a docstring correction. What this
-    class promises is the narrower and true thing: an adapter cannot write
+    An item does not reach the graph. `CollectionService.run_once` stores each item as a
+    `collect.document` (versioned, deduplicated on content hash) and, when a watch matches, a
+    `collect.watch_hit`; it never calls `ProposalStore` and no extractor runs over the document
+    afterwards. The only path from a source into `collect.proposal` is a manual capture through
+    `CaptureService`. Feeding the collector into the proposal queue is deliberately not done,
+    because it would put a machine's suggestions into an analyst's triage at the collector's rate
+    rather than the analyst's (the "landfill" docs/09 warns about). An adapter cannot write
     `core.node` or `core.edge`, because it never holds anything that could.
 
-    ## The frozen contract (docs/00 decision 69, 2026-09-24)
-
-    Class attributes, with the defaults RSS keeps. `source_kinds` empty
-    means any kind, which only RSS may use; `requires_authority` is True
-    for every forum and Telegram adapter (docs/00 decision 69);
-    `persona_platform` None means persona-less only; `run_seconds` is the
-    whole poll's wall clock, shared by every request in it. Every hook
-    below has the base behaviour shown, and run_once reads each through
-    `_attr`, so a duck-typed adapter that defines only `fetch` still polls.
+    The frozen contract (docs/00 decision 69) is the class attributes, with the defaults RSS keeps.
+    `source_kinds` empty means any kind, which only RSS may use; `requires_authority` is True for
+    every forum and Telegram adapter; `persona_platform` None means persona-less only; `run_seconds`
+    is the whole poll's wall clock, shared by every request in it. Every hook has the base behaviour
+    shown and run_once reads each through `_attr`, so a duck-typed adapter that defines only `fetch`
+    still polls.
     """
 
     key: str = "abstract"
@@ -1569,17 +1397,14 @@ def _attr(adapter, name: str):
 class RssAdapter(Adapter):
     """The simplest adapter, and the one that proves the pipeline.
 
-    docs/09 puts RSS first for exactly that reason: it needs no persona, no
-    authorisation and no target that can notice it, so the plumbing can be
-    proved before any of the risk arrives.
+    docs/09 puts RSS first for that reason: it needs no persona, no authorisation and no target that
+    can notice it, so the plumbing can be proved before any of the risk arrives.
 
-    Parsed with the stdlib XML parser and **entity resolution disabled**:
-    an XXE in a feed you did not write is a file-read primitive, and a feed
-    is by definition attacker-adjacent.
+    Parsed with the stdlib XML parser and entity resolution disabled: an XXE in a feed you did not
+    write is a file-read primitive, and a feed is by definition attacker-adjacent.
 
-    Reads RSS and WEB sources only (2026-09-24): a XENFORO or TELEGRAM
-    source with parser_key 'rss' would otherwise be read with no authority
-    at all, bypassing docs/00 decision 69.
+    Reads RSS and WEB sources only: a XENFORO or TELEGRAM source with parser_key 'rss' would
+    otherwise be read with no authority at all, bypassing docs/00 decision 69.
     """
 
     key = "rss"
@@ -1611,7 +1436,7 @@ class RssAdapter(Adapter):
 
 #: The append point for a category only collection produces.
 COLLECT_ONLY_CATEGORIES: tuple[str, ...] = (
-    "FORUM_MEMBER",  # F3 and F4 (2026-09-24), a forum member's profile
+    "FORUM_MEMBER",  # a forum member's profile
 )
 
 
@@ -1636,23 +1461,21 @@ def default_adapters() -> dict[str, Adapter]:
     the routes obtain it through get_adapters() in routers/collection.py,
     and the readiness rows read it. An adapter is registered by one line
     here and nowhere else."""
-    from noctornal_api.forum_adapters import forum_registry  # F3 and F4 (2026-09-24)
-    from noctornal_api.telegram import TelegramAdapter  # F5.3
+    from noctornal_api.forum_adapters import forum_registry
+    from noctornal_api.telegram import TelegramAdapter
 
     return {
         "rss": RssAdapter(),
-        **forum_registry(),  # xenforo and mybb, public boards (2026-09-24)
-        "telegram": TelegramAdapter(),  # F5.3, 2026-09-24
+        **forum_registry(),  # xenforo and mybb, public boards
+        "telegram": TelegramAdapter(),
     }
 
 
-#: Every reader of a source that a caller may see: the ceiling on the
-#: source's own label and, since F43 (2026-10-02, 0163), its compartments.
-#: `_SOURCE_VISIBLE` takes the clearance alone and FAILS CLOSED on a
-#: compartmented source (a reader that did not say which compartments it
-#: holds sees none of them); `_SOURCE_VISIBLE_HELD` takes `held` as well,
-#: the reader's own compartments, and is what every converted reader uses.
-#: A NULL clearance is the worker's and sees every source.
+#: Every reader of a source that a caller may see: the ceiling on the source's own label and its
+#: compartments (0163). `_SOURCE_VISIBLE` takes the clearance alone and fails closed on a
+#: compartmented source (a reader that does not say which compartments it holds sees none of them);
+#: `_SOURCE_VISIBLE_HELD` takes `held` as well, the reader's own compartments, and is the one to
+#: use. A NULL clearance is the worker's and sees every source.
 _SOURCE_VISIBLE = ("(%(clearance)s::core.tlp IS NULL "
                    "OR (s.classification <= %(clearance)s::core.tlp "
                    "AND cardinality(s.compartments) = 0))")
@@ -1719,21 +1542,15 @@ _XML_DECLARED_ENCODING = re.compile(
     rb"""^[ \t\r\n]*<\?xml[^>]{0,200}?\sencoding\s*=\s*["']"""
     rb"""([A-Za-z][A-Za-z0-9._-]{0,40})["']""")
 
-#: The encodings a feed may DECLARE, by name with `-` and `_` removed and the
-#: case folded, mapped to the codec that reads it. collection-rss-codec-dos
-#: (2026-10-03): the declared name used to go straight to Python's whole
-#: codec registry, and the feed is written by the people under
-#: investigation. `punycode` decodes in quadratic time (a 1 MB body held
-#: parse_rss for two minutes, a 16 MiB one for hours, in-process with no
-#: bound), and `utf-7` and `unicode_escape` turn ASCII into markup. Before
-#: that decode was added expat read the bytes itself, which supported four
-#: encodings and the ASCII-compatible single-byte ones, so this is a subset
-#: of that, narrowed to what feeds are served in (the DOS and Mac code pages
-#: expat also read are left out; add one here on a real need). No name
-#: outside it is ever looked up. The multi-byte East Asian codecs were never
-#: read here and are not added; a feed that declares one is refused, and
-#: says so, every poll. Every codec in it is a table lookup or a fixed-width
-#: unit, linear in the body (test_review46_rss_codecs pins that).
+#: The encodings a feed may declare, by name with `-` and `_` removed and the case folded, mapped to
+#: the codec that reads it. The declared name never goes to Python's whole codec registry, because
+#: the feed is written by the people under investigation: `punycode` decodes in quadratic time (a 1
+#: MB body holds parse_rss for two minutes, a 16 MiB one for hours, in-process with no bound), and
+#: `utf-7` and `unicode_escape` turn ASCII into markup. The list is the encodings expat reads (four,
+#: plus the ASCII-compatible single-byte ones) narrowed to what feeds are served in; the DOS and Mac
+#: code pages are left out, add one on a real need. The multi-byte East Asian codecs are not read: a
+#: feed that declares one is refused, and says so, every poll. Every codec in it is a table lookup
+#: or a fixed-width unit, linear in the body (test_review46_rss_codecs pins that).
 _FEED_CODECS: dict[str, str] = {
     "utf8": "utf-8",
     "utf16": "utf-16", "utf16le": "utf-16-le", "utf16be": "utf-16-be",
@@ -1758,21 +1575,16 @@ _MAX_PROLOG_ITEMS = 10_000
 
 
 def _feed_text(body: bytes) -> str:
-    """The feed as ONE text, decoded here and nowhere else.
+    """The feed as one text, decoded here and nowhere else.
 
-    collection-rss-doctype-bypass-utf16 (2026-10-03). The refusal below used
-    to scan the raw BYTES for an ASCII `<!DOCTYPE`, and ElementTree then
-    parsed the same bytes under whatever encoding the document declared.
-    A feed served as UTF-16 spells that keyword with a NUL between letters,
-    so the scan found nothing and the parser expanded the DTD. A defence
-    and a parser that read the document two ways are a defence with a
-    bypass: the encoding is chosen once, by XML 1.0 appendix F (a byte-order
-    mark, else the first four bytes, else the declaration, else UTF-8), the
-    scan runs over the decoded text, and that SAME text is what is parsed.
-    Anything that does not decode strictly is refused, as is an EBCDIC feed,
-    whose declaration this does not try to read. A declared name is read only
-    if it is in `_FEED_CODECS`; any other is refused before it is looked up
-    (collection-rss-codec-dos, 2026-10-03: `punycode` is quadratic)."""
+    A defence and a parser that read the document two ways are a defence with a bypass: a feed
+    served as UTF-16 spells `<!DOCTYPE` with a NUL between letters, so a scan of the raw bytes finds
+    nothing and the parser expands the DTD. So the encoding is chosen once, by XML 1.0 appendix F (a
+    byte-order mark, else the first four bytes, else the declaration, else UTF-8), the DOCTYPE scan
+    runs over the decoded text, and that same text is what is parsed. Anything that does not decode
+    strictly is refused, as is an EBCDIC feed, whose declaration this does not try to read. A
+    declared name is read only if it is in `_FEED_CODECS`; any other is refused before it is looked
+    up (`punycode` is quadratic)."""
     head = body[:4]
     if head in (b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff"):
         codec = "utf-32"
@@ -1797,9 +1609,8 @@ def _feed_text(body: bytes) -> str:
             label = declared.group(1).decode("ascii")
             codec = _FEED_CODECS.get(label.lower().replace("-", "").replace("_", ""))
             if codec is None:
-                # Refused BEFORE any lookup or decode (collection-rss-codec-dos,
-                # 2026-10-03). The label is at most 41 characters of letters,
-                # digits, dot, hyphen and underscore, so it is safe to name.
+                # Refused before any lookup or decode. The label is at most 41 characters of
+                # letters, digits, dot, hyphen and underscore, so it is safe to name.
                 raise CollectionError(
                     f"feed did not parse: it declares the encoding {label!r}, "
                     f"which is not one a feed may use")
@@ -1807,11 +1618,10 @@ def _feed_text(body: bytes) -> str:
         text = body.decode(codec)
     except Exception as exc:  # noqa: BLE001 - an undecodable feed is not a crash
         raise CollectionError(f"feed did not parse: {type(exc).__name__}") from exc
-    # A NUL is not an XML character. UTF-16 or UTF-32 with no byte-order mark
-    # that does not open with `<?` falls to UTF-8 above and keeps its NULs:
-    # the scan below then reads no declaration, and the parser, given the
-    # same text, re-detects the wide encoding and expands the DTD it never
-    # saw (2026-10-07). Refused here, for any codec.
+    # A NUL is not an XML character. UTF-16 or UTF-32 with no byte-order mark that does not open
+    # with `<?` falls to UTF-8 above and keeps its NULs: the scan below then reads no declaration,
+    # and the parser, given the same text, re-detects the wide encoding and expands the DTD it never
+    # saw. Refused here, for any codec.
     if "\x00" in text:
         raise CollectionError(
             "feed did not parse: it holds a NUL, which is no XML character "
@@ -1823,17 +1633,14 @@ def _feed_text(body: bytes) -> str:
 
 
 def _refuse_prolog_declarations(text: str) -> None:
-    """Refuse a feed whose prolog carries a DOCTYPE or any other `<!`
-    declaration. The prolog is walked token by token: whitespace, a
-    processing instruction (`<?` to `?>`) and a comment (`<!--` to `-->`) are
-    stepped over WHOLE, and the first `<!` that is not a comment is a
-    declaration. The walk ends at the first other `<`, the root element.
+    """Refuse a feed whose prolog carries a DOCTYPE or any other `<!` declaration.
 
-    Until 2026-10-03 the prolog was taken to end at the first `<` followed by
-    a name character found anywhere, comments included, so `<!-- <x -->`
-    ended it early and a DOCTYPE after the comment went unscanned, and a
-    comment of over a mebibyte did the same through the scan's cap. Neither
-    needs a second encoding; both are the same bypass."""
+    The prolog is walked token by token: whitespace, a processing instruction (`<?` to `?>`) and a
+    comment (`<!--` to `-->`) are stepped over whole, and the first `<!` that is not a comment is a
+    declaration. The walk ends at the first other `<`, the root element. Comments must be stepped
+    over whole: ending the prolog at the first `<` followed by a name character, comments included,
+    would let `<!-- <x -->`, or a comment over a mebibyte (the scan's cap), end it early and hide a
+    DOCTYPE after it."""
     index = _PROLOG_SPACE.match(text).end()
     for _ in range(_MAX_PROLOG_ITEMS):
         if text.startswith("<?", index):
@@ -1853,38 +1660,32 @@ def _refuse_prolog_declarations(text: str) -> None:
 
 
 def parse_rss(body: bytes) -> list[Item]:
-    """Minimal RSS/Atom parsing that REFUSES a DOCTYPE.
+    """Minimal RSS/Atom parsing that refuses a DOCTYPE.
 
-    `defusedxml` would be the right dependency and is not one. Without it,
-    the honest defence is to refuse the construct rather than to try to
-    neuter it: a feed has no legitimate need for a DOCTYPE or an internal
-    entity, and refusing both closes XXE and billion-laughs outright
-    instead of relying on a parser flag whose name and effect have changed
-    between Python versions.
+    `defusedxml` would be the right dependency and is not one. Without it, the defence is to refuse
+    the construct rather than to neuter it: a feed has no legitimate need for a DOCTYPE or an
+    internal entity, and refusing both closes XXE and billion-laughs outright instead of relying on
+    a parser flag whose name and effect change between Python versions.
 
-    An XXE in a feed you did not write is a file-read primitive on the
-    collector, which is the host holding every persona credential.
+    An XXE in a feed you did not write is a file-read primitive on the collector, which is the host
+    holding every persona credential.
     """
     return read_feed(body)[0]
 
 
-#: The most items one poll of a feed reads (2026-10-07). A
-#: feed is a window of the newest few dozen; a 16 MiB one of bare items is
-#: some 600,000 documents in one transaction, every poll. A forum page is
-#: held to forum_parse.MAX_POSTS the same way.
+#: The most items one poll of a feed reads. A feed is a window of the newest few dozen; a 16 MiB one
+#: of bare items is some 600,000 documents in one transaction, every poll. A forum page is held to
+#: forum_parse.MAX_POSTS the same way.
 MAX_FEED_ITEMS = 500
 
 
 def read_feed(body: bytes) -> tuple[list[Item], int, int]:
-    """`parse_rss`, with what it did not keep counted, so the run can say so
-    (invariant 12): `(items, items with nothing to tell them apart, items
-    past MAX_FEED_ITEMS)`. Both used to be dropped without a word."""
+    """`parse_rss`, with what it did not keep counted, so the run can say so (invariant 12):
+    `(items, items with nothing to tell them apart, items past MAX_FEED_ITEMS)`."""
     from xml.etree import ElementTree
 
-    # CP1 (2026-07-26) closed an 8 KiB window; the finding of 2026-10-03
-    # closed the encoding and the comment forms of the same bypass. The
-    # prolog is the only place a DTD may legally appear, so it is what is
-    # walked, over the decoded text the parser is then given.
+    # The prolog is the only place a DTD may legally appear, so it is what is walked, over the
+    # decoded text the parser is then given.
     text = _feed_text(body)
     _refuse_prolog_declarations(text)
 
@@ -1936,52 +1737,32 @@ def fetch(url: str, *, etag: str | None = None,
           ) -> tuple[bytes, int, str | None, str | None]:
     """An outbound HTTP GET that connects only to addresses it has checked.
 
-    Refuses non-HTTP schemes, credentials in the URL and any name that
-    resolves into private space, and does it on **every redirect hop**
-    rather than the first URL only. `tls_context` is for a private CA; it
-    must still verify certificates against the name, and None means the
-    platform trust store, as before.
+    Refuses non-HTTP schemes, credentials in the URL and any name that resolves into private space,
+    on every redirect hop rather than the first URL only. `tls_context` is for a private CA; it must
+    still verify certificates against the name, and None means the platform trust store.
 
-    `timeout` bounds each socket operation and `max_seconds` bounds the
-    whole call, every hop included (c2, 2026-09-24). The second is the one
-    a hostile source cannot stretch: it is enforced by a watchdog that
-    shuts the socket down under a read still going when it runs out, so a
-    body or a header drip-fed one byte at a time ends on time instead of
-    when the far end chooses. See `pinned_http.Deadline`.
+    `timeout` bounds each socket operation and `max_seconds` bounds the whole call, every hop
+    included. The second is the one a hostile source cannot stretch: a watchdog shuts the socket
+    down under a read still going when it runs out, so a body drip-fed one byte at a time ends on
+    time (`pinned_http.Deadline`).
 
-    `route` is the route from egress.route_for; None is the direct public
-    route this function has always used, refused once a proxy is
-    configured (2026-09-24). A thin wrapper since then: the work is
-    pinned_http's, the one outbound client, and this keeps the collector's
-    signature, its return tuple and every message its suites read.
+    `route` is the route from egress.route_for; None is the direct public route, refused once a
+    proxy is configured. This is a thin wrapper over pinned_http, the one outbound client; it keeps
+    the collector's signature, return tuple and messages.
 
-    ## The check and the connect are one lookup (sec-ssrf-rebinding)
+    The check and the connect are one lookup: each hop's name is resolved once and the answers that
+    were judged are the addresses the pinned connection dials, by number, so a zone answering public
+    and then internal (DNS rebinding) has nothing to rebind. The name still goes everywhere a name
+    belongs (the `Host` header, TLS SNI, the certificate check), so a pinned address serves only the
+    host the URL names. No proxy is read from the environment, because a forward proxy resolves the
+    name itself and a check made here would say nothing about where it connected; a proxy is used
+    only when the caller passes a PROXY route from egress.route_for, and then the egress proxy is
+    the single resolver and this process resolves only the proxy's own address (docs/00 decision
+    68).
 
-    Until 2026-09-23 this docstring called itself a floor and said why: the
-    name was resolved once by the check and again by the socket layer
-    inside `urlopen`, and nothing stopped the two answers differing. That
-    is DNS rebinding, and it needs no more than a zone with a zero TTL
-    answering a public address first and an internal one second.
-
-    Now each hop's name is resolved ONCE and the answers that were judged
-    are the addresses the pinned connection dials, by number. The name
-    still goes everywhere a name belongs: the `Host` header, TLS SNI and
-    the certificate check, so a pinned address serves only the host the
-    URL names.
-
-    No proxy is consulted from the environment. urlopen read HTTP_PROXY,
-    HTTPS_PROXY and, on Windows, the system proxy setting, and a forward
-    proxy resolves the name itself, so a check made here would say nothing
-    about where it connected. A proxy is used only when the caller passes a
-    route from egress.route_for whose mode is PROXY; the egress proxy is
-    then the single resolver at the boundary and applies egress_policy.py
-    itself, and this process resolves nothing but the proxy's own address
-    (docs/00 decision 68).
-
-    Redirects (docs/17 F15(f)) are followed hop by hop, never inside the
-    HTTP library: `urlopen` used to follow them internally, so hops 2..N
-    were reached with no check at all and a public host answering
-    `302 -> http://127.0.0.1/` fetched the internal page.
+    Redirects (docs/17) are followed hop by hop, never inside the HTTP library, so every hop is
+    checked: a public host answering `302 -> http://127.0.0.1/` cannot make this fetch the internal
+    page.
     """
     fetched = pinned_http._fetch_response(
         url, route=route if route is not None else _legacy_route(), etag=etag,
@@ -1995,11 +1776,10 @@ def fetch(url: str, *, etag: str | None = None,
 
 
 def fetch_response(url: str, *, route: EgressRoute | None = None, **kwargs) -> Fetched:
-    """pinned_http.fetch_response with the collector's test seam: the call
-    a collection adapter's RunContext makes (docs/20 section 9), so a
-    suite that patches `collection._is_blocked` reaches the connect through
-    this path as it does through `fetch`. `route` None is the legacy route
-    `fetch` uses (2026-09-24)."""
+    """pinned_http.fetch_response with the collector's test seam: the call a collection adapter's
+    RunContext makes (docs/20 section 9), so a suite that patches `collection._is_blocked` reaches
+    the connect through this path as it does through `fetch`. `route` None is the legacy route
+    `fetch` uses."""
     return pinned_http._fetch_response(
         url, route=route if route is not None else _legacy_route(),
         _blocked_override=_live_is_blocked, **kwargs)
@@ -2012,24 +1792,19 @@ def fetch_response(url: str, *, route: EgressRoute | None = None, **kwargs) -> F
 def next_due_at(last_ok: datetime | None, interval_s: int, jitter_pct: int,
                 *, now: datetime | None = None,
                 rng: random.Random | None = None) -> datetime:
-    """When to poll next, with jitter as a PERCENTAGE of the interval.
+    """When to poll next, with jitter as a percentage of the interval.
 
-    docs/04 asks for jitter and the reason is operational security, not
-    courtesy: a collector that polls exactly every 300 seconds is one a
-    competent forum admin picks out of an access log in an afternoon, and a
-    burnt persona is expensive and slow to replace.
-
-    Jitter is symmetric around the interval rather than added to it -- only
-    ever adding makes the MINIMUM gap the interval, which is still a
+    docs/04 asks for jitter for operational security, not courtesy: a collector that polls exactly
+    every 300 seconds is one a competent forum admin picks out of an access log in an afternoon, and
+    a burnt persona is expensive and slow to replace. Jitter is symmetric around the interval rather
+    than added to it, because only ever adding makes the minimum gap the interval, which is still a
     signature.
     """
     now = now or datetime.now(timezone.utc)
     if last_ok is None:
-        # A source that has NEVER been polled is due now, not one interval
-        # from now. Waiting the interval first means a newly-added source
-        # sits idle for its whole period and somebody concludes the
-        # collector is broken -- which is how a working system gets
-        # "fixed".
+        # A source that has never been polled is due now, not one interval from now: waiting first
+        # leaves a newly added source idle for its whole period, and somebody concludes the
+        # collector is broken.
         return now
     base = last_ok + timedelta(seconds=interval_s)
     if jitter_pct <= 0:
@@ -2042,17 +1817,12 @@ def next_due_at(last_ok: datetime | None, interval_s: int, jitter_pct: int,
 class RateLimiter:
     """Per-source `max_rps`, spaced rather than bursted.
 
-    docs/04 asks for it globally through Redis; this is the durable half
-    and it is honest about being that. A burst that respects an average is
-    still a burst, and a burst is what gets noticed.
+    docs/04 asks for it globally through Redis; this is the durable half. A burst that respects an
+    average is still a burst, and a burst is what gets noticed.
 
-    docs/17 F15(i): the state used to live on the INSTANCE, and
-    `CollectionService` is constructed per request, so the dict was always
-    empty and this never spaced anything. It now reads and writes
-    `collect.source.last_request_at`, which survives the process and is
-    shared between workers -- the property that actually matters. A Redis
-    token bucket remains the right optimisation; it is no longer the fix
-    for a correctness bug.
+    The state is `collect.source.last_request_at`, not the instance, because `CollectionService` is
+    constructed per request: the column survives the process and is shared between workers. A Redis
+    token bucket would be an optimisation, not a fix.
     """
 
     def __init__(self, conn: psycopg.Connection | None = None, *,
@@ -2078,8 +1848,7 @@ class RateLimiter:
                 (source_id,)).fetchone()
             elapsed = float(row[0]) if row and row[0] is not None else None
             if elapsed is not None and elapsed < gap:
-                # A stamp ahead of the clock (it stepped back) waits the
-                # whole gap, never none (2026-09-25).
+                # A stamp ahead of the clock (it stepped back) waits the whole gap, never none.
                 delay = gap - max(elapsed, 0.0)
                 self._sleep(delay)
             self._c.execute(
@@ -2100,12 +1869,11 @@ class RateLimiter:
         return delay
 
     def wait_persona(self, persona_id: UUID, min_gap_s: float) -> float:
-        """The gap between two requests made AS one persona, whatever source
-        they read (2026-09-24): the platform sees one account, so the
-        gap is the account's. Measured on collection_account.last_request_at
-        with clock_timestamp(), exactly as `wait` measures a source, so it
-        survives the process and is shared between workers. Zero or less
-        does nothing."""
+        """The gap between two requests made as one persona, whatever source they read: the platform
+        sees one account, so the gap is the account's. Measured on
+        collection_account.last_request_at with clock_timestamp(), exactly as `wait` measures a
+        source, so it survives the process and is shared between workers. Zero or less does
+        nothing."""
         if min_gap_s <= 0:
             return 0.0
         delay = 0.0
@@ -2142,12 +1910,9 @@ class RunResult:
     items_deleted: int = 0
     watch_hits: int = 0
     error: str | None = None
-    #: Things the run could not do while otherwise succeeding -- the same
-    #: idea as `lab.sample.triage_gaps`. A watch whose regex will not
-    #: compile is the case this exists for: it matches nothing, for ever,
-    #: and without this the run is indistinguishable from one where the
-    #: pattern simply did not fire. `default_factory`, because a mutable
-    #: default on a dataclass is shared by every instance.
+    #: Things the run could not do while otherwise succeeding, as `lab.sample.triage_gaps` does. A
+    #: watch whose regex will not compile is the case this exists for: it matches nothing, for ever,
+    #: and without this the run is indistinguishable from one where the pattern simply did not fire.
     warnings: list[str] = field(default_factory=list)
     #: What the run wants known that is not a fault: a walk that
     #: stopped at its budget, documents with no retention clock.
@@ -2159,22 +1924,16 @@ class RunResult:
     blocked_reason: str | None = None
 
 
-#: Serialises the poll of ONE source across processes -- see `run_once`.
+#: Serialises the poll of one source across processes (see `run_once`). Keyed on the source rather
+#: than one lock for the whole collector, because two different sources should poll at the same
+#: time: they are different sites, politeness is already per source (`max_rps` and
+#: `collect.source.last_request_at`), and a single global lock would make the runner's throughput
+#: the slowest feed's fetch timeout, the failure where a cron entry starts overlapping itself.
 #:
-#: Keyed on the SOURCE rather than one lock for the whole collector,
-#: because two different sources SHOULD poll at the same time: they are
-#: different sites, politeness is already per source (`max_rps` and
-#: `collect.source.last_request_at`), and a single global lock would make
-#: the runner's throughput the slowest feed's fetch timeout -- which is the
-#: shape of failure where a cron entry starts overlapping ITSELF.
-#:
-#: Session-scoped (`pg_try_advisory_lock`), not transaction-scoped, for the
-#: reason `transports._DRAIN_LOCK` states: `db.connect()` is autocommit, so
-#: a `pg_advisory_xact_lock` would be released by the very statement that
-#: took it and would guard nothing. The name is hashed with
-#: `hashtextextended(..., 0)`, the idiom the drain lock and migrations 0013
-#: and 0024 already use, so the lock space is addressed one way across the
-#: codebase.
+#: Session-scoped (`pg_try_advisory_lock`), not transaction-scoped, for the reason
+#: `transports._DRAIN_LOCK` states: `db.connect()` is autocommit, so a `pg_advisory_xact_lock` would
+#: be released by the very statement that took it and would guard nothing. The name is hashed with
+#: `hashtextextended(..., 0)`, the idiom the drain lock and migrations 0013 and 0024 use.
 _POLL_LOCK = "collect.run_once"
 
 
@@ -2325,14 +2084,11 @@ def _watch_dict(row) -> dict:
 
 
 def _feed_floor_refusal(source) -> tuple[str, str] | None:
-    """Invariant 8's floor for a source whose adapter enforces no collection
-    authority (RSS and WEB): reading a source is itself a boundary crossing
-    (decision 103), so AMBER_STRICT and RED are not polled by the collector.
-
-    egress-rss-floor (2026-10-03): only adapters with `requires_authority`
-    ever reached `ceiling_refusal`, so a feed labelled RED was fetched from
-    this deployment's own address on every poll. AMBER is the highest a
-    collection may carry; no per-kind ceiling is declared for feeds."""
+    """Invariant 8's floor for a source whose adapter enforces no collection authority (RSS and
+    WEB): reading a source is itself a boundary crossing (decision 103), so AMBER_STRICT and RED are
+    not polled by the collector. Only adapters with `requires_authority` reach `ceiling_refusal`, so
+    without this a feed labelled RED would be fetched from this deployment's own address on every
+    poll. AMBER is the highest a collection may carry; no per-kind ceiling is declared for feeds."""
     from noctornal_api.egress import Destination, can_egress
     decision = can_egress(source.classification, Destination.COLLECTION_TARGET,
                           destination_ceiling="AMBER")
@@ -2347,25 +2103,18 @@ def _feed_floor_refusal(source) -> tuple[str, str] | None:
 class CollectionService:
     """The scheduler's reporting half, one poll, and the read path.
 
-    Where a poll's output goes, stated exactly because the `Adapter`
-    docstring used to overstate it: `run_once` stores what it fetched as
-    `collect.document` and `collect.watch_hit` rows, and records the poll
-    itself on `collect.collection_run`, on the source (health, failure
-    count, next due time) and on `collect.watch.last_hit_at`. That is the
-    whole list, plus (2026-09-24) the raw markup an adapter keeps,
-    in its own bucket, and whatever an adapter's own commit hooks write
-    inside the same persist transaction. No proposal, no extraction, no
-    graph element.
+    `run_once` stores what it fetched as `collect.document` and `collect.watch_hit` rows and records
+    the poll on `collect.collection_run`, on the source (health, failure count, next due time) and
+    on `collect.watch.last_hit_at`, plus the raw markup an adapter keeps in its own bucket and
+    whatever an adapter's commit hooks write in the same persist transaction. No proposal, no
+    extraction, no graph element.
 
-    Two kinds of caller share this class, and `clearance` is how they are
-    told apart. The listing methods take `clearance=None` for the
-    worker/scheduler, which has no user and must see every source or it
-    silently polls nothing, and a TLP name for an HTTP caller, whose own
-    ceiling then hides any source labelled above it.
+    `clearance` tells the two kinds of caller apart. The listing methods take `clearance=None` for
+    the worker/scheduler, which has no user and must see every source or it silently polls nothing,
+    and a TLP name for an HTTP caller, whose ceiling hides any source labelled above it.
 
-    `fetcher` replaces `collection.fetch_response` inside RunContext (the
-    tests inject one; nothing in production passes it) and `raw_store` the
-    raw markup store (default: MinIO when configured, else none).
+    `fetcher` replaces `collection.fetch_response` inside RunContext (tests inject one; production
+    passes none) and `raw_store` the raw markup store (default: MinIO when configured, else none).
     """
 
     def __init__(self, conn: psycopg.Connection,
@@ -2442,8 +2191,8 @@ class CollectionService:
         if platform is not None and source.collection_account_id is None:
             return self.CAUSE_BINDING, (
                 "This source is read by a persona, and none is bound to it.")
-        # Before the feed's own early answer: a deactivated feed was still
-        # fetched by Poll now, because only the authority path asked (2026-10-07).
+        # Before the feed's own early answer (`not requires` below), so a deactivated feed is not
+        # fetched by Poll now.
         if not source.is_active:
             return self.CAUSE_INACTIVE, "This source is deactivated."
         if not requires:
@@ -2586,12 +2335,10 @@ class CollectionService:
                 window = None
             opening = window_opening(window, now) if window else None
             if opening is not None:
-                # A night's rest must not end in every source firing on the
-                # first cron pass after the opening, at the same time every
-                # day (the regular signature docs/04 forbids): the next due
-                # time moves to the opening plus a jitter of its own. The
-                # second write due_sources makes, beside rolling a missing
-                # schedule.
+                # A night's rest must not end in every source firing on the first cron pass after
+                # the opening, at the same time every day (the regular signature docs/04 forbids):
+                # the next due time moves to the opening plus a jitter of its own. This is the
+                # second write due_sources makes, beside rolling a missing schedule.
                 spread = min(interval * max(jitter, 0) / 100.0, 3600.0)
                 generator = rng or random.Random()
                 moved = opening + timedelta(
@@ -2635,28 +2382,19 @@ class CollectionService:
                     clearance: str | None = None, compartments=None) -> list[dict]:
         """What is ready to poll. Reports; does not act.
 
-        Nothing loops here. A collector that runs itself on a timer nobody
-        watches is how a persona gets burnt at 3am, and the same reasoning
-        (decisions 30, 46) applies: the seam is deliberate.
+        Nothing loops here: a collector that runs itself on a timer nobody watches is how a persona
+        gets burnt at 3am (decisions 30, 46). Nor does it roll the schedule. The schedule is stored,
+        rolled once when a run finishes, and read as-is; recomputing `next_due_at` on every call
+        would re-roll it whenever anybody looks, and frequent polling would collapse the variance
+        toward the floor, the regular cadence jitter exists to avoid.
 
-        It also does not ROLL here. docs/17 F15(i): this used to compute
-        `next_due_at` freshly on every call, so the schedule was re-rolled
-        every time anybody looked and the realised interval depended on how
-        often the scheduler polls. Frequent polling collapsed the variance
-        toward the floor -- a regular cadence, which is the signature
-        jitter exists to avoid. The schedule is now stored, rolled once
-        when a run finishes, and read as-is.
+        Only what may be polled is reported. A source that would be refused before any request,
+        whose persona cannot be used now, or that no confirmed authority covers is left out and
+        reported by `held_sources` instead, so it cannot fill a pass or be recorded as a failure.
 
-        Since 2026-09-24, only what may be polled. A source that would be
-        refused before any request, whose persona cannot be used now, or
-        that no confirmed authority covers is left out and reported by
-        `held_sources` instead, so it cannot fill a pass or be recorded as
-        a failure.
-
-        `clearance=None` -- the default, and the scheduler's reading --
-        applies NO classification filter. An HTTP caller passes its own
-        ceiling, and a source labelled above it is not reported as due: its
-        name and URL are what the label protects.
+        `clearance=None`, the default and the scheduler's reading, applies no classification filter.
+        An HTTP caller passes its own ceiling, and a source labelled above it is not reported as
+        due: its name and URL are what the label protects.
         """
         due, _held_rows = self._schedule(now=now or datetime.now(timezone.utc),
                                          rng=rng, clearance=clearance,
@@ -2680,12 +2418,10 @@ class CollectionService:
                      now: datetime | None = None,
                      rng: random.Random | None = None, compartments=None
                      ) -> tuple[list[dict], list[dict]]:
-        """Both answers from ONE reading of the schedule: the cron's pass
-        (2026-09-25). Asking due_sources and then
-        held_sources reads it twice, and the first reading moves a source
-        whose persona is outside its active hours to the window's opening,
-        so the second no longer saw it as due and the pass under-counted
-        `held`."""
+        """Both answers from one reading of the schedule: the cron's pass. Asking due_sources and
+        then held_sources reads it twice, and the first reading moves a source whose persona is
+        outside its active hours to the window's opening, so the second would no longer see it as
+        due and the pass would under-count `held`."""
         return self._schedule(now=now or datetime.now(timezone.utc),
                               rng=rng, clearance=clearance,
                               compartments=compartments)
@@ -2696,25 +2432,22 @@ class CollectionService:
         return len(self.held_sources())
 
     def mark_interrupted_runs(self) -> int:
-        """Finish every run still RUNNING whose poll is no longer running:
-        FAILED, class Interrupted, with the sentence INTERRUPTED_RUN_SENTENCE.
-        Returns how many. Called at the start of a pass, between polls and
-        never inside one (a session lock is re-entrant on its own
+        """Finish every run still RUNNING whose poll is no longer running: FAILED, class
+        Interrupted, with the sentence INTERRUPTED_RUN_SENTENCE. Returns how many. Called at the
+        start of a pass, between polls and never inside one (a session lock is re-entrant on its own
         connection).
 
-        A poll stopped where Python cannot unwind it (the collector sends
-        its poll child SIGTERM and the child installs no handler; an
-        out-of-memory kill; a host that lost power) never reaches the
-        handler that finishes its row, and the row was committed RUNNING
-        before the first request. A poll holds its source's advisory lock
-        (`run_once`) for exactly as long as it runs, and a session lock ends
-        with its connection, so a RUNNING run whose source's lock is free is
-        being polled by no one. A lock somebody holds is a live poll, and
-        its run is left alone.
+        A poll stopped where Python cannot unwind it (the collector sends its poll child SIGTERM and
+        the child installs no handler; an out-of-memory kill; a host that lost power) never reaches
+        the handler that finishes its row, and the row is committed RUNNING before the first
+        request. A poll holds its source's advisory lock (`run_once`) for exactly as long as it
+        runs, and a session lock ends with its connection, so a RUNNING run whose source's lock is
+        free is being polled by no one. A lock somebody holds is a live poll, and its run is left
+        alone.
 
-        It is not counted against the source's health and the source is not
-        rescheduled: nothing about the source failed, and its `next_due_at`
-        was never rolled, so the same pass polls it again."""
+        It is not counted against the source's health and the source is not rescheduled: nothing
+        about the source failed, and its `next_due_at` is never rolled, so the same pass polls it
+        again."""
         marked = 0
         for (source_id,) in self._c.execute(
                 "SELECT DISTINCT source_id FROM collect.collection_run "
@@ -2775,50 +2508,45 @@ class CollectionService:
                  persona_id: UUID | None = None,
                  watch_id: UUID | None = None,
                  clearance: str | None = None, compartments=None) -> RunResult:
-        """One poll. Every outcome that got as far as the lock is a
-        `collection_run` row, including the failures -- parser health is
-        only knowable if the failures are recorded as carefully as the
+        """One poll. Every outcome that got as far as the lock is a `collection_run` row, including
+        the failures: parser health is only knowable if failures are recorded as carefully as
         successes.
 
-        `clearance` is the caller's own ceiling, and a source above it is
-        refused as `CollectionNotFound` -- indistinguishably from a source
-        that does not exist. Added 2026-09-02, because a failing poll
-        returned the SSRF guard's messages, which quote the host. `None` is
-        the worker's reading and applies NO filter.
+        `clearance` is the caller's own ceiling, and a source above it is refused as
+        `CollectionNotFound`, indistinguishably from one that does not exist (a failing poll would
+        otherwise return the SSRF guard's messages, which quote the host). `None` is the worker's
+        reading and applies no filter. `actor_id` is who pressed Poll now; None is the system (the
+        cron), and persona use it causes is audited as the system, never as a nil UUID.
 
-        `actor_id` is who pressed Poll now, recorded on the run; None is
-        the system (the cron), and persona use it causes is audited as the
-        system, never as a nil UUID (2026-09-24).
+        One poll of one source at a time: a per-source advisory lock (`pg_try_advisory_lock`,
+        session scoped because this connection is autocommit) is taken after the clearance check, so
+        "busy" is not an existence oracle. The loser returns at once with `CollectionBusy` and
+        writes nothing.
 
-        ## One poll of one source at a time (2026-09-10)
-
-        A per-source advisory lock (`pg_try_advisory_lock`, session scoped,
-        because this connection is autocommit), taken AFTER the clearance
-        check so "busy" is not an existence oracle. The loser returns
-        immediately with `CollectionBusy` and writes nothing.
-
-        ## The order (2026-09-24)
+        The order (other docstrings refer to these steps by number):
 
         1. the source under the ceiling, and its adapter;
-        2. the persona argument: a persona-less parser takes none, and a
-           persona parser reads as the bound persona only;
-        3. every refusal that is about configuration (`_refusal`) and the
-           confirmer's (a person who confirmed the covering authority does
-           not run it), before any lock, run row or network;
-        4. the source lock; 5. the persona gate's check, lock and hours;
-        6. the resume cursor, read AFTER the lock; 7. the run row, with its
-           start time, persona, exit and requester, COMMITTED before the
-           route is resolved (autocommit; a caller inside a transaction is
-           refused), because the egress proxy reads it from its own
-           connection;
-        8. the authority (missing: BLOCKED); 9. the adapter's plan;
-        10. the egress route, RSS included (the passive default, so RSS
-           keeps working once a proxy is configured); 11. RSS's one wait;
-        12. the persona lease and the fetch; 13. the outcome;
-        14. ONE persist transaction with a savepoint per item;
-        15. a persist failure is FAILED and re-raised; 16. the lease, the
-           persona lock and the source lock are released; 17. the adapter
-           settles every outcome that wrote a run row.
+        2. the persona argument: a persona-less parser takes none, and a persona parser reads as the
+           bound persona only;
+        3. every refusal about configuration (`_refusal`) and the confirmer's (a person who
+           confirmed the covering authority does not run it), before any lock, run row or network;
+        4. the source lock;
+        5. the persona gate's check, lock and hours;
+        6. the resume cursor, read after the lock;
+        7. the run row (start time, persona, exit, requester), committed before the route is
+           resolved because the egress proxy reads it from its own connection (autocommit; a caller
+           inside a transaction is refused);
+        8. the authority (missing: BLOCKED);
+        9. the adapter's plan;
+        10. the egress route, RSS included (the passive default, so RSS keeps working once a proxy
+            is configured);
+        11. RSS's one wait;
+        12. the persona lease and the fetch;
+        13. the outcome;
+        14. one persist transaction with a savepoint per item;
+        15. a persist failure is FAILED and re-raised;
+        16. the lease, the persona lock and the source lock are released;
+        17. the adapter settles every outcome that wrote a run row.
         """
         from noctornal_api.collection_authority import (
             AuthorityError,
@@ -2890,22 +2618,18 @@ class CollectionService:
                 if gate is not None:
                     gate.release()
         finally:
-            # A session lock outlives the statement that took it, so an
-            # exception escaping the poll -- the persist handler re-raises
-            # one on purpose -- would otherwise strand the lock for the life
-            # of the connection, and this source would be unpollable until
-            # the process that held it exited.
+            # A session lock outlives the statement that took it, so an exception escaping the poll
+            # (the persist handler re-raises one on purpose) would otherwise strand the lock for the
+            # life of the connection, and this source would be unpollable until the process that
+            # held it exited.
             #
-            # Guarded because this is SQL in a bare `finally`. When the
-            # CONNECTION is what failed, this statement raises too, and an
-            # exception from a `finally` REPLACES the one unwinding through
-            # it: the caller would read an OperationalError from
-            # pg_advisory_unlock and never see the defect that actually
-            # ended the poll. Swallowing is right here: a session lock
-            # lives and dies with its session, so a connection too broken
-            # to run this has already released the lock by dying. Logged
-            # rather than silent, because a healthy connection that refuses
-            # the unlock would mean the lock really is stranded.
+            # Guarded because this is SQL in a bare `finally`: when the connection is what failed,
+            # this statement raises too, and an exception from a `finally` replaces the one
+            # unwinding through it, so the caller would read an OperationalError from
+            # pg_advisory_unlock and never see the defect that ended the poll. Swallowing is right:
+            # a session lock lives and dies with its session, so a connection too broken to run this
+            # has already released the lock. Logged rather than silent, because a healthy connection
+            # that refuses the unlock would mean the lock really is stranded.
             try:
                 self._c.execute(
                     "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
@@ -2949,9 +2673,8 @@ class CollectionService:
         elif requires:
             exit_profile = source.egress_profile_id
         else:
-            # The passive default: its id is the egress proxy's to know, and
-            # a passive run records NULL, which is what the proxy's run
-            # check requires of one (2026-09-24).
+            # The passive default: its id is the egress proxy's to know, and a passive run records
+            # NULL, which is what the proxy's run check requires of one.
             exit_profile = None
         run_id = self._c.execute(
             """INSERT INTO collect.collection_run
@@ -3052,9 +2775,8 @@ class CollectionService:
                                          str(exc), state, notes, adapter,
                                          persona_id)
                 except (RouteUnavailable, DestinationRefused) as exc:
-                    # docs/20 section 9: a route refusal on any poll, RSS
-                    # included, is BLOCKED, never a failure counted against
-                    # a feed's health (2026-09-24).
+                    # docs/20 section 9: a route refusal on any poll, RSS included, is BLOCKED,
+                    # never a failure counted against a feed's health.
                     self._capture(context, state, notes)
                     return self._blocked(result, source, "EgressUnavailable",
                                          redact(str(exc)), state, notes,
@@ -3222,16 +2944,14 @@ class CollectionService:
                          fetched: FetchResult, result: RunResult, state: dict,
                          notes: list[str], input_cursor: dict,
                          persona_id, watch_id) -> RunResult:
-        """Step 14, and its failure. Everything after the fetch is inside
-        a handler for the same reason `analytics_runs` CR9 is: the run row
-        was INSERTed 'RUNNING' on an autocommit connection, so it is
-        already committed and survives whatever unwinds above it.
+        """Step 14, and its failure. Everything after the fetch is inside a handler for the same
+        reason as in `analytics_runs`: the run row is inserted 'RUNNING' on an autocommit
+        connection, so it is already committed and survives whatever unwinds above it.
 
-        Re-raised, not swallowed: a fetch failure is an expected outcome
-        (the site is down) and returns a result; a failure to persist what
-        was fetched is a defect, and the caller must not be told the poll
-        succeeded. A cursor over its cap is the adapter's defect and is
-        recorded, not raised."""
+        Re-raised, not swallowed: a fetch failure is an expected outcome (the site is down) and
+        returns a result; a failure to persist what was fetched is a defect, and the caller must not
+        be told the poll succeeded. A cursor over its cap is the adapter's defect and is recorded,
+        not raised."""
         try:
             self._persist(source, adapter, fetched, result, state, notes,
                           input_cursor, persona_id, watch_id)
@@ -3282,11 +3002,10 @@ class CollectionService:
         raw_gaps = {"unconfigured": 0, "refused": 0}
         broken: dict[tuple[UUID, str], str] = {}
         misaimed: dict[UUID, str] = {}
-        # collection-watch-regex-redos (2026-10-03): the watches are read and
-        # every regex is matched BEFORE the transaction, in a bounded child
-        # (watch_regex), so a pattern that never finishes holds no database
-        # transaction and is stopped at its limit. A pattern that did not
-        # compile or was stopped is reported once per run below.
+        # The watches are read and every regex is matched before the transaction, in a bounded child
+        # (watch_regex), so a pattern that never finishes holds no database transaction and is
+        # stopped at its limit. A pattern that does not compile or is stopped is reported once per
+        # run below.
         watches = self._watches(source.id)
         verdicts = self._regex_verdicts(items, watches, adapter=adapter,
                                         categories=categories)
@@ -3377,9 +3096,8 @@ class CollectionService:
                 f"matched nothing in this run: {reason} "
                 f"(pattern {redact(pat)[:120]!r})"))
                 for (wid, pat), reason in slow.items())
-            # A watch aimed at a chat this source does not read (F47,
-            # 2026-10-02) is as silent as a regex that will not compile, and
-            # is reported the same way, once per run.
+            # A watch aimed at a chat this source does not read is as silent as a regex that will
+            # not compile, and is reported the same way, once per run.
             warnings.extend(RunWarning(WATCH_PATTERN, f"watch {wid} {reason}.")
                             for wid, reason in misaimed.items())
             if raw_gaps["unconfigured"]:
@@ -3509,23 +3227,19 @@ class CollectionService:
                         classification: str, category: str = "FORUM_POST",
                         retain_days: int | None = None,
                         compartments=frozenset()) -> tuple[UUID, bool]:
-        """Deduped on content hash, versioned rather than overwritten.
+        """Deduped on content hash, versioned rather than overwritten. Returns (document id,
+        inserted).
 
-        `compartments` (F43, 2026-10-02) are the source's: every document a
-        source collects inherits them, so a read under a compartment is
-        read back under it by every document reader (decision 78).
+        `compartments` are the source's: every document a source collects inherits them, so a read
+        under a compartment is read back under it by every document reader (decision 78).
 
-        An edited forum post is a NEW version, not a correction: what the
-        actor said and what they later said instead are both facts, and
-        overwriting loses the more interesting one.
+        An edited forum post is a new version, not a correction: what the actor said and what they
+        later said instead are both facts, and overwriting loses the more interesting one.
 
-        Since 2026-09-24 it returns (document id, inserted). The dedupe
-        reads UNPURGED rows only, so a re-fetch of a purged post is a new
-        capture with a new clock (the purge replaces the digest with one not
-        derived from the content, docs/00 decision 74). A hit returns the
-        latest version of that item and clears its deleted-upstream flag:
-        the item is back.
-        `retain_until` is set only from a retention rule's days.
+        The dedupe reads unpurged rows only, so a re-fetch of a purged post is a new capture with a
+        new clock (the purge replaces the digest with one not derived from the content, docs/00
+        decision 74). A hit returns the latest version of that item and clears its deleted-upstream
+        flag: the item is back. `retain_until` is set only from a retention rule's days.
         """
         digest = item.content_sha256
         hit = self._c.execute(
@@ -3640,12 +3354,10 @@ class CollectionService:
             (source_id, wanted[:5000])).rowcount
 
     def _watches(self, source_id: UUID) -> list[tuple]:
-        """The active watches of one source, on the collector's connection:
-        `collect.watch` is under row-level security (0124) and the poll, a
-        manual run and a pasted capture read it as the COLLECTION system
-        purpose, which sees every case's watches. The target kind and
-        reference ride along (F47, 2026-10-02) so the matcher can scope a
-        chat watch without a second read."""
+        """The active watches of one source, on the collector's connection: `collect.watch` is under
+        row-level security (0124) and the poll, a manual run and a pasted capture read it as the
+        COLLECTION system purpose, which sees every case's watches. The target kind and reference
+        ride along so the matcher can scope a chat watch without a second read."""
         return self._c.execute(
             """SELECT id, case_id, keywords, selector_watch, regexes,
                       priority, suppress_window_s, target_kind, target_ref
@@ -3657,35 +3369,26 @@ class CollectionService:
                        broken: dict[tuple[UUID, str], str],
                        misaimed: dict[UUID, str] | None = None,
                        regex_verdicts: "watch_regex.Verdicts | None" = None) -> int:
-        """Keyword, selector and regex matching into `watch_hit`, for ONE
-        item, inside its savepoint (2026-09-24).
+        """Keyword, selector and regex matching into `watch_hit`, for one item, inside its
+        savepoint.
 
-        Suppression is applied HERE rather than at notification time,
-        because docs/04 wants repeated hits on the same thread collapsed
-        into one with a running count -- and a suppression that happens
-        after the row is written is a suppression that still filled the
-        table.
+        Suppression is applied here rather than at notification time, because docs/04 wants repeated
+        hits on the same thread collapsed into one with a running count, and a suppression applied
+        after the row is written still fills the table.
 
-        Added: a selector equal to the item's author_uid records
-        'author:<uid>', and each `meta['match_ids']` entry equal to a
-        selector records '<label>:<id>'. The hit is written with ON
-        CONFLICT DO NOTHING and counted only when a row went in, so a post
-        re-fetched after its suppression window never raises a unique
-        violation and never wedges the source. Purged documents are never
-        matched. A broken pattern is reported once per run in `broken`.
+        A selector equal to the item's author_uid records 'author:<uid>', and each
+        `meta['match_ids']` entry equal to a selector records '<label>:<id>'. The hit is written
+        with ON CONFLICT DO NOTHING and counted only when a row went in, so a post re-fetched after
+        its suppression window never raises a unique violation or wedges the source. Purged
+        documents are never matched. A broken pattern is reported once per run in `broken`.
 
-        F47 (2026-10-02), two things beside the item's text. A forum post's
-        signature is kept beside it, not in its text, and is matched on its
-        own: a reason reads `signature_keyword:`, `signature_selector:` or
-        `signature_regex:` so the analyst can tell a post that says a thing
-        from an author whose signature does, and a signature repeated on every
-        post of an author raises a hit on each (the thread's suppression
-        window thins them). And a watch of target kind TELEGRAM_CHAT fires
-        only on a message collected from the chat it names, with `chat:<id>`
-        leading its reasons; with no term of any kind it fires on every
-        message of that chat. A chat watch that names another chat, or
-        meets an item that is no Telegram message, matches nothing and is
-        reported once per run in `misaimed`.
+        A forum post's signature is kept beside its text and matched on its own, with a reason of
+        `signature_keyword:`, `signature_selector:` or `signature_regex:`, so the analyst can tell a
+        post that says a thing from an author whose signature does. A TELEGRAM_CHAT watch fires only
+        on a message collected from the chat it names, with `chat:<id>` leading its reasons, and
+        with no term of any kind fires on every message of that chat. A chat watch that names
+        another chat, or meets an item that is no Telegram message, matches nothing and is reported
+        once per run in `misaimed`.
         """
         haystack, sig_haystack = _watch_texts(item)
         meta = item.meta if isinstance(item.meta, dict) else {}
@@ -3735,13 +3438,11 @@ class CollectionService:
                     if exact and exact == value:
                         matched.append(f"{label}:{value}")
             for pattern in (regexes or []):
-                # A watch with a broken pattern must not stop the other
-                # watches from matching, and must not be SILENT: a watch is a
-                # standing tasking, and swallowed it reads exactly like a
-                # quiet one. The pattern was matched (or reported, redacted:
-                # an operator watching for a leaked credential puts that
-                # credential in the pattern, and the report is stored) before
-                # this transaction began; a pattern that failed has no
+                # A watch with a broken pattern must not stop the other watches from matching, and
+                # must not be silent: a watch is a standing tasking, and swallowed it reads exactly
+                # like a quiet one. The pattern is matched (or reported, redacted: an operator
+                # watching for a leaked credential puts that credential in the pattern, and the
+                # report is stored) before this transaction begins; a pattern that failed has no
                 # verdict and matches nothing here.
                 if not pattern or pattern in regex_verdicts.failed:
                     continue
@@ -3912,16 +3613,14 @@ class CollectionService:
                       actor_id: UUID, clearance: str,
                       ceiling_env=None, compartments=(),
                       held_compartments=None) -> dict:
-        """A new source. Every refusal is a sentence
-        (CollectionError, a 400), except a persona or exit the caller may
-        not see (CollectionNotFound, a 404). A source is created with no
-        schedule, so it is due at once; a forum or Telegram source then
-        waits on its authority before anything is read.
+        """A new source. Every refusal is a sentence (CollectionError, a 400), except a persona or
+        exit the caller may not see (CollectionNotFound, a 404). A source is created with no
+        schedule, so it is due at once; a forum or Telegram source then waits on its authority
+        before anything is read.
 
-        `compartments` (F43, 2026-10-02) file the source, and everything it
-        collects, under those keys: the creator must hold every one
-        (`held_compartments`, their own), and the keys must be registered
-        (the compartments_registered trigger refuses the rest)."""
+        `compartments` file the source, and everything it collects, under those keys: the creator
+        must hold every one (`held_compartments`, their own), and the keys must be registered (the
+        compartments_registered trigger refuses the rest)."""
         from noctornal_api.collection_authority import (
             AUTHORITY_KINDS,
             source_ceiling,
@@ -4132,23 +3831,18 @@ class CollectionService:
 
     def unhealthy_sources(self, *, clearance: str | None = None,
                           compartments=None) -> list[dict]:
-        """Sources that have actually FAILED, not sources nobody has polled.
+        """Sources that have actually failed, not sources nobody has polled.
 
-        `WHERE health <> 'OK'` looked right and was not: a source that has
-        never run carries the default health with zero failures, so every
-        newly added source appeared on the alert list next to a parser that
-        genuinely broke. Never-polled sources are reported separately.
+        `WHERE health <> 'OK'` would list every newly added source next to a parser that genuinely
+        broke, because a source that has never run carries the default health with zero failures.
+        Never-polled sources are reported separately. A source whose last poll was BLOCKED is listed
+        too, with its reason: nothing is being read from it, and the reason is what somebody has to
+        act on.
 
-        Since 2026-09-24 a source whose last poll was BLOCKED is listed
-        too, with its reason: nothing is being read from it, and the reason
-        is what somebody has to act on.
-
-        `clearance` as in `due_sources`: None is the worker and filters
-        nothing; a TLP name hides sources labelled above it, and a source
-        filed under a compartment the reader does not hold is hidden too
-        (2026-10-03: this list named a compartmented
-        source and, once it failed, its blocked reason, to a reader without
-        the key).
+        `clearance` as in `due_sources`: None is the worker and filters nothing; a TLP name hides
+        sources labelled above it, and a source filed under a compartment the reader does not hold
+        is hidden too, so the list never names a compartmented source or its blocked reason to a
+        reader without the key.
         """
         rows = self._c.execute(
             f"""SELECT s.id, s.name, s.health, s.consecutive_failures,
@@ -4174,13 +3868,11 @@ class CollectionService:
                              compartments=None) -> list[dict]:
         """Active, configured, and never successfully collected from.
 
-        Not an error and not healthy either. A source somebody added and
-        nobody ever ran is the quiet way a collection plan turns out to
-        have been aspirational.
+        Not an error and not healthy either. A source somebody added and nobody ever ran is the
+        quiet way a collection plan turns out to have been aspirational.
 
-        `clearance` as in `due_sources`: None filters nothing, a TLP name
-        hides sources labelled above it, and so does a compartment the
-        reader does not hold (2026-10-03).
+        `clearance` as in `due_sources`: None filters nothing, a TLP name hides sources labelled
+        above it, and so does a compartment the reader does not hold.
         """
         rows = self._c.execute(
             f"""SELECT s.id, s.name, s.kind, s.created_at,
@@ -4232,21 +3924,17 @@ class CollectionService:
              clearance: str | None = None, compartments=None) -> list[dict]:
         """Recent polls, successes and failures alike, newest first.
 
-        Joined to the source and filtered by the caller's ceiling on its
-        label (2026-09-02): a run names its source, and a failed run's
-        error quotes the fetch. An explicit `source_id` above the ceiling
-        is answered with an empty list, NOT refused, because an empty run
-        history means "no polls matched" whether the source was never
-        polled, is above the ceiling or is not a source at all, and the
-        three are identical to the caller.
+        Joined to the source and filtered by the caller's ceiling on its label: a run names its
+        source, and a failed run's error quotes the fetch. An explicit `source_id` above the ceiling
+        is answered with an empty list, not refused, because an empty run history means "no polls
+        matched" whether the source was never polled, is above the ceiling or is not a source at
+        all, and the three are identical to the caller.
 
-        Since 2026-09-24, ordered by the start time with runs whose start
-        was never recorded last (the index collection_run_started_idx),
-        and each row says who asked for it (the system for the cron), the
-        persona (unnamed when the caller may not see it), the exit, the
-        authority (only when that authority is within the caller's
-        clearance, so a RED authority over an AMBER source leaks no id) and
-        how many requests its custody log holds.
+        Ordered by the start time, with runs whose start was never recorded last (the index
+        collection_run_started_idx). Each row says who asked for it (the system for the cron), the
+        persona (unnamed when the caller may not see it), the exit, the authority (only when that
+        authority is within the caller's clearance, so a RED authority over an AMBER source leaks no
+        id) and how many requests its custody log holds.
         """
         rows = self._c.execute(
             f"""SELECT {self._RUN_COLUMNS} {self._RUN_FROM}
@@ -4281,40 +3969,17 @@ class CollectionService:
         return detail
 
 
-    # ── the read path ──────────────────────────────────────────────────
+    # The read path. Everything above writes `collect.document` and `collect.watch_hit`; the methods
+    # below read them back. `watch_hit.notified_at` has no writer: there is no notification kind for
+    # a watch hit, and adding one belongs with the notification registry.
     #
-    # Everything above WRITES `collect.document` and `collect.watch_hit`.
-    # Until 2026-08-10 nothing read them back. No endpoint, no UI, and no
-    # search reach -- `SearchService` covered `core.node` and
-    # `core.evidence` only, and `document.search_tsv`'s GIN index was used
-    # by no query in the tree until `SearchService.search` joined the
-    # document table on 2026-09-02. A watch could fire four hundred times
-    # and the analyst saw the integer 400 on a run card and could not open
-    # one of them.
-    #
-    # That is the tags/node-sets defect one layer up: not a service with
-    # no caller, an entire PHASE with no caller. The lifecycle columns
-    # show the intent was never finished rather than decided against --
-    # `watch_hit` carries `notified_at`, `suppressed`, `acknowledged_by`,
-    # `acknowledged_at` and a partial index for the unnotified set, none
-    # of them written or read by anything. The read path made three of
-    # them visible; `suppress_hit`, `unsuppress_hit` and
-    # `set_document_triage` below (2026-09-02) are the writers the pane
-    # had been describing. `notified_at` still has no writer: there is no
-    # notification kind for a watch hit, and inventing one belongs with
-    # the notification registry, not here.
-    #
-    # Clearance is a PARAMETER here rather than constructor state, unlike
-    # CommsService, because this same class does the collecting and the
-    # collector has no user. A read method that inherited a NULL clearance
-    # from a worker would be a read method that returns everything.
-    #
-    # L1 (2026-09-24): so are the reader's `compartments`, checked as
-    # `d.compartments <@` them in every read and reader's verb below. Unlike
-    # a missing clearance, a missing set FAILS CLOSED: the default is the
-    # empty set, which sees only documents that carry no compartment, so a
-    # caller that forgets to pass it hides captures rather than exposing
-    # them, and existing callers keep working.
+    # Clearance is a parameter here rather than constructor state, unlike CommsService, because this
+    # same class does the collecting and the collector has no user. A read method that inherited a
+    # NULL clearance from a worker would return everything. The reader's `compartments` are a
+    # parameter too, checked as `d.compartments <@` them in every read and reader's verb below;
+    # unlike a missing clearance, a missing set fails closed: the default is the empty set, which
+    # sees only documents that carry no compartment, so a caller that forgets to pass it hides
+    # captures rather than exposing them.
 
     def documents(self, *, clearance: str,
                   compartments: frozenset[str] = frozenset(),
@@ -4325,44 +3990,25 @@ class CollectionService:
                   with_hold_reason: bool = False) -> list[dict]:
         """Collected documents, newest first.
 
-        `legal_hold_reason` is free text a person wrote, which can name
-        the matter the hold serves, so it is returned only when
-        `with_hold_reason` says the caller is one who places and lifts
-        document holds (retention.manage); every other reader sees
-        `legal_hold` and None (2026-09-25).
+        `legal_hold_reason` is free text that can name the matter the hold serves, so it is returned
+        only when `with_hold_reason` says the caller places and lifts document holds
+        (retention.manage); every other reader sees `legal_hold` and None.
 
-        NOT case-scoped, because `collect.document` has no `case_id`: a
-        document hangs off a SOURCE, and the same forum post is evidence
-        in however many cases cite it. So this is gated on the global
-        `collection.read` and filtered by classification, which defaults
-        to AMBER and can be higher.
+        Not case-scoped, because `collect.document` has no `case_id`: a document hangs off a source,
+        and the same forum post is evidence in however many cases cite it. It is gated on the global
+        `collection.read` and filtered by classification (default AMBER, can be higher). `body_text`
+        is excerpted, because returning every body pulls megabytes to render twenty titles.
 
-        `body_text` is excerpted. The full text of a forum thread is not a
-        list-view concern, and an endpoint that returns every body pulls
-        megabytes to render twenty titles.
+        Purged documents are excluded: `retention` empties `body_text` (NOT NULL, so `''`) and
+        stamps `purged_at`, and a row whose text is gone would render as an empty document rather
+        than a deletion, so `purged_at`, not the text, is the predicate.
 
-        Purged documents are excluded outright. `retention` EMPTIES
-        `body_text` and stamps `purged_at`; a row whose text is gone
-        renders as an EMPTY document rather than as a deletion, which is
-        the reported-as-the-wrong-thing shape this codebase keeps
-        finding. (Until 2026-09-02 this said retention "NULLs" the
-        column. It cannot: `collect.document.body_text` is NOT NULL, so
-        the purge writes `''` and `purged_at` is what says the empty
-        string means destroyed rather than blank -- which is exactly why
-        `purged_at`, not the text, is the predicate below.)
-
-        BOTH labels are checked -- the document's and its source's -- and
-        the second was added on 2026-09-02. Every row here carries
-        `s.name` and `d.external_url`, which is the source's identity, and
-        `_store_document` copies the source's label onto the document only
-        at INSERT. So a source collected while it was AMBER and later
-        reclassified RED left its already-collected documents at AMBER,
-        and the reclassification that was supposed to hide the forum's
-        name went on publishing it on every one of them. The two labels
-        answer different questions -- the document's says how sensitive
-        the post is, the source's says how sensitive it is that we are
-        reading that forum at all -- and a row that discloses both has to
-        satisfy both.
+        Both labels are checked, the document's and its source's. Every row carries `s.name` and
+        `d.external_url`, the source's identity, and `_store_document` copies the source's label
+        onto the document only at INSERT, so a source reclassified RED after collection would go on
+        publishing the forum's name on documents still labelled AMBER. The labels answer different
+        questions (how sensitive the post is, and how sensitive it is that we read that forum at
+        all), and a row that discloses both must satisfy both.
         """
         rows = self._c.execute(
             """SELECT d.id, d.source_id, s.name, d.external_url, d.title,
@@ -4398,8 +4044,7 @@ class CollectionService:
                  "body_length": r[14],
                  "truncated": (r[14] or 0) > 400,
                  "compartments": sorted(r[15] or []),
-                 # The identity fields a forum or a chat carries, and the
-                 # document-level hold (2026-09-24).
+                 # The identity fields a forum or a chat carries, and the document-level hold.
                  "source_kind": r[16], "author_uid": r[17],
                  "parent_ref": r[18], "category": r[19],
                  "legal_hold": bool(r[20]),
@@ -4412,32 +4057,18 @@ class CollectionService:
                    limit: int = 100) -> list[dict]:
         """What the watches on this case matched.
 
-        Case-scoped, because `collect.watch` carries `case_id` even though
-        the document it matched does not.
+        Case-scoped, because `collect.watch` carries `case_id` even though the document it matched
+        does not. Unacknowledged first, then by score: a hit nobody has looked at outranks a
+        higher-scoring one somebody has dealt with. A suppressed hit is returned, carrying its
+        reason: hiding it would make a watch that is drowning look like one that is quiet.
 
-        Unacknowledged first, then by score: a hit nobody has looked at
-        outranks a higher-scoring one somebody has already dealt with.
-
-        A suppressed hit is RETURNED, carrying its reason. Suppression is
-        alert hygiene -- the same thread matching hourly -- and hiding it
-        outright would make a watch that is drowning look like a watch
-        that is quiet, which is exactly the difference an analyst needs.
-
-        Filtered on the DOCUMENT's label only, unlike `documents()` and
-        `SearchService.search`, which were given the source's label as
-        well on 2026-09-02. The difference is deliberate and is the case
-        scope: a row is here because a watch somebody put on THIS case
-        matched, the route is gated on `collection.read` against that
-        case rather than globally, and the analyst who configured the
-        watch is already entitled to know it fired. `external_url` does
-        carry the source's host, so a source reclassified RED after
-        collection is still reachable this way by the people on the case
-        its watch belongs to -- recorded here rather than silently
-        assumed covered, because whether a watch may be placed on a
-        source above its owner's ceiling is a question about watch
-        creation and belongs with that, not here. `create_watch` (F53,
-        2026-10-08) answers it: a watch goes only on a source its creator
-        can see.
+        Filtered on the document's label only, unlike `documents()` and `SearchService.search`,
+        which also check the source's label. The case scope is why: a row is here because a watch
+        somebody put on this case matched, the route is gated on `collection.read` against that
+        case, and the analyst who configured the watch is already entitled to know it fired.
+        `external_url` carries the source's host, so a source reclassified RED after collection
+        stays reachable this way to the people on the case; `create_watch` closes that at creation,
+        since a watch goes only on a source its creator can see.
         """
         rows = self._c.execute(
             """SELECT h.id, h.watch_id, w.name, h.document_id, d.title,
@@ -4478,20 +4109,15 @@ class CollectionService:
                         compartments: frozenset[str] = frozenset()) -> dict:
         """Mark a hit as looked at. Idempotent, and it does not re-stamp.
 
-        `acknowledged_at` is set once. Re-acknowledging would rewrite when
-        somebody FIRST saw it, and that timestamp is the only evidence of
-        how long a hit sat unread.
+        `acknowledged_at` is set once. Re-acknowledging would rewrite when somebody first saw it,
+        and that timestamp is the only evidence of how long a hit sat unread.
 
-        The clearance check is inside the UPDATE rather than in a prior
-        SELECT, so there is no window between deciding and writing, and a
-        hit on a document above the caller's clearance is not merely
-        hidden from the list but unacknowledgeable.
-
-        `d.purged_at IS NULL` is the same predicate on the other axis, and
-        it was missing until 2026-09-02: `watch_hits` has always dropped
-        hits on purged documents, so acknowledging one stamped
-        `acknowledged_by` on a row no list will ever show again -- a
-        write reported as a success that no reader can observe.
+        The clearance check is inside the UPDATE rather than in a prior SELECT, so there is no
+        window between deciding and writing, and a hit on a document above the caller's clearance is
+        not merely hidden from the list but unacknowledgeable. `d.purged_at IS NULL` is the same
+        predicate on the other axis: `watch_hits` drops hits on purged documents, so acknowledging
+        one would stamp a row no list will ever show again, a write reported as a success that no
+        reader can observe.
         """
         row = self._c.execute(
             """UPDATE collect.watch_hit h
@@ -4510,15 +4136,10 @@ class CollectionService:
         return {"id": str(row[0]), "acknowledged_by": str(row[1]),
                 "acknowledged_at": row[2].isoformat() if row[2] else None}
 
-    # ── creating a watch (F53, 2026-10-08) ────────────────────────────
-    #
-    # Until now only a seeding script inserted a watch, so a watch of target
-    # kind TELEGRAM_CHAT could be written only by hand, and the rule for its
-    # reference (a typed chat id) was held by the database (0130) and the
-    # matcher but by no writer that could say why in words. The caller's gate
-    # (the case, `collection.read`, and the global `watch.manage`) has run
-    # before either of these; they are the part of the decision that needs
-    # the data.
+    # Creating a watch. The caller's gate (the case, `collection.read` and the global
+    # `watch.manage`) has already run; these are the part of the decision that needs the data, and
+    # they say in words why a reference is refused (a TELEGRAM_CHAT watch needs a typed chat id,
+    # which the database also holds, 0130).
 
     def create_watch(self, case_id: UUID, *, source_id: UUID, name: str,
                      target_kind: str, target_ref: str, keywords=None,
@@ -4527,32 +4148,22 @@ class CollectionService:
                      clearance: str, compartments=None) -> dict:
         """A new watch on this case, owned by the person who made it.
 
-        Every refusal is a sentence (CollectionError, a 400), except a source
-        the caller may not see (CollectionNotFound, the 404 a random id gets)
-        and a name the case already holds (CollectionConflict, a 409).
+        Every refusal is a sentence (CollectionError, a 400), except a source the caller may not see
+        (CollectionNotFound, the 404 a random id gets) and a name the case already holds
+        (CollectionConflict, a 409). The source must be one the caller can see, by label and
+        compartments: what the watch matches is what the source's documents carry, and whoever
+        tasked it must be entitled to read the source.
 
-        The source is one the caller can see, by its label and its
-        compartments. That is the question `watch_hits` leaves to this
-        writer ("whether a watch may be placed on a source above its
-        owner's ceiling"): it may not, because what the watch matches is
-        what the source's documents carry, and the person who tasked it has
-        to be entitled to read the source they tasked.
+        A watch of any kind but TELEGRAM_CHAT with no keyword, selector or pattern matches nothing
+        (docs/04) and a silent watch reads exactly like a quiet one, so it is refused here rather
+        than left to a warning on some later poll. A TELEGRAM_CHAT watch with none is the documented
+        "every message of the chat" and is allowed; it names, by its typed id, the chat its source
+        reads, since aimed at another chat it would match nothing. Patterns are parsed here, so a
+        typo is refused now and not found as a PARTIAL run later, and are never matched here
+        (matching is the bounded child's, `watch_regex`).
 
-        A watch of any kind but TELEGRAM_CHAT with no keyword, selector or
-        pattern matches nothing (docs/04), and a watch that is silent reads
-        exactly like one that is quiet, so it is refused here rather than
-        left to a warning on some later poll. A TELEGRAM_CHAT watch with
-        none is the documented "every message of the chat" (F54) and is
-        allowed. It names, by its typed id, the chat its source reads: aimed
-        at another chat it would match nothing, and the poll would say so
-        only after it had run.
-
-        Patterns are PARSED here, so a typo is refused now and not found as
-        a PARTIAL run later, and are never matched here: matching is the
-        bounded child's (`watch_regex`).
-
-        The audit row carries the counts and never the terms: the audit
-        trail is read by people who have no access to the case's content.
+        The audit row carries the counts and never the terms: the audit trail is read by people who
+        have no access to the case's content.
         """
         name = _watch_line(name, "A watch's name", 3, 200)
         if target_kind not in WATCH_TARGET_KINDS:
@@ -4670,33 +4281,12 @@ class CollectionService:
         return [{"id": str(r[0]), "name": r[1], "kind": r[2],
                  "is_active": bool(r[3]), "chat": r[4]} for r in rows]
 
-    # ── the writers the Collected pane was describing ─────────────────
-    #
-    # `watch_hits` returns `suppressed` and `suppress_reason`, `documents`
-    # returns and filters on `triage_state`, and the pane offers both. Until
-    # 2026-09-02 no production path set any of them: `_match_watches`
-    # drops a suppressed match BEFORE the row is written (so a stored
-    # `suppressed = true` could only come from a test), and nothing touched
-    # `triage_state` after the INSERT default. The UI was internally
-    # consistent with a service that showed the columns, and both were
-    # describing rows that did not exist.
-    #
-    # Every write is inside one UPDATE whose WHERE carries the case (for
-    # hits), the clearance, and `d.purged_at IS NULL`, exactly as the
-    # matching read does: no window between deciding and writing, and a row
-    # the caller may not see is not merely hidden but unwritable. Every
-    # write is audited, because these columns record nothing about who
-    # changed them.
-    #
-    # The purge half of that sentence was untrue when it was written. The
-    # writers carried the clearance predicate and not the purge one, while
-    # `watch_hits` and `set_document_triage` carried both -- so a hit on a
-    # purged document was invisible to every reader and still suppressible,
-    # unsuppressible and acknowledgeable, and each of those returned a 200
-    # describing a change no list would ever show. Corrected 2026-09-02, on
-    # all three writers rather than the two that were reported: the claim is
-    # about the read/write pair, and fixing one of a matched set is how the
-    # next reader concludes the odd one out was deliberate.
+    # The writers behind the Collected pane's suppression and triage controls. Every write is one
+    # UPDATE whose WHERE carries the case (for hits), the clearance and `d.purged_at IS NULL`,
+    # exactly as the matching read does: there is no window between deciding and writing, and a row
+    # the caller may not see is not merely hidden but unwritable. Without the purge predicate a
+    # write on a hit on a purged document would succeed, a 200 describing a change no list will ever
+    # show. Every write is audited, because these columns record nothing about who changed them.
 
     def suppress_hit(self, case_id: UUID, hit_id: UUID, *, actor_id: UUID,
                      reason: str, clearance: str,
@@ -4779,24 +4369,17 @@ class CollectionService:
                             ) -> dict:
         """Move a document between 0011's four triage states.
 
-        Validated against `TRIAGE_STATES` because the column is bare
-        `text`: a fifth value would be stored, would match no option in
-        the pane's filter, and the document would have left every view
-        without being deleted. LINKED is settable by hand deliberately --
-        nothing automated links a document to the graph (see the
-        `Adapter` docstring), so an analyst who has done it by hand is the
-        only one who can say so.
+        Validated against `TRIAGE_STATES` because the column is bare `text`: a fifth value would be
+        stored, would match no option in the pane's filter, and the document would vanish from every
+        view without being deleted. LINKED is settable by hand deliberately: nothing automated links
+        a document to the graph (see the `Adapter` docstring), so an analyst who has done it by hand
+        is the only one who can say so.
 
-        NOT case-scoped, like `documents`: a document hangs off a source,
-        not a case. Gated on clearance inside the UPDATE -- on the
-        DOCUMENT's label and on its SOURCE's, because triage is the
-        reader's verb and has to be gated on exactly what the read is
-        gated on. `documents()` gained the source join on 2026-09-02 and
-        this writer was left behind for the length of one commit, which
-        made a document hidden from the list still triageable and turned
-        the 200-vs-404 split into an existence oracle of the same shape
-        `/sources/{id}/run` had just lost. Purged
-        documents are untouchable -- triaging a destroyed exhibit would
+        Not case-scoped, like `documents`: a document hangs off a source, not a case. Gated on
+        clearance inside the UPDATE, on the document's label and on its source's, because triage is
+        the reader's verb and has to be gated on exactly what the read is gated on; otherwise a
+        document hidden from the list would still be triageable, and the 200-vs-404 split would be
+        an existence oracle. Purged documents are untouchable: triaging a destroyed exhibit would
         resurrect it in the filtered list with an empty body.
         """
         if state not in TRIAGE_STATES:
@@ -4829,8 +4412,8 @@ class CollectionService:
     def _audit(self, actor_id: UUID | None, action: str, object_type: str,
                object_id: UUID, detail: dict, *,
                case_id: UUID | None = None) -> None:
-        """actor_kind SYSTEM with a NULL actor when no person is behind the
-        write (2026-09-24), as evidence.py records it."""
+        """actor_kind SYSTEM with a NULL actor when no person is behind the write, as evidence.py
+        records it."""
         self._c.execute(
             """INSERT INTO audit.event
                    (actor_id, actor_kind, action, object_type, object_id,
@@ -4840,41 +4423,34 @@ class CollectionService:
              object_id, case_id, Json(detail)))
 
 
-# ---------------------------------------------------------------------------
-# Helpers the service and the gate share (2026-09-24)
-# ---------------------------------------------------------------------------
+# Helpers the service and the gate share.
 
 def _str(value) -> str | None:
     return str(value) if value is not None else None
 
 
-#: The ids our own adapters write for an item, exactly: a Telegram message,
-#: `c:<chat>/<message>` for a channel or a supergroup and
-#: `g:<chat>/<message>@u:<persona>` for a basic group, whose message ids belong
-#: to one account (`TelegramAdapter._external_id`); and a forum post or member,
-#: `post:<n>` and `member:<n>` (`forum_parse.post_ref`, `member_ref`, ids below
-#: 2**53). ASCII digits only and nothing around them, matched with fullmatch.
-#: Held to the adapters' own writers by test_item_label_typed_ids (F36,
-#: 2026-10-02).
+#: The ids our own adapters write for an item, exactly: a Telegram message, `c:<chat>/<message>` for
+#: a channel or a supergroup and `g:<chat>/<message>@u:<persona>` for a basic group, whose message
+#: ids belong to one account (`TelegramAdapter._external_id`); and a forum post or member,
+#: `post:<n>` and `member:<n>` (`forum_parse.post_ref`, `member_ref`, ids below 2**53). ASCII digits
+#: only and nothing around them, matched with fullmatch. Held to the adapters' own writers by
+#: test_item_label_typed_ids.
 _TYPED_ITEM_ID = re.compile(
     r"[cg]:[1-9][0-9]{0,19}/[1-9][0-9]{0,19}(?:@u:[1-9][0-9]{0,19})?"
     r"|(?:post|member):[1-9][0-9]{0,15}")
 
 
 def _item_label(item) -> str:
-    """An item's id for a warning: redacted and short, because the id is
-    the site's text and the warning is stored.
+    """An item's id for a warning: redacted and short, because the id is the site's text and the
+    warning is stored.
 
-    The ids our own adapters write are the one shape kept as they are (F36,
-    2026-10-02). The redactor reads `c:123/45` or `post:1001` alone on a line
-    as `user:password` and masks it, so a warning said "Item 'c:[REDACTED]'
-    was skipped" and the analyst could not tell which message it meant. The
-    exemption is the whole string being that shape, which is digits and fixed
-    separators and carries nothing a site could smuggle a credential in, and
-    it is withheld when the string is a secret live right now (a persona's
-    credential that happens to have the shape is still masked by the exact
-    layer). Anything else, a longer string that merely contains one
-    included, goes through `redact` as before."""
+    The ids our own adapters write are the one shape kept as they are. The redactor reads `c:123/45`
+    or `post:1001` alone on a line as `user:password` and masks it, so a warning would say "Item
+    'c:[REDACTED]' was skipped" and the analyst could not tell which message it meant. The exemption
+    is the whole string being that shape, which is digits and fixed separators and carries nothing a
+    site could smuggle a credential in, and it is withheld when the string is a secret live right
+    now (a persona's credential that happens to have the shape is still masked by the exact layer).
+    Anything else, a longer string that merely contains one included, goes through `redact`."""
     external = getattr(item, "external_id", None)
     if not isinstance(external, str) or not external:
         return "with no id"
@@ -4938,9 +4514,8 @@ def _address_problem(url) -> str | None:
 
 @contextmanager
 def _route_secret(route: EgressRoute):
-    """The route's proxy token is registered for redaction for the life of
-    the route (2026-09-24): a library holding it as a plain
-    password (Telethon's proxy dict) could otherwise echo it into an error
+    """The route's proxy token is registered for redaction for the life of the route: a library
+    holding it as a plain password (Telethon's proxy dict) could otherwise echo it into an error
     this codebase stores. A DIRECT route carries none."""
     token = getattr(route, "token", None) if route is not None else None
     if route is not None and route.proxied and token:
@@ -5001,10 +4576,6 @@ def _checked_profile(conn: psycopg.Connection, profile) -> str:
     return str(profile)
 
 
-# ---------------------------------------------------------------------------
-# The persona gate (2026-09-24)
-# ---------------------------------------------------------------------------
-
 @dataclass
 class PersonaContext:
     """What an attended act or a persona poll holds while the persona is in
@@ -5028,19 +4599,20 @@ _PERSONA_LOCK = "collect.persona"
 class PersonaGate:
     """The six steps between a request to use a persona and the credential.
 
-    (1) check: the row exists and the caller may see it (set_status's
-    predicate; a hidden persona is CollectionNotFound before the lock and
-    before any audit row), it is an account on the adapter's platform, and
-    it may be used now (PERSONA_USABLE_SQL, with a sentence for why not);
-    (2) lock: one runner per persona, because one credential used by two
-    connections at once is what a platform reads as a stolen one;
-    (3) window: its active hours in UTC; (4) authority: a live confirmed
-    authority and the confirmer check; (5) pace: the per-persona gap;
-    (6) the route and the lease. STOPPING (a logout, a destroy) checks only
-    existence, visibility, platform and the exit: stopping is always
-    allowed. `clearance` None is the worker's (the cron) and nobody
-    else's: an authenticated host script passes its operator's ceiling
-    (2026-09-24).
+    (1) check: the row exists and the caller may see it (set_status's predicate; a hidden persona is
+        CollectionNotFound before the lock and before any audit row), it is an account on the
+        adapter's platform, and it may be used now (PERSONA_USABLE_SQL, with a sentence for why
+        not);
+    (2) lock: one runner per persona, because one credential used by two connections at once is what
+        a platform reads as a stolen one;
+    (3) window: its active hours in UTC;
+    (4) authority: a live confirmed authority and the confirmer check;
+    (5) pace: the per-persona gap;
+    (6) the route and the lease.
+
+    A stopping gate (a logout, a destroy) checks only existence, visibility, platform and the exit:
+    stopping is always allowed. `clearance` None is the worker's (the cron) and nobody else's: an
+    authenticated host script passes its operator's ceiling.
     """
 
     def __init__(self, conn: psycopg.Connection, persona_id: UUID, *,
@@ -5050,10 +4622,9 @@ class PersonaGate:
                  stopping: bool = False, needs_secret: bool = True,
                  needs_browser_identity: bool = False, min_gap_s: float = 0.0,
                  sleep=time.sleep, adapter=None, compartments=None):
-        # Enforced, not only said (2026-09-25): no ceiling
-        # is the worker's reading and sees every persona, so a PERSON
-        # reaching the gate without their ceiling is a caller that forgot
-        # it, and is refused before anything is read.
+        # Enforced, not only said: no ceiling is the worker's reading and sees every persona, so a
+        # person reaching the gate without their ceiling is a caller that forgot it, and is refused
+        # before anything is read.
         if clearance is None and actor_id is not None:
             raise CollectionError(
                 "A person's use of a persona is checked against that "
@@ -5062,8 +4633,8 @@ class PersonaGate:
         self.persona_id = persona_id
         self.actor_id = actor_id
         self.clearance = clearance
-        #: The reader's own compartments (F43): a persona bound to a
-        #: source under a key they do not hold is hidden from them.
+        #: The reader's own compartments: a persona bound to a source under a key they do not hold
+        #: is hidden from them.
         self.compartments = compartments
         self.purpose = purpose
         self.source_id = source_id
@@ -5116,9 +4687,8 @@ class PersonaGate:
             now = datetime.now(timezone.utc)
             sentence, until = _persona_hold_sentence(persona, now)
             refused = PersonaUnavailable(sentence)
-            # A wait the PLATFORM imposed is answered to an attended act as
-            # the platform's wait, with its end in UTC (2026-09-25);
-            # attended_answer reads this.
+            # A wait the platform imposed is answered to an attended act as the platform's wait,
+            # with its end in UTC; attended_answer reads this.
             if (until is not None and until == persona["hold_until"]):
                 refused.platform_wait_until = until
             raise refused
@@ -5299,16 +4869,14 @@ def _platform_wait_answer(until: datetime | None) -> str:
 
 
 def attended_answer(exc: BaseException) -> tuple[int, str] | None:
-    """The fixed status and sentence an attended act's route answers with,
-    never a library's text; None for an exception that is not a persona or
-    authority outcome (the route's own handling applies).
+    """The fixed status and sentence an attended act's route answers with, never a library's text;
+    None for an exception that is not a persona or authority outcome (the route's own handling
+    applies).
 
-    The sentences carry the wait's end in UTC and the rest in minutes
-    (2026-09-25): persona_session
-    puts the hold record_outcome placed on the exception as `hold_until`,
-    and the gate puts a live platform hold on its refusal as
-    `platform_wait_until`. Either missing, the sentence says less rather
-    than guess."""
+    The sentences carry the wait's end in UTC and the rest in minutes: persona_session puts the hold
+    record_outcome placed on the exception as `hold_until`, and the gate puts a live platform hold
+    on its refusal as `platform_wait_until`. Either missing, the sentence says less rather than
+    guess."""
     from noctornal_api.collection_authority import AuthorityError, AuthorityMissing
 
     if isinstance(exc, RateLimited):
@@ -5378,8 +4946,8 @@ def persona_session(conn: psycopg.Connection, persona_id: UUID, *,
             try:
                 yield context
             except (RateLimited, PersonaSuspended, WorkAbandoned) as exc:
-                # The end of the hold rides on the exception so the route's
-                # attended_answer can say it in UTC (2026-09-25).
+                # The end of the hold rides on the exception so the route's attended_answer can say
+                # it in UTC.
                 exc.hold_until = record_outcome(
                     conn, persona_id=persona_id, source_id=source_id,
                     run_id=run_id, exc=exc, adapter=adapter)

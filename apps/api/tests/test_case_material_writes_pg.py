@@ -1,13 +1,11 @@
-"""The request role writes only what a request writes on exhibits and cases,
-and deletes no case material it never deletes (0178).
+"""The request role writes only what a request writes on exhibits and cases, and deletes no case
+material it never deletes (0178).
 
-A statement injected as `noctornal_app` could set an exhibit's or a case's
-`legal_hold` false, an exhibit's `purged_at`, `retention_until` or
-`is_worm_locked`, and delete an entity, a tie, an exhibit or a case. Each
-is now refused by the privilege check itself; the writes a request does
-make, and the holds the RETENTION connection makes, still work. Run as the
-request role bound by a real session's proof, and over HTTP in production's
-shape. Account prefix `rlscm-`.
+A statement injected as `noctornal_app` could set an exhibit's or a case's `legal_hold` false, an
+exhibit's `purged_at`, `retention_until` or `is_worm_locked`, and delete an entity, a tie, an exhibit
+or a case. Each is refused by the privilege check itself; the writes a request does make, and the
+holds the RETENTION connection makes, still work. Run as the request role bound by a real session's
+proof, and over HTTP in production's shape. Account prefix `rlscm-`.
 """
 from __future__ import annotations
 

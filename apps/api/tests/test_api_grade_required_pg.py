@@ -1,25 +1,18 @@
 """Every write that records a claim must carry the claim's grading.
 
-gap-api-grade-required (decided 2026-09-23). `AssertionBody` defaulted
-basis, reliability, credibility and confidence to DIRECT_OBSERVATION, F, 6
-and LOW, and `CreateNodeBody` / `CreateEdgeBody` defaulted the whole
-assertion, so a script that posted a bare label recorded "we saw this
-ourselves" in its caller's name at a grade nobody chose. ACH weights a
-cell by that grade, the confidence filter acts on it, and a disclosure
-reviewer cannot tell it from a considered F6.
+A default grading (DIRECT_OBSERVATION, F, 6, LOW) would let a script that posted a bare label record
+"we saw this ourselves" in its caller's name at a grade nobody chose. ACH weights a cell by that grade,
+the confidence filter acts on it, and a disclosure reviewer cannot tell it from a considered F6.
 
-Now a missing field is a 422 whose detail NAMES it, nothing is written,
-and a graded write records exactly the grading sent. Six endpoints record
-a claim: create an entity, create a tie, add a claim to either, and
-correct either (a correction is a claim: invariant 1).
+So a missing field is a 422 whose detail names it, nothing is written, and a graded write records
+exactly the grading sent. Six endpoints record a claim: create an entity, create a tie, add a claim to
+either, and correct either (a correction is a claim: invariant 1).
 
-`test_api_grade_required.py` holds the pure half: the request models, and
-that no product code builds a claim on the service's fixture defaults.
+`test_api_grade_required.py` holds the pure half: the request models, and that no product code builds
+a claim on the service's fixture defaults.
 
-The email prefix is `agrq-` and must stay unique (see
-test_graph_mutation_api_pg.py on why prefixes must not collide).
-
-Env-gated on DATABASE_URL.
+The email prefix is `agrq-` and must stay unique (see test_graph_mutation_api_pg.py on why prefixes
+must not collide). Env-gated on DATABASE_URL.
 """
 from __future__ import annotations
 
@@ -211,9 +204,8 @@ def test_each_grading_field_is_required_on_an_added_claim(conn, client, field):
 
 @pytest.mark.parametrize("field", GRADING)
 def test_each_grading_field_is_required_on_a_correction(conn, client, field):
-    """A correction is a claim ("this is now called X"), so it is graded
-    like one. The console's Correct... used to send a rationale alone and
-    the API graded the rest DIRECT_OBSERVATION F6 LOW."""
+    """A correction is a claim ("this is now called X"), so it is graded like one: the API does not
+    default the grading when the console sends a rationale alone."""
     token = _owner(conn)
     case_id = _case(client, token)
     a, _b, tie = _pair(client, token, case_id)

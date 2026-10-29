@@ -1,22 +1,11 @@
-"""url_norm keeps a fragment that names the resource, and never a key or a
-token (L5, 2026-09-24).
+"""url_norm keeps a fragment that names the resource, and never a key or a token.
 
-`url_norm` dropped every fragment, so every legacy MEGA link
-(`#!<handle>!<key>`), every matrix.to link (`#/@user:server`) and every
-web.telegram.org chat (`#@name`) normalised to one value, and after the
-first one a case recorded each later one as "already known". The first
-rule of the normalisers is that two different identifiers never collide.
-The fix keeps the fragment only on a registry of hosts whose fragment IS
-the identity, rewrites a legacy link to its current form, and never keeps
-a MEGA key. A generic "keep any route" rule would put keys and tokens
-into the norm on unregistered hosts
-(a CryptPad pad, a Send link, a reset link, a MEGA host with a trailing
-dot), so every other host drops its fragment as before. Telegram Web's own
-login link carries a session token in its fragment, so that host keeps a
-fragment only in a shape that names a chat. Each collision test fails on
-ab27a4a, and each Telegram token case fails on the first version of this
-change, which kept that host's whole fragment. norm(norm(x)) == norm(x) is held over every case and a generated
-sweep of hostile fragments.
+Dropping every fragment would make different MEGA, matrix.to and web.telegram.org links collide;
+keeping any route would put keys and tokens into the norm on unregistered hosts (a CryptPad pad,
+a Send link, a reset link, a MEGA host with a trailing dot). So only registered hosts keep a
+fragment, a legacy link is rewritten to its current form, a MEGA key is never kept, and Telegram
+Web keeps only a shape that names a chat, since its login link carries a session token.
+norm(norm(x)) == norm(x) is held over every case and a generated sweep of hostile fragments.
 """
 from __future__ import annotations
 
@@ -31,7 +20,7 @@ KEY = "SecretKeyXYZ"
 
 #: raw -> expected norm. Every MEGA case, and every hostile probe.
 CASES = {
-    # the defect: two different legacy links used to collapse
+    # two different legacy links stay apart
     "https://mega.nz/#!AbCd1234!" + KEY: "https://mega.nz/file/AbCd1234",
     "https://mega.nz/#!ZZZZ9999!otherkey": "https://mega.nz/file/ZZZZ9999",
     # a legacy and a current link to one file are one identifier
@@ -92,7 +81,6 @@ CASES = {
     "https://web.telegram.org/k/#?tgaddr=tg%3A%2F%2Fresolve%3Fdomain%3Ddurov":
         "https://web.telegram.org/k/#?tgaddr=tg%3A%2F%2Fresolve%3Fdomain%3Ddurov",
     # ...and never its login token, a tg://login token or a start parameter
-    # (the whole fragment used to be kept)
     "https://web.telegram.org/a/#tgWebAuthToken=" + KEY
     + "&tgWebAuthUserId=777000&tgWebAuthDcId=2": "https://web.telegram.org/a/",
     "https://web.telegram.org/k/#@durov?start=" + KEY: "https://web.telegram.org/k/",

@@ -46,9 +46,8 @@ from noctornal_api.http.body_ceiling import credential_in_body
 from noctornal_api.http.element_gate import authorize_element
 from noctornal_api.http.errors import Problem, safe_detail
 from noctornal_api.http.limits import BodyCappedRoute, body_cap, rate_limit
-# The Lab's own door policy for the sample origin, shared by the exhibit
-# production so that origin keeps one: the address meter, the peer hash
-# and the ticket body's bound (x-hostile-export, 2026-09-24).
+# The Lab's own door policy for the sample origin, shared by the exhibit production so that origin
+# keeps one: the address meter, the peer hash and the ticket body's bound.
 from noctornal_api.http.routers.samples import (
     _TICKET_BODY_CAP,
     _ip_hash,
@@ -72,19 +71,11 @@ from noctornal_api.wording import count_of
 router = APIRouter(prefix="/cases/{case_id}/evidence", tags=["evidence"],
                    route_class=BodyCappedRoute)
 
-#: Declared by NOCTORNAL_MAX_EVIDENCE_BYTES (`config.declared_cap`), 256 MiB
-#: when a development deployment leaves it unset; a production boot refuses
-#: without the declaration (docs/08, "Exhibit size policy"), because the
-#: number is a decision about a permanent commitment and a module constant
-#: -- which this was until 2026-09-11 -- is a decision nobody in the
-#: deployment took. The same shape as `samples.MAX_SAMPLE_BYTES`. It bounds
-#: two things at once. Storage, because every exhibit
-#: is written under a COMPLIANCE object lock that no credential can
-#: shorten, so an accepted byte is a byte kept for the whole retention
-#: period whatever anyone later decides. Memory, because `EvidenceService.
-#: ingest` holds the exhibit as one `bytes` and then reads it back whole
-#: to verify the store, so one request costs the process roughly twice
-#: the upload. There was NO cap here until 2026-09-09.
+#: Declared by NOCTORNAL_MAX_EVIDENCE_BYTES (`config.declared_cap`), 256 MiB when a development
+#: deployment leaves it unset; a production boot refuses without it, as the number is a permanent
+#: commitment the deployment must take (docs/08, "Exhibit size policy"). It bounds storage, since
+#: every exhibit is kept under a COMPLIANCE lock no credential can shorten, and memory, since
+#: `EvidenceService.ingest` holds the exhibit whole and reads it back to verify.
 MAX_EVIDENCE_BYTES = declared_cap(EVIDENCE_CAP_ENV)
 
 
@@ -101,32 +92,22 @@ def _authorize_exhibit(
     conn: psycopg.Connection, user: CurrentUser, case_id: UUID,
     evidence_id: UUID, permission_key: str,
 ) -> None:
-    """Authorize an exhibit, deciding access BEFORE revealing existence.
+    """Authorize an exhibit, deciding access before revealing existence.
 
-    A caller who fails the case-level gate gets the same 403 whether or not
-    the exhibit id is real, so status codes are not an existence oracle for
-    someone whose assignment has expired but who still knows old ids. Only
-    once the case check passes does a missing row become a 404, and the
-    element's own labels then apply on top (authorize_object unions the
-    case's compartments and takes the stricter classification).
-
-    An exhibit above the caller's labels answers as a missing one, the
-    same 404 and sentence (`element_gate.authorize_element`, http_ui-016):
-    it answered the gate's 403 until 2026-10-07
-    (2026-10-07), so a leaked id told an exhibit the caller may not see
-    from one that does not exist. The AUTHZ_DENIED row is still written.
+    A caller who fails the case gate gets the same 403 whether or not the exhibit id is real. Once
+    it passes, a missing row is a 404, and the exhibit's own labels apply on top; an exhibit above
+    the caller's labels answers as a missing one, the same 404 and sentence
+    (`element_gate.authorize_element`), with its AUTHZ_DENIED row still written.
     """
     authorize_object(conn, user, case_id=case_id, permission_key=permission_key)
-    # The element's case and labels as facts (`deps.element_labels`,
-    # S1 2026-09-25), so the gate below still decides, and audits, an element
-    # above the caller's labels rather than row-level security hiding it.
+    # The element's case and labels as facts (`deps.element_labels`), so the gate below decides,
+    # and audits, an element above the caller's labels rather than row-level security hiding it.
     # Content is read only after the gate.
     facts = element_labels(conn, "evidence", evidence_id)
     if facts is None or facts[0] != case_id:
         raise Problem(404, "Not found", EXHIBIT_MISSING)
     row = (facts[1], facts[2])
-    # The second gate: one open is one use of a break-glass grant, not one
-    # per gate (sec-breakglass-double-count, 2026-09-23).
+    # The second gate: one open is one use of a break-glass grant, not one per gate.
     authorize_element(conn, user, case_id=case_id, permission_key=permission_key,
                       classification=row[0], compartments=frozenset(row[1] or []),
                       missing_detail=EXHIBIT_MISSING)
@@ -141,24 +122,14 @@ STEP_UP_DETAIL = ("re-authenticate with your second factor before "
 
 def _authorize_export(conn: psycopg.Connection, user: CurrentUser,
                       case_id: UUID, evidence_id: UUID) -> None:
-    """`_authorize_exhibit(..., "evidence.export")`, except that a sign-in
-    which is the only thing missing is told so.
+    """`_authorize_exhibit(..., "evidence.export")`, except that a sign-in which is the only thing
+    missing is told so.
 
-    `evidence.export` is a step-up permission, and `authorize_object`
-    answers a stale sign-in with "missing permission evidence.export on
-    this case", so a Lead investigator who holds it would read that they
-    do not (ux07-evidence:no-exhibit-export-control, 2026-09-23, the
-    report's C15 again). The same shape as `reports._require_export`: one
-    five-part decision, reworded only when step-up freshness is the sole
-    failed check, which only a caller assigned to the case can reach.
-    Case first and exhibit second, as `_authorize_exhibit` orders them, so
-    a missing row is a 404 only to a caller the case gate has passed.
-
-    One export is one break-glass use, as one open is in
-    `_authorize_exhibit`: the exhibit's gate counts only when the case's
-    did not (`counted_at_case_gate`). Until this, each export on a case
-    above the caller's clearance wrote two BREAK_GLASS_ACTION rows and
-    read as two on the officer's card (r2 c4, 2026-09-24)."""
+    `authorize_object` answers a stale sign-in with "missing permission", which a holder of the
+    step-up `evidence.export` would misread. As in `reports._require_export`, it is one five-part
+    decision, reworded only when step-up freshness is the sole failed check. Case first, exhibit
+    second, as `_authorize_exhibit` orders them, and one export is one break-glass use: the
+    exhibit's gate counts only when the case's did not (`counted_at_case_gate`)."""
     def gate(classification=None, compartments=frozenset(), *,
              count_use: bool = True) -> None:
         eff_cls, eff_comp = effective_labels(conn, case_id, classification,
@@ -183,9 +154,8 @@ def _authorize_export(conn: psycopg.Connection, user: CurrentUser,
                          classification=classification, compartments=compartments)
 
     gate()
-    # The element's case and labels as facts (`deps.element_labels`,
-    # S1 2026-09-25), so the gate below still decides, and audits, an element
-    # above the caller's labels. Content is read only after the gate.
+    # The element's case and labels as facts (`deps.element_labels`), so the gate below decides,
+    # and audits, an element above the caller's labels. Content is read only after the gate.
     facts = element_labels(conn, "evidence", evidence_id)
     if facts is None or facts[0] != case_id:
         raise Problem(404, "Not found", EXHIBIT_MISSING)
@@ -202,11 +172,8 @@ def _authorize_export(conn: psycopg.Connection, user: CurrentUser,
         raise Problem(404, "Not found", EXHIBIT_MISSING) from None
 
 
-#: Why a hostile exhibit's bytes are refused here, in the words the
-#: console shows beside the exhibit. It named "the unit's exhibit
-#: procedure" as the way out until 2026-09-24, because nothing in the
-#: product could produce these bytes (x-hostile-export); the card's
-#: production control now does, from the sample origin.
+#: Why a hostile exhibit's bytes are refused here, in the words the console shows beside it; the
+#: card's production control serves them from the sample origin instead.
 HOSTILE_DETAIL = (
     "this exhibit is attacker-authored markup (an email, a captured page or "
     "a HAR), and its bytes are never served from the application origin. "
@@ -231,10 +198,8 @@ _CLOCK_SKEW = timedelta(minutes=5)
 
 
 def _known_classification(classification: str) -> None:
-    """An unknown classification is the caller's mistake, said as one before
-    anything else is read (2026-10-08). It reached `check_writable_labels`,
-    whose refusal to resolve a label is a 403, so a typo read as a missing
-    permission."""
+    """An unknown classification is the caller's mistake, said as one before anything else is
+    read; `check_writable_labels` would refuse it with a 403, as if a permission were missing."""
     try:
         tlp_from_name(classification)
     except AccessResolutionError:
@@ -313,29 +278,11 @@ async def upload(
 ) -> IngestOut:
     """Lodge an exhibit. The request body is capped at `MAX_EVIDENCE_BYTES`.
 
-    The cap is on the multipart BODY, of which the file is the bulk, and it
-    is enforced by `BodyCappedRoute` on the bytes as they arrive: a body
-    whose declared length exceeds the cap is refused before a byte of it is
-    read, and a chunked body is refused on the chunk that crosses the cap.
-    The 413 carries the cap in its message. Nothing below this line runs
-    for a refused upload, so nothing is written to the bucket or the
-    evidence table.
-
-    Until 2026-09-09 there was no cap. `await file.read()` accumulated
-    whatever arrived, the service put it in the bucket under a COMPLIANCE
-    object lock, and only then was anything about its size recorded. A
-    caller could hand the API gigabytes, the "refusal" never came, and the
-    object was locked under a retention that no credential can shorten.
-    The cap has to be enforced before the parser buffers the upload, which
-    is why it lives in the route class rather than in this function --
-    FastAPI parses the form before the handler or any dependency runs.
-
-    Provenance (ux07-evidence:upload-drops-provenance, 2026-09-23):
-    `acquired_at` is when the material was obtained, ISO 8601, read as UTC
-    when it carries no offset; left out, it is the moment of receipt.
-    `authority_ref` is REQUIRED for a legal-process acquisition, because a
-    seizure recorded without the instrument it rests on is the gap a
-    custody challenge lands in. Both are checked before a byte is stored.
+    `BodyCappedRoute` enforces the cap on the bytes as they arrive, since FastAPI parses the form
+    before the handler runs; the 413 states the cap and nothing is stored. `acquired_at` is when the
+    material was obtained (ISO 8601, UTC when it has no offset; receipt when left out), and
+    `authority_ref` is required for a legal-process acquisition. Both are checked before a byte is
+    stored.
     """
     _known_classification(classification)
     provenance = _provenance(acquisition_method, description, source_url,
@@ -349,8 +296,8 @@ async def upload(
         media_type=file.content_type or "application/octet-stream",
         data=data, acquired_by=user.user_id,
         acquisition_method=acquisition_method, classification=classification,
-        # Bytes of an exhibit above the uploader are lodged as their own
-        # exhibit, never deduplicated onto the hidden one (rls-4, 2026-10-03).
+        # Bytes of an exhibit above the uploader are lodged as their own exhibit, never
+        # deduplicated onto the hidden one.
         reader_ceiling=user_ceiling(conn, user.user_id, case_id=case_id),
         **provenance,
     )
@@ -361,31 +308,18 @@ async def upload(
 @router.get("/policy", response_model=dict)
 def size_policy(case_id: UUID,
                 user: CurrentUser = Depends(current_user)) -> dict:
-    """What this deployment accepts as one exhibit, so the console can say
-    so BEFORE the analyst picks a file rather than after a 413.
+    """What this deployment accepts as one exhibit, so the console can say so before a 413.
 
-    The case in the path is not consulted: the cap is the deployment's,
-    not the case's, and knowing it discloses nothing about any case. Any
-    signed-in account may read it, which is why `current_user` and not the
-    case gate. `max_bytes` is the value `upload` enforces on THIS process
-    -- the same module constant -- so the two cannot disagree.
+    The cap is the deployment's, so any signed-in account may read it and the case in the path is
+    not consulted. `max_bytes` is the constant `upload` enforces, so the two cannot disagree.
     """
     return {
         "max_bytes": MAX_EVIDENCE_BYTES,
         "declared": cap_is_declared(EVIDENCE_CAP_ENV),
-        # The storage lock's length (ux07-evidence:worm-chip-outlives-lock,
-        # 2026-09-23): the pane said "locked for the retention period" and
-        # never which one. Counted from LODGING, the server's receipt: this
-        # said "from acquisition" while the same pass made "acquired" the
-        # time the uploader states, so an exhibit obtained twelve days before
-        # it was lodged read as locked twelve days short (verifier,
-        # 2026-09-23). Since 2026-09-24 (x-lock-extension) that is the
-        # SHORTEST lock: it runs to the case's retention date when that is
-        # later, at lodging and whenever the date is extended, but never
-        # more than `lock_horizon_days` ahead in one step. The flag said
-        # True while only an extension moved a lock, and the flagship
-        # exhibit was locked a year short of its case (verifier): an
-        # exhibit whose lock still ends first now says so on its own
+        # The storage lock's length, counted from lodging (the server's receipt), not the stated
+        # acquisition time. That is the shortest lock: it runs to the case's retention date when
+        # that is later, at lodging and whenever the date is extended, but never more than
+        # `lock_horizon_days` ahead in one step. An exhibit whose lock still ends first says so
         # (`lock_short_of_case`), and the pane offers to lengthen it.
         "lock_days": DEFAULT_RETENTION.days,
         "lock_follows_case_retention": True,
@@ -408,25 +342,14 @@ def size_policy(case_id: UUID,
 
 # --- the exhibit register -------------------------------------------------
 #
-# ux07-evidence, 2026-09-23. The pane read `GET /evidence-list?limit=200`,
-# which carries the title, a size, a flag and a time, and nothing else, so
-# five findings could not be fixed in the console alone: the WORM lock's
-# date (worm-chip-outlives-lock), what an exhibit backs (no-forward-trace-
-# from-exhibit), when and under what authority it was obtained against when
-# it was lodged (upload-drops-provenance), the last verification (verify-
-# writes-custody-silently) and how many exhibits there are at all
-# (evidence-list-silently-capped: the newest 200 were kept without a word).
-# The register below answers all five, one page at a time with the total,
-# under the reader's own ceiling, as `/evidence-list` filters.
+# The register gives each exhibit's lock date, what it backs, its provenance and last verification,
+# a page at a time with the total, under the reader's own ceiling as `/evidence-list` filters.
 #
-# "Backs" is the projection's rule read backwards (`projections.
-# evidenced_sql`): an exhibit backs an element when a live (unretracted)
-# assertion carries it or an evidence_link attaches it, and the element is
-# one the canvas would draw for this reader: in the case, not deleted, not
-# merged away, holding live provenance, within the reader's clearance and
-# compartments, and for a tie, both ends so too; and the exhibit itself is
-# not purged. Counting the same way is what makes "backs nothing" agree
-# with the hollow marks on the canvas.
+# "Backs" is the projection's rule read backwards (`projections.evidenced_sql`): an exhibit backs
+# an element when a live assertion carries it or an evidence_link attaches it, the exhibit is not
+# purged, and the element is one the canvas would draw for this reader (in the case, not deleted or
+# merged away, holding live provenance, within the reader's labels, and for a tie both ends too).
+# Counting the same way keeps "backs nothing" in step with the hollow marks on the canvas.
 
 def _live_node(alias: str) -> str:
     """The projection's node predicate, for `alias`, with named binds."""
@@ -457,16 +380,12 @@ def _live_edge(alias: str) -> str:
 
 
 def _attached(column: str, ev: str) -> str:
-    """Ids in `column` ('node_id' or 'edge_id') that exhibit `ev` is
-    attached to by a link or a live assertion, while `ev` is unpurged.
-    Both are literals from this module, never client input.
+    """Ids in `column` ('node_id' or 'edge_id') that exhibit `ev` is attached to by a link or a
+    live assertion, while `ev` is unpurged. Both are literals from this module, never client
+    input.
 
-    The purge leg is the projection's (`evidenced_sql`: `bx.purged_at IS
-    NULL`, "an element cannot rest on bytes the record says are gone").
-    Without it a purged exhibit's card said "Backs 1 entity" while the
-    canvas drew that entity hollow, and the exhibit was missing from the
-    "backs nothing" count and filter (ux07-evidence:no-forward-trace-from-
-    exhibit, verifier, 2026-09-23)."""
+    The purge leg is the projection's (`evidenced_sql`): an element cannot rest on bytes the record
+    says are gone, so a purged exhibit backs nothing, as the canvas draws it."""
     if column not in ("node_id", "edge_id"):  # not `assert`: stripped under python -O, and this guards SQL text
         raise ValueError("refused identifier outside the allow-list")
     unpurged = f"""EXISTS (SELECT 1 FROM core.evidence bx
@@ -491,17 +410,11 @@ def _backs_counts(ev: str) -> str:
 
 
 def _backs_nothing(alias: str) -> str:
-    """A boolean: the exhibit aliased `alias` backs nothing the reader would
-    see drawn. `_backs_counts`' rule, asked as an existence test: a purged
-    exhibit backs nothing, and an exhibit backs an element a live claim or a
-    link attaches it to while the element is drawn.
+    """A boolean: the exhibit aliased `alias` backs nothing the reader would see drawn.
 
-    This is what the case-wide "backs nothing" figure and filter ask of every
-    exhibit, so it stops at the first live attachment instead of counting
-    them all (docs/17, the register grows with the case: counting for every
-    exhibit took 1.4 s warm and 5.7 s cold at 15,300 exhibits, this 0.12 s
-    and 0.42 s). What each exhibit backs, as numbers, is counted for the
-    page's own rows only."""
+    `_backs_counts`' rule as an existence test, for the case-wide "backs nothing" figure and
+    filter: it stops at the first live attachment, as counting for every exhibit grows with the
+    case (docs/17). The counts themselves are taken for the page's own rows only."""
     return f"""({alias}.purged_at IS NOT NULL OR NOT (
           EXISTS (SELECT 1 FROM core.assertion ba JOIN core.node bn ON bn.id = ba.node_id
                    WHERE ba.evidence_id = {alias}.id AND ba.retracted_at IS NULL
@@ -556,30 +469,24 @@ class ExhibitOut(BaseModel):
     source_segments: list[dict] = []
     authority_segments: list[dict] = []
     is_worm_locked: bool
-    #: The last day of the storage lock (the object's COMPLIANCE retention),
-    #: None on a row that never recorded one. Set when the exhibit was
-    #: lodged, to the case's retention date when that is later than the
-    #: default period, and moved later when the case's retention is
-    #: extended past it (x-lock-extension, 2026-09-24).
+    #: The last day of the storage lock (the object's COMPLIANCE retention), None on a row that
+    #: never recorded one. Set at lodging, to the case's retention date when that is later than the
+    #: default period, and moved later when the case's retention is extended past it.
     lock_until: date | None = None
-    #: The instant the lock ends, from the newest custody row that set it:
-    #: ACQUIRED, or LOCK_EXTENDED once the case's retention lengthened it.
-    #: None on an exhibit lodged before 2026-09-23 and never extended, whose
-    #: record carries only the day.
+    #: The instant the lock ends, from the newest custody row that set it: ACQUIRED, or
+    #: LOCK_EXTENDED once the case's retention lengthened it. None on an older exhibit, never
+    #: extended, whose record carries only the day.
     lock_ends_at: datetime | None = None
-    #: True once the lock can no longer be counted on: from `lock_ends_at`,
-    #: or, when only the day is known, from the start of that day. The chip
-    #: must stop saying the store refuses a delete.
+    #: True once the lock cannot be counted on: from `lock_ends_at`, or, when only the day is
+    #: known, from the start of that day. The chip then stops saying the store refuses a delete.
     lock_lapsed: bool = False
-    #: True when the lock ends before the case's retention date, so the
-    #: store would accept a delete the case still forbids, and lengthening
-    #: it would change that (`evidence.lock_short_before`; x-lock-extension,
-    #: verifier, 2026-09-24).
+    #: True when the lock ends before the case's retention date, so the store would accept a delete
+    #: the case still forbids, and lengthening it would change that (`evidence.lock_short_before`).
     lock_short_of_case: bool = False
     legal_hold: bool = False
-    #: Why the hold was placed, for a reader who holds `retention.manage`
-    #: here and no other (`RegisterOut.may_hold`): a hold's text is for the
-    #: people who place and lift it, as the due list's is (2026-10-08).
+    #: Why the hold was placed, for a reader who holds `retention.manage` here and no other
+    #: (`RegisterOut.may_hold`): a hold's text is for the people who place and lift it, as the due
+    #: list's is.
     legal_hold_reason: str | None = None
     is_hostile_markup: bool = False
     purged_at: datetime | None = None
@@ -598,22 +505,19 @@ class RegisterOut(BaseModel):
     offset: int
     limit: int
     items: list[ExhibitOut]
-    #: Whether the reader holds `evidence.export` here, asked as if their
-    #: sign-in were fresh (the route asks for one when it is not), and the
-    #: global `audit.read` the custody-chain verifier needs. For showing
-    #: controls only; every route decides for itself.
+    #: Whether the reader holds `evidence.export` here, asked as if their sign-in were fresh (the
+    #: route asks for one when it is not), and the global `audit.read` the custody-chain check
+    #: needs. For showing controls only; every route decides for itself.
     may_export: bool = False
     may_audit: bool = False
-    #: Whether the reader may place and lift a legal hold on an exhibit here:
-    #: `retention.manage` through a global role and on the case, asked as if
-    #: the sign-in were fresh. For showing the card's Hold control only; the
-    #: route decides (2026-10-08).
+    #: Whether the reader may place and lift a legal hold on an exhibit here: `retention.manage`
+    #: through a global role and on the case, asked as if the sign-in were fresh. For showing the
+    #: card's Hold control only; the route decides.
     may_hold: bool = False
-    #: Of the exhibits this reader may see, how many hold a lock SHORT of
-    #: the case (`ExhibitOut.lock_short_of_case`), across every page; the
-    #: instant `POST .../locks` would lengthen them to; and whether the
-    #: reader holds `case.update`, the verb that route and the retention
-    #: date share (x-lock-extension, verifier, 2026-09-24).
+    #: Of the exhibits this reader may see, how many hold a lock short of the case
+    #: (`ExhibitOut.lock_short_of_case`) across every page; the instant `POST .../locks` would
+    #: lengthen them to; and whether the reader holds `case.update`, the verb that route and the
+    #: retention date share.
     locks_short: int = 0
     lock_target: datetime | None = None
     may_lock: bool = False
@@ -654,18 +558,13 @@ def _holds_audit_read(conn: psycopg.Connection, user: CurrentUser) -> bool:
 
 def lock_state(lock_until: date | None, acquired_detail: dict,
                now: datetime) -> tuple[datetime | None, bool]:
-    """(the instant the storage lock ends, whether it can no longer be
-    counted on), from the day on the row and the ACQUIRED custody detail.
+    """(the instant the storage lock ends, whether it cannot be counted on any more), from the day
+    on the row and the ACQUIRED custody detail.
 
-    The store's COMPLIANCE lock ends at the lodging instant plus the lock
-    period, part way through the day `retention_until` keeps. This read
-    "lapsed" only once that day had passed and the chip said the store
-    refused "until the end of" it, which overstated the lock by up to 24
-    hours (ux07-evidence:worm-chip-outlives-lock, verifier, 2026-09-23).
-    Since then `ingest` records the instant; an exhibit lodged before it
-    carries only the day, and its lock is not counted on from the START of
-    that day, so the console never claims a lock the store may already
-    have released."""
+    The store's COMPLIANCE lock ends part way through the day `retention_until` keeps, at the
+    lodging instant plus the lock period, which `ingest` records. An older exhibit carries only the
+    day, so its lock is not counted on from the start of that day, and the console never claims a
+    lock the store may already have released."""
     if lock_until is None:
         return None, False
     ends_at = None
@@ -718,10 +617,9 @@ def case_lock_bounds(conn: psycopg.Connection, case_id: UUID,
     return short_before, lock_target(row[0], now)[0]
 
 
-#: The newest lock end per exhibit: the ACQUIRED row's, or a later
-#: LOCK_EXTENDED row's once the case's retention lengthened it
-#: (x-lock-extension, 2026-09-24). The register, its count of short locks
-#: and the inspector's list all read it from here, so they cannot disagree.
+#: The newest lock end per exhibit: the ACQUIRED row's, or a later LOCK_EXTENDED row's once the
+#: case's retention lengthened it. The register, its count of short locks and the inspector's list
+#: all read it from here, so they cannot disagree.
 NEWEST_LOCK_SQL = """LEFT JOIN LATERAL (
                    SELECT c.detail ->> 'lock_ends_at' AS lock_ends_at
                      FROM core.evidence_custody c
@@ -759,17 +657,11 @@ LEGACY_STATED_MARGIN = timedelta(minutes=5)
 
 def time_was_stated(acquired_detail: dict, acquired_at: datetime,
                     lodged_at: datetime) -> bool:
-    """Whether the exhibit's acquisition time is one somebody stated,
-    rather than the moment the server received the bytes.
+    """Whether the exhibit's acquisition time is one somebody stated, rather than the moment the
+    server received the bytes.
 
-    The ACQUIRED custody row says so for every exhibit lodged since
-    2026-09-23. An earlier row has no flag, and reading its absence as
-    "not stated" made exhibits ingested with a real, earlier acquisition
-    time (the README showcase seeds them thirty days back) read "acquired
-    at lodging, no earlier time stated" in warning style, hiding the time
-    the record does hold (ux07-evidence:upload-drops-provenance, verifier,
-    2026-09-23). Without the flag, a time more than the skew margin before
-    the lodging was stated; a default one sits on the lodging instant."""
+    The ACQUIRED custody row carries the flag; an older row has none, and then a time more than the
+    skew margin before the lodging was stated, while a default one sits on the lodging instant."""
     flag = acquired_detail.get("acquired_at_stated")
     if isinstance(flag, bool):
         return flag
@@ -884,11 +776,9 @@ def register(
 ) -> RegisterOut:
     """The case's exhibits, a page at a time, with how many there are.
 
-    `q` matches the title or description, `backs_nothing` keeps the
-    exhibits nothing on the live graph rests on, and `evidence_id` asks for
-    one exhibit (the pane's "show this one" from search or an assertion
-    card). Filtered by the reader's own clearance and compartments, as the
-    list it replaces was."""
+    `q` matches the title or description, `backs_nothing` keeps the exhibits nothing on the live
+    graph rests on, and `evidence_id` asks for one exhibit (the pane's "show this one"). Filtered
+    by the reader's own clearance and compartments."""
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     # Whether this reader places and lifts holds here: the global role the
     # route demands and the case's, as `routers/governance.legal_hold` asks
@@ -930,19 +820,13 @@ def lengthen_locks(
     user: CurrentUser = Depends(require("case.update")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> LockExtensionOut:
-    """Lengthen every live exhibit's storage lock to the case's retention
-    date as it stands, as extending that date would.
+    """Lengthen every live exhibit's storage lock to the case's retention date as it stands, as
+    extending that date would.
 
-    x-lock-extension, verifier, 2026-09-24. A lock followed the case only
-    when the date was EXTENDED, so an exhibit lodged into a case already
-    retained past its lock stayed deletable at the store for the rest of
-    the case's retention, and the console could not fix it: the case
-    record refuses to save a date that has not changed. This is that fix,
-    offered by the Evidence pane when its register counts a lock short of
-    the case. `case.update`, the verb that moves the date, because it
-    commits the same thing; governance, so it stays open on a CLOSED or
-    ARCHIVED case. Refused on a PURGED case, whose exhibits are being
-    destroyed: a lock moved now would stand in the purge's way."""
+    For a lock short of the case, which re-saving an unchanged date cannot fix; the Evidence pane
+    offers it when its register counts one. `case.update`, the verb that moves the date, and
+    governance, so it stays open on a CLOSED or ARCHIVED case. Refused on a PURGED case, where a
+    lock moved now would stand in the purge's way."""
     row = conn.execute(
         'SELECT retention_until, status FROM core."case" WHERE id = %s',
         (case_id,)).fetchone()
@@ -955,9 +839,8 @@ def lengthen_locks(
     from noctornal_api.http.routers.cases import _extend_exhibit_locks
     from psycopg.types.json import Json
     report = _extend_exhibit_locks(conn, case_id, row[0], user.user_id)
-    # One row for the act itself: each lengthened exhibit has its own, but
-    # a press that found every lock already long enough would otherwise
-    # leave no trace that it was asked for (invariant 12).
+    # One row for the act itself: each lengthened exhibit has its own, but a press that found every
+    # lock long enough would otherwise leave no trace of the request (invariant 12).
     conn.execute(
         """INSERT INTO audit.event
                (actor_id, actor_kind, action, object_type, object_id, case_id, detail)
@@ -990,12 +873,8 @@ def index(
 ) -> IndexOut:
     """Every exhibit's id, title and type, for the attach pickers.
 
-    ux07-evidence:evidence-list-silently-capped (2026-09-23). The pickers
-    were built from the pane's list, the newest 200, so an early exhibit
-    (often the original seizure) dropped out of every "Supporting exhibit"
-    picker without a word. They now read this, which carries every exhibit
-    the reader may see up to `INDEX_MAX` and the total, so a picker that
-    cannot list them all says so."""
+    Every exhibit the reader may see up to `INDEX_MAX`, with the total, so a picker that cannot
+    list them all says so rather than dropping the oldest without a word."""
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     binds = {"case": case_id, "clr": clearance.name, "comp": list(compartments)}
     total = conn.execute(
@@ -1043,11 +922,8 @@ def backs(
     user: CurrentUser = Depends(current_user),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> BacksOut:
-    """What rests on this exhibit: the entities and relationships it
-    backs, under the rule the register counts by, each one the console
-    opens in the inspector (ux07-evidence:no-forward-trace-from-exhibit,
-    2026-09-23: "what do we lose if it is excluded?" had no answer short
-    of opening every node)."""
+    """What rests on this exhibit: the entities and relationships it backs, under the rule the
+    register counts by, each one the console opens in the inspector."""
     _authorize_exhibit(conn, user, case_id, evidence_id, "evidence.read")
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     binds = {"case": case_id, "clr": clearance.name, "comp": list(compartments),
@@ -1094,15 +970,13 @@ def download(
     user: CurrentUser = Depends(current_user),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> Response:
-    """Serve the exhibit bytes. The service re-verifies the hash and fails
-    closed, so a tampered object is never served. Attachment + nosniff;
-    docs/11 additionally requires a SEPARATE ORIGIN for sample bytes — that
-    origin split is a deployment concern, not enforced here.
+    """Serve the exhibit bytes as an attachment with nosniff. The service re-verifies the hash and
+    fails closed, so a tampered object is never served. The separate origin docs/11 requires for
+    sample bytes is a deployment concern, not enforced here.
 
-    Attacker-authored markup is refused with 409 (docs/19 section 1.1: the
-    API origin never serves those bytes), after the gate, so the refusal
-    says nothing to a caller who may not see the row. It served them until
-    2026-09-23; see `EvidenceService.refuse_if_hostile`."""
+    Attacker-authored markup is refused with 409 (docs/19 section 1.1), after the gate, so the
+    refusal says nothing to a caller who may not see the row; see
+    `EvidenceService.refuse_if_hostile`."""
     _authorize_exhibit(conn, user, case_id, evidence_id, "evidence.read")
     svc = _svc(conn)
     if svc.refuse_if_hostile(evidence_id, user.user_id, purpose="content"):
@@ -1122,14 +996,11 @@ def export(
     user: CurrentUser = Depends(current_user),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> Response:
-    """Export for release outside the platform. evidence.export is a
-    step-up permission, so the gate's fifth check demands fresh MFA; the
-    service additionally refuses AMBER_STRICT/RED (invariant 8).
+    """Export for release outside the platform, from the console's "Export for disclosure".
 
-    The console's "Export for disclosure" calls this (ux07-evidence:no-
-    exhibit-export-control, 2026-09-23; nothing did before). A stale
-    sign-in is told so in words the console acts on (`_authorize_export`),
-    and attacker-authored markup is refused here as on `/content`."""
+    `evidence.export` is a step-up permission, so the gate's fifth check demands fresh MFA, and the
+    service refuses AMBER_STRICT and RED (invariant 8). A stale sign-in is told so in words the
+    console acts on (`_authorize_export`); attacker-authored markup is refused as on `/content`."""
     _authorize_export(conn, user, case_id, evidence_id)
     svc = _svc(conn)
     if svc.refuse_if_hostile(evidence_id, user.user_id, purpose="export"):
@@ -1144,12 +1015,10 @@ def export(
 
 # --- attacker markup, produced through the sample origin -----------------
 #
-# x-hostile-export, 2026-09-24. docs/19 section 1.1: a DOM, HAR or `.eml`
-# exhibit leaves only from the separate sample origin, through the gate a
-# Lab download passes. Two legs, the Lab's two (routers/samples.py): a
-# ticket minted HERE under the ordinary cookie session, its CSRF
-# double-submit and the export gate; then that ticket spent THERE, by a
-# request that carries no cookie and no header, because none can cross.
+# docs/19 section 1.1: a DOM, HAR or `.eml` exhibit leaves only from the separate sample origin,
+# through the gate a Lab download passes. Two legs, as in routers/samples.py: a ticket minted here
+# under the cookie session, its CSRF double-submit and the export gate; then that ticket spent
+# there, by a request that carries no cookie and no header, because none can cross.
 
 class ProductionTicketOut(BaseModel):
     #: Returned once. The row holds its SHA-256 and nothing else (0061).
@@ -1178,25 +1047,20 @@ def mint_production_ticket(
     user: CurrentUser = Depends(current_user),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> ProductionTicketOut:
-    """A one-shot, sixty-second authority to produce ONE exhibit of
-    attacker markup from the sample origin.
+    """A one-shot, sixty-second authority to produce one exhibit of attacker markup from the
+    sample origin.
 
-    The gate is `POST /export`'s, the same function: `evidence.export` on
-    the case and on the exhibit's own labels, with a sign-in from the last
-    fifteen minutes, told as such when that is all that is missing. Then
-    the service refuses a split that cannot serve (409, its reason), an
-    exhibit that is not attacker markup or was purged (409), and one the
-    egress gate keeps in (400, audited), before a row is written. A POST,
-    for the reasons the Lab's mint gives: the CSRF double-submit applies
-    only to an unsafe method, and a GET minting a credential is one a
-    prefetcher can fire."""
+    The gate is `POST /export`'s: `evidence.export` on the case and the exhibit's own labels, with
+    a sign-in from the last fifteen minutes. The service then refuses a split that cannot serve
+    and an exhibit that is not attacker markup or was purged (409), and one the egress gate keeps
+    in (400, audited), before a row is written. A POST, so the CSRF double-submit applies and no
+    prefetcher can mint a credential."""
     _authorize_export(conn, user, case_id, evidence_id)
     # No store: minting touches no bytes, and must not fail over bucket
     # credentials it never uses (`samples._ticket_svc`'s reason).
     try:
-        # A ticket row binds its holder once spent, so the request role
-        # may not write one (0109, S1 2026-09-25): minted on a system
-        # connection, after the export gate above.
+        # A ticket row binds its holder once spent, so the request role may not write one (0109):
+        # minted on a system connection, after the export gate above.
         with system_connection(SystemPurpose.TICKETS, reuse=conn) as sconn:
             ticket = EvidenceService(sconn, storage=None).issue_production_ticket(
                 evidence_id, case_id=case_id, actor_id=user.user_id,
@@ -1244,16 +1108,13 @@ def produce(
     _presented: None = Depends(_production_presented),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> Response:
-    """The exhibit, in the Lab's archive (ZIP, password `infected`),
-    served by the sample origin only, on a production ticket only.
+    """The exhibit in the Lab's archive (ZIP, password `infected`), served by the sample origin
+    only, on a production ticket only.
 
-    The ticket is spent first, in one statement, and the holder's
-    authority re-derived from it (`redeem_production_ticket`); then the
-    exhibit's own decision again and the verified bytes
-    (`EvidenceService.produce`), which writes the EXPORTED custody row
-    naming the ticket. The headers are the Lab download's: an attachment,
-    `nosniff`, and a sandboxing CSP, so nothing upstream can turn the
-    answer into a page."""
+    The ticket is spent first, in one statement, and the holder's authority re-derived from it;
+    then `EvidenceService.produce` decides on the exhibit again, returns the verified bytes and
+    writes the EXPORTED custody row naming the ticket. The headers are the Lab download's: an
+    attachment, `nosniff` and a sandboxing CSP, so nothing upstream can turn it into a page."""
     if not ticket:
         raise Problem(401, "Unauthenticated", "no production ticket")
     try:
@@ -1264,9 +1125,8 @@ def produce(
         # 401: a spent or expired ticket is an expired credential, and one
         # answer for every reason (the Lab's rule).
         raise Problem(401, "Unauthenticated", safe_detail(exc)) from exc
-    # Bound to the spent ticket's holder before the exhibit is read or its
-    # custody appended (S1, 2026-09-25). The redemption above ran unbound
-    # on purpose.
+    # Bound to the spent ticket's holder before the exhibit is read or its custody appended; the
+    # redemption above runs unbound on purpose.
     bind_ticket(conn, ticket)
     try:
         blob, digest = _svc(conn).produce(
@@ -1304,19 +1164,15 @@ class CustodyOut(BaseModel):
     action: str
     actor_id: str
     occurred_at: datetime
-    #: THREE states, and a reader must keep them apart (2026-09-22): True,
-    #: the stored bytes matched the recorded digest when this row was
-    #: written; False, they did NOT (a HASH_VERIFIED row recording a
-    #: mismatch, the tamper alarm); None, this row attests no check.
+    #: Three states a reader must keep apart: True, the stored bytes matched the recorded digest
+    #: when this row was written; False, they did not (a HASH_VERIFIED row recording a mismatch,
+    #: the tamper alarm); None, this row attests no check.
     hash_verified: bool | None
-    #: The actor's display name, so the log names a person rather than an
-    #: eight-hex id (README screenshot review, 2026-09-23).
+    #: The actor's display name, so the log names a person rather than an eight-hex id.
     actor_name: str | None = None
-    #: What the row says beyond its action: a re-acquisition of bytes
-    #: already held, the method, the stated acquisition time, the source
-    #: and authority, what a check found. Without it two ACQUIRED rows read
-    #: as one exhibit acquired twice (ux07-evidence:custody-rows-not-court-
-    #: legible, 2026-09-23). See `custody_detail` for what leaves.
+    #: What the row says beyond its action: a re-acquisition of bytes already held, the method, the
+    #: stated acquisition time, the source and authority, what a check found. Without it two
+    #: ACQUIRED rows read as one exhibit acquired twice. `custody_detail` decides what leaves.
     detail: dict = {}
 
 
@@ -1325,10 +1181,8 @@ class CustodyOut(BaseModel):
 _CUSTODY_DETAIL_KEYS = ("deduplicated", "acquisition_method",
                         "acquired_at_stated", "acquired_at", "bytes",
                         "lock_ends_at", "sha256_ok", "blake3_ok", "on_read",
-                        # How a production left, and what a lock extension
-                        # moved (x-hostile-export, x-lock-extension,
-                        # 2026-09-24). The ticket id and the origin stay on
-                        # the row for whoever audits it; the log a reader
+                        # How a production left, and what a lock extension moved. The ticket id
+                        # and the origin stay on the row for whoever audits it; the log a reader
                         # sees says how, not which ticket.
                         "via", "archive_format", "previous_lock_ends_at",
                         "case_retention_until", "capped_at_horizon")

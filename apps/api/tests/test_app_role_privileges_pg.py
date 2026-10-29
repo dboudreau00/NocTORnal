@@ -1,55 +1,35 @@
 """The runtime role holds what the product needs and does not own the tables.
 
-Every REVOKE this schema carries -- 0013 on `audit.event`, 0052 on
-`core.purge_tombstone` and `lab.sample_access`, 0058 on
-`core.evidence_custody` -- takes privileges away from PUBLIC. An owner's
-rights are implicit and are not in the ACL, so none of those statements
-constrained the connection the API actually holds, which in the shipped
-compose belongs to the role that owns the schema. `ALTER TABLE audit.event
+Every REVOKE this schema carries (0013 on `audit.event`, 0052 on `core.purge_tombstone` and
+`lab.sample_access`, 0058 on `core.evidence_custody`) takes privileges away from PUBLIC. An owner's
+rights are implicit and are not in the ACL, so none of those statements constrain a connection that
+belongs to the role that owns the schema, as the shipped compose's does. `ALTER TABLE audit.event
 DISABLE TRIGGER ALL` needs table ownership and nothing else.
 
-`db/init/10-app-role.sh` creates `noctornal_app` and migration 0060 grants it.
-This file reads the catalog and asserts what that pair left behind.
+`db/init/10-app-role.sh` creates `noctornal_app` and migration 0060 grants it. This file reads the
+catalog and asserts what that pair left behind.
 
-## What it proves, and what it cannot
+Every assertion is a catalog read, made over the owner's connection about a different role. It proves
+the privileges; it does not attempt the attack, which would need this file to connect as
+`noctornal_app`, and that password is deliberately not available to the test suite (it lives in the
+gitignored `infra/production/secrets.env`). The inference is exact: `ALTER TABLE`, `DROP TABLE` and
+`TRUNCATE` are owner-only operations with no grantable privilege behind them except TRUNCATE, which
+nothing grants. So "is not the owner, is not a superuser, and is not a member of the owner" is "cannot
+drop the append-only triggers", and the three facts are asserted separately below.
 
-Every assertion here is a CATALOG READ, made over the owner's connection about
-a different role. It proves the privileges; it does not attempt the attack,
-because attempting it would need this file to connect AS `noctornal_app`, and
-the password for that role is deliberately not available to the test suite: it
-lives in `infra/production/secrets.env`, which is gitignored, is never part of
-a checkout, and is read by nothing here.
+The file is doubly gated: `DATABASE_URL`, as every `*_pg` file is, and `NOCTORNAL_APP_DB_ROLE`, because
+the role exists only where initdb ran with `NOCTORNAL_APP_DB_PASSWORD` set (a production-shaped stack,
+not the dev compose, a developer database or CI). Elsewhere 0060 is a deliberate no-op. The gate is
+read from the environment into a module constant at import time, because a `pytest.mark.skipif`
+expression is evaluated during collection: a gate that queried `pg_roles` would fail collection on a
+machine with no database. The module must import with nothing running.
 
-The inference is exact rather than approximate: `ALTER TABLE`, `DROP TABLE` and
-`TRUNCATE` are owner-only operations with no grantable privilege behind them
-except TRUNCATE, which nothing grants. So "is not the owner, is not a
-superuser, and is not a member of the owner" IS "cannot drop the append-only
-triggers". The three facts are asserted separately below for that reason.
-
-## Why this file is doubly gated
-
-`DATABASE_URL`, as every `*_pg` file is. And `NOCTORNAL_APP_DB_ROLE`, because
-the role exists only where initdb ran with `NOCTORNAL_APP_DB_PASSWORD` set --
-which is a production-shaped stack, and is NOT the dev compose, any developer
-database, or CI. Everywhere else 0060 is a deliberate no-op and there is
-nothing here to assert.
-
-The gate is read from the ENVIRONMENT rather than from the database, and read
-at import time into a module constant, because a `pytest.mark.skipif`
-expression is evaluated during collection: a gate that queried `pg_roles` would
-have to open a connection to decide whether to skip, and would fail collection
-outright on a machine with no database rather than skipping. The module must
-import with nothing running.
-
-**CI's "No tests were skipped" step fails on any skip.** So a CI run that does
-not create the role will go red here. That is a deployment decision rather than
-a test one -- either CI creates `noctornal_app` before `alembic upgrade head`
-(the role must exist BEFORE 0060 runs, or 0060 no-ops and grants nothing) and
-exports `NOCTORNAL_APP_DB_ROLE=noctornal_app`, or the gate step learns about
+CI's "No tests were skipped" step fails on any skip, so a CI run that does not create the role goes red
+here. Either CI creates `noctornal_app` before `alembic upgrade head` (the role must exist before 0060
+runs, or 0060 no-ops) and exports `NOCTORNAL_APP_DB_ROLE=noctornal_app`, or the gate step learns about
 this file. `db/README.md` records the ordering.
 
-No fixture here writes anything, so this file has no email prefix and no
-cleanup: it cannot collide with a suite running beside it.
+No fixture here writes anything, so this file has no email prefix and no cleanup.
 """
 from __future__ import annotations
 
@@ -83,12 +63,9 @@ LEDGER_SEQUENCE_COLUMN = {
     "core.purge_tombstone": None,
 }
 
-#: A FLOOR, not a count. The tree holds 79 tables at 0060 and gains more with
-#: nearly every revision, so an exact figure would be a number somebody has to
-#: edit -- and a number edited on every commit is a number nobody reads. What
-#: this guards against is the scan silently matching nothing (a typo in the
-#: schema list, a filter that excludes everything) and the loop below then
-#: passing vacuously, which is the failure mode a privilege test has.
+#: A floor, not a count: the tree gains tables with nearly every revision, so an exact figure would be
+#: a number somebody has to edit on every commit. It guards against the scan silently matching nothing
+#: (a typo in the schema list, a filter that excludes everything) and the loop below passing vacuously.
 MINIMUM_TABLES = 60
 
 
@@ -115,16 +92,13 @@ def _migration():
 
 
 def _guarded_after_0060() -> dict[str, tuple[str, ...]]:
-    """Tables a LATER migration guarded against deletion without making
-    them ledgers, each with the privileges the runtime role keeps on it.
+    """Tables a later migration guarded against deletion without making them ledgers, each with the
+    privileges the runtime role keeps on it.
 
-    A migration declares these as a module constant `GUARDED_TABLES`,
-    beside the REVOKE it runs, rather than in a list here, so the claim
-    and the statement that makes it true live in one file. The first was
-    0063's `lab.preservation_authorisation` (revocation is an UPDATE, so
-    it keeps UPDATE and loses DELETE); until the verifier's pass of
-    2026-09-22 it was on no list, and the accounting test below failed in
-    CI on it."""
+    A migration declares these as a module constant `GUARDED_TABLES`, beside the REVOKE it runs, so the
+    claim and the statement that makes it true live in one file. An example is 0063's
+    `lab.preservation_authorisation` (revocation is an UPDATE, so it keeps UPDATE and loses DELETE).
+    """
     guarded: dict[str, tuple[str, ...]] = {}
     for path in sorted(MIGRATION.parent.glob("[0-9][0-9][0-9][0-9]_*.py")):
         if path.name <= MIGRATION.name:
@@ -137,12 +111,10 @@ def _guarded_after_0060() -> dict[str, tuple[str, ...]]:
 
 
 def _runtime_read_only() -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """S1 (2026-09-25): the schemas and tables a later migration made
-    read-only to the runtime role, whatever 0060 or a GUARDED_TABLES entry
-    granted. 0109 is the first: the IAM plane and lab.download_ticket, which
-    row-level security reads to decide who a connection is, so a runtime
-    role that could write them could rebind itself. Read from every
-    migration after 0060 the way GUARDED_TABLES is."""
+    """The schemas and tables a later migration made read-only to the runtime role, whatever 0060 or a
+    GUARDED_TABLES entry granted. 0109 is the first: the IAM plane and lab.download_ticket, which
+    row-level security reads to decide who a connection is, so a runtime role that could write them
+    could rebind itself. Read from every migration after 0060 the way GUARDED_TABLES is."""
     schemas: list[str] = []
     tables: list[str] = []
     for path in sorted(MIGRATION.parent.glob("[0-9][0-9][0-9][0-9]_*.py")):
@@ -176,25 +148,23 @@ def _later_migration_dicts(attr: str) -> dict[str, tuple[str, ...]]:
 
 
 def _column_selects() -> dict[str, tuple[str, ...]]:
-    """Tables a later migration made readable by named columns only
-    (`RUNTIME_COLUMN_SELECTS`; 0143 is the first, iam.app_user without
-    its credential columns, rls-6 2026-10-03). Table-level SELECT is
-    false there by design, so reachability is any column's SELECT."""
+    """Tables a later migration made readable by named columns only (`RUNTIME_COLUMN_SELECTS`; 0143 is
+    the first, iam.app_user without its credential columns). Table-level SELECT is false there by
+    design, so reachability is any column's SELECT."""
     return _later_migration_dicts("RUNTIME_COLUMN_SELECTS")
 
 
 def _runtime_column_updates() -> dict[str, tuple[str, ...]]:
-    """The tables whose UPDATE a later migration narrowed to named columns
-    for the runtime role, with those columns: 0109's two on the IAM plane,
-    and 0155's ingest records, credentials and authorisations (F51,
-    2026-10-02), 0178's exhibits and cases (Beta 1.1), and the download
-    tickets, of which 0180 left the request role no column at all."""
+    """The tables whose UPDATE a later migration narrowed to named columns for the runtime role, with
+    those columns: 0109's two on the IAM plane, 0155's ingest records, credentials and authorisations,
+    0178's exhibits and cases, and the download tickets, of which 0180 left the request role no column
+    at all."""
     return _later_migration_dicts("RUNTIME_COLUMN_UPDATES")
 
 
 def _no_longer_deleted() -> set[str]:
-    """The tables a later migration took DELETE from because no request
-    deletes from them (0178, Beta 1.1: the case material), unquoted."""
+    """The tables a later migration took DELETE from because no request deletes from them (0178: the
+    case material), unquoted."""
     out: set[str] = set()
     for path in sorted(MIGRATION.parent.glob("[0-9][0-9][0-9][0-9]_*.py")):
         if path.name <= MIGRATION.name:
@@ -237,14 +207,11 @@ def test_the_gate_names_the_role_the_migration_grants():
 def test_the_runtime_role_exists_and_holds_no_cluster_power(conn):
     """Four attributes, each of which would undo the control on its own.
 
-    `rolsuper` bypasses privilege checks entirely. `rolcreaterole` is the
-    quiet one: on PostgreSQL before 16 a CREATEROLE role could `ALTER ROLE
-    <owner> PASSWORD ...` on any non-superuser role and then simply log in as
-    the owner, so it is ownership one statement away. `rolbypassrls` matters
-    for the row-level policies this schema does not have yet -- a control
-    that is inert today and silently defeated on the day it is added is worse
-    than no control. `rolreplication` can stream the whole cluster, including
-    every ledger, out of the box.
+    `rolsuper` bypasses privilege checks entirely. `rolcreaterole` is the quiet one: on PostgreSQL
+    before 16 a CREATEROLE role could `ALTER ROLE <owner> PASSWORD ...` on any non-superuser role and
+    log in as the owner, so it is ownership one statement away. `rolbypassrls` defeats row-level
+    policies silently. `rolreplication` can stream the whole cluster, including every ledger, out of
+    the box.
     """
     row = conn.execute(
         """SELECT rolcanlogin, rolsuper, rolcreaterole, rolcreatedb,
@@ -263,14 +230,13 @@ def test_the_runtime_role_exists_and_holds_no_cluster_power(conn):
     # would misreport which power the role holds.
     assert not any(powers), dict(zip(names, powers, strict=True))
 
-    # Granted by the init script, not by 0060, and asserted here because it is
-    # the one privilege whose absence looks like an outage rather than a
-    # permission error: libpq reports it at connect time, before any query.
+    # Granted by the init script, not by 0060, and asserted here because it is the one privilege whose
+    # absence looks like an outage rather than a permission error: libpq reports it at connect time,
+    # before any query.
     #
-    # It does NOT prove the init script's GRANT ran. CONNECT belongs to PUBLIC
-    # on a stock cluster, so this passes either way; what it catches is the
-    # deployment that hardened the database with `REVOKE CONNECT ON DATABASE
-    # ... FROM PUBLIC` and did not put the role's own grant back.
+    # It does not prove the init script's GRANT ran. CONNECT belongs to PUBLIC on a stock cluster, so
+    # this passes either way; what it catches is the deployment that hardened the database with
+    # `REVOKE CONNECT ON DATABASE ... FROM PUBLIC` and did not put the role's own grant back.
     assert _scalar(conn, "SELECT has_database_privilege(%s, current_database(), "
                          "'CONNECT')", (APP_DB_ROLE,))
 
@@ -278,12 +244,10 @@ def test_the_runtime_role_exists_and_holds_no_cluster_power(conn):
 def test_it_owns_nothing_and_is_not_a_member_of_the_owner(conn):
     """The whole control, stated as the catalog holds it.
 
-    Ownership is not a privilege and cannot be revoked, only transferred, so
-    the only way the API cannot `ALTER TABLE ... DISABLE TRIGGER` is that it
-    connects as a role that owns nothing. Membership is the back door: a role
-    that is a member of the owner can reach every one of the owner's rights,
-    by inheritance if it has INHERIT and by `SET ROLE` regardless -- which is
-    why both senses are checked.
+    Ownership is not a privilege and cannot be revoked, only transferred, so the API can only be
+    unable to `ALTER TABLE ... DISABLE TRIGGER` if it connects as a role that owns nothing.
+    Membership is the back door: a role that is a member of the owner reaches every one of the owner's
+    rights, by inheritance if it has INHERIT and by `SET ROLE` regardless, so both senses are checked.
     """
     m = _migration()
     rows = conn.execute(
@@ -309,23 +273,18 @@ def test_it_owns_nothing_and_is_not_a_member_of_the_owner(conn):
 
 
 def test_the_catalog_and_the_migration_agree_on_which_tables_are_ledgers(conn):
-    """0060's `LEDGERS` is a hand-written tuple, and the reason UPDATE and
-    DELETE come back off those four tables is that each carries an append-only
-    trigger pair. The catalog holds the real list: a `BEFORE TRUNCATE`
-    statement trigger exists on exactly the four tables the chain made
-    append-only -- `audit.event` (0013) and `core.evidence_custody` (0023),
-    which arrived with both triggers, and `lab.sample_access` (0031) and
-    `core.purge_tombstone` (0032), which arrived with only the row-level one
-    and gained the statement-level one in 0052.
+    """0060's `LEDGERS` is a hand-written tuple, and UPDATE and DELETE come back off those four tables
+    because each carries an append-only trigger pair. The catalog holds the real list: a `BEFORE
+    TRUNCATE` statement trigger exists on exactly the four tables the chain made append-only:
+    `audit.event` (0013) and `core.evidence_custody` (0023), which arrived with both triggers, and
+    `lab.sample_access` (0031) and `core.purge_tombstone` (0032), which arrived with only the
+    row-level one and gained the statement-level one in 0052.
 
-    A fifth ledger added by a later migration lands here first. It will have
-    inherited UPDATE and DELETE from 0060's default privileges the moment it
-    was created -- silently, because that is what a default privilege does --
-    and its own migration must revoke them.
-
-    A later table that is guarded but not append-only (it keeps UPDATE)
-    is accounted for by its own migration's `GUARDED_TABLES`, and checked
-    by `test_the_guarded_records_keep_exactly_what_their_migration_declares`.
+    A fifth ledger added by a later migration lands here first. It inherits UPDATE and DELETE from
+    0060's default privileges the moment it is created, silently, so its own migration must revoke
+    them. A later table that is guarded but not append-only (it keeps UPDATE) is accounted for by its
+    own migration's `GUARDED_TABLES`, and checked by
+    `test_the_guarded_records_keep_exactly_what_their_migration_declares`.
     """
     m = _migration()
     accounted = set(m.LEDGERS) | set(_guarded_after_0060())
@@ -370,12 +329,11 @@ def test_the_guarded_records_keep_exactly_what_their_migration_declares(conn):
 def test_the_ledgers_are_readable_appendable_and_nothing_else(conn):
     """SELECT and INSERT, and none of the other five.
 
-    TRUNCATE is the interesting absence. Nothing revokes it, because a GRANT
-    of DML never confers it: it is an owner-only operation unless explicitly
-    granted, and it is the one that would empty a ledger without firing a
-    row-level trigger (0052 exists because of exactly that gap). TRIGGER is
-    checked for the same reason in reverse -- it would let this role install
-    its own trigger on the ledger, though not drop the existing one.
+    TRUNCATE is the interesting absence. Nothing revokes it, because a GRANT of DML never confers it:
+    it is an owner-only operation unless explicitly granted, and it would empty a ledger without firing
+    a row-level trigger (0052 exists because of that gap). TRIGGER is checked for the same reason in
+    reverse: it would let this role install its own trigger on the ledger, though not drop the existing
+    one.
     """
     m = _migration()
     for table in m.LEDGERS:
@@ -387,33 +345,28 @@ def test_the_ledgers_are_readable_appendable_and_nothing_else(conn):
         assert not got["TRIGGER"], (table, got)
 
 
-#: The ledger sequences drawn by a SECURITY DEFINER chain trigger (0149,
-#: 2026-10-03): the trigger draws them as the owner inside the chain lock, so
-#: since 0169 the runtime role holds no privilege on them and the column has
-#: no default. The Lab's custody ledger joined them in 0175 (Beta 1.1): its
-#: own definer trigger draws the number, with no chain to lock.
+#: The ledger sequences drawn by a SECURITY DEFINER chain trigger (0149): the trigger draws them as
+#: the owner inside the chain lock, so since 0169 the runtime role holds no privilege on them and the
+#: column has no default. The Lab's custody ledger joined them in 0175: its own definer trigger draws
+#: the number, with no chain to lock.
 DEFINER_DRAWN = {"audit.event": "seq", "core.evidence_custody": "id",
                  "lab.sample_access": "id"}
 
 
 def test_the_ledger_sequences_are_usable_or_every_audited_action_fails(conn):
-    """The grant that reads as boilerplate and is not, for the sequences a
-    column DEFAULT still draws.
+    """The grant that reads as boilerplate and is not, for the sequences a column DEFAULT still draws.
 
-    A column DEFAULT `nextval(...)` is evaluated as the INSERTING role, so
-    without USAGE the very first write to such a ledger fails, saying
-    `permission denied for sequence ...`, which names the sequence and not
-    the table, sending whoever reads the log to the wrong place.
+    A column DEFAULT `nextval(...)` is evaluated as the inserting role, so without USAGE the first
+    write to such a ledger fails with `permission denied for sequence ...`, which names the sequence
+    and not the table.
 
-    None of the three ledger sequences is like that any more. 0149 moved
-    the audit and custody chains' draw into the chain trigger, which runs as
-    the owner INSIDE the chain lock (so seq order is chain order), and 0169
-    took the runtime role's USAGE and SELECT away and dropped the defaults:
-    nothing legitimate draws them, and `SELECT last_value` read the whole
-    log's volume to a caller who may read none of it. 0175 (Beta 1.1) did the
-    same for the Lab's custody ledger. That is
-    `test_the_definer_drawn_sequences_are_the_triggers_alone`; what is left
-    here is the map's own honesty about the tombstones, which have none.
+    None of the three ledger sequences is like that. 0149 moved the audit and custody chains' draw into
+    the chain trigger, which runs as the owner inside the chain lock (so seq order is chain order), and
+    0169 took the runtime role's USAGE and SELECT away and dropped the defaults: nothing legitimate
+    draws them, and `SELECT last_value` would read the whole log's volume to a caller who may read none
+    of it. 0175 did the same for the Lab's custody ledger. That is
+    `test_the_definer_drawn_sequences_are_the_triggers_alone`; what is left here is the map's own
+    honesty about the tombstones, which have none.
     """
     seen = 0
     for table, column in LEDGER_SEQUENCE_COLUMN.items():
@@ -430,11 +383,10 @@ def test_the_ledger_sequences_are_usable_or_every_audited_action_fails(conn):
         assert _scalar(conn, "SELECT has_sequence_privilege(%s, %s, 'USAGE')",
                        (APP_DB_ROLE, seq)), (
             f"INSERT into {table} will fail: no USAGE on {seq}")
-        # SELECT is the spare half, and asserted because 0060 grants it, not
-        # because an INSERT needs it: USAGE alone already covers `nextval`
-        # AND `currval`. SELECT is what lets a session read `last_value` off
-        # the sequence itself, which nothing in the product does today. A
-        # database holding one and not the other diverged from 0060 by hand.
+        # SELECT is the spare half, asserted because 0060 grants it, not because an INSERT needs it:
+        # USAGE alone covers `nextval` and `currval`. SELECT lets a session read `last_value` off the
+        # sequence, which nothing in the product does. A database holding one and not the other
+        # diverged from 0060 by hand.
         assert _scalar(conn, "SELECT has_sequence_privilege(%s, %s, 'SELECT')",
                        (APP_DB_ROLE, seq))
         seen += 1
@@ -466,16 +418,15 @@ def test_the_definer_drawn_sequences_are_the_triggers_alone(conn):
 
 
 def test_an_ordinary_table_carries_the_full_four(conn):
-    """The other half of the same contract: the role is least-privilege, not
-    read-only. `core.node` is the graph's central table -- `graph.py` inserts
-    into it and `graph.py` and `merges.py` update it -- so a control that made
-    it unwritable would have replaced a security problem with an outage.
+    """The other half of the same contract: the role is least-privilege, not read-only.
 
-    DELETE used to be asserted here for the shape of the grant, though
-    nothing in `apps/api/src` deletes a `core.node` row (history is
-    superseded rather than overwritten, docs/01). 0178 (Beta 1.1) took it:
-    the request role deletes only where a request deletes, so the table that
-    keeps all four is one a request removes rows from, a tag on an entity."""
+    `core.node` is the graph's central table (`graph.py` inserts into it and `graph.py` and `merges.py`
+    update it), so a control that made it unwritable would replace a security problem with an outage.
+    It has no DELETE, because nothing in `apps/api/src` deletes a `core.node` row (history is
+    superseded rather than overwritten, docs/01): 0178 gave the request role DELETE only where a
+    request deletes, so the table that keeps all four is one a request removes rows from, a tag on an
+    entity.
+    """
     got = _table_privileges(conn, "core.node")
     assert got["SELECT"] and got["INSERT"] and got["UPDATE"], got
     assert not got["DELETE"] and not got["TRUNCATE"], got
@@ -487,13 +438,11 @@ def test_an_ordinary_table_carries_the_full_four(conn):
 def test_every_table_in_every_product_schema_is_reachable(conn):
     """The blanket grants, checked one table at a time.
 
-    `GRANT ... ON ALL TABLES IN SCHEMA` applies to the tables that existed
-    when it ran and to nothing else; the ALTER DEFAULT PRIVILEGES clauses are
-    what cover later ones, and they bind to a specific creating role. A table
-    created by a migration run as some other identity is therefore reachable
-    by its owner and by nothing the product runs, and the symptom is a single
-    endpoint returning 500 with `permission denied for table <something>` long
-    after the migration that introduced it went green.
+    `GRANT ... ON ALL TABLES IN SCHEMA` applies to the tables that existed when it ran and to nothing
+    else; the ALTER DEFAULT PRIVILEGES clauses cover later ones, and they bind to a specific creating
+    role. A table created by a migration run as some other identity is reachable by its owner and by
+    nothing the product runs, and the symptom is a single endpoint returning 500 with `permission
+    denied for table <something>` long after the migration went green.
     """
     m = _migration()
     tables = [r[0] for r in conn.execute(
@@ -531,12 +480,10 @@ def test_every_table_in_every_product_schema_is_reachable(conn):
 
 
 def test_a_column_confined_table_is_updatable_in_exactly_its_columns(conn):
-    """F51, 2026-10-02: 0155 took table UPDATE on the ingest records, the
-    victims' credentials and the reveal authorisations from the runtime
-    role and gave back only the columns a request writes, because a row
-    policy says which rows and not which columns. No table UPDATE, every
-    declared column, and no other column, on each such table, 0109's two
-    included."""
+    """0155 took table UPDATE on the ingest records, the victims' credentials and the reveal
+    authorisations from the runtime role and gave back only the columns a request writes, because a row
+    policy says which rows and not which columns. Each such table has no table UPDATE, every declared
+    column, and no other column, 0109's two included."""
     confined = _runtime_column_updates()
     assert {"ingest.record", "ingest.victim_credential",
             "ingest.pii_authorisation"} <= set(confined), confined
@@ -558,10 +505,9 @@ def test_a_column_confined_table_is_updatable_in_exactly_its_columns(conn):
     assert not wrong, wrong
 
 
-#: Reference vocabulary nothing writes at run time (0172, 2026-10-07): the ontology, the
-#: comms catalogue and the
-#: ingest categories. A row here decides which identifier is a merge lead
-#: and which one a platform is indexed on, for every case at once.
+#: Reference vocabulary nothing writes at run time (0172): the ontology, the comms catalogue and the
+#: ingest categories. A row here decides which identifier is a merge lead and which one a platform is
+#: indexed on, for every case at once.
 VOCABULARY = ("core.node_type", "core.edge_type", "core.selector_type",
               "comms.platform", "ingest.category_rule")
 
@@ -578,15 +524,13 @@ def test_the_vocabulary_is_readable_and_not_writable(conn):
 
 
 def test_the_version_table_is_readable_and_not_writable(conn):
-    """`readiness.py`'s `migrations_at_head` check reads `alembic_version` on
-    the API's own connection. Alembic creates that table, so it belongs to the
-    owner and carries no grant of its own -- without 0060's explicit SELECT
-    the readiness endpoint reports `permission denied for table
-    alembic_version` as a failed check, which reads as "this deployment is
-    behind" and is nothing of the sort.
+    """`readiness.py`'s `migrations_at_head` check reads `alembic_version` on the API's own connection.
+    Alembic creates that table, so it belongs to the owner and carries no grant of its own: without
+    0060's explicit SELECT the readiness endpoint reports `permission denied for table alembic_version`
+    as a failed check, which reads as "this deployment is behind" and is nothing of the sort.
 
-    SELECT only. A runtime process that could stamp a revision could tell the
-    check what it wanted to hear.
+    SELECT only. A runtime process that could stamp a revision could tell the check what it wanted to
+    hear.
     """
     m = _migration()
     got = _table_privileges(conn, m.VERSION_TABLE)

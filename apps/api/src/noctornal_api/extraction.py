@@ -1,41 +1,19 @@
 """Manual capture: paste text, get selectors, get proposals (docs/14 C2).
 
-docs/14 recommends this before any adapter:
+The path is: pasted text -> collect.document (hashed, deduped) -> regex extractors -> collect.extraction
+(selectors WITH offsets) -> collect.proposal, which is where it STOPS. Human review (proposals.py) comes next, and
+only then a node, edge or assertion. It exercises the whole proposal pipeline without any persona-management
+risk, and shows that machine output reaches the graph only through a human (invariant 3).
 
-    A paste-a-conversation-export path that lands a document, extracts
-    selectors with offsets, and proposes graph changes would exercise the
-    whole proposal pipeline without any of the persona-management risk.
-
-Which is the point. Phase 4's collection layer is a large build with real
-operational hazard -- personas, egress binding, FLOOD_WAIT, parser drift --
-and none of it is needed to prove the part that matters: that machine
-output reaches the graph only through a human. Until now `collect.proposal`
-had nothing writing it, so invariant 3 was true because nothing existed to
-violate it.
-
-The whole path, and where it stops:
-
-    pasted text -> collect.document (hashed, deduped)
-      -> regex extractors -> collect.extraction (selectors WITH offsets)
-      -> collect.proposal                              <- STOPS HERE
-      -> ------- human review (proposals.py) -------
-      -> node / edge / assertion
-
-Three things this deliberately does NOT do.
-
-**It does not touch the graph.** It holds a `ProposalStore`, which by
-construction cannot (see proposals.py). The extractor is not an actor.
-
-**It does not guess at people.** A selector found in text is evidence that
-a string appeared, not that an actor exists. Proposals are for SELECTOR
-nodes and their observation, never "this handle is a person" -- that is an
-attribution, and attribution is an assessment a human makes (invariant 2).
-
-**It does not pretend precision it lacks.** Every extractor here is a
-regex over pasted text. Regexes over prose produce false positives, so
-every proposal carries the matched text, its character offsets and a
-plain-language rationale, and scores are deliberately modest. docs/03: a
-bare 0.87 "will be either over-trusted or ignored".
+- It does not touch the graph. It holds a `ProposalStore`, which by construction cannot (see proposals.py). The
+  extractor is not an actor.
+- It does not guess at people. A selector found in text is evidence that a string appeared, not that an actor
+  exists. Proposals are for SELECTOR nodes and their observation, never "this handle is a person": that is an
+  attribution, and attribution is an assessment a human makes (invariant 2).
+- It does not pretend precision it lacks. Every extractor here is a regex over pasted text, and regexes over
+  prose produce false positives, so every proposal carries the matched text, its character offsets and a
+  plain-language rationale, and scores are deliberately modest (docs/03: a bare score is either over-trusted or
+  ignored).
 """
 from __future__ import annotations
 
@@ -60,15 +38,12 @@ from noctornal_ontology.normalisers import (
 EXTRACTOR = "paste_selector_regex"
 EXTRACTOR_VERSION = "1"
 
-# Selector patterns, ordered most-specific first. Ordering matters: an
-# onion address is also a domain, and a Bitcoin address matches loose
-# alphanumeric patterns, so the first claim on a span wins and later
-# overlapping matches are dropped.
+# Selector patterns, ordered most-specific first: an onion address is also a domain, and a Bitcoin address
+# matches loose alphanumeric patterns, so the first claim on a span wins and later overlapping matches are
+# dropped.
 #
-# The score attached to each is a statement about how often the PATTERN is
-# wrong in prose, not about how important the selector is. A PGP
-# fingerprint is 40 hex characters and essentially never appears by
-# accident; a bare handle is a word.
+# The score attached to each says how often the PATTERN is wrong in prose, not how important the selector is. A
+# PGP fingerprint is 40 hex characters and essentially never appears by accident; a bare handle is a word.
 _PATTERNS: tuple[tuple[str, re.Pattern, float, str], ...] = (
     ("ONION", re.compile(r"\b([a-z2-7]{56}\.onion)\b", re.I), 0.95,
      "56-character v3 onion address"),
@@ -119,13 +94,11 @@ class ExtractionError(Exception):
     pass
 
 
-#: The compartments ingest uses for third-party personal data: every ingest
-#: key's forced compartment, revoked keys included, since the records a key
-#: brought keep it (L1, 2026-09-24). Records and dead letters take their
-#: compartment from their key and nothing else (`IngestService`), keys are
-#: never deleted (batches and dead letters hold them by foreign key), and a
-#: rename moves a key's and its records' together, so this set is also
-#: every compartment an ingest record carries, read without scanning them.
+#: The compartments ingest uses for third-party personal data: every ingest key's forced compartment, revoked
+#: keys included, since the records a key brought keep it. Records and dead letters take their compartment from
+#: their key and nothing else (`IngestService`), keys are never deleted (batches and dead letters hold them by
+#: foreign key), and a rename moves a key's and its records' together, so this set is also every compartment an
+#: ingest record carries, read without scanning them.
 VICTIM_DATA_SQL = """
 SELECT DISTINCT forced_compartment FROM ingest.api_key
  WHERE forced_compartment IS NOT NULL
@@ -160,17 +133,14 @@ class CaptureResult:
     hits: list[Hit] = field(default_factory=list)
     proposal_ids: list[UUID] = field(default_factory=list)
     skipped_existing: int = 0
-    #: The label this capture's proposals carry: never below the case, nor
-    #: below an earlier capture of the same text. The triage notice is
-    #: labelled with it (final review u12, 2026-09-24).
+    #: The label this capture's proposals carry: never below the case, nor below an earlier capture of the same
+    #: text. The triage notice is labelled with it.
     classification: str | None = None
-    #: The label the document is stored at. A fresh capture's is the same
-    #: as `classification`; a re-paste's is the earlier capture's, which a
-    #: re-paste never changes (c15 follow-up, 2026-09-24).
+    #: The label the document is stored at. A fresh capture's is the same as `classification`; a re-paste's is the
+    #: earlier capture's, which a re-paste never changes.
     document_classification: str | None = None
-    #: The compartments the document is stored under: its case's (L1,
-    #: 2026-09-24). A re-paste only dedupes onto a document under the same
-    #: set, so this is also the case's on a re-paste.
+    #: The compartments the document is stored under: its case's. A re-paste only dedupes onto a document under
+    #: the same set, so this is also the case's on a re-paste.
     document_compartments: tuple[str, ...] = ()
 
     def summary(self) -> dict:
@@ -192,8 +162,8 @@ class CaptureResult:
 
 @dataclass(frozen=True)
 class CaptureLabels:
-    """What a capture into a case is stored under: a classification never
-    below the case's, and the case's compartments (L1, 2026-09-24)."""
+    """What a capture into a case is stored under: a classification never below the case's, and the case's
+    compartments."""
     classification: str
     compartments: tuple[str, ...] = ()
 
@@ -232,13 +202,10 @@ def find_selectors(text: str) -> list[Hit]:
     keep out of the graph.
     """
     claims: list[Hit] = []
-    # Where a URL of any scheme holds a credential. Nothing but a URL
-    # selector is read out of those spans: a password is not an identifier,
-    # and only http and https links are URL selectors, so the userinfo of
-    # `mysql://root:Secret123@db.example/app` was read as the e-mail
-    # address `Secret123@db.example` and proposed, and on accept written
-    # to the graph and the index (graph-url-selector-keeps-credentials,
-    # 2026-10-03, verify round).
+    # Where a URL of any scheme holds a credential. Nothing but a URL selector is read out of those spans: a
+    # password is not an identifier, and only http and https links are URL selectors, so the userinfo of
+    # `mysql://root:Secret123@db.example/app` would be read as the e-mail address `Secret123@db.example`,
+    # proposed, and on accept written to the graph and the index.
     secret_spans = credential_spans(text)
     secret_starts = [a for a, _ in secret_spans]
     for sel_type, pattern, score, why in _PATTERNS:
@@ -246,10 +213,9 @@ def find_selectors(text: str) -> list[Hit]:
             raw = m.group(1)
             end = m.end(1)
             if sel_type == "URL":
-                # A link written in prose ends at the sentence, not at the
-                # full stop after it (L5, 2026-09-24): "grab it here
-                # https://mega.nz/#!AbCd1234!key." carried the stop into
-                # the raw value and the normaliser. Offsets stay exact.
+                # A link written in prose ends at the sentence, not at the full stop after it: "grab it here
+                # https://mega.nz/#!AbCd1234!key." must not carry the stop into the raw value and the normaliser.
+                # Offsets stay exact.
                 stop = _widen_over_userinfo(text, m.start(1), m.end(1))
                 raw = text[m.start(1):stop].rstrip(_URL_TRAILING)
                 end = m.start(1) + len(raw)
@@ -352,23 +318,14 @@ class CaptureService:
         return CaptureLabels(row[0], tuple(sorted(row[1] or [])))
 
     def stored_labels(self, case_id: UUID, requested: str) -> CaptureLabels:
-        """What a capture into this case is stored under: the label asked
-        for, never below the case's own, and the case's compartments.
+        """What a capture into this case is stored under: the label asked for, never below the case's own, and the
+        case's compartments.
 
-        Final review c15 (2026-09-24). `collect.document` hangs off a
-        source, not a case, and `/collection/documents` and the combined
-        search listed it by its own label for every holder of
-        `collection.read`. The capture form defaulted to AMBER on every
-        case, so a stealer-log thread pasted into RED OP-HALCYON-25 was
-        stored at AMBER, and every AMBER collection reader in the
-        deployment could list its title, URL and an excerpt. c15 raised
-        the label to the case and refused every compartmented case,
-        because a document could not carry compartments.
-
-        L1 (2026-09-24). A document now carries compartments and every
-        reader of one checks them, so a capture takes its case's
-        compartments and a compartmented case captures like any other.
-        The refusal that stays is `refusal`'s: victim data."""
+        `collect.document` hangs off a source, not a case, and `/collection/documents` and the combined search
+        list it by its own label for every holder of `collection.read`, so a stealer-log thread pasted into a RED
+        case must not be stored at AMBER. A document carries compartments and every reader of one checks them, so
+        a capture takes its case's compartments and a compartmented case captures like any other. The refusal
+        that stays is `refusal`'s: victim data."""
         if requested not in TLP_ORDER:
             raise ExtractionError(f"unknown classification {requested!r}")
         case = self.case_labels(case_id)
@@ -383,18 +340,14 @@ class CaptureService:
         return victim_data_compartments(self._c)
 
     def refusal(self, case_id: UUID) -> str | None:
-        """Why this case takes no capture, in the words the console shows
-        on its capture form, or None when it takes one.
+        """Why this case takes no capture, in the words the console shows on its capture form, or None when it
+        takes one.
 
-        Only a case carrying a compartment an ingest feed uses to wall off
-        third-party personal data is refused (L1, 2026-09-24): a captured
-        document is in the collection's free-text index, and decision 52
-        makes free-text search across victim personal data impossible.
-        docs/16 L2 (how such data is minimised) is blocking and unsettled,
-        so pasted victim data stays out of that index until it is; an
-        exhibit is read only inside its case. The sentence names only the
-        compartments that are the reason, and cites no document: it is
-        read on screen (L6's rule)."""
+        Only a case carrying a compartment an ingest feed uses to wall off third-party personal data is refused: a
+        captured document is in the collection's free-text index, and decision 52 makes free-text search across
+        victim personal data impossible. docs/16 L2 (how such data is minimised) is blocking and unsettled, so
+        pasted victim data stays out of that index until it is; an exhibit is read only inside its case. The
+        sentence names only the compartments that are the reason, and cites no document: it is read on screen."""
         case = self.case_labels(case_id)
         victim = sorted(set(case.compartments)
                         & self.victim_data_compartments())
@@ -426,8 +379,7 @@ class CaptureService:
         """Land the text, extract, and raise proposals for what was found."""
         if not text or not text.strip():
             raise ExtractionError("nothing to capture")
-        # Never below the case, under the case's compartments, and never
-        # into a case walled off for victim data (c15 and L1, 2026-09-24):
+        # Never below the case, under the case's compartments, and never into a case walled off for victim data:
         # see `stored_labels`.
         labels = self.stored_labels(case_id, classification)
         classification = labels.classification
@@ -436,21 +388,16 @@ class CaptureService:
         digest = hashlib.sha256(text.encode("utf-8")).digest()
         source = self.source_id()
 
-        # Dedupe on content hash (docs/02: "dedupe on content_sha256 --
-        # edited posts version, not duplicate"). Re-pasting the same text
-        # must not manufacture a second document and a second set of
+        # Dedupe on content hash (docs/02: dedupe on content_sha256; an edited post is a new version, not a
+        # duplicate). Re-pasting the same text must not manufacture a second document and a second set of
         # proposals for the same observation.
         #
-        # Only onto a live document under the IDENTICAL compartments (L1,
-        # 2026-09-24). A document is read under its compartments, so text
-        # pasted into a compartmented case and again into one without
-        # them are two documents with two locks: deduping the second onto
-        # the first would hide it from the second case's readers, and
-        # raising the first's lock would hide it from the first's. Keeping
-        # them apart also keeps the reply from being an oracle for a
-        # capture under a compartment the caller is not in. Containment
-        # both ways rather than `=`, because array order is not guaranteed
-        # after a hand edit. A purged document is never a dedupe target:
+        # Only onto a live document under the IDENTICAL compartments. A document is read under its compartments,
+        # so text pasted into a compartmented case and again into one without them are two documents with two
+        # locks: deduping the second onto the first would hide it from the second case's readers, and raising the
+        # first's lock would hide it from the first's. Keeping them apart also keeps the reply from being an
+        # oracle for a capture under a compartment the caller is not in. Containment both ways rather than `=`,
+        # because array order is not guaranteed after a hand edit. A purged document is never a dedupe target:
         # its text is gone.
         existing = self._c.execute(
             """SELECT id, classification FROM collect.document
@@ -461,31 +408,22 @@ class CaptureService:
             (source, digest, keys, keys),
         ).fetchone()
         if existing is not None:
-            # The DOCUMENT is deduped across cases under one lock --
-            # `collect.document` hangs off a source, not a case, because
-            # the same forum post is one observation however many cases
-            # care about it. But a case's triage queue is its own: pasting
-            # the same thread into a second case must still raise
-            # proposals THERE, or the second analyst silently gets
-            # nothing. Proposals are deduped separately, by value, inside
-            # _propose.
+            # The DOCUMENT is deduped across cases under one lock: `collect.document` hangs off a source, not a
+            # case, because the same forum post is one observation however many cases care about it. But a case's
+            # triage queue is its own: pasting the same thread into a second case must still raise proposals
+            # THERE, or the second analyst silently gets nothing. Proposals are deduped separately, by value,
+            # inside _propose.
             #
-            # The stricter of the stored document's label and this
-            # paste's: the text is the same, and whichever analyst judged
-            # it more sensitive is the one to believe, so the proposals
-            # raised HERE carry it.
+            # The stricter of the stored document's label and this paste's: the text is the same, and whichever
+            # analyst judged it more sensitive is the one to believe, so the proposals raised HERE carry it.
             #
-            # The shared document keeps its own label (c15 follow-up,
-            # 2026-09-24). Raising it on a stricter re-paste was tried in
-            # this pass and protected nothing: the same text was already
-            # stored, and readable, at the lower label, and a document
-            # records no case, so the stricter case's interest never
-            # reaches it. What the raise did reach was every OTHER case
-            # citing the document. A proposal is read at the stricter of
-            # its own and its document's label, so an AMBER case's pending
-            # proposals and its Open source view vanished from that case's
-            # own AMBER reviewers, and the vanishing told them somebody
-            # above their clearance had pasted the same thread.
+            # The shared document keeps its own label. Raising it on a stricter re-paste would protect nothing:
+            # the same text is already stored, and readable, at the lower label, and a document records no case,
+            # so the stricter case's interest never reaches it. What the raise would reach is every OTHER case
+            # citing the document: a proposal is read at the stricter of its own and its document's label, so an
+            # AMBER case's pending proposals and its Open source view would vanish from that case's own AMBER
+            # reviewers, and the vanishing would tell them somebody above their clearance had pasted the same
+            # thread.
             label = strictest(existing[1], classification) or classification
             result = CaptureResult(existing[0], deduplicated=True,
                                    classification=label,
@@ -520,9 +458,8 @@ class CaptureService:
                             char_start, char_end, extractor, extractor_version,
                             score)
                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                    # A link's password or token is not kept in a derived
-                    # row either; the document holds the text as pasted
-                    # (graph-url-selector-keeps-credentials, 2026-10-03).
+                    # A link's password or token is not kept in a derived row either; the document holds the text
+                    # as pasted.
                     (document_id, h.selector_type,
                      redact_url_credentials(h.raw_value), h.norm_value,
                      h.char_start, h.char_end, EXTRACTOR, EXTRACTOR_VERSION,
@@ -544,22 +481,15 @@ class CaptureService:
                  classification: str) -> tuple[list[UUID], int]:
         """One proposal per NEW selector value.
 
-        A selector already recorded in this case is not proposed again --
-        the observation is worth storing as an extraction, but asking an
-        analyst to re-triage a handle they accepted last week is how a
-        triage queue becomes something people stop opening.
+        A selector already recorded in this case is not proposed again: the observation is worth storing as an
+        extraction, but asking an analyst to re-triage a handle they accepted last week is how a triage queue
+        becomes something people stop opening.
 
-        Each proposal carries the capture's `classification`, and Accept
-        writes its element at that label unless the reviewer raises it
-        (ux08-triage:accept-downgrades-classification and the owner's
-        gap-capture-classification, 2026-09-23). The capture form asked
-        for a classification, stored it on the document, and the payload
-        never carried it, so a RED capture's selectors were accepted at
-        AMBER.
+        Each proposal carries the capture's `classification`, and Accept writes its element at that label unless
+        the reviewer raises it. Without it a RED capture's selectors would be accepted at AMBER.
 
-        One transaction for the batch: all of a capture's proposals land
-        together or none do, and the live channel folds their
-        announcements into one event rather than one per selector.
+        One transaction for the batch: all of a capture's proposals land together or none do, and the live
+        channel folds their announcements into one event rather than one per selector.
         """
         with self._c.transaction():
             return self._propose_each(case_id, document_id, text, hits,
@@ -571,9 +501,8 @@ class CaptureService:
         made: list[UUID] = []
         skipped = 0
         seen: set[tuple[str, str]] = set()
-        # Every URL in the capture, once, so a context window that cuts one
-        # is widened to the whole URL before its credentials are redacted
-        # (graph-url-selector-keeps-credentials, 2026-10-03).
+        # Every URL in the capture, once, so a context window that cuts one is widened to the whole URL before its
+        # credentials are redacted.
         urls = [m.span() for m in URL_IN_TEXT.finditer(text)]
         for h in hits:
             key = (h.selector_type, h.norm_value)
@@ -613,9 +542,8 @@ class CaptureService:
                     "classification": classification,
                     "attrs": {
                         "selector_type": h.selector_type,
-                        # Accept copies attrs onto the entity, so a URL's
-                        # password or token is redacted here, not kept
-                        # (graph-url-selector-keeps-credentials, 2026-10-03).
+                        # Accept copies attrs onto the entity, so a URL's password or token is redacted here, not
+                        # kept.
                         "raw_value": redact_url_credentials(h.raw_value),
                         "char_start": h.char_start,
                         "char_end": h.char_end,
@@ -636,19 +564,15 @@ class CaptureService:
 
 def _context(text: str, start: int, end: int, window: int = 45, *,
              urls: list[tuple[int, int]] | None = None) -> str:
-    """The matched span with its surroundings, whitespace-collapsed. A
-    reviewer deciding whether a handle is real needs to see that it came
-    from a sentence rather than a quoted signature block.
+    """The matched span with its surroundings, whitespace-collapsed. A reviewer deciding whether a handle is real
+    needs to see that it came from a sentence rather than a quoted signature block.
 
-    It is copied into the proposal's rationale and, on accept, into the
-    claim's, so a URL in it is shown without its password or token
-    (graph-url-selector-keeps-credentials, 2026-10-03). A URL the window
-    cuts is shown whole, redacted, when it is short: cut after its scheme,
-    the userinfo no longer looks like a URL's and would escape the
-    redaction. A long one is left out of the window instead of widened to,
-    because a paste of one huge token with a match after every `)` would
-    otherwise copy the whole token into every proposal's rationale.
-    `urls` is every URL span in `text`, computed once per capture."""
+    It is copied into the proposal's rationale and, on accept, into the claim's, so a URL in it is shown without
+    its password or token. A URL the window cuts is shown whole, redacted, when it is short: cut after its
+    scheme, the userinfo no longer looks like a URL's and would escape the redaction. A long one is left out of
+    the window instead of widened to, because a paste of one huge token with a match after every `)` would
+    otherwise copy the whole token into every proposal's rationale. `urls` is every URL span in `text`, computed
+    once per capture."""
     lo = max(0, start - window)
     hi = min(len(text), end + window)
     if urls is None:
@@ -681,14 +605,11 @@ _USERINFO_STOPS = ")'"
 def _widen_over_userinfo(text: str, start: int, stop: int) -> int:
     """Where a URL match really ends when it was cut inside its userinfo.
 
-    The URL pattern stops at `)` and `'`, so `https://alice:pa)ss@host/x`
-    matched `https://alice:pa` and left `ss@host/x` to be found as an
-    email address: the password in two selectors, neither redacted
-    (graph-url-selector-keeps-credentials, 2026-10-03). When the characters
-    after the stop, up to the next space or quote, reach an `@` before any
-    `/`, `?` or `#`, that `@` closes this URL's userinfo and the match runs
-    to the end of that token. Otherwise `stop` is returned unchanged, so a
-    URL in brackets or quotes ends where it always did."""
+    The URL pattern stops at `)` and `'`, so `https://alice:pa)ss@host/x` matches `https://alice:pa` and would
+    leave `ss@host/x` to be found as an email address: the password in two selectors, neither redacted. When the
+    characters after the stop, up to the next space or quote, reach an `@` before any `/`, `?` or `#`, that `@`
+    closes this URL's userinfo and the match runs to the end of that token. Otherwise `stop` is returned
+    unchanged, so a URL in brackets or quotes ends where the pattern stopped."""
     if stop >= len(text) or text[stop] not in _USERINFO_STOPS:
         return stop
     end = stop

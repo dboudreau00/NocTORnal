@@ -1,22 +1,11 @@
-"""Administration, Integrations: the outbound channels, the outbox, Jira,
-and a case owner's veto (F8 and F7, 2026-09-24).
+"""Administration, Integrations: the outbound channels, the outbox, Jira, and a case owner's veto.
 
-Every route under /integrations runs require_global("integration.manage"),
-which is step-up and held by SYS_ADMIN. Nothing here returns a password, a
-webhook secret, a raw webhook URL, the Jira credential or its ciphertext:
-the overview carries configuration facts and the readiness rows'
-verdicts, which the register and this page share through readiness.check
-(one reader per fact).
-
-The case router carries the one case-scoped piece: a case owner (case.update)
-keeping a case out of Jira, readable by anyone who reads the case.
-
-Jira's administration runs on a system connection (F51, 2026-10-02): the
-links it lists, closes and counts and the deliveries it counts are every
-case's and every recipient's, which row-level security shows the
-administrator's request role only for their own cases and inbox. A retire
-that closed only those links would leave the rest open for the next
-event to comment on. Nothing it returns names a case or carries content.
+Every route under /integrations requires `integration.manage` (step-up, SYS_ADMIN), and nothing
+here returns a password, a webhook secret, a raw webhook URL or the Jira credential. The case
+router carries the one case-scoped piece: a case owner (case.update) keeping a case out of Jira.
+Jira's administration runs on a system connection, because its links and deliveries span every
+case and recipient, which row-level security would narrow to the administrator's own; nothing it
+returns names a case or carries content.
 """
 from __future__ import annotations
 
@@ -44,7 +33,7 @@ router = APIRouter(prefix="/integrations", tags=["integrations"])
 case_router = APIRouter(tags=["integrations"])
 
 _MANAGE = require_global("integration.manage")
-#: Jira's administration, across every case and recipient (F51, 2026-10-02).
+#: Jira's administration, across every case and recipient.
 _ADMIN_CONN = system_conn(SystemPurpose.NOTIFY_ADMIN)
 
 
@@ -95,7 +84,7 @@ def overview(
     }
 
 
-# --- Jira (F7) ----------------------------------------------------------------
+# --- Jira ---------------------------------------------------------------------
 
 class JiraConfirm(BaseModel):
     ceiling: str
@@ -273,7 +262,7 @@ def jira_links(
         raise _problem(exc) from exc
 
 
-# --- the case owner's veto (F7) -----------------------------------------------
+# --- the case owner's veto ----------------------------------------------------
 
 class CaseRoutingIn(BaseModel):
     jira_blocked: bool

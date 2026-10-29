@@ -1,10 +1,8 @@
-"""Shared helpers for the forum adapters' tests (F3 and F4,
-2026-09-24). Importable, no test functions.
+"""Shared helpers for the forum adapters' tests. Importable, no test functions.
 
-Every page a test serves is a saved fixture under tests/fixtures/xenforo or
-tests/fixtures/mybb, on hosts nobody can register, handed to RunContext
-through its injected fetcher: no test contacts a forum, and the collection
-foundation's socket guard refuses anything but loopback besides.
+Every page a test serves is a saved fixture under tests/fixtures/xenforo or tests/fixtures/mybb, on
+hosts nobody can register, handed to RunContext through its injected fetcher: no test contacts a
+forum, and the collection foundation's socket guard refuses anything but loopback besides.
 """
 from __future__ import annotations
 

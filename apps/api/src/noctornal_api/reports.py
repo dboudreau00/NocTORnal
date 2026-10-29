@@ -1,89 +1,51 @@
-"""Report builder with TLP-aware redaction (Phase 6, docs/08 + docs/13).
+"""Report builder with TLP-aware redaction (docs/08 + docs/13).
 
 ## Redaction is STRUCTURAL, never textual
 
-The tempting implementation searches the finished report for material above
-the target classification and removes it. That is not redaction, it is
-hoping -- a name appears in a label, an attribute, a rationale, a selector
-value, an evidence title and a URL, and a filter that catches five of those
-has still disclosed.
-
-So nothing above the target ever enters the document. The report is built
-from a projection computed at the TARGET's clearance, using the same
-`GraphService` an analyst at that level would see. If the material is not
-in the projection it cannot be in the report, and that property does not
-depend on anybody remembering to escape anything.
+Searching the finished report for material above the target and removing it is not redaction: a name appears
+in a label, an attribute, a rationale, a selector value, an evidence title and a URL, and a filter that catches
+five of those has still disclosed. So nothing above the target ever enters the document. The report is built
+from a projection computed at the TARGET's clearance with the same `GraphService` an analyst at that level
+would see; material that is not in the projection cannot be in the report.
 
 ## A report that silently omits is worse than one that refuses
 
-A redacted report is a disclosure document. One that quietly drops the two
-ties that made an actor central, and then presents a centrality figure
-computed without them, is not merely incomplete -- it is misleading, and
-misleading in the direction of whoever chose the target level.
-
-Every report therefore carries a **redaction statement**: how many elements
-were withheld and at what level the document was built. Never which
-classification, never which compartment, never where -- the same discipline
-as U2 (migration 0030). And every figure in the report is labelled as
-computed over the redacted graph, because a number carried across a
-classification boundary without that label is a number that will be quoted
-without it.
+A redacted report that quietly drops the ties that made an actor central, and presents a centrality figure
+computed without them, is misleading. Every report therefore carries a **redaction statement**: how many
+elements were withheld and at what level the document was built. Never which classification, never which
+compartment, never where (the same discipline as migration 0030). Every figure is labelled as computed over
+the redacted graph, because a number carried across a classification boundary without that label will be
+quoted without it.
 
 ## The evidence register is the prosecution-grade part
 
-decision 13 targets US FRE 902(13)/(14) and Canada Evidence Act ss. 31.1-31.8.
-Both turn on the integrity of the electronic record, so the register lists
-every exhibit's SHA-256 and BLAKE3 and the custody chain's head hash. That
-is what makes a hash-value certification possible later; a report that
-describes exhibits without identifying them evidentially is a summary, not
-a disclosure.
+decision 13 targets US FRE 902(13)/(14) and Canada Evidence Act ss. 31.1-31.8. Both turn on the integrity of
+the electronic record, so the register lists every exhibit's SHA-256 and BLAKE3 and the custody chain's head
+hash, which is what makes a hash-value certification possible later.
 
 ## The case header is case content
 
-This was the hole (F19, 2026-07-26). The document's mark is DERIVED from
-what actually went into it, which is right -- but it was derived from the
-graph elements and the exhibits only, while `report.case` copied the case
-code, title, summary, legal basis and authority reference in unconditionally
-and unfiltered. A RED case with nothing at or below the target therefore
-produced a document containing the operation's codename and its summary,
-computed a mark of TLP:CLEAR because the graph body was empty, and handed
-that laundered value to the egress gate.
+The document's mark is DERIVED from what went into it, so the header (case code, title, summary, legal basis,
+authority reference) must be filtered too: copied in unconditionally, it would let a RED case with nothing at
+or below the target produce a document naming the operation, marked TLP:CLEAR because the graph body was
+empty. The header is material classified at the case's own level:
 
-So the header is now treated as what it is: material classified at the
-case's own level.
+- If the case's labels are within the target, the header goes in AND the mark is floored at the case's
+  classification. A document quoting an AMBER case's title is an AMBER document however empty its graph.
+- If they are not, the narrative fields are WITHHELD and the redaction statement says so. An AMBER_STRICT case
+  can still produce a GREEN report; it just does not name the operation.
 
-- If the case's labels are within the target, the header goes in AND the
-  mark is floored at the case's classification. A document quoting an AMBER
-  case's title is an AMBER document however empty its graph.
-- If they are not, the narrative fields are WITHHELD and the redaction
-  statement says so. That still leaves the feature intact -- an
-  AMBER_STRICT case can produce a GREEN report -- it just produces one that
-  does not name the operation.
-
-A case code IS intelligence. `transports.py` reasons the same way about
-putting one in an email subject line: "OP-KESTREL" tells a reader that an
-operation by that name exists and that this person works on it.
-
-The same holds for everything written ABOUT the case rather than about one
-element: the assumptions (0056) and, since final review C2 (2026-09-23),
-the competing hypotheses. A hypothesis statement has no label of its own,
-so it went into every document the console prepared, including a RED
-case's TLP:CLEAR one. Both now travel with the header and are counted when
-it is withheld, and the matrix's evidence is read at the target like
-everything else.
+A case code IS intelligence: `transports.py` reasons the same way about an email subject line. The same holds
+for everything written ABOUT the case rather than about one element: the assumptions (0056) and the competing
+hypotheses, which have no label of their own. Both travel with the header and are counted when it is withheld,
+and the matrix's evidence is read at the target like everything else.
 
 ## Egress
 
-`can_egress()` decides whether the finished document may leave, and it is
-called with the DOCUMENT's classification -- which is the target level, not
-the case's. That is the whole point of building at a lower level: an
-AMBER_STRICT case can produce a GREEN report, and the GREEN report may
-leave when the case never could.
-
-It is also called with the document's COMPARTMENTS, which `check_egress`
-used to drop on the floor -- so the two call sites of the one shared gate
-disagreed about one of its three arguments, and `DENY_COMPARTMENTED` could
-never fire for a report.
+`can_egress()` decides whether the finished document may leave. It is called with the DOCUMENT's
+classification (the target level, not the case's) and its COMPARTMENTS, so `DENY_COMPARTMENTED` can fire for a
+report. That is the point of building at a lower level: an AMBER_STRICT case can produce a GREEN report, and
+the GREEN report may leave when the case never could.
 """
 from __future__ import annotations
 
@@ -123,10 +85,7 @@ WITHHELD_MARK = "[withheld: above this document's ceiling]"
 
 
 def _count(n: int, one: str, many: str) -> str:
-    """A count and its noun in agreement. The statement is printed at the
-    top of every disclosure, and "0 entit(y/ies), 0 relationship(s) and 1
-    exhibit(s)" is the first line a reader meets (README screenshot
-    review, 2026-09-23)."""
+    """A count and its noun in agreement: the statement is printed at the top of every disclosure."""
     return f"{n} {one if n == 1 else many}"
 
 
@@ -153,39 +112,25 @@ class Redaction:
     #: reader who is not told this reads an untitled report as an
     #: administrative quirk rather than as a redaction.
     header_withheld: bool = False
-    #: How many still-standing assumptions (OPEN or CONFIRMED) went with
-    #: the header. An assumption is free text an analyst wrote ABOUT the
-    #: case -- "the OP-KESTREL key is the operator's" -- so it is case
-    #: content at the case's own level, exactly like the title, and it is
+    #: How many still-standing assumptions (OPEN or CONFIRMED) went with the header. An assumption is free text
+    #: an analyst wrote ABOUT the case, so it is case content at the case's own level, like the title, and is
     #: withheld on the same condition. Counted so the statement can say so.
     assumptions_withheld: int = 0
-    #: How many live competing hypotheses went with the header. A
-    #: hypothesis statement ("OP-KESTREL is run by Ivan Petrov") is free
-    #: text about the case with no label of its own, exactly like an
-    #: assumption, and until final review C2 (2026-09-23) it went in
-    #: whether or not the header did: a RED case prepared at GREEN with the
-    #: console's defaults saved a TLP:CLEAR file naming the operation and
-    #: its suspect.
+    #: How many live competing hypotheses went with the header. A hypothesis statement is free text about the
+    #: case with no label of its own, like an assumption, so it goes in only when the header does.
     hypotheses_withheld: int = 0
-    #: How many items of evidence in the hypothesis matrix rest on material
-    #: above the ceiling and were left out of its scores (C2). Counted
-    #: apart from the entities because an element the projection does not
-    #: count (a deleted node, an inferred tie) can still carry a stance.
-    #: Like those counts it follows the case's withheld-disclosure setting,
-    #: and is 0 under NONE.
+    #: How many items of evidence in the hypothesis matrix rest on material above the ceiling and were left out
+    #: of its scores. Counted apart from the entities because an element the projection does not count (a
+    #: deleted node, an inferred tie) can still carry a stance. Like those counts it follows the case's
+    #: withheld-disclosure setting, and is 0 under NONE.
     hypothesis_evidence_withheld: int = 0
-    #: Exhibits above the ceiling exist, said without a number. The case's
-    #: withheld-disclosure setting (0030) decides what the document may say
-    #: about them: nothing under NONE, that there are some under PRESENCE
-    #: (this flag, with `evidence_withheld` left at 0), the figure only under
-    #: COUNT (2026-10-07: the figure used to be stated
-    #: whatever the setting).
+    #: Exhibits above the ceiling exist, said without a number. The case's withheld-disclosure setting (0030)
+    #: decides what the document may say about them: nothing under NONE, that there are some under PRESENCE
+    #: (this flag, with `evidence_withheld` left at 0), the figure only under COUNT.
     evidence_some_withheld: bool = False
-    #: The same for the entities, the relationships and the hypothesis
-    #: matrix's evidence (2026-10-08): the three figures that were still
-    #: stated exactly under PRESENCE. Each of the three counts above is 0
-    #: unless the setting is COUNT, and each flag is True only under
-    #: PRESENCE and only when there is something above the ceiling.
+    #: The same for the entities, the relationships and the hypothesis matrix's evidence. Each of the three
+    #: counts above is 0 unless the setting is COUNT, and each flag is True only under PRESENCE and only when
+    #: there is something above the ceiling.
     nodes_some_withheld: bool = False
     edges_some_withheld: bool = False
     hypothesis_evidence_some_withheld: bool = False
@@ -217,10 +162,8 @@ class Redaction:
                     f"prepared to include material up to TLP:{self.ceiling_tlp}. "
                     f"Nothing in the case file was above that ceiling, so "
                     f"nothing has been withheld from it.")
-        # Every count below agrees with its noun, and the header's aside is
-        # a sentence of its own rather than a " -- " clause: the statement
-        # is the first thing a disclosure says (README screenshot review,
-        # 2026-09-23).
+        # Every count agrees with its noun, and the header's aside is a sentence of its own rather than a " -- "
+        # clause: the statement is the first thing a disclosure says.
         header = self._header_sentences()
         matrix = ""
         n = self.hypothesis_evidence_withheld
@@ -288,13 +231,9 @@ class Redaction:
         return header
 
     def _statement_saying_nothing(self) -> str:
-        """The statement of a case that discloses nothing about material
-        above the ceiling (0030, NONE). It used to read "nothing has been
-        withheld" whenever its counts were zero, and under NONE they are zero
-        whatever was withheld, so it said so of a document that had left
-        entities or exhibits out (2026-10-08). It says neither that anything
-        was withheld nor that nothing was: the same sentence, whether or not
-        the case holds anything above the ceiling."""
+        """The statement of a case that discloses nothing about material above the ceiling (0030, NONE). Under
+        NONE the counts are zero whatever was withheld, so it says neither that anything was withheld nor that
+        nothing was: the same sentence whether or not the case holds anything above the ceiling."""
         return (
             f"This document is marked TLP:{self.built_at_tlp} and was prepared "
             f"to include material up to TLP:{self.ceiling_tlp}, from a case "
@@ -314,10 +253,8 @@ class Report:
     relationships: list[dict] = field(default_factory=list)
     evidence: list[dict] = field(default_factory=list)
     hypotheses: dict = field(default_factory=dict)
-    #: The still-standing assumptions (`assumptions.REPORTABLE_STATUSES`):
-    #: what the findings rest on, with who made them and who reviewed
-    #: them. A document that does not say what it assumes is a document
-    #: whose reader cannot tell a finding from a premise.
+    #: The still-standing assumptions (`assumptions.REPORTABLE_STATUSES`): what the findings rest on, with who
+    #: made them and who reviewed them, so a reader can tell a finding from a premise.
     assumptions: list[dict] = field(default_factory=list)
     #: The compartments of everything actually in the document. Carried on
     #: the report rather than re-derived at the gate, because the gate is
@@ -374,12 +311,8 @@ class ReportBuilder:
               compartments: frozenset[str] = frozenset()) -> Report:
         """Build at `target_tlp`. Nothing above it is read at any point.
 
-        The projection is computed with the TARGET as the clearance, which
-        means the redaction is done by the same code path that protects a
-        live analyst -- not by a second, parallel filter that could drift
-        from it. Reusing the enforcement is the point: a redaction routine
-        with its own idea of what AMBER means is a redaction routine that
-        will one day disagree with the access gate.
+        The projection is computed with the TARGET as the clearance, so redaction is done by the same code path
+        that protects a live analyst, not by a second filter that could drift from the access gate.
         """
         try:
             target = tlp_from_name(target_tlp)
@@ -396,46 +329,29 @@ class ReportBuilder:
         case_tlp = case[4]
         case_compartments = frozenset(case[10] or [])
 
-        # The case header -- code, title, summary, legal basis, authority
-        # reference -- is material classified at the case's own level, not
-        # free metadata. It goes in only when the case's labels are within
-        # what was asked for, on BOTH axes.
+        # The case header (code, title, summary, legal basis, authority reference) is material classified at the
+        # case's own level, not free metadata. It goes in only when the case's labels are within what was asked
+        # for, on BOTH axes.
         #
-        # `compartments` is the requester's read-in, and it is a real
-        # parameter rather than a hardcoded empty set. The first version of
-        # this fix hardcoded it, which closed the leak and broke the
-        # feature: an analyst read into a compartment could not produce a
-        # report naming their OWN case, and `report.compartments` was
-        # therefore always empty, so `DENY_COMPARTMENTED` remained
-        # unreachable on the built path — the exact defect the same fix had
-        # just repaired in `check_egress`. Closing a hole by refusing
-        # everybody is its own defect.
+        # `compartments` is the requester's read-in and is a real parameter, not a hardcoded empty set:
+        # otherwise an analyst read into a compartment could not report on their OWN case, and
+        # `report.compartments` would always be empty, leaving `DENY_COMPARTMENTED` unreachable on the built
+        # path.
         header_ok = (tlp_from_name(case_tlp) <= target
                      and case_compartments <= compartments)
-        # Every element reads at the STRICTER of its own label and its
-        # case's, and the union of their compartments, as the access gate
-        # and exhibit export compose them (`deps.effective_labels`, F19).
-        # evidence-report-case-raise-leak (2026-10-03): this builder chose
-        # by the element's own label, so after an AMBER case was raised to
-        # RED, everything created before the raise kept AMBER and went out
-        # in a TLP:AMBER release (exhibit titles, hashes, node labels) while
-        # exporting the same exhibit was refused as RED. `enforce_tlp_floor`
-        # keeps a new element at or above its case, and lowering a case is
-        # refused, so an element below its case's label predates a raise.
-        # Composed, every element of a case above the ceiling is above it
-        # too, which is exactly the header's condition: when the header is
-        # withheld, so is every element, and the mark below is taken from
-        # what is left.
+        # Every element reads at the STRICTER of its own label and its case's, and the union of their
+        # compartments, as the access gate and exhibit export compose them (`deps.effective_labels`). Choosing by
+        # the element's own label would let an element created before a case was raised from AMBER to RED go
+        # out in a TLP:AMBER release. `enforce_tlp_floor` keeps a new element at or above its case, and lowering
+        # a case is refused, so an element below its case's label predates a raise. Composed, every element of a
+        # case above the ceiling is above it too, which is the header's condition: when the header is withheld
+        # so is every element, and the mark below is taken from what is left.
         elements_ok = header_ok
 
-        # `target_tlp` is a CEILING on what may be included, not the mark the
-        # document gets. The mark is derived below from what actually went
-        # in, so asking for a report "up to RED" on a case holding nothing
-        # above GREEN produces a GREEN document. Over-classification is then
-        # impossible by construction rather than prevented by a check, which
-        # matters because over-classification is how material stops reaching
-        # the people who need it -- and unlike under-classification, nothing
-        # ever alarms about it.
+        # `target_tlp` is a CEILING on what may be included, not the mark the document gets. The mark is derived
+        # below from what actually went in, so asking for a report "up to RED" on a case holding nothing above
+        # GREEN produces a GREEN document. Over-classification is impossible by construction, which matters
+        # because it is how material stops reaching the people who need it and nothing ever alarms about it.
 
         # The redacted view, from the SAME code path that protects a live
         # analyst.
@@ -460,17 +376,11 @@ class ReportBuilder:
             sub = Subgraph(nodes=[], edges=[], projection=sub.projection,
                            truncated=False)
 
-        # The compartment filter mirrors the projection, which is built at
-        # the requester's read-in. Without it the exhibit register was the
-        # one place compartmented material entered a report: the graph
-        # filtered it and the evidence query did not.
-        # `purged_at` travels with each row so the register can say which
-        # exhibits are destroyed. A purged exhibit stays IN the register
-        # (the record of it is meant to outlive the bytes, and dropping it
-        # would miscount it as withheld above the ceiling), but it no
-        # longer makes anything "Evidenced", and until 2026-09-22 the
-        # register did not say so: an entity attached only to a purged
-        # exhibit printed NO beside an exhibit list that still showed it.
+        # The compartment filter mirrors the projection, which is built at the requester's read-in; without it
+        # compartmented material would enter through the exhibit register. `purged_at` travels with each row so
+        # the register can say which exhibits are destroyed. A purged exhibit stays IN the register (the record is
+        # meant to outlive the bytes, and dropping it would miscount it as withheld above the ceiling), but it no
+        # longer makes anything "Evidenced".
         evidence_rows = self._c.execute(
             """SELECT id, title, sha256, blake3, media_type, byte_size,
                       acquired_at, acquisition_method, classification,
@@ -481,23 +391,18 @@ class ReportBuilder:
                 ORDER BY acquired_at, id""",
             (case_id, target.name, sorted(compartments))).fetchall() \
             if elements_ok else []
-        # EVERY exhibit in the case, on a system connection, because the
-        # difference from what was included is the withheld count the report
-        # states; under row-level security the request connection counts only
-        # what the requester may read and the report would say nothing was
-        # withheld (S1, 2026-09-25).
+        # EVERY exhibit in the case, on a system connection, because the difference from what was included is the
+        # withheld count the report states; under row-level security the request connection counts only what the
+        # requester may read and the report would say nothing was withheld.
         with system_connection(SystemPurpose.WITHHELD, reuse=self._c) as counter:
             evidence_total = counter.execute(
                 "SELECT count(*) FROM core.evidence WHERE case_id = %s",
                 (case_id,)).fetchone()[0]
 
-        # The competing hypotheses (final review C2, 2026-09-23). A
-        # statement is free text about the case with no label of its own,
-        # so it is case content at the case's level and goes in on the
-        # header's condition, exactly like an assumption; when the header
-        # is withheld the builder only COUNTS them. The matrix's evidence is
-        # read at the TARGET through `ach_cells`, the same filter the live
-        # ACH read uses, so a label above the ceiling is never read and an
+        # The competing hypotheses. A statement is free text about the case with no label of its own, so it is
+        # case content at the case's level and goes in on the header's condition, like an assumption; when the
+        # header is withheld the builder only COUNTS them. The matrix's evidence is read at the TARGET through
+        # `ach_cells`, the same filter the live ACH read uses, so a label above the ceiling is never read and an
         # above-ceiling stance does not move a printed score.
         hypotheses: dict = {}
         hypotheses_withheld = 0
@@ -514,13 +419,11 @@ class ReportBuilder:
                         WHERE case_id = %s AND status::text <> 'SUPERSEDED'""",
                     (case_id,)).fetchone()[0]
 
-        # The document's own mark: the highest classification of anything
-        # actually in it, never the ceiling that was asked for. The case
-        # header counts as "in it" -- deriving the mark from the graph body
-        # alone is what let a RED case emit a TLP:CLEAR document carrying
-        # its own codename and summary. So does every element whose label
-        # the hypothesis matrix carries: a stance can rest on an element
-        # the projection does not return (a deleted node, an inferred tie).
+        # The document's own mark: the highest classification of anything actually in it, never the ceiling asked
+        # for. The case header counts as "in it": deriving the mark from the graph body alone would let a RED
+        # case emit a TLP:CLEAR document carrying its own codename and summary. So does every element whose label
+        # the hypothesis matrix carries, since a stance can rest on an element the projection does not return (a
+        # deleted node, an inferred tie).
         included = ([n["classification"] for n in sub.nodes]
                     + [e["classification"] for e in sub.edges]
                     + [r[8] for r in evidence_rows]
@@ -529,25 +432,18 @@ class ReportBuilder:
         marking = (max((tlp_from_name(c) for c in included), default=Tlp.CLEAR)
                    if included else Tlp.CLEAR)
 
-        # The register (0056). An assumption is free text written ABOUT the
-        # case -- it names the operation, its subjects, its premises -- so
-        # it is case content at the case's own level and goes in on exactly
-        # the header's condition. When the header is withheld the builder
+        # The register (0056). An assumption is free text written ABOUT the case, so it is case content at the
+        # case's own level and goes in on exactly the header's condition. When the header is withheld the builder
         # only COUNTS them, so the text it must not include is never read.
         register = AssumptionService(self._c)
         assumptions = register.for_report(case_id) if header_ok else []
         assumptions_withheld = 0 if header_ok else register.count_reportable(case_id)
 
-        # The exhibit figure follows the case's withheld-disclosure setting
-        # (0030): NONE says nothing, PRESENCE that some are above the
-        # ceiling, and only COUNT the number. It was stated exactly under
-        # all three (2026-10-07), so a case set to NONE
-        # had a register showing 0 beside a document saying "2 exhibits".
+        # The exhibit figure follows the case's withheld-disclosure setting (0030): NONE says nothing, PRESENCE
+        # that some are above the ceiling, and only COUNT the number.
         hidden_exhibits = evidence_total - len(evidence_rows)
-        # All three figures, and the matrix's, by the one rule (decision 179,
-        # and 2026-10-08 for the three that were still exact under
-        # PRESENCE): the number only under COUNT, that there are some under
-        # PRESENCE, and under NONE neither.
+        # All three figures, and the matrix's, follow the one rule (decision 179): the number only under COUNT,
+        # that there are some under PRESENCE, and under NONE neither.
         counted = withheld.mode == DISCLOSURE_COUNT
         some = withheld.mode == DISCLOSURE_PRESENCE
         hidden_nodes = withheld.nodes or 0
@@ -578,11 +474,9 @@ class ReportBuilder:
               "has_evidence": n.get("has_evidence", False)}
              for n in sub.nodes),
             key=lambda a: (a["label"].lower(), a["id"]))
-        # Ordered by the labels a reader sees, then by id. The projection's
-        # edge query has no ORDER BY, so without this two builds of the same
-        # case could list the same ties in different orders, and the
-        # document an analyst previewed would not be byte-for-byte the one
-        # the egress check cleared (ux15-report, 2026-09-22).
+        # Ordered by the labels a reader sees, then by id. The projection's edge query has no ORDER BY, so
+        # without this two builds of the same case could list the same ties in different orders, and the document
+        # an analyst previewed would not be byte-for-byte the one the egress check cleared.
         label_of = {a["id"]: a["label"] for a in actors}
         relationships = sorted(
             ({"type": e["edge_type"], "src": str(e["src_node_id"]),
@@ -609,13 +503,10 @@ class ReportBuilder:
                 "summary": case[2] if header_ok else None,
                 "status": case[3] if header_ok else None,
                 "classification": case_tlp,
-                # docs/08: legal basis and retention are NOT NULL for a
-                # reason. A disclosure document that does not state the
-                # authority it was collected under is not disclosable --
-                # which is precisely why withholding them has to be stated
-                # in the redaction statement rather than left to look like
-                # an empty field. A report built below its case's own
-                # classification is a briefing, not a disclosure.
+                # docs/08: legal basis and retention are NOT NULL for a reason. A disclosure document that does
+                # not state the authority it was collected under is not disclosable, so withholding them is
+                # stated in the redaction statement rather than left to look like an empty field. A report built
+                # below its case's own classification is a briefing, not a disclosure.
                 "legal_basis": case[5] if header_ok else withheld_mark,
                 "authority_ref": case[6] if header_ok else withheld_mark,
                 "retention_until": case[7].isoformat()
@@ -625,15 +516,10 @@ class ReportBuilder:
                 "opened": case[9].isoformat()
                 if header_ok and case[9] else None,
             },
-            # The union of what actually went in: the case header when it
-            # is included, plus every exhibit's, entity's and tie's own
-            # (2026-10-07: the last two were left out,
-            # so a compartmented entity left through `export` and `smtp`
-            # with its label in the document). The projection's nodes and
-            # edges cannot contribute beyond the requester's read-in because
-            # `GraphService` filtered on it, and an exhibit is in the
-            # register for the same reason, so this is bounded by
-            # `compartments` and is the honest subset of it, not the whole.
+            # The union of what actually went in: the case header when it is included, plus every exhibit's,
+            # entity's and tie's own. The projection's nodes and edges cannot contribute beyond the requester's
+            # read-in because `GraphService` filtered on it, and an exhibit is in the register for the same
+            # reason, so this is bounded by `compartments` and is the honest subset of it, not the whole.
             compartments=frozenset(
                 (case_compartments if header_ok else frozenset())
                 | {c for r in evidence_rows for c in (r[9] or [])}
@@ -673,13 +559,11 @@ class ReportBuilder:
                     count_withheld: bool) -> _Matrix:
         """The ACH matrix, if the case has one, over what `target` may see.
 
-        Included because a report that states a conclusion without the
-        alternatives that were considered and ruled out is the confirmation
-        bias ACH exists to correct, delivered on letterhead.
+        Included because a report that states a conclusion without the alternatives considered and ruled out
+        is the confirmation bias ACH exists to correct, delivered on letterhead.
 
-        `count_withheld` is the case's withheld-disclosure setting (0030):
-        under NONE the element counts are never computed, so this one is
-        not either, and the report says no more than the graph does.
+        `count_withheld` is the case's withheld-disclosure setting (0030): under NONE the element counts are
+        never computed, so this one is not either, and the report says no more than the graph does.
         """
         from noctornal_api.ach import STANCE_LABEL, EvidenceItem, as_response, score
 
@@ -697,24 +581,16 @@ class ReportBuilder:
                 assertion_id=cell.assertion_id, label=cell.label,
                 reliability=cell.reliability, credibility=cell.credibility))
             item.stances[cell.hypothesis_id] = cell.stance
-        # A REJECTED hypothesis is printed for the record and scored as
-        # `retired`, never as a live competitor: once the console could
-        # reject one, a ruled-out theory could otherwise head the ranking
-        # and hold rows "unfinished" (ux11-ach:no-hypothesis-lifecycle-in-
-        # console, 2026-09-23).
+        # A REJECTED hypothesis is printed for the record and scored as `retired`, never as a live competitor: a
+        # ruled-out theory could otherwise head the ranking and hold rows "unfinished".
         body = as_response(score(
             [(r[0], r[1]) for r in rows if r[2] != "REJECTED"],
             list(items.values()),
             retired=[(r[0], r[1]) for r in rows if r[2] == "REJECTED"]))
         body["statuses"] = {str(r[0]): r[2] for r in rows}
-        # The reason recorded with each hypothesis's CURRENT status, from
-        # the change that set it. Rejecting needs one, and the console says
-        # it is printed here; it was kept only in the audit trail and on
-        # the card, so a document listing a REJECTED hypothesis never said
-        # what ruled it out (verifier of ux11-ach:no-hypothesis-lifecycle-
-        # in-console, 2026-09-23). Free text about the case, like the
-        # statement beside it, so it goes in on the header's condition,
-        # which is the only condition this section is built under.
+        # The reason recorded with each hypothesis's CURRENT status, from the change that set it, so a document
+        # listing a REJECTED hypothesis says what ruled it out. Free text about the case, like the statement
+        # beside it, so it goes in on the header's condition, the only condition this section is built under.
         current = {r[0]: r[2] for r in rows}
         changes = self._c.execute(
             """SELECT DISTINCT ON (object_id)
@@ -728,10 +604,8 @@ class ReportBuilder:
         body["status_notes"] = {
             str(hid): note for hid, status, note in changes
             if note and status == current.get(hid)}
-        # The reasoning behind each stance, for every cell that has one
-        # (ux11-ach:stance-note-erased-on-rescore, 2026-09-23). Only cells
-        # `ach_cells` returned at this target, against a hypothesis the
-        # section prints.
+        # The reasoning behind each stance, for every cell that has one. Only cells `ach_cells` returned at this
+        # target, against a hypothesis the section prints.
         statement = {r[0]: r[1] for r in rows}
         body["reasoning"] = [
             {"evidence": c.label, "hypothesis": statement[c.hypothesis_id],
@@ -772,24 +646,16 @@ class AchCell:
     label: str
     classification: str
     compartments: tuple[str, ...]
-    #: Why the analyst put the stance where it is. Read through the same
-    #: filter as the rest of the cell, so a note travels only with a cell
-    #: the reader may see (ux11-ach:stance-note-erased-on-rescore,
-    #: 2026-09-23: the note was written and then never read by anything).
+    #: Why the analyst put the stance where it is. Read through the same filter as the rest of the cell, so a
+    #: note travels only with a cell the reader may see.
     note: str | None = None
 
 
-#: Whether a matrix cell's assertion is about something a reader at
-#: %(clearance)s, read into %(compartments)s, may see: the projection's own
-#: rule (`GraphService.project`), so the matrix and the graph agree. A tie
-#: is visible only when both its ends are, because a rationale written
-#: about a tie can name either end.
-#:
-#: Final review C2 (2026-09-23). Both reads of the matrix, the report's and
-#: GET /ach, used to label a cell `coalesce(n.label, ...)` with no filter at
-#: all, so an AMBER analyst on an AMBER case received a RED node's label as
-#: `evidence[].label` while every graph, list and search view hid it, and
-#: above-ceiling stances moved the scores a released document printed.
+#: Whether a matrix cell's assertion is about something a reader at %(clearance)s, read into %(compartments)s,
+#: may see: the projection's own rule (`GraphService.project`), so the matrix and the graph agree. A tie is
+#: visible only when both its ends are, because a rationale written about a tie can name either end. Both reads
+#: of the matrix, the report's and GET /ach, use it, so a label above the reader's ceiling never reaches
+#: `evidence[].label` and above-ceiling stances never move a printed score.
 _ACH_CELL_VISIBLE = """
     (   (a.node_id IS NOT NULL
          AND n.classification <= %(clearance)s::core.tlp
@@ -828,21 +694,15 @@ def ach_cells(conn: psycopg.Connection, case_id: UUID, *, clearance: str,
     """The matrix cells a reader at `clearance`, read into `compartments`,
     may see. The ONE query both the report and GET /ach read the matrix
     through, so the two cannot disagree about what a stance may reveal."""
-    # A tie is labelled by both its ends and its type, "vellum_ram → leads →
-    # Meridian crew", not by the type alone: "leads" was one of six such
-    # ties on the demo case, and the report's reasoning table names each
-    # row (ux11-ach:evidence-row-is-a-name-not-a-claim, 2026-09-23). The
-    # ends are visible whenever the cell is: `_ACH_CELL_VISIBLE` admits a
-    # tie only when both are.
+    # A tie is labelled by both its ends and its type, e.g. "vellum_ram -> leads -> Meridian crew", not by the
+    # type alone, because the report's reasoning table names each row and one type can recur. The ends are
+    # visible whenever the cell is: `_ACH_CELL_VISIBLE` admits a tie only when both are.
     #
-    # So a tie's cell carries its ends' labels as well as its own, and its
-    # classification and compartments are the highest and the union of
-    # all three. The report marks itself from these and nothing else for
-    # an end the projection drops (a deleted, merged or dissolved node):
-    # with the tie's own mark alone, a GREEN tie to a deleted AMBER node
-    # printed the AMBER label in a document marked GREEN, which the egress
-    # check then cleared for a GREEN destination (verifier of ux11-ach,
-    # 2026-09-23). A stance note about a tie can name either end too.
+    # So a tie's cell carries its ends' labels as well as its own, and its classification and compartments are
+    # the highest and the union of all three. The report marks itself from these and nothing else for an end
+    # the projection drops (a deleted, merged or dissolved node): with the tie's own mark alone, a GREEN tie to
+    # a deleted AMBER node would print the AMBER label in a document marked GREEN. A stance note about a tie
+    # can name either end too.
     rows = conn.execute(
         """SELECT he.assertion_id, he.hypothesis_id, he.stance,
                   a.reliability, a.credibility,
@@ -872,13 +732,12 @@ def ach_cells(conn: psycopg.Connection, case_id: UUID, *, clearance: str,
 
 def ach_cells_withheld(conn: psycopg.Connection, case_id: UUID, *,
                        clearance: str, compartments: frozenset[str]) -> int:
-    """How many live pieces of matrix evidence `ach_cells` leaves out for
-    this reader. A count only: never which, never where.
+    """How many live pieces of matrix evidence `ach_cells` leaves out for this reader. A count only: never
+    which, never where.
 
-    Counted on a system connection with this reader's ceiling (S1,
-    2026-09-25): the stances it counts are the ones row-level security hides
-    from the reader's own connection, so counted there it would always be
-    zero, and the matrix would say "incomplete: false"."""
+    Counted on a system connection with this reader's ceiling: the stances it counts are the ones row-level
+    security hides from the reader's own connection, so counted there it would always be zero, and the matrix
+    would say "incomplete: false"."""
     with system_connection(SystemPurpose.WITHHELD, reuse=conn) as counter:
         return counter.execute(
             "SELECT count(DISTINCT he.assertion_id)" + _ACH_CELL_FROM
@@ -889,20 +748,13 @@ def ach_cells_withheld(conn: psycopg.Connection, case_id: UUID, *,
 
 def check_egress(report: Report, destination: Destination | str,
                  destination_ceiling: str | None = None):
-    """Whether the finished document may leave, judged on the DOCUMENT's
-    classification rather than the case's.
+    """Whether the finished document may leave, judged on the DOCUMENT's classification rather than the
+    case's.
 
-    That distinction is the whole reason for building at a lower level: an
-    AMBER_STRICT case can produce a GREEN report, and the GREEN report may
-    leave when the case never could. Passing the case's classification here
-    would make redaction pointless.
-
-    The compartments are the document's too, and they are passed. This
-    function used to omit the argument entirely, so the two call sites of
-    the one shared gate — here and `transports.dispatch_due` — disagreed
-    about one of its three parameters, and `DENY_COMPARTMENTED` could never
-    fire on the report path. A gate whose callers each supply a different
-    subset of its inputs is not one gate.
+    That distinction is the reason for building at a lower level: an AMBER_STRICT case can produce a GREEN
+    report, and the GREEN report may leave when the case never could. The document's compartments are passed
+    too, so `DENY_COMPARTMENTED` can fire on the report path; a gate whose callers each supply a different
+    subset of its inputs is not one gate (see `transports.dispatch_due`).
     """
     return can_egress(report.redaction.built_at_tlp, destination,
                       compartments=report.compartments,
@@ -910,22 +762,15 @@ def check_egress(report: Report, destination: Destination | str,
 
 
 def content_digest(report: Report) -> str:
-    """A fingerprint of what the document SAYS, so two builds can be shown
-    to be the same document.
+    """A fingerprint of what the document SAYS, so two builds can be shown to be the same document.
 
-    ux15-report:report-download-bypasses-egress (2026-09-22): the console's
-    preview came from one build, the egress verdict from a second, and the
-    downloaded file from a third, and nothing tied them together. "Cleared"
-    and "downloaded" could name two different documents: the release built
-    with hypotheses on whatever the preview had said, and a write between
-    Prepare and Check egress changed the file without changing the screen.
-    Build and release both return this; the console offers the file only
-    when the release's digest matches the preview's.
+    The console's preview, the egress verdict and the downloaded file come from separate builds, and "cleared"
+    and "downloaded" must not name two different documents. Build and release both return this; the console
+    offers the file only when the release's digest matches the preview's.
 
-    The generation time and author are left out (they differ on every
-    build and say nothing about the content), and every list is put in a
-    canonical order first, so a query that returns the same rows in a
-    different order is not reported as a different document.
+    The generation time and author are left out (they differ on every build and say nothing about the content),
+    and every list is put in a canonical order first, so a query that returns the same rows in a different
+    order is not reported as a different document.
     """
     body = report.as_dict()
     body.pop("generated_at", None)
@@ -950,16 +795,13 @@ def content_digest(report: Report) -> str:
 
 
 def _line(value) -> str:
-    """`value` as ONE line: every character an editor or a renderer may
-    end a line on becomes a space.
+    """`value` as ONE line: every character an editor or a renderer may end a line on becomes a space.
 
-    Final review U13 (2026-09-23). Labels, exhibit titles, assumptions and
-    hypothesis statements went into the document verbatim, and a label is
-    only checked for being blank. A collected handle holding a newline
-    ended its table row and put text of the forum's choosing on a line of
-    its own in the file the egress gate cleared: "\\n\\n**TLP:CLEAR**" is a
-    false handling mark partway through an AMBER document. `str()` first so
-    a missing value still prints as it always did."""
+    Labels, exhibit titles, assumptions and hypothesis statements go into the document verbatim, and a label is
+    only checked for being blank. A collected handle holding a newline would end its table row and put text of
+    the forum's choosing on a line of its own in the file the egress gate cleared: "\\n\\n**TLP:CLEAR**" is a
+    false handling mark partway through an AMBER document. `str()` first so a missing value still prints as it
+    always did."""
     return " ".join(str(value).splitlines())
 
 
@@ -992,11 +834,10 @@ def render_markdown(report: Report) -> str:
     must still carry its handling caveat.
     """
     d = report.as_dict()
-    # U13: every value is made safe for where it lands ONCE, here, and on
-    # copies. `as_dict` hands back the report's own lists, which
-    # `content_digest` is computed over, so they are rebound, never edited.
-    # The heading and the authority lines are not tables, so a case field
-    # only has to stay on its line; every table row is built from `_cells`.
+    # Every value is made safe for where it lands ONCE, here, and on copies. `as_dict` hands back the report's
+    # own lists, which `content_digest` is computed over, so they are rebound, never edited. The heading and the
+    # authority lines are not tables, so a case field only has to stay on its line; every table row is built
+    # from `_cells`.
     d["case"] = {k: _line(v) if isinstance(v, str) else v
                  for k, v in d["case"].items()}
     for key in ("assumptions", "actors", "relationships", "evidence"):
@@ -1009,14 +850,12 @@ def render_markdown(report: Report) -> str:
             "status_notes": {k: _cell(v) for k, v in
                              (d["hypotheses"].get("status_notes") or {}).items()}}
     tlp = d["classification"]
-    # A missing value is said in words, as the console says it, and the
-    # mark is set off from the case by the separator the console's case
-    # header uses. No dash: an em or en dash in shipped copy is refused
+    # A missing value is said in words, as the console says it, and the mark is set off from the case by the
+    # separator the console's case header uses. No dash: an em or en dash in shipped copy is refused
     # (test_server_copy_no_dashes.py).
     #
-    # The three dates are NOT NULL on the case, so one is None only when the
-    # header is withheld; it then says so in the words the legal basis and
-    # authority beside it use, never "None".
+    # The three dates are NOT NULL on the case, so one is None only when the header is withheld; it then says so
+    # in the words the legal basis and authority beside it use, never "None".
     withheld_header = d["redaction"]["header_withheld"]
     dates = {key: d["case"][key]
              or (WITHHELD_MARK if withheld_header else "not recorded")
@@ -1083,13 +922,8 @@ def render_markdown(report: Report) -> str:
         "",
         "## Entities",
         "",
-        # Says what the column means because until 2026-09-22 it meant less
-        # than the console implied: it counted exhibits carried by a claim
-        # and ignored exhibits linked to the entity, so an entity the
-        # analyst had linked an exhibit to printed "NO" (ux07
-        # two-evidence-paths-disagree). The rule is projections.evidenced_sql,
-        # which also ignores a purged exhibit, so the sentence says that too
-        # and the register below marks each purged row (2026-09-22 verifier).
+        # The rule is projections.evidenced_sql: an exhibit carried by a claim or linked to the entity counts, a
+        # purged one does not, so the sentence says that and the register below marks each purged row.
         "Evidenced means at least one exhibit in the register below, not "
         "marked purged, is attached to the entity, either by a live claim "
         "that cites it or by a direct link. A purged exhibit stays in the "
@@ -1103,12 +937,8 @@ def render_markdown(report: Report) -> str:
         lines.append(f"| {a['type']} | {a['label']} | {a['classification']} | "
                      f"{'yes' if a['has_evidence'] else 'NO'} |")
 
-    # The ties themselves, by name. Until 2026-09-22 the document carried
-    # only a COUNT of relationships while the console's preview listed them
-    # (as "undefined -> undefined", ux15-report), so the one thing a
-    # network report is about was neither readable on screen nor present
-    # in the file. Every tie here joins two entities listed above: the
-    # projection admits an edge only when both endpoints are visible.
+    # The ties themselves, by name: the one thing a network report is about. Every tie here joins two entities
+    # listed above, because the projection admits an edge only when both endpoints are visible.
     label_of = {a["id"]: a["label"] for a in d["actors"]}
     sign_word = {1: "positive", -1: "negative", 0: "neutral"}
     lines += [
@@ -1139,19 +969,16 @@ def render_markdown(report: Report) -> str:
         purged = e.get("purged_at")
         title = (f"{e['title']} **(PURGED {purged}: does not count as "
                  f"evidence)**" if purged else e["title"])
-        # The whole digest: half of one cannot be checked against a digest
-        # recomputed from the exhibit, which is what the column is for
-        # (2026-10-07).
+        # The whole digest: half of one cannot be checked against a digest recomputed from the exhibit, which is
+        # what the column is for.
         lines.append(f"| {title} | `{e['sha256'] or ''}` | "
                      f"{e['acquired_at']} | {e['acquisition_method']} |")
     if not d["evidence"]:
         lines.append("| _none at this classification_ | | | |")
 
     if d["hypotheses"]:
-        # With its status (README screenshot review, 2026-09-23). The
-        # section exists to carry the alternatives that were ruled out
-        # beside the one that was not, and without this column a REJECTED
-        # hypothesis read exactly like an open one.
+        # With its status: the section carries the alternatives that were ruled out beside the one that was not,
+        # and without this column a REJECTED hypothesis would read like an open one.
         statuses = d["hypotheses"].get("statuses") or {}
         lines += ["", "## Competing hypotheses", "",
                   d["hypotheses"].get("method", ""), "",
@@ -1164,10 +991,8 @@ def render_markdown(report: Report) -> str:
                          f"{h['assessed']} |")
         for warning in d["hypotheses"].get("warnings", []):
             lines.append(f"\n> ⚠ {warning}")
-        # The reason recorded with a status, above all what ruled a
-        # REJECTED hypothesis out (verifier of ux11-ach:no-hypothesis-
-        # lifecycle-in-console, 2026-09-23): "rejected" with no reason is a
-        # verdict a reader cannot check.
+        # The reason recorded with a status, above all what ruled a REJECTED hypothesis out: "rejected" with no
+        # reason is a verdict a reader cannot check.
         reasons = d["hypotheses"].get("status_notes") or {}
         stated = [h for h in d["hypotheses"]["hypotheses"]
                   if reasons.get(str(h.get("id")))]
@@ -1179,9 +1004,8 @@ def render_markdown(report: Report) -> str:
                 lines.append(f"| {h['statement']} | "
                              f"{_cell(statuses.get(hid, 'not recorded'))} | "
                              f"{reasons[hid]} |")
-        # The analysts' reasons for their stances (ux11-ach:stance-note-
-        # erased-on-rescore, 2026-09-23), so a disclosed matrix carries its
-        # judgements and not only its arithmetic.
+        # The analysts' reasons for their stances, so a disclosed matrix carries its judgements and not only its
+        # arithmetic.
         if d["hypotheses"].get("reasoning"):
             lines += ["", "### Why each stance stands where it does", "",
                       "| Evidence | Hypothesis | Stance | Note |",
@@ -1190,9 +1014,8 @@ def render_markdown(report: Report) -> str:
                 lines.append(f"| {r['evidence']} | {r['hypothesis']} | "
                              f"{r['stance']} | {r['note']} |")
     elif d["redaction"].get("hypotheses_withheld"):
-        # Said where the section would be, as for assumptions: a heading
-        # that silently disappears reads as "no alternatives were
-        # considered", which is the one thing ACH exists to rule out (C2).
+        # Said where the section would be, as for assumptions: a heading that silently disappears reads as "no
+        # alternatives were considered", which is the one thing ACH exists to rule out.
         withheld = d["redaction"]["hypotheses_withheld"]
         lines += ["", "## Competing hypotheses", "",
                   f"_{_count(withheld, 'competing hypothesis', 'competing hypotheses')} "

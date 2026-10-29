@@ -1,14 +1,9 @@
 """`GET /auth/me` carries who you are, not just which row you are.
 
-Until 2026-09-02 the response held `user_id` and `recovery_codes_remaining`
-and nothing else, and the analyst UI put `me.user_id` straight into the app
-bar -- so every signed-in analyst was greeted by their own UUID. The
-display name and email have been on `iam.app_user` since 0001; nothing
-read them back to the person they belong to.
-
-The existing fields are kept exactly: the UI and the recovery-code flow
-read `recovery_codes_remaining`, and a response that renamed it would
-break a client that was correct yesterday.
+The response holds the display name and email beside `user_id` and `recovery_codes_remaining`, so the
+analyst UI can greet a person by name rather than by their own UUID. The existing fields are kept
+exactly: the UI and the recovery-code flow read `recovery_codes_remaining`, and a response that
+renamed it would break a client that was correct before.
 
 Email prefix `me-`, unique to this file. Env-gated on DATABASE_URL.
 """
@@ -66,29 +61,20 @@ def _make_user(conn):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
-    is off in these tests.
+    """A signed-in caller, minted the way `scripts/bootstrap.py session` mints one: the account looked
+    up by email, then `SessionService` against the same store the API validates against.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Unbound (no address, no User-Agent), which 0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING`
+    refuses; it is off in these tests. It is not `POST /auth/login`, which answers 204 and leaves the
+    token only in `__Host-session`; nothing in this file is about the sign-in path. TOTP codes are
+    single-use, so two sign-ins for one account inside one 30-second step would fail on the code.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as both real mint sites pass: a session that never satisfied MFA is refused
+    # by every step-up gated route.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token
@@ -143,11 +129,10 @@ def test_me_reflects_a_renamed_account(conn, client):
 
 
 def test_me_states_the_two_limits_the_session_runs_under(conn, client):
-    """expiry-drops-context (2026-09-22): the console warns five minutes
-    before either limit, so it has to know them. The idle timeout is the
-    server's own constant, and the absolute limit is a DISTANCE the
-    browser can count down without trusting its clock to agree with this
-    one. A session minted a moment ago has close to its full 12 hours."""
+    """The console warns five minutes before either limit, so it has to know them. The idle timeout is
+    the server's own constant, and the absolute limit is a distance the browser can count down without
+    trusting its clock to agree with this one. A session minted a moment ago has close to its full 12
+    hours."""
     from noctornal_api.security.sessions import ABSOLUTE_LIFETIME, IDLE_TIMEOUT
     _, email, _secret = _make_user(conn)
     body = client.get("/api/v1/auth/me",
@@ -174,11 +159,10 @@ def test_me_counts_down_the_session_it_was_asked_on(conn, client):
 
 
 def test_me_says_how_long_the_step_up_gate_stays_open(conn, client):
-    """Fix round, 2026-09-22: the console asks for a fresh sign-in BEFORE a
-    step-up gated request once this reaches zero, because every refused
-    POST /auth/recovery-codes spends a token of its rate limit. The gate
-    it describes is the route's own: open (and issuing) while this is
-    above zero, shut (403) once it is zero."""
+    """The console asks for a fresh sign-in before a step-up gated request once this reaches zero,
+    because every refused POST /auth/recovery-codes spends a token of its rate limit. The gate it
+    describes is the route's own: open (and issuing) while this is above zero, shut (403) once it is
+    zero."""
     from noctornal_api.security.sessions import STEP_UP_FRESHNESS
     _, email, _secret = _make_user(conn)
     token = _session(conn, email)

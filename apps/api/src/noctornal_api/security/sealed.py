@@ -1,27 +1,17 @@
 """The inventory of envelope-sealed columns, and the re-wrap over them.
 
-One list, read by two callers that must agree: the readiness check
-`kek_ring_opens_stored_secrets` (does the ring open the rows the database
-actually holds?) and `scripts/rewrap_secrets.py` (move every row under
-the active key). A column added to one and not the other is a secret the
-register vouches for and a rotation leaves behind, so the list lives here
-and both import it.
+One list, read by two callers that must agree: the readiness check `kek_ring_opens_stored_secrets` (does
+the ring open the rows the database actually holds?) and `scripts/rewrap_secrets.py` (move every row under
+the active key). A column added to one and not the other is a secret the register vouches for and a
+rotation leaves behind, so the list lives here and both import it.
 
 ## One row's verdict is not a group's
 
-The first cut of `inventory` opened ONE row per (table, key id) and
-called that the group's answer, on the reasoning that every row under an
-id was sealed by the key the id names. That is true from 2026-09-11 on
-and false for everything before it: until then every blob was recorded as
-`env:v1` whatever key sealed it, so a deployment that ever changed its
-KEK -- rotated on purpose, restored a secrets file from the wrong backup,
-regenerated `.env.local` after a wiped checkout -- holds rows under two
-keys and one id. The development database this was written against held
-93 enrolled accounts under `env:v1`, of which 65 opened under no key
-anyone still had. A one-row sample of that group answers "opens" or "does
-not" depending on which row the planner returns first, which is a
-readiness verdict decided by luck. So the check opens up to `SAMPLE_ROWS`
-rows per group, deterministically, and counts.
+`inventory` opens up to `SAMPLE_ROWS` rows per (table, key id), deterministically, and counts. One row per
+group would be wrong where a deployment ever changed its KEK: blobs written before key ids were honoured
+are all recorded as `env:v1` whatever key sealed them, so a group can hold rows under two keys and one id.
+A one-row sample would then answer "opens" or "does not" depending on which row the planner returns first,
+a readiness verdict decided by luck.
 """
 from __future__ import annotations
 
@@ -35,14 +25,12 @@ from noctornal_api.security import envelope
 #: has a uuid primary key called `id`, which the re-wrap pages on.
 SEALED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("iam.app_user", "totp_secret_ciphertext", "totp_key_id"),
-    # collect.collection_account left this list on 2026-10-02 (A collector
-    # process): a persona credential seals under the persona ring, which
-    # the API does not hold. security/persona_sealed.py is its inventory.
+    # collect.collection_account is not on this list: a persona credential seals under the persona ring,
+    # which the API does not hold. security/persona_sealed.py is its inventory.
     ("ingest.victim_credential", "value_ciphertext", "value_key_id"),
     ("lab.sample", "data_key_ciphertext", "data_key_id"),
     ("collect.egress_profile", "endpoint_ciphertext", "key_id"),
-    # The Jira service credential (F7) and the lookup provider keys
-    # (F15.2), 2026-09-24. Both are zero bytes or NULL once destroyed.
+    # The Jira service credential and the lookup provider keys. Both are zero bytes or NULL once destroyed.
     ("notify.jira_destination", "credential_ciphertext", "credential_key_id"),
     ("ingest.provider", "secret_ciphertext", "secret_key_id"),
     # A persona's forum session cookies (collect.collection_account.
@@ -82,19 +70,14 @@ class SealedGroup:
 
 def inventory(conn: psycopg.Connection, *,
               sample: int = SAMPLE_ROWS) -> list[SealedGroup]:
-    """Every (table, key id) pair holding sealed rows, with how many of
-    its first `sample` rows the ring opens. A NULL key id is read as
-    `envelope.DEFAULT_KEY_ID`, which is what `decrypt` does with it.
+    """Every (table, key id) pair holding sealed rows, with how many of its first `sample` rows the ring
+    opens. A NULL key id is read as `envelope.DEFAULT_KEY_ID`, which is what `decrypt` does with it.
 
-    An EMPTY ciphertext is not a sealed row and is excluded. The columns
-    are NOT NULL, so the only way to record "there is no key here" is
-    zero bytes, and `SampleService.reject` writes exactly that when it
-    purges: the data key is destroyed WITH the bytes it opened. Until
-    2026-09-16 those rows were counted and opened like any other, so one
-    rejected sample was enough to take the whole readiness check out with
-    `ValueError: Nonce must be between 8 and 128 bytes` -- a true
-    sentence about the wrong question. A destroyed key is the ABSENCE of
-    a sealed row, not evidence about the ring.
+    An empty ciphertext is not a sealed row and is excluded. The columns are NOT NULL, so the only way to
+    record "there is no key here" is zero bytes, and `SampleService.reject` writes exactly that when it
+    purges: the data key is destroyed with the bytes it opened. Counting those rows would take the whole
+    readiness check out with `ValueError: Nonce must be between 8 and 128 bytes`, a true sentence about the
+    wrong question. A destroyed key is the absence of a sealed row, not evidence about the ring.
     """
     out: list[SealedGroup] = []
     for table, cipher, kid in SEALED_COLUMNS:
@@ -138,23 +121,17 @@ def rewrap_table(conn: psycopg.Connection, table: str, cipher: str, kid: str,
                  batch: int = 200) -> RewrapReport:
     """Re-seal every row of one table under the active key.
 
-    Without `legacy`, only rows NOT recorded under the active id are
-    visited: the rest are the active key's own. With it, every row is
-    visited, because the rows a pre-ring key sealed are recorded under
-    the active id too -- that is the whole problem -- and a row under the
-    active id that opens is left untouched rather than re-nonced.
+    Without `legacy`, only rows not recorded under the active id are visited: the rest are the active
+    key's own. With it, every row is visited, because the rows a pre-ring key sealed are recorded under the
+    active id too, and a row under the active id that opens is left untouched rather than re-nonced.
 
-    The compare-and-set is on the ciphertext, not the key id, because two
-    rows under one id are told apart only by their bytes. Keyset-paged on
-    `id`, so a row this pass cannot move cannot make it loop.
+    The compare-and-set is on the ciphertext, not the key id, because two rows under one id are told apart
+    only by their bytes. Keyset-paged on `id`, so a row this pass cannot move cannot make it loop.
 
-    Rows with an EMPTY ciphertext are skipped for `inventory`'s reason: a
-    purged sample's data key was destroyed on purpose, and re-sealing
-    zero bytes would manufacture a key for material that no longer
-    exists. Without the filter this aborted mid-pass, but only WITH
-    `legacy` -- the predicate below is what spares those rows otherwise,
-    since they sit under the active id -- so the fault was hidden in
-    exactly the mode the runbook calls for after a key restore.
+    Rows with an empty ciphertext are skipped for `inventory`'s reason: a purged sample's data key was
+    destroyed on purpose, and re-sealing zero bytes would manufacture a key for material that no longer
+    exists. The predicate spares those rows without `legacy` because they sit under the active id, so the
+    filter matters in exactly the mode the runbook calls for after a key restore.
     """
     active = envelope.active_key_id()
     report = RewrapReport(table)

@@ -1,12 +1,9 @@
-"""Shared set-up for the comms PGP suites (F10-fix, F10a, F10b, F10c,
-2026-09-24). Importable, no tests of its own.
+"""Shared set-up for the comms PGP suites. Importable, no tests of its own.
 
-Every row a suite makes is removed at teardown, the guarded ones as the
-schema owner with `DISABLE TRIGGER USER` inside one transaction (the
-pattern of test_sample_preservation_pg.py): the verification ledger, the
-key registry and the lookups refuse DELETE by design, and a later
-downgrade (test_compartment_binding_pg.py goes to 0058) must never meet
-rows these suites left behind.
+Every row a suite makes is removed at teardown, the guarded ones as the schema owner with
+`DISABLE TRIGGER USER` inside one transaction (the pattern of test_sample_preservation_pg.py): the
+verification ledger, the key registry and the lookups refuse DELETE by design, and a later downgrade
+(test_compartment_binding_pg.py goes to 0058) must never meet rows these suites left behind.
 """
 from __future__ import annotations
 

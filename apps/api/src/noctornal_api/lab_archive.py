@@ -1,64 +1,39 @@
-"""Archive expansion in the sample pipeline: an archive sample's members
-become child samples (roadmap phase 8 "archive expansion", 2026-10-02).
+"""Archive expansion in the sample pipeline: an archive sample's members become child samples.
 
-## Where it runs, and when
-
-After a sample's static triage has written its findings (`lab_triage.
-run_claimed`, once `_write_results` returns DONE), the same verified
-plaintext is handed to the archive child (`lab_archive_child`) through
-`_expand_child`, the ONE call site of the runner seam: `lab_triage.
-run_child` with `kind=CHILD_KIND`, which is `analysis_runner`'s dispatch, so
-the child runs in the bounded local subprocess or in the isolated analysis
-worker exactly as every static triage step does (docs/17 F42; the worker
-starts the module `lab_archive_child` by that kind and no other program).
-Nothing here parses an archive in the API process, and nothing here opens,
-runs or renders a member: a member is bytes that become a sample, exactly as
+After a sample's static triage has written its findings (`lab_triage.run_claimed`, once `_write_results`
+returns DONE), the same verified plaintext is handed to the archive child (`lab_archive_child`) through
+`_expand_child`, the one call site of the runner seam: `lab_triage.run_child` with `kind=CHILD_KIND`,
+which is `analysis_runner`'s dispatch, so the child runs in the bounded local subprocess or in the
+isolated analysis worker exactly as every static triage step does (the worker starts the module
+`lab_archive_child` by that kind and no other program). Nothing here parses an archive in the API
+process, and nothing opens, runs or renders a member: a member is bytes that become a sample, exactly as
 an upload does.
 
-The child is asked BEFORE the run's findings are written (`prefetch`, called
-from `lab_triage.run_claimed` beside the other steps), and only the member
-rows are made after (`expand_after_triage`). That order is the runner's own
-contract: a sandbox that fails under the child (no worker, a busy worker, an
-answer that is not one: `analysis_runner.SANDBOX_FAILURES`) interrupts the
-whole run, which waits for the worker at the same attempt with nothing
-written. It is never recorded as a fact about the archive, never as an
-expansion that finished, and never as a clean archive; only a failure that
-is the archive's own (a bomb, a corrupt file, a child over its clock) is
-recorded as one.
+The child is asked before the run's findings are written (`prefetch`, called from
+`lab_triage.run_claimed`), and only the member rows are made after (`expand_after_triage`). A sandbox that
+fails under the child (no worker, a busy worker, an answer that is not one:
+`analysis_runner.SANDBOX_FAILURES`) interrupts the whole run, which waits for the worker at the same
+attempt with nothing written. It is never recorded as a fact about the archive, an expansion that
+finished, or a clean archive; only a failure that is the archive's own (a bomb, a corrupt file, a child
+over its clock) is recorded as one.
 
-## What a member becomes
+Every accepted member goes through `SampleService.submit`, the upload's own path: the same envelope,
+screening before any write, custody, queued static triage, preservation and legal-hold rules. It carries
+its parent's case, classification, compartments (never below: 0158's trigger refuses a member labelled
+under its parent) and submitter, plus `parent_sample_id` and `archive_path`. `submit` screens a member
+(docs/16 L1) before its row is written and its triage queued.
 
-Every accepted member goes through `SampleService.submit`, the upload's
-own path: the same envelope, the same screening before any write, the
-same custody, the same queued static triage, the same preservation and
-legal-hold rules. It carries its parent's case, classification and
-compartments (never below: a member is material from the archive, and
-0158's trigger refuses one labelled under its parent), the parent's
-submitter, and two columns of its own: `parent_sample_id` and
-`archive_path`. A member is screened (F13, docs/16 L1) by `submit`
-BEFORE its row is written and before its triage is queued, so no triage
-and no fuzzy hashing runs on a member whose screening result is not in.
+Nothing is silently dropped. Every entry the child saw is on the record: an accepted member as a child
+sample, a refused one (a link, a traversal name, a bomb, an encrypted member the convention did not open,
+a duplicate) with its reason in the parent's ARCHIVE analysis row, and a whole-archive refusal (too many
+members, too many bytes, a corrupt archive) as the parent's `archive_expansion` gap naming the limit. A
+member that matches screening, at creation or on a later list import, isolates the whole tree for good
+under the existing REJECTED preservation path (`isolate_tree`): the archive holds the material, and so
+does every other member of it.
 
-## Nothing silently dropped, and the tree is one thing
-
-Every entry the child saw is on the record: an accepted member as a
-child sample, a refused one (a link, a traversal name, a bomb, an
-encrypted member the convention did not open, a duplicate) with its
-reason in the parent's ARCHIVE analysis row, and a whole-archive refusal
-(too many members, too many bytes, a corrupt archive) as the parent's
-`archive_expansion` gap naming the limit. A member that matches
-screening, at creation or on a later list import, isolates the WHOLE
-tree for good under the existing REJECTED preservation path
-(`isolate_tree`): the archive holds the material, and so does every
-other member of it.
-
-## What the parent believes
-
-Nothing a child says is stored unchecked: every reported member is
-re-hashed from the bytes that came back, every path is re-checked with
-the child's own rule, every count and size is held to the caps, and an
-answer that does not add up is a failure of the whole expansion, never a
-partial one.
+Nothing a child says is stored unchecked: every reported member is re-hashed from the bytes that came
+back, every path is re-checked with the child's own rule, every count and size is held to the caps, and
+an answer that does not add up fails the whole expansion, never part of it.
 """
 from __future__ import annotations
 
@@ -99,9 +74,8 @@ MEMBER_ENV = "NOCTORNAL_ARCHIVE_MAX_MEMBER_BYTES"
 RATIO_ENV = "NOCTORNAL_ARCHIVE_MAX_RATIO"
 DEPTH_ENV = "NOCTORNAL_ARCHIVE_MAX_DEPTH"
 WALL_ENV = "NOCTORNAL_ARCHIVE_WALL_S"
-#: The members of a whole archive tree, the root excluded (2026-10-07): MEMBERS_ENV bounds
-#: one archive, and depth 2
-#: expands two levels, so one small upload made about 200 + 200 x 200 samples.
+#: The members of a whole archive tree, the root excluded: MEMBERS_ENV bounds one archive, and depth 2
+#: expands two levels, so one small upload would otherwise make about 200 + 200 x 200 samples.
 TREE_ENV = "NOCTORNAL_ARCHIVE_MAX_TREE_MEMBERS"
 SETTINGS_ENV = (MEMBERS_ENV, TOTAL_ENV, MEMBER_ENV, RATIO_ENV, DEPTH_ENV, WALL_ENV,
                 TREE_ENV)
@@ -210,10 +184,8 @@ def archive_settings(env=None) -> tuple[ArchiveSettings | None, str | None]:
                       f"within its own cap could never be expanded")
     settings = ArchiveSettings(members, total, member, ratio, depth, wall, tree)
     if stdout_cap(settings) > analysis_runner.MAX_OUTPUT_BYTES:
-        # The isolated worker refuses a request whose output cap is above
-        # its own ceiling, and a refusal is read as the sandbox's state:
-        # every expansion would wait for ever. Refused here, by name,
-        # instead (the runner merge, 2026-10-03).
+        # The isolated worker refuses a request whose output cap is above its own ceiling, and a refusal is
+        # read as the sandbox's state: every expansion would wait for ever. Refused here, by name, instead.
         return None, (f"{TOTAL_ENV} and {MEMBERS_ENV} together ask for more "
                       f"output from the expansion child than the analysis "
                       f"runner hands back, so the expansion could never run")
@@ -276,16 +248,14 @@ STOPPED_REASON = ("a member matched a prohibited-content hash list; the "
 ANSWER_REASON = ("the expansion process's answer did not match its own bytes; "
                  "nothing was stored")
 RECORD_REASON = "the expansion's record could not be written"
-#: An expansion that raised part way (the object store, the database, a
-#: restart) leaves the members stored so far standing; the gap says so and
-#: how to go on, because a later run resumes it (2026-10-03) instead of reading the partial
-#: tree as a finished one.
+#: An expansion that raised part way (the object store, the database, a restart) leaves the members
+#: stored so far standing; the gap says so and how to go on, because a later run resumes it instead of
+#: reading the partial tree as a finished one.
 INTERRUPTED_REASON = ("the expansion stopped before it finished; the members "
                       "stored so far stand and running static triage on the "
                       "archive again continues it")
-#: A child that did not finish: named by the setting that bounded it, not
-#: the generic static-triage sentence (2026-10-03; the
-#: brief wants every limit named).
+#: A child that did not finish: named by the setting that bounded it, not the generic static-triage
+#: sentence, so every limit is named.
 CHILD_SENTENCES = {
     "timeout": ("the expansion did not finish within the {wall} seconds "
                 f"{WALL_ENV} allows and was stopped; nothing was expanded"),
@@ -300,9 +270,8 @@ ARCHIVE_TOOL_VERSION = "noctornal-archive 1"
 TREE_TRIGGER = "ARCHIVE_MEMBER"
 ALREADY_HELD_SENTENCE = ("a sample with this content is already held in the "
                          "Lab; it was not stored twice")
-#: A duplicate the archive's own readers could not see is not named as one
-#: (2026-10-03; F19's oracle rule): the record says no more
-#: than that no sample of its own was made.
+#: A duplicate the archive's own readers could not see is not named as one, which would tell the reader a
+#: sample exists that they cannot see: the record says no more than that no sample of its own was made.
 NOT_STORED_SENTENCE = "this member was not stored as a sample of its own"
 
 #: Whole-archive refusals, by the child's code, each naming its limit.
@@ -403,7 +372,7 @@ def _sentence(table: dict, code: str, detail: dict) -> str:
 #: How the child is started. A module attribute so a test can point it at a
 #: script that lies, floods or never returns.
 CHILD_ARGV: list[str] = [sys.executable, "-m", "noctornal_api.lab_archive_child"]
-#: The module the isolated analysis worker starts for this kind (F42).
+#: The module the isolated analysis worker starts for this kind.
 CHILD_KIND = "lab_archive_child"
 #: The report's largest honest size: one line per member and per refusal.
 REPORT_ROOM = 2 * 1024
@@ -627,25 +596,21 @@ def tree_ids(conn: psycopg.Connection, root: UUID) -> list[UUID]:
 
 def isolate_tree(svc, sample_id: UUID, *, verdict, trigger: str,
                  actor_id: UUID | None, root: UUID | None = None) -> list[UUID]:
-    """A member (or an archive) matched screening: isolate everything in
-    its tree that is not isolated yet, each through `reject_by_screening`
-    with the cascade off, recording which sample the match was found on.
-    The archive that held the material holds it still, and so does every
-    sibling cut from the same bytes, so each is REJECTED and MATCH for
-    good and its bytes go the preserved way. Returns what was isolated.
+    """A member (or an archive) matched screening: isolate everything in its tree that is not isolated
+    yet, each through `reject_by_screening` with the cascade off, recording which sample the match was
+    found on. The archive that held the material holds it still, and so does every sibling cut from the
+    same bytes, so each is REJECTED and MATCH for good and its bytes go the preserved way. Returns what
+    was isolated.
 
-    Idempotent, and it never stops at the first sample it cannot isolate
-    (2026-10-03): a sibling locked for the lock
-    timeout, or a deadlock, is counted, the rest of the tree is still
-    isolated, and a `SampleError` naming the count is raised at the end so
-    the caller knows the tree is not finished. Finishing it is the
-    screening pass's job (`complete_isolations`), found from the database
-    alone, so a crash between a matched row and its cascade is mended too.
+    Idempotent, and it never stops at the first sample it cannot isolate: a sibling locked for the lock
+    timeout, or a deadlock, is counted, the rest of the tree is still isolated, and a `SampleError` naming
+    the count is raised at the end so the caller knows the tree is not finished. Finishing it is the
+    screening pass's job (`complete_isolations`), found from the database alone, so a crash between a
+    matched row and its cascade is mended too.
 
-    `root` names the archive when the sample the match was found on is not
-    in the archive's tree (a member whose bytes an earlier upload already
-    held, found by hash): without it the cascade would isolate that other
-    sample's tree and leave the archive that carried the material visible."""
+    `root` names the archive when the sample the match was found on is not in the archive's tree (a member
+    whose bytes an earlier upload already held, found by hash): without it the cascade would isolate that
+    other sample's tree and leave the archive that carried the material visible."""
     from noctornal_api.samples import SampleError
     conn = svc._c
     root = root or root_of(conn, sample_id)
@@ -686,11 +651,10 @@ SELECT trigger, list_seq, lists_consulted, matched_lists, matched_algorithms
  WHERE sample_id = %s AND outcome = 'MATCH'
  ORDER BY (trigger = 'ARCHIVE_MEMBER'), screened_at DESC LIMIT 1"""
 
-#: Every tree that holds an isolated sample, as (root, one isolated
-#: sample), found by walking UP from the isolated samples (a handful), not
-#: down from every archive. The one named is the sample the match was
-#: first found on (a result that was not itself a tree cascade), so the
-#: records the sweep writes say where the material really was.
+#: Every tree that holds an isolated sample, as (root, one isolated sample), found by walking up from the
+#: isolated samples (a handful), not down from every archive. The one named is the sample the match was
+#: first found on (a result that was not itself a tree cascade), so the records the sweep writes say where
+#: the material really was.
 _ISOLATED_IN_TREES = f"""
 WITH RECURSIVE up AS (
     SELECT m.id AS leaf, m.id, m.parent_sample_id, 0 AS depth
@@ -726,18 +690,14 @@ def match_verdict(conn: psycopg.Connection, sample_id: UUID):
 
 
 def complete_isolations(svc, *, ends: float | None = None) -> dict:
-    """Finish every archive tree whose isolation stopped half way (2026-10-03): a tree
-    holding an isolated sample and a
-    sample that is not is isolated whole, from the database alone, so it
-    does not matter whether the first attempt met a locked sibling, lost
-    its process or raised after the matched row committed. Called by every
-    screening pass. Returns `{"completed": trees finished, "open": trees
-    still unfinished}` and never raises: an unfinished tree is counted,
-    logged, and tried again by the next pass.
+    """Finish every archive tree whose isolation stopped half way: a tree holding an isolated sample and a
+    sample that is not is isolated whole, from the database alone, so it does not matter whether the first
+    attempt met a locked sibling, lost its process or raised after the matched row committed. Called by
+    every screening pass. Returns `{"completed": trees finished, "open": trees still unfinished}` and never
+    raises: an unfinished tree is counted, logged, and tried again by the next pass.
 
-    Fail closed: nothing here ever UN-isolates, and a tree that cannot be
-    finished stays as visible as it was, which is why `open` reaches the
-    worker's exit code."""
+    Fail closed: nothing here ever un-isolates, and a tree that cannot be finished stays as visible as it
+    was, which is why `open` reaches the worker's exit code."""
     conn = svc._c
     completed = open_ = 0
     for root, leaf in conn.execute(_ISOLATED_IN_TREES).fetchall():
@@ -855,14 +815,11 @@ def tree_locked(conn: psycopg.Connection, root: UUID, *, wait_s: float,
                 sleep=time.sleep):
     """The tree's expansion lock for a block, or TreeBusy after `wait_s`.
 
-    A session advisory lock (this connection is autocommit, so a
-    transaction-scoped one would end with the statement that took it),
-    named by the root. Two archives of one tree expanded in the same moment
-    by two processes each read the tree's count before either stored a
-    member, so each passed the cap by up to one archive's cap
-    (docs/17, "the archive tree count is not locked"); under the lock the
-    second reads what the first stored. The waiter holds no database lock
-    while it waits."""
+    A session advisory lock (this connection is autocommit, so a transaction-scoped one would end with the
+    statement that took it), named by the root. Without it, two archives of one tree expanded at the same
+    moment by two processes would each read the tree's count before either stored a member, and each pass
+    the cap by up to one archive's cap; under the lock the second reads what the first stored. The waiter
+    holds no database lock while it waits."""
     key = f"{_TREE_LOCK}:{root}"
     ends = time.monotonic() + wait_s
     while not conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
@@ -967,9 +924,9 @@ def _expand(conn, storage, c, data: bytes, analysis,
         if gap is not None:
             _set_gap(conn, c.sample_id, None)
         return None
-    # Members with no ARCHIVE finding are a half-finished expansion (it
-    # raised, or the process ended, after some members were stored): it is
-    # RESUMED below, never declared complete (2026-10-03; invariant 12, nothing silently dropped).
+    # Members with no ARCHIVE finding are a half-finished expansion (it raised, or the process ended, after
+    # some members were stored): it is resumed below, never declared complete (invariant 12, nothing
+    # silently dropped).
     if file_type in UNSUPPORTED:
         _set_gap(conn, c.sample_id, {"status": "unavailable",
                                      "reason": UNSUPPORTED[file_type]})
@@ -1020,14 +977,11 @@ def _expand(conn, storage, c, data: bytes, analysis,
     have = {r[0]: (r[1], bytes(r[2])) for r in conn.execute(
         "SELECT archive_path, id, sha256 FROM lab.sample "
         "WHERE parent_sample_id = %s", (c.sample_id,)).fetchall()}
-    # One roof over the whole tree, every level of it (2026-10-07): the per-archive cap
-    # alone let a small upload make
-    # thousands of samples, each with an encrypted object and a triage run.
-    # Only what this run has still to store is counted; a duplicate it will
-    # find is counted too, which errs toward refusing. The read and the
-    # storing below are one step under the tree's lock (`tree_locked`, taken
-    # by `expand_after_triage`), so a second archive of the tree reads what
-    # the first stored.
+    # One roof over the whole tree, every level of it: the per-archive cap alone would let a small upload
+    # make thousands of samples, each with an encrypted object and a triage run. Only what this run has
+    # still to store is counted; a duplicate it will find is counted too, which errs toward refusing. The
+    # read and the storing below are one step under the tree's lock (`tree_locked`, taken by
+    # `expand_after_triage`), so a second archive of the tree reads what the first stored.
     held_now = len(tree_ids(conn, root_of(conn, c.sample_id))) - 1
     new = sum(1 for m in expansion.members
               if (have.get(m.path) or (None, None))[1]
@@ -1046,11 +1000,10 @@ def _expand(conn, storage, c, data: bytes, analysis,
         return findings
     stored: list[dict] = []
     refused = [{"path": r["path"], "reason": r["reason"]} for r in expansion.refused]
-    # Entries refused with bytes behind them were not compared by anything;
-    # the derived "members were not compared" gap says so (2026-10-03). A link, a device, a
-    # directory and an empty
-    # entry hold no content (a zip entry marked as one that carries more than
-    # a link target is read as a member: lab_archive_child._zip_kind).
+    # Entries refused with bytes behind them were not compared by anything; the derived "members were not
+    # compared" gap says so. A link, a device, a directory and an empty entry hold no content (a zip entry
+    # marked as one that carries more than a link target is read as a member:
+    # lab_archive_child._zip_kind).
     unscreened = sum(1 for r in expansion.refused
                      if r["code"] not in CONTENT_FREE_REFUSALS)
     stopped: tuple | None = None
@@ -1071,10 +1024,9 @@ def _expand(conn, storage, c, data: bytes, analysis,
             (hashlib.sha256(m.data).digest(),)).fetchone()
         if (twin is not None and twin[1] == screening.MATCH
                 and verdict.outcome != screening.MATCH):
-            # Identical bytes to a sample that matched a list the deployment
-            # has since retired: a match stays a match, so the archive that
-            # carries them is isolated whole, as for a live match, instead of
-            # the member being refused as a quiet duplicate (2026-10-03).
+            # Identical bytes to a sample that matched a list the deployment has since retired: a match
+            # stays a match, so the archive that carries them is isolated whole, as for a live match,
+            # instead of the member being refused as a quiet duplicate.
             found = match_verdict(conn, twin[0])
             if found is not None:
                 stopped = (twin[0], found[1], m.path)
@@ -1091,8 +1043,8 @@ def _expand(conn, storage, c, data: bytes, analysis,
                 source_note=f"expanded from archive sample {c.sample_id}",
                 classification=classification,
                 compartments=frozenset(compartments or []),
-                # The archive's own labels decide how much a duplicate may be
-                # said to be (F19): its readers are the record's readers.
+                # The archive's own labels decide how much a duplicate may be said to be: its readers are
+                # the record's readers.
                 visible_to_clearance=classification,
                 visible_to_compartments=frozenset(compartments or []),
                 parent_sample_id=c.sample_id, archive_path=m.path)
@@ -1142,13 +1094,11 @@ def _expand(conn, storage, c, data: bytes, analysis,
     _record(conn, svc, c, findings, None)
     if stopped is not None:
         member_id, verdict, _path = stopped
-        # Rooted at THIS archive, not at the row found by hash: that row can
-        # be an earlier upload of the same bytes outside this tree, and
-        # isolating its tree would leave the archive that carried the
-        # material visible (2026-10-03). A failure is
-        # logged and left to the screening pass (`complete_isolations`),
-        # which finds the half-isolated tree from the database; it is not
-        # allowed to read as "the expansion's record could not be written".
+        # Rooted at this archive, not at the row found by hash: that row can be an earlier upload of the
+        # same bytes outside this tree, and isolating its tree would leave the archive that carried the
+        # material visible. A failure is logged and left to the screening pass (`complete_isolations`),
+        # which finds the half-isolated tree from the database; it is not allowed to read as "the
+        # expansion's record could not be written".
         try:
             isolate_tree(svc, member_id or c.sample_id, verdict=verdict,
                          trigger="SUBMISSION", actor_id=None, root=root_of(

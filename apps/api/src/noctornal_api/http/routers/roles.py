@@ -1,27 +1,10 @@
 """Which roles hold which permission, for any signed-in account.
 
-Added 2026-09-23 for ux19-copy developer-speak-in-copy. A refusal in the
-console named a permission code ("Approvals need case.read on this case",
-"missing permission evidence.read on this case") and never the role that
-carries it or the person who can give one, so the one thing the analyst
-could act on was missing. The console now says "this needs the Analyst,
-Contributor, ... or Reviewer role on this case; ask this case's Lead
-investigator", and it needs the grant table to say it.
-
-The names come from here, not from a copy in the console: role display
-names are the server's (migration 0062, and `test_role_names_ui` holds the
-console to that), and a second copy of the grant table would drift the
-first time a deployment changed a grant.
-
-Why any signed-in account may read it, when `/admin/roles` needs
-user.manage: that route is the administration surface (descriptions, what
-may be granted), and this is only the table every refusal is explained
-by. It is how the deployment is configured, not case content and not a
-need-to-know lock of the kind the compartment registry is (see
-`routers/compartments.py`): knowing that REVIEWER holds proposal.review
-tells nobody which cases exist or what is in them. It names no account and
-no assignment. The service account is left out, because no person is ever
-told to become one.
+The console explains a refusal by the roles that carry the permission ("this needs the Analyst or
+Reviewer role on this case"), with display names from the server (migration 0062,
+`test_role_names_ui`) rather than a copy that would drift. Any signed-in account may read it,
+unlike `/admin/roles`: it is deployment configuration, not case content, and names no account and
+no assignment. The service account is left out, because no person is told to become one.
 """
 from __future__ import annotations
 

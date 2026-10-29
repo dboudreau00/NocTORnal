@@ -49,22 +49,18 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 class LoginBody(BaseModel):
-    # Bounded (http_ui-006, 2026-10-03): this route is unauthenticated and
-    # a failed attempt is audited, so the sizes are the caller's to choose
-    # only within these. 254 is the longest address SMTP carries; the
-    # passwords leave room above MAX_PASSWORD_LENGTH so the policy, not the
-    # parser, words that refusal.
+    # Bounded: this route is unauthenticated and a failed attempt is audited. 254 is the longest
+    # address SMTP carries; the passwords leave room above MAX_PASSWORD_LENGTH so the policy, not
+    # the parser, words that refusal.
     email: str = Field(max_length=254)
     password: str = Field(max_length=4096)
     totp_code: str | None = Field(default=None, max_length=64)
-    # The password the person chooses, sent only when the server has said
-    # it must be changed (0066; gap-password-reset, 2026-09-23). Absent
-    # on every ordinary sign-in.
+    # The password the person chooses, sent only when the server has said it must be changed
+    # (0066). Absent on every ordinary sign-in.
     new_password: str | None = Field(default=None, max_length=4096)
 
 
-#: How much of a submitted address a failed sign-in records verbatim
-#: (http_ui-006, 2026-10-03).
+#: How much of a submitted address a failed sign-in records verbatim.
 AUDIT_EMAIL_CHARS = 64
 
 
@@ -76,19 +72,13 @@ _ADDRESS_SHAPE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 
 
 def _audit_email(email: str) -> dict:
-    """The submitted address as a failed sign-in records it: verbatim up
-    to AUDIT_EMAIL_CHARS when it is shaped like an address, and past that
-    the head, the length and a sha256 prefix, so the officer can still tell
-    repeated submissions apart. Until 2026-10-03 the whole string went into
-    the append-only log, and with no body ceiling one unauthenticated
-    request made a permanent multi-megabyte row (http_ui-006).
+    """The submitted address as a failed sign-in records it in the append-only log.
 
-    A value that is not shaped like an address records only its length and
-    the prefix (2026-10-07): the sign-in box is where people
-    type a password by mistake, and for an unknown account the row would
-    otherwise keep it in clear in a log nothing can delete from. An
-    address-shaped password (`Hunter2@home.net`) is not told apart from an
-    address and is the residual docs/17 records."""
+    Verbatim up to AUDIT_EMAIL_CHARS when shaped like an address; past that the head, the length
+    and a sha256 prefix, so one unauthenticated request cannot write a huge permanent row and
+    repeated submissions can still be told apart. Anything else records only its length and the
+    prefix, because people type passwords into the sign-in box by mistake; an address-shaped
+    password is the residual docs/17 records."""
     if not _ADDRESS_SHAPE.fullmatch(email):
         return {"email_length": len(email),
                 "email_sha256": hashlib.sha256(email.encode()).hexdigest()[:16]}
@@ -101,12 +91,9 @@ def _audit_email(email: str) -> dict:
 def _ip_hash(request: Request) -> bytes | None:
     """The address the audit row names is the one the session is bound to.
 
-    `client_ip` is the peer, or the outermost trusted proxy's client when
-    `NOCTORNAL_TRUSTED_PROXY_HOPS` says so. Until 2026-09-09 this hashed
-    `request.client.host` while the binding (0058) and the rate limiter
-    read `client_ip`, so behind a proxy every sign-in was audited from
-    the proxy's own address: the log said who signed in from where, and
-    the where was the load balancer.
+    `client_ip` (the peer, or the outermost trusted proxy's client when
+    `NOCTORNAL_TRUSTED_PROXY_HOPS` says so) is what the binding (0058) and the rate limiter read;
+    `request.client.host` behind a proxy would be the load balancer.
     """
     ip = client_ip(request)
     if ip is None:
@@ -116,8 +103,7 @@ def _ip_hash(request: Request) -> bytes | None:
 
 def _audit(conn, action: str, actor_id, detail: dict, request: Request,
            *, outcome: str = "SUCCESS") -> None:
-    # `outcome`: a failed sign-in is DENIED, not the column's default
-    # SUCCESS (http_ui-006, 2026-10-03).
+    # `outcome`: a failed sign-in is DENIED, not the column's default SUCCESS.
     conn.execute(
         """INSERT INTO audit.event
                (actor_id, actor_kind, action, object_type, object_id, detail,
@@ -156,36 +142,16 @@ PASSWORD_CHANGE_REQUIRED = (
                            Depends(rate_limit_peek("auth.login_failed"))])
 def login(body: LoginBody, request: Request,
           conn: psycopg.Connection = Depends(get_conn)) -> Response:
-    """204 and the cookie pair; since 2026-09-10 there is no body at all.
+    """Sign in: 204 and the cookie pair, no body; the credential leaves only as `__Host-session`.
 
-    The credential leaves here as `__Host-session` and nowhere else. What
-    that closed, what it did not, and why it could not be done sooner are
-    at the set itself, below.
-
-    Metered twice, both IP-scoped, and both checked before the Argon2id
-    verify.
-
-    The order is the point: password hashing is deliberately expensive, so
-    an unlimited login endpoint is a CPU amplifier — one cheap HTTP request
-    buys ~100ms of server work. `auth.login` caps that draw per source.
-
-    `auth.login_failed` is the anti-guessing control, and it is PEEKED
-    here and consumed below only when authentication actually fails. That
-    asymmetry is what lets an IP-scoped control coexist with the customer
-    for this product: two hundred analysts behind one corporate egress
-    address, all signing on within ten minutes of 09:00, never move the
-    failure meter at all. A password sprayer moves nothing else.
-
-    Neither is email-scoped: anyone can send a given address, so an
-    email-keyed limit would be a remotely triggerable lockout of a named
-    analyst. Targeted guessing against one account is the (decaying)
-    account lockout's job.
+    Two IP-scoped meters run before the Argon2id verify: `auth.login` caps the hashing work per
+    source, and `auth.login_failed` is peeked here and consumed only on a failure, so many analysts
+    behind one egress address never move it. Neither is keyed by email, which would let anyone lock
+    out a named analyst; targeted guessing is the account lockout's job.
     """
-    # Sign-in writes the IAM plane (the lockout counter, the TOTP
-    # counter, a recovery code, the new session, the sign-in stamp), which
-    # the request role may only read (0109, S1 2026-09-25). So the whole
-    # sign-in runs on a system connection; in development and the suite that
-    # is this request's own connection.
+    # Sign-in writes the IAM plane (the lockout and TOTP counters, a recovery code, the new
+    # session, the sign-in stamp), which the request role may only read (0109), so it runs on a
+    # system connection; in development and the suite that is this request's own connection.
     with system_connection(SystemPurpose.AUTH, reuse=conn) as sconn:
         return _login(body, request, sconn)
 
@@ -201,22 +167,18 @@ def _login(body: LoginBody, request: Request,
                                        current=body.password)
         if problem:
             raise Problem(422, "Invalid field", problem)
-    # A recovery code is checked here and spent only once the sign-in is
-    # known to go ahead (`spend`, below): the must-change and
-    # no-change-pending refusals come first, and until 2026-09-24 each of
-    # them cost the person a single-use code (2026-09-24).
+    # A recovery code is checked here and spent only once the sign-in is known to go ahead
+    # (`spend`, below), so the must-change and no-change-pending refusals do not cost the person a
+    # single-use code.
     service = AuthService(PgUserStore(conn))
     result = service.authenticate(
         body.email, body.password, body.totp_code, spend_recovery=False
     )
     if result.outcome is AuthOutcome.SECOND_FACTOR_UNAVAILABLE:
-        # The password verified; the stored second factor could not be
-        # opened under any key this process holds. Not a credential
-        # failure, so the failure meter is not consumed and no lockout
-        # attempt was burnt; audited under its own reason; answered as
-        # the server fault it is, naming the readiness check that
-        # explains it. Until 2026-09-11 this was an InvalidTag out of the
-        # store and a 500 to the analyst.
+        # The password verified but the stored second factor could not be opened under any key this
+        # process holds. Not a credential failure, so neither the failure meter nor the lockout is
+        # touched; audited under its own reason and answered as a server fault naming the
+        # readiness check that explains it.
         _audit(conn, "AUTH_FAILED", result.user_id,
                {"reason": result.audit_reason, **_audit_email(body.email)},
                request, outcome="DENIED")
@@ -231,10 +193,9 @@ def _login(body: LoginBody, request: Request,
         raise Problem(401, "Unauthenticated", "invalid credentials")
     must_change = _password_change_due(conn, result.user_id, body, request)
     if not service.spend(result):
-        # The recovery code verified above was spent by a concurrent
-        # sign-in before this one could spend it. The same answer and the
-        # same trace as a spent code gets inside `authenticate`; nothing
-        # has been changed yet, the new password included.
+        # A concurrent sign-in spent the recovery code verified above first. The same answer and
+        # trace as a spent code gets inside `authenticate`; nothing has changed yet, the new
+        # password included.
         consume_on_failure(request, "auth.login_failed")
         _audit(conn, "AUTH_FAILED", None,
                {"reason": "bad_recovery_code", **_audit_email(body.email)},
@@ -243,50 +204,22 @@ def _login(body: LoginBody, request: Request,
     if must_change:
         change_password(conn, result.user_id, body.new_password,
                         keep_session=None, via="sign-in after a reset")
-    # Where the session was minted (0058). `client_ip` is the rate
-    # limiter's view of the peer -- the outermost trusted proxy's client
-    # when NOCTORNAL_TRUSTED_PROXY_HOPS says so -- because a binding to the
-    # proxy's own address would match every replay that came through the
-    # same proxy, which is every replay.
+    # Where the session was minted (0058): `client_ip`, the outermost trusted proxy's client when
+    # NOCTORNAL_TRUSTED_PROXY_HOPS says so, because a binding to the proxy's own address would
+    # match every replay that came through it.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), result.user_id, mfa_satisfied=True,
         ip=client_ip(request), user_agent=request.headers.get("user-agent"),
     )
-    # The Admin card's "last password sign-in", stamped here, where a
-    # session exists, and nowhere else (final review u22, 2026-09-24).
+    # The Admin card's "last password sign-in" is stamped only here, where a session exists.
     PgUserStore(conn).record_sign_in(result.user_id, datetime.now(timezone.utc))
     _audit(conn, "AUTH_SUCCEEDED", result.user_id, {}, request)
     response = Response(status_code=204)
-    # The pair is the WHOLE of a successful login now: the HttpOnly
-    # session cookie, and the readable CSRF cookie that is the
-    # double-submit half docs/05 requires (`deps.session_token` demands
-    # the matching header on a cookie-authenticated unsafe method).
-    #
-    # The same token was returned in the body as well, to every client,
-    # until 2026-09-10. It had to be: two console paths could not read the
-    # cookie -- the live websocket authenticated from a token in its first
-    # frame, and the Lab download is cross-origin, so no `__Host-` cookie
-    # can reach it. Both are closed (`routers/live.py` `_handshake` now
-    # prefers `__Host-session` off the upgrade; the download crosses on a
-    # one-shot ticket minted under the cookie session, 0061), and a body
-    # token nothing needs is a session credential that any script on this
-    # origin can read -- the exact property HttpOnly exists to deny. The
-    # order was load-bearing: deleting it first would have taken the
-    # console's live pane and every Lab download with it.
-    #
-    # This is not the end of bearer tokens, and reading it that way is the
-    # mistake to avoid. `deps.session_token` still prefers `Authorization:
-    # Bearer`; `scripts/bootstrap.py session` still mints one through
-    # `SessionService` directly, never through here, and the `#token=`
-    # link it prints is still exchanged at `POST /auth/cookie`. What went
-    # away is LOGIN handing one out.
-    #
-    # Nor is the token withheld from the client that just signed in: the
-    # cookie value IS the raw session token, so a script client reads it
-    # off `Set-Cookie` and may send it as either transport. The property
-    # gained is narrower and is the one that matters here -- script in the
-    # analyst's browser cannot read an HttpOnly cookie, so after this
-    # there is nowhere in a browser that the session token is legible.
+    # The whole of a successful login: the HttpOnly session cookie and the readable CSRF cookie,
+    # the double-submit half docs/05 requires. No token in the body, so no script in the browser
+    # can read the session token. Bearer use is unaffected: `deps.session_token` prefers
+    # `Authorization: Bearer`, a script client reads the token off `Set-Cookie`, and
+    # `scripts/bootstrap.py session` mints one through `SessionService`, never through here.
     _set_session_cookies(response, token)
     return response
 
@@ -295,29 +228,15 @@ def _password_change_due(conn, user_id, body: LoginBody,
                          request: Request) -> bool:
     """The must-change rule, at the one door a session comes through.
 
-    gap-password-reset (2026-09-23). An administrator-issued password is
-    known to whoever issued it, so it must never open a session: a reset
-    password, and since 2026-09-24 the password an administrator issues
-    with a new account (final review c8). Reached only AFTER both factors
-    verified, so the refusals below tell nobody anything a guesser did not
-    already have to know. Three outcomes:
+    A password an administrator issued (a reset, or a new account's) is known to whoever issued
+    it, so it never opens a session. Reached only after both factors verified:
 
-    - the flag is set and no new password came: 403 with
-      `PASSWORD_CHANGE_REQUIRED_TYPE`, and NO session. A TOTP code this
-      request carried has been spent (replay protection), so the console
-      asks for a fresh one with the new password. A recovery code has
-      not: `login` spends it only after this answers (2026-09-24);
-    - the flag is set and a new password came: True, and `login` stores
-      it and clears the flag in one statement (`iam_admin.change_password`)
-      once the second factor is spent, then mints the session with it;
-    - no flag, but a new password came: 409. Nothing asked for a change,
-      and quietly ignoring the field would leave the person believing
-      they had changed a password that is still the old one.
+    - flag set, no new password: 403 `PASSWORD_CHANGE_REQUIRED_TYPE` and no session; the TOTP code
+      is spent, a recovery code is not;
+    - flag set and a new password: True; `login` stores it and clears the flag in one statement;
+    - no flag but a new password: 409, rather than leave the person believing it changed.
 
-    This is the ONLY check of the flag in the API, and that is enough:
-    `reset_password` revokes every live session, and no session can be
-    minted here while the flag stands. (`scripts/bootstrap.py session`
-    mints from the server's shell, whose operator holds the database.)
+    The only check of the flag in the API, which is enough: `reset_password` revokes every session.
     """
     row = conn.execute(
         "SELECT must_change_password FROM iam.app_user WHERE id = %s",
@@ -346,10 +265,9 @@ def logout(request: Request,
     user would evict their other devices; that is a separate, deliberate
     capability (password change, admin kill-all)."""
     SessionService(PgSessionStore(conn)).revoke(user.session_id, "logout")
-    # The revoke ended this connection's binding, and the database attributes
-    # a request-role row only to the user its connection is bound to (0150,
-    # 2026-10-03), so the sign-out is written by the system role, as sign-in
-    # is. With none to hand the row is written here and demoted, not lost.
+    # The revoke ended this connection's binding, and the database attributes a request-role row
+    # only to the user its connection is bound to (0150), so the sign-out is written by the system
+    # role, as sign-in is. With none to hand the row is written here and demoted, not lost.
     try:
         with system_connection(SystemPurpose.AUTH, reuse=conn) as sconn:
             _audit(sconn, "AUTH_LOGOUT", user.user_id,
@@ -359,12 +277,8 @@ def logout(request: Request,
         _audit(conn, "AUTH_LOGOUT", user.user_id,
                {"session_id": str(user.session_id)}, request)
     response = Response(status_code=204)
-    # Clear the cookies so the browser stops presenting a dead token. With
-    # the attributes they were SET with: until 2026-09-09 this was
-    # `delete_cookie(name, path="/")`, whose defaults emit no Secure and
-    # `SameSite=lax`, and a browser refuses a `__Host-` cookie without
-    # Secure -- so the deletion was ignored and the revoked token rode
-    # along on every later request while this endpoint said 204.
+    # Clear the cookies with the attributes they were set with: a browser ignores a `__Host-`
+    # cookie deletion without Secure, and the dead token would ride along on every later request.
     _clear_session_cookies(response)
     return response
 
@@ -376,49 +290,12 @@ def adopt_cookie(request: Request,
                  conn: psycopg.Connection = Depends(get_conn)) -> Response:
     """Set the cookie pair for the session the caller is already presenting.
 
-    Kept deliberately after login stopped returning a token (2026-09-10),
-    because the hand-off it serves does not come from login and never
-    did. A browser can no longer be handed a bearer by signing in, but
-    `scripts/bootstrap.py session` still mints one through
-    `SessionService` directly -- the recovery path for a host whose clock
-    TOTP cannot live with -- and this route is the only way that token
-    becomes a session the browser keeps across a reload. Without it that
-    hand-off would either die or have to write the token into web
-    storage, which is what the cookie pair replaced. What did change is
-    the population: nothing arrives here holding a login-body token,
-    because there is no longer any such thing.
-
-    For the `#token=` hand-off: `scripts/bootstrap.py session` mints a
-    session from a shell and hands the token to the browser in the URL
-    fragment, and the console exchanges it here ONCE so the session
-    survives a reload without the token ever being written to web
-    storage. The cookie carries the same token, so no session is minted,
-    no login event is written and nothing about the session changes but
-    its transport -- which is why a successful adoption is not audited as
-    an authentication outcome: `current_user` has already validated the
-    session (and, under `NOCTORNAL_SESSION_STRICT_BINDING`, checked its
-    binding), and a bogus token gets the same generic 401 as everywhere
-    else with no cookie set.
-
-    Reachable with a cookie too, in which case the CSRF double-submit in
-    `session_token` applies and the effect is a fresh CSRF cookie for the
-    same session.
-
-    A bearer that arrives alongside a live cookie session for a DIFFERENT
-    account is refused with 409 and audited (2026-09-09). `session_token`
-    prefers the bearer, so until then a link of the documented deep-link
-    shape `#case=<id>&tab=feeds&token=<attacker's token>` opened by a
-    signed-in analyst replaced the browser's cookie with the attacker's
-    session: every tab the analyst already had open kept showing the
-    analyst, `authHeaders()` in each of them read the new CSRF cookie
-    live, and every write from those tabs landed in the hash-chained
-    audit log under the attacker's user_id. The console now checks for an
-    existing session before it exchanges; this refusal is what holds when
-    the console gets that wrong. The SAME account is allowed on purpose: a
-    tab left with the session cookie and no readable half recovers through
-    its own `bootstrap.py session` link, and the effect is a fresh pair
-    for the same user. A cookie the server no longer honours is replaced
-    freely -- there is no session there to protect.
+    Serves the `#token=` hand-off from `scripts/bootstrap.py session`: the console exchanges the
+    token here once, so the session survives a reload without the token in web storage. Nothing is
+    minted, so a success is not audited as an authentication. A bearer arriving beside a live
+    cookie session for a different account is refused with 409 and audited: a link carrying
+    someone else's token would otherwise swap the analyst's open tabs onto that session. A cookie
+    for the same account, or one the server does not honour, is overwritten freely.
     """
     cookie = request.cookies.get(SESSION_COOKIE)
     if cookie and cookie != raw:
@@ -456,31 +333,21 @@ def _clear_session_cookies(response: Response) -> None:
 
 class Me(BaseModel):
     user_id: str
-    # Who you are, not just which row you are. Until 2026-09-02 the model
-    # carried the id and the code count and nothing else, and the analyst
-    # UI put `me.user_id` straight into the app bar, so every signed-in
-    # analyst was greeted by their own UUID.
     display_name: str
     email: str
     recovery_codes_remaining: int
-    # The session's two limits, so the console can warn before either
-    # instead of discovering them on a Save (expiry-drops-context,
-    # 2026-09-22). The idle window has just been slid by this very request,
-    # so it is the full timeout; the absolute limit is a distance rather
-    # than a timestamp because the browser's clock need not agree with
-    # this one.
+    # The session's two limits, so the console can warn before either. This request has just
+    # slid the idle window, so it is the full timeout; the absolute limit is a distance, not a
+    # timestamp, because the browser's clock need not agree with this one.
     idle_timeout_seconds: int
     session_expires_in_seconds: int
-    # How much longer this session satisfies the step-up gate (a second
-    # factor within STEP_UP_FRESHNESS), 0 when it no longer does. The
-    # console asks for a fresh sign-in BEFORE a gated request instead of
-    # after its 403, because each refused POST /auth/recovery-codes still
-    # spends a token of that route's rate limit (2026-09-22 fix round).
+    # How much longer this session satisfies the step-up gate (a second factor within
+    # STEP_UP_FRESHNESS), 0 once it does not. The console asks for a fresh sign-in before a gated
+    # request rather than after its 403, because each refused POST /auth/recovery-codes spends a
+    # token of that route's rate limit.
     step_up_fresh_seconds: int
-    # The account's own clearance, so the app bar can say what this
-    # person may open ("cleared RED") beside their role on the case, in
-    # place of a literal "analyst" printed for every account
-    # (ux02-cases:header-says-analyst-no-permission-cues, 2026-09-23).
+    # The account's own clearance, so the app bar can say what this person may open ("cleared
+    # RED") beside their role on the case.
     tlp_clearance: str | None = None
 
 
@@ -501,9 +368,8 @@ def me(user: CurrentUser = Depends(current_user),
         # not as a 500 the client would retry.
         raise Problem(401, "Unauthenticated", "session refers to no account")
     display_name, email, clearance = row
-    # Through the definer (rls-6, 2026-10-03): the request role may not
-    # read the hashes it counts. None means the connection is no longer
-    # bound to this account, a session revoked while this request ran.
+    # Through the definer: the request role may not read the hashes it counts. None means the
+    # connection is not bound to this account any more, a session revoked while this request ran.
     remaining = PgUserStore(conn).recovery_codes_remaining(user.user_id)
     if remaining is None:
         raise Problem(401, "Unauthenticated", "invalid or expired session")
@@ -543,15 +409,10 @@ def issue_recovery_codes(
     user: CurrentUser = Depends(current_user),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> RecoveryCodesOut:
-    """Issue a fresh SET of recovery codes, invalidating any previous set
-    (docs/05: "10, single-use, Argon2id-hashed, regenerated as a set").
+    """Issue a fresh set of recovery codes, invalidating any previous set (docs/05).
 
-    Step-up protected. Anyone who can reach a live session can otherwise
-    mint themselves a permanent MFA bypass, which would make the second
-    factor decorative: a stolen session cookie would become ten reusable
-    keys that survive the session's own expiry.
-
-    The plaintexts are returned here and are never retrievable again.
+    Step-up protected, or a stolen session could mint ten second factors that outlive it. The
+    plaintexts are returned here and are never retrievable again.
     """
     fresh = (
         user.session_mfa_at is not None
@@ -564,7 +425,7 @@ def issue_recovery_codes(
         raise Problem(403, "Forbidden",
                       "re-authenticate with your second factor before "
                       "issuing recovery codes")
-    # An IAM write, so on a system connection (S1, 0109).
+    # An IAM write, so on a system connection (0109).
     with system_connection(SystemPurpose.AUTH, reuse=conn) as sconn:
         codes = PgUserStore(sconn).issue_recovery_codes(user.user_id)
     _audit(conn, "RECOVERY_CODES_ISSUED", user.user_id,
@@ -577,7 +438,7 @@ def issue_recovery_codes(
 
 
 class PasswordChangeBody(BaseModel):
-    # Bounded as LoginBody is (http_ui-006, 2026-10-03).
+    # Bounded as LoginBody is.
     current_password: str = Field(max_length=4096)
     totp_code: str = Field(max_length=64)
     new_password: str = Field(max_length=4096)
@@ -596,23 +457,13 @@ def change_own_password(
     user: CurrentUser = Depends(current_user),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """Change your own password (gap-password-reset, 2026-09-23).
+    """Change your own password.
 
-    There was no way for a person to change their own password at all.
-    The current password AND a code from the authenticator are required,
-    in the request, rather than a step-up window: a session somebody
-    walked away from must not be enough to lock its owner out by replacing
-    the password, and a code typed now is the freshest proof there is.
-    Verified by `AuthService.authenticate`, the sign-in's own reader, so a
-    wrong current password here counts toward the account's lockout
-    exactly as a wrong sign-in does, and a session thief guessing it is
-    stopped by the same five failures.
-
-    A refusal is a 403, not a 401: the session is fine and stays signed
-    in, and a 401 would tell the console the session had ended. Which
-    factor was wrong is not said, for the reason login does not say it.
-    Every other session is signed out (`iam_admin.change_password`); the
-    one making the change is kept.
+    Takes the current password and an authenticator code in the request, not a step-up window, so
+    an abandoned session cannot lock its owner out. Checked by `AuthService.authenticate`, so a
+    wrong password counts toward the lockout as at sign-in. A refusal is a 403 that does not say
+    which factor was wrong; a 401 would tell the console the session had ended. Every other
+    session is signed out; this one is kept.
     """
     row = conn.execute("SELECT email FROM iam.app_user WHERE id = %s",
                        (user.user_id,)).fetchone()
@@ -623,9 +474,8 @@ def change_own_password(
                                    current=body.current_password)
     if problem:
         raise Problem(422, "Invalid field", problem)
-    # The credential check and the change both write the IAM plane
-    # (lockout and TOTP counters, the password, other sessions revoked), so
-    # they run on a system connection (S1, 0109).
+    # The credential check and the change both write the IAM plane (lockout and TOTP counters, the
+    # password, other sessions revoked), so they run on a system connection (0109).
     with system_connection(SystemPurpose.AUTH, reuse=conn) as sconn:
         return _change_own_password(body, request, user, conn, sconn, email)
 

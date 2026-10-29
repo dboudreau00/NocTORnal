@@ -1,79 +1,26 @@
-"""Four-eyes approval: request, decide, consume.
+"""Four-eyes approval: request, decide, consume (docs/05).
 
-docs/05: "Dual control for the genuinely irreversible: case deletion,
-evidence purge, role definition changes, persona credential reveal. Two
-distinct humans, enforced by constraint."
+Migration 0028 holds the two-distinct-humans constraint; this module is the lifecycle around it.
 
-The constraint lives in migration 0028. This module is the lifecycle around
-it, and the two rules it exists to hold:
-
-**An approval is for a specific action, not for a person.** Everything is
-bound to `payload_hash` -- a hash over the operation, the case and the
-canonicalised payload. `consume()` recomputes it against what is about to
-run and refuses on any difference. Without that binding, "Bob approved it"
-means Bob approved whatever the requester did next.
-
-**An approval is spent, not held.** `consume()` is one atomic UPDATE
-guarded on `state = 'APPROVED'`, so it succeeds exactly once even under
-concurrency. An approval that can be replayed is a standing grant.
-
-## What the caller still has to do
-
-This module does NOT decide whether the approver was allowed to approve.
-That is an authorization question and there is exactly one place that
-answers those -- `security/access.evaluate()` via `http/deps`. The HTTP
-layer checks that the approver independently holds the operation's
-permission and has a fresh second factor BEFORE calling `decide()`, for the
-obvious reason: a second human who could not have performed the operation
-themselves is a witness, not a control.
-
-## Consuming is the requester's job
-
-Only `requested_by` may consume an approval. The approval says "you may do
-the thing you asked to do"; letting the approver execute it instead splits
-one action across two people's names in the audit log and makes "who did
-this" ambiguous, which is the question this whole system exists to answer.
-An approver who wants to perform it can raise their own request.
-
-## Case-scoped and deployment-wide (F9, 2026-09-24)
-
-Every operation says whether it is raised in a case or for the whole
-deployment (`Operation.scope`). A deployment-wide request has no case, so
-nobody is assigned to it: it is raised and decided through the global
-`/approvals` routes and told to everybody who could sign it. The first of
-them is `dual_control.policy`, a change to the two-person policy itself,
-which an administrator proposes and a DIFFERENT kind of person, a Security
-officer, countersigns (`Operation.approver_permission`).
-
-## The second person on a case's merge switch (F39, 2026-10-02)
-
-`case.policy.relax` carries `signer_assignment_seasoned`: whoever approves
-it must have held `case.update` on the case for `relax_seasoning` days (7
-unless `NOCTORNAL_RELAX_SEASONING_DAYS` says otherwise, 0 off), from the
-assignment's `granted_at` against the database's clock. It is checked where
-the colleague approves (`_refuse_unseasoned_assignment`) and again where the
-approval is spent (`refuse_unseasoned_spend`, judged at `decided_at`). The
-database does not check it: it cannot read the setting, and the approver's
-permission is an API check for every case operation.
-
-## Out-of-band audit rows, and the one rule they follow
-
-A refusal the caller's transaction must not roll back is written on a
-second connection (`_record_out_of_band`). `audit.chain_hash` takes an
-advisory lock on every audit insert and holds it to the end of the
-inserting transaction, so a caller whose open transaction has ALREADY
-written an audit row holds that lock, and a second connection waiting for
-it waits on a caller that is waiting for the second connection. Postgres
-cannot see that cycle: it runs through this Python thread. So the rule
-(2026-09-24): out of band only while the caller holds no
-open transaction that has audited. `_record_out_of_band` checks the
-caller's locks and, when it does hold the chain lock, writes on the
-caller's own connection instead and logs that it did; the side
-connection also carries a five-second lock timeout, so a future mistake
-fails one request instead of freezing every audited action in the
-deployment. The callers keep the rule by shape: `consume()` is the first
-write in every transaction that spends an approval, and a refused policy
-change is recorded after its transaction has rolled back.
+- An approval is for a specific action, not a person: it is bound to `payload_hash` (operation, case
+  and canonicalised payload), and `consume()` recomputes it against what is about to run and refuses
+  on any difference.
+- An approval is spent, not held: `consume()` is one atomic UPDATE guarded on `state = 'APPROVED'`,
+  so it succeeds exactly once even under concurrency. Only `requested_by` may call it, so one action
+  is never split across two names in the audit log.
+- Whether the approver may approve is not decided here. The HTTP layer checks that they hold the
+  operation's permission and a fresh second factor before calling `decide()`
+  (`security/access.evaluate()` via `http/deps`), because a second human who could not have
+  performed the operation is a witness, not a control.
+- A deployment-wide operation (`Operation.scope`) has no case: it goes through the global
+  `/approvals` routes and is told to everybody who could sign it.
+- A refusal the caller's transaction must not roll back is written on a second connection
+  (`_record_out_of_band`). `audit.chain_hash` holds an advisory lock to the end of the inserting
+  transaction, so if the caller has already audited, a second connection would wait on a caller that
+  is waiting for it, a cycle Postgres cannot see. `_record_out_of_band` then writes on the caller's
+  own connection and logs that it did, and the side connection has a five-second lock timeout.
+  `consume()` stays the first write in a transaction that spends an approval, and a refused policy
+  change is recorded after its transaction has rolled back.
 """
 from __future__ import annotations
 
@@ -101,9 +48,8 @@ REJECTED = "REJECTED"
 WITHDRAWN = "WITHDRAWN"
 CONSUMED = "CONSUMED"
 
-#: The deployment modes of a configurable operation, least strict first
-#: (F9, 2026-09-24). PER_CASE: a case asks for the second signature with
-#: its own switch. ALWAYS: every case needs it. There is no NEVER: a
+#: The deployment modes of a configurable operation, least strict first. PER_CASE: a case asks for
+#: the second signature with its own switch. ALWAYS: every case needs it. There is no NEVER: a
 #: deployment should not forbid a case from being stricter.
 MODES = ("PER_CASE", "ALWAYS")
 
@@ -119,39 +65,29 @@ class ApprovalError(Exception):
 class Operation:
     """One four-eyeable operation.
 
-    `permission` is what the REQUESTER holds. `signer_permission` is what
-    the APPROVER must independently hold, and it is the SAME permission
-    unless `approver_permission` names another one, deliberately: an
-    approver drawn from a wider pool than the actors is a rubber stamp
-    with a job title. The one exception is a pair declared in
-    `iam.separated_duty`, where the second person is by design a different
-    kind of person (an administrator proposes, a Security officer
-    countersigns); then nobody holding the requester's permission may sign
-    at all, or one person holding both roles would be both people.
+    `permission` is what the requester holds; `signer_permission` is what the approver must
+    independently hold. They are the same permission unless `approver_permission` names another,
+    because an approver drawn from a wider pool than the actors is a rubber stamp. The exception is
+    a pair declared in `iam.separated_duty`, where the second person is by design a different kind
+    of person (an administrator proposes, a Security officer countersigns): nobody holding the
+    requester's permission may then sign, or one person holding both roles would be both people.
 
-    `scope` and `enforced_at` have no default (F9, 2026-09-24), so an entry
-    that does not say whether it is raised in a case, and which function
-    spends it, does not construct. `enforced_at` is
-    "relative/path.py::Qualname" of the function that calls `consume` for
-    this key, or None with `not_enforced_because` saying why; the
-    Two-person controls screen shows that sentence rather than a control
-    the code does not have, and `test_approvals_catalogue.py` holds both
-    halves to the source.
+    `scope` and `enforced_at` have no default, so an entry that does not say whether it is raised in
+    a case and which function spends it does not construct. `enforced_at` is
+    "relative/path.py::Qualname" of the function that calls `consume` for this key, or None with
+    `not_enforced_because` saying why; the Two-person controls screen shows that sentence, and
+    `test_approvals_catalogue.py` holds both halves to the source.
 
-    `modes[0]` is the operation's floor. An operation is configurable, and
-    gets a row in `iam.dual_control_operation`, only when it lists more than
-    one mode; the database can then make it stricter and never looser.
+    `modes[0]` is the operation's floor. An operation is configurable, with a row in
+    `iam.dual_control_operation`, only when it lists more than one mode; the database can then make
+    it stricter and never looser.
 
-    `countersigner_seasoned`: the approver may not sign within the seven
-    days after someone else took over their credentials or gave them the
-    role that signs (`iam.countersign_blocked_by`).
-
-    `signer_assignment_seasoned` (F39, 2026-10-02): the approver must have
-    held `signer_permission` on the case for the deployment's window
-    (`relax_seasoning`, seven days unless declared otherwise, 0 off), read
-    from the assignment's grant time by the database clock. The other half
-    of the countersigner rule: that one is about an account somebody else
-    touched, this one about a colleague nobody has worked beside yet.
+    `countersigner_seasoned`: the approver may not sign within seven days of someone else taking
+    over their credentials or giving them the role that signs (`iam.countersign_blocked_by`).
+    `signer_assignment_seasoned`: the approver must have held `signer_permission` on the case for
+    the deployment's window (`relax_seasoning`, seven days unless declared otherwise, 0 off), read
+    from the assignment's grant time by the database clock; the database cannot read the setting, so
+    it does not check it.
     """
 
     key: str
@@ -175,13 +111,10 @@ class Operation:
         return len(self.modes) > 1
 
 
-# The catalogue. docs/05 names four; docs/08 adds out-of-schedule purge;
-# docs/04 adds credential reveal; F9 (2026-09-24) adds the two-person
-# policy itself and the case switch's relaxation. The ones not wired yet
-# are registered so that when those operations are built the control
-# already exists and does not have to be retrofitted onto something that
-# already shipped without it; each says why it is not wired, and the
-# Two-person controls screen shows that sentence.
+# The catalogue. docs/05 names four; docs/08 adds out-of-schedule purge; docs/04 adds credential
+# reveal; the two-person policy itself and the case switch's relaxation are also here. Operations
+# not wired yet are registered so the control exists when they are built; each says why it is not
+# wired, and the Two-person controls screen shows that sentence.
 OPERATIONS: dict[str, Operation] = {
     "node.merge": Operation(
         key="node.merge", permission="graph.merge", ttl=timedelta(hours=8),
@@ -226,10 +159,9 @@ OPERATIONS: dict[str, Operation] = {
             "leaves the vault, and revealing a Telegram session would hand "
             "over the whole account."),
     ),
-    # F9 (2026-09-24). A change to the two-person policy: which operations
-    # need a second signature, and which permission pairs no role may hold.
-    # Proposed by an administrator and countersigned by a Security officer,
-    # a declared separated pair (migration dual_control_policy).
+    # A change to the two-person policy: which operations need a second signature, and which
+    # permission pairs no role may hold. Proposed by an administrator and countersigned by a
+    # Security officer, a declared separated pair (migration dual_control_policy).
     "dual_control.policy": Operation(
         key="dual_control.policy", permission="dual_control.manage",
         approver_permission="dual_control.countersign",
@@ -239,13 +171,11 @@ OPERATIONS: dict[str, Operation] = {
         enforced_at="dual_control.py::DualControlPolicyService.apply",
         countersigner_seasoned=True,
     ),
-    # F9b (2026-09-24). Turning a case's merge requirement OFF. The second
-    # person is another holder of case.update on the case: a deputy or a
-    # second Lead investigator (0028's same-permission rule). Turning it on
-    # takes no approval at all. F39 (2026-10-02): and that person must have
-    # held case.update on the case for the seasoning window, because an
-    # account holding SYS_ADMIN and CASE_OWNER could otherwise create its own
-    # second person and approve at once.
+    # Turning a case's merge requirement OFF. The second person is another holder of case.update on
+    # the case: a deputy or a second Lead investigator (0028's same-permission rule). Turning it on
+    # takes no approval at all. That person must have held case.update on the case for the seasoning
+    # window, or an account holding SYS_ADMIN and CASE_OWNER could create its own second person and
+    # approve at once.
     "case.policy.relax": Operation(
         key="case.policy.relax", permission="case.update",
         ttl=timedelta(hours=24),
@@ -317,11 +247,9 @@ def countersign_block(conn: psycopg.Connection, signer_id: UUID,
                       lookback_days: int | None = None) -> dict | None:
     """Why `signer_id` may not countersign now, or None.
 
-    The one reader of the seven-day rule (F9, 2026-09-24): decide, the
-    listing, the overview and the ledger trigger all call
-    `iam.countersign_blocked_by`. With a proposer named, it also answers
-    for the reverse direction: the signer took over the proposer's account
-    (2026-09-24). `lookback_days` widens the window for
+    The one reader of the seven-day rule: decide, the listing, the overview and the ledger trigger
+    all call `iam.countersign_blocked_by`. With a proposer named, it also answers for the reverse
+    direction: the signer took over the proposer's account. `lookback_days` widens the window for
     the change card's provenance line, and only for that."""
     row = conn.execute(
         """SELECT b.action, b.occurred_at, b.actor_id, b.subject_id,
@@ -404,26 +332,18 @@ def countersign_block_sentence(block: dict, *, days: int = 7) -> str:
             f"proposes.")
 
 
-# ---------------------------------------------------------------------------
-# The second person on a case's merge switch (F39, 2026-10-02)
-# ---------------------------------------------------------------------------
+# The second person on a case's merge switch. Turning the requirement off takes a second holder of
+# `case.update` on the case, who must have held it for the seasoning window (modelled on the
+# deployment-wide policy's seven-day countersigner rule), or an account holding SYS_ADMIN and
+# CASE_OWNER could create that person, assign it to the case and approve its own relax within the
+# minute. The window is a deployment setting, seven days unless declared, and 0 turns the rule off
+# (docs/00 open question 12).
 #
-# Turning a case's merge requirement off takes a second holder of
-# `case.update` on the case (F9b). Until 2026-10-02 an account holding
-# SYS_ADMIN and CASE_OWNER could create that second person, assign it to the
-# case and approve its own relax within the minute. The owner's decision
-# (docs/00 open question 12, answered 2026-10-02) is a seasoning rule
-# modelled on the deployment-wide policy's seven-day countersigner rule: the
-# second person must have held `case.update` on the case for the window.
-# The window is a deployment setting, seven days unless declared, and 0 turns
-# the rule off.
-#
-# The age is the assignment's own `granted_at`, compared with the database's
-# clock inside one statement (`assignment_block`): an API process can neither
-# supply the time that counts nor shorten the wait. `_grant` (cases.py) sets
-# `granted_at = now()` on every re-grant, so a role change or a repeated
-# grant restarts the clock. That is deliberate and fails safe: the colleague
-# waits a window and reads why, and nobody can move the date back.
+# The age is the assignment's own `granted_at`, compared with the database's clock inside one
+# statement (`assignment_block`): an API process can neither supply the time that counts nor shorten
+# the wait. `_grant` (cases.py) sets `granted_at = now()` on every re-grant, so a role change or a
+# repeated grant restarts the clock. That fails safe: the colleague waits a window and reads why,
+# and nobody can move the date back.
 
 #: The setting, and the numbers around it.
 RELAX_SEASONING_ENV = "NOCTORNAL_RELAX_SEASONING_DAYS"
@@ -435,13 +355,12 @@ def relax_seasoning(env: Mapping[str, str] | None = None
                     ) -> tuple[int, str | None]:
     """The window in days, and why a declared value was not used, or None.
 
-    The one reader: the decide route, the spend check, the policy read, the
-    Two-person controls screen and the production boot all call it, so they
-    cannot disagree about what a usable value is. Unset or blank is the
-    default. A whole number from 0 to 365 is that number, and 0 is the one
-    way to turn the rule off. Anything else (a word, a sign, a fraction, a
-    year and a day) is NOT 0: it answers the default and a sentence, so a
-    typo can never be the way the rule goes off. The value is not quoted."""
+    The one reader (the decide route, the spend check, the policy read, the Two-person controls
+    screen and the production boot), so they cannot disagree about what a usable value is. Unset or
+    blank is the default. A whole number from 0 to 365 is that number, and 0 is the one way to turn
+    the rule off. Anything else (a word, a sign, a fraction, a year and a day) is not 0: it answers
+    the default and a sentence, so a typo can never be the way the rule goes off. The value is not
+    quoted."""
     source = os.environ if env is None else env
     raw = str(source.get(RELAX_SEASONING_ENV, "")).strip()
     if not raw:
@@ -463,18 +382,14 @@ def relax_seasoning_days(env: Mapping[str, str] | None = None) -> int:
 def assignment_block(conn: psycopg.Connection, signer_id: UUID, case_id: UUID,
                      permission: str, *, days: int,
                      as_of: datetime | None = None) -> dict | None:
-    """Why `signer_id` may not yet be the second person on a case's change,
-    or None when they may.
+    """Why `signer_id` may not yet be the second person on a case's change, or None when they may.
 
-    `kind` is "unassigned" when no live assignment of theirs to the case
-    carries `permission` (judged at `as_of`), and "seasoning" when one does
-    but was granted less than `days` days before `as_of`. `as_of` None is the
-    database's `now()`: the decision itself. A spent approval is judged at
-    its `decided_at`, which the approval guard pinned to the database's
-    clock, so the question at spend is whether they were seasoned WHEN THEY
-    SIGNED. The comparison that decides is made in SQL on purpose, against
-    `now()` or the pinned `as_of`, never against a time this process read
-    off its own clock. `days` 0 is never asked: callers skip the rule."""
+    `kind` is "unassigned" when no live assignment of theirs to the case carries `permission`
+    (judged at `as_of`), and "seasoning" when one does but was granted less than `days` days before
+    `as_of`. `as_of` None is the database's `now()`; a spent approval is judged at its `decided_at`,
+    so the question at spend is whether they were seasoned when they signed. The comparison is made
+    in SQL, never against a time this process read off its own clock. `days` 0 is never asked:
+    callers skip the rule."""
     row = conn.execute(
         """SELECT ca.granted_at,
                   ca.granted_at + make_interval(hours => %(days)s::int * 24),
@@ -563,14 +478,12 @@ def holds_global_permission(conn: psycopg.Connection, user_id: UUID,
 
 
 def eligible_signers_sql(alias: str = "u") -> str:
-    """SQL true when `alias` (an iam.app_user row) could sign a
-    deployment-wide request whose signer permission is `%(signer)s` and
-    whose requester permission is `%(requester)s`: active, holding the
-    signer's permission, and, where the two differ, NOT holding the
-    requester's (2026-09-24: `iam.separated_duty` keeps
-    the halves in different roles, and this keeps them in different
-    people). Shared by the notification, the waiting count and
-    `dual_control.signers`, so the three agree about who could sign."""
+    """SQL true when `alias` (an iam.app_user row) could sign a deployment-wide request whose signer
+    permission is `%(signer)s` and whose requester permission is `%(requester)s`: active, holding
+    the signer's permission, and, where the two differ, not holding the requester's
+    (`iam.separated_duty` keeps the halves in different roles, this keeps them in different people).
+    Shared by the notification, the waiting count and `dual_control.signers`, so the three agree
+    about who could sign."""
     return f"""
         {alias}.is_active
         AND EXISTS (SELECT 1 FROM iam.user_role sur
@@ -601,20 +514,16 @@ class ApprovalRequest:
     decision_note: str | None
     consumed_at: datetime | None
     result_ref: UUID | None
-    #: N1 (2026-09-02). Whether the notification that a request or a
-    #: decision raises actually reached anyone, on the record returned by
-    #: `request()` / `decide()` ONLY.
+    #: Whether the notification a request or a decision raises reached anyone, on the record
+    #: returned by `request()` and `decide()` only.
     #:
-    #: `approvers_notified`: 0 means nobody else on the case both holds the
-    #: operation's permission and may read the request (or the request has
-    #: no case); None means the notify write itself failed after the row
-    #: committed. `requester_notified`: False means suppressed, None means
-    #: failed. Reach is not stored, so a record read back from the table
-    #: carries None for both -- which is "not recorded", not "failed". The
-    #: router renders them only on the two writes, so a listing never
-    #: claims a failure it cannot know about. (A listing does carry a
-    #: separate count of the APPROVAL_REQUESTED notifications a request
-    #: raised, which IS stored; see the router, 2026-09-23.)
+    #: `approvers_notified`: 0 means nobody else on the case both holds the operation's permission
+    #: and may read the request (or the request has no case); None means the notify write itself
+    #: failed after the row committed. `requester_notified`: False means suppressed, None means
+    #: failed. Reach is not stored, so a record read back from the table carries None for both,
+    #: which is "not recorded", not "failed". The router renders them only on the two writes, so a
+    #: listing never claims a failure it cannot know about. (A listing carries a separate, stored
+    #: count of the APPROVAL_REQUESTED notifications a request raised; see the router.)
     approvers_notified: int | None = None
     requester_notified: bool | None = None
 
@@ -630,13 +539,10 @@ class ApprovalRequest:
 def canonical_payload(payload: dict) -> str:
     """The exact bytes the hash is taken over.
 
-    Sorted keys and no whitespace, so two dicts that mean the same thing
-    hash the same regardless of how the client serialised them. UUIDs and
-    datetimes are stringified because a payload that round-trips through
-    JSON must hash identically before and after -- otherwise every approval
-    would fail to consume, which is at least a loud failure, or worse, a
-    later change to the serialiser would silently start letting mismatched
-    payloads through.
+    Sorted keys and no whitespace, so two dicts that mean the same thing hash the same however the
+    client serialised them. UUIDs and datetimes are stringified because a payload that round-trips
+    through JSON must hash identically before and after: otherwise every approval would fail to
+    consume, or a later change to the serialiser would silently let mismatched payloads through.
     """
     return json.dumps(payload, sort_keys=True, separators=(",", ":"),
                       default=str)
@@ -653,9 +559,8 @@ def payload_hash(operation: str, case_id: UUID | None, payload: dict) -> bytes:
     return hashlib.sha256(material.encode("utf-8")).digest()
 
 
-#: A payload key read as a uuid, or NULL when it is not one, so a malformed
-#: legacy payload counts as naming nothing rather than failing the read
-#: (2026-10-03). `{key}` is a literal chosen in this module.
+#: A payload key read as a uuid, or NULL when it is not one, so a malformed legacy payload counts as
+#: naming nothing rather than failing the read. `{key}` is a literal chosen in this module.
 _PAYLOAD_UUID = (
     "(CASE WHEN r.payload->>'{key}' ~* "
     "'^[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$' "
@@ -670,16 +575,14 @@ class ApprovalService:
 
     def request(self, *, operation: str, case_id: UUID | None, payload: dict,
                 justification: str, requested_by: UUID,
-                # The labels of what the payload names, when it names case
-                # elements: the signers' notice quotes the justification,
-                # so it is labelled at least this high (2026-10-03).
+                # The labels of what the payload names, when it names case elements: the signers'
+                # notice quotes the justification, so it is labelled at least this high.
                 element_classification: str | None = None,
                 element_compartments: frozenset[str] = frozenset(),
                 ) -> ApprovalRequest:
         op = self._operation(operation)
-        # F9 (2026-09-24): a case operation raised with no case would be
-        # told to nobody and decided by nobody, and a deployment-wide one
-        # raised in a case would be hidden behind that case's assignments.
+        # A case operation raised with no case would be told to nobody and decided by nobody, and a
+        # deployment-wide one raised in a case would be hidden behind that case's assignments.
         if op.scope == "case" and case_id is None:
             raise ApprovalError(f"{op.description} is raised in a case")
         if op.scope == "global" and case_id is not None:
@@ -712,23 +615,18 @@ class ApprovalService:
             "operation": operation, "justification": record.justification,
             "expires_at": record.expires_at.isoformat(),
         })
-        # An approval nobody is told about is an approval nobody gives, and
-        # then dual control is just a merge button that does not work. So
-        # the reach is COUNTED and returned, not discarded: until N1
-        # (2026-09-02) this was a bare statement, `approval_requested`
-        # returned a count nothing read, and a request that reached nobody
-        # was a 201 like any other.
+        # An approval nobody is told about is an approval nobody gives, so the reach is counted and
+        # returned, not discarded.
         #
-        # It runs on an autocommit connection AFTER the row above committed,
-        # so a failure here is logged and reported as `None`, never raised.
-        # Raising turned a request that EXISTS into a 500; the analyst
-        # re-submitted, and the retry was a 409 for an identical pending
-        # request they had just been told was never made.
+        # It runs on an autocommit connection after the row above committed, so a failure here is
+        # logged and reported as `None`, never raised: raising would turn a request that exists into
+        # a 500, and the retry would be a 409 for an identical pending request the analyst was told
+        # was never made.
         reach: int | None = 0
         try:
             if case_id is not None:
-                # The SIGNER's permission (F9, 2026-09-24): the people told
-                # are the people the decide route will accept.
+                # The signer's permission: the people told are the people the decide route will
+                # accept.
                 reach = notify_events.approval_requested(
                     self._c, case_id=case_id, request_id=record.id,
                     operation=operation, permission=op.signer_permission,
@@ -750,36 +648,24 @@ class ApprovalService:
 
     def decide(self, request_id: UUID, *, decided_by: UUID, approve: bool,
                note: str | None = None) -> ApprovalRequest:
-        """Approve or reject. The caller must ALREADY have checked that
-        `decided_by` holds the operation's permission and has a fresh second
-        factor -- see the module docstring.
+        """Approve or reject. The caller must already have checked that `decided_by` holds the
+        operation's permission and a fresh second factor (see the module docstring).
 
-        Self-approval is refused here as well as by the CHECK constraint.
-        The constraint is the guarantee; this is the readable error.
+        Self-approval is refused here as well as by the CHECK constraint: the constraint is the
+        guarantee, this is the readable error.
 
-        Three refusals are about the PERSON rather than the request, and all
-        apply to approving only: a refusal is the safe direction and is
-        never blocked (F9, 2026-09-24).
+        Three refusals are about the person rather than the request, and apply to approving only
+        (refusing is the safe direction and is never blocked). Where the signer's permission is a
+        different kind of person's (`approver_permission`), an account that also holds the
+        requester's permission is not a second person: the first-run account holds both roles and
+        could otherwise countersign what a second account it created proposed.
+        `countersigner_seasoned` is the seven-day rule, in either direction.
+        `signer_assignment_seasoned` is the case-assignment window (`relax_seasoning`). Each comes
+        with a sentence saying who and when, and is written out of band: the refusal is the
+        detection signal, and a caller's rollback must not take it.
 
-        - Where the signer's permission is a different kind of person's
-          (`approver_permission`), an account that also holds the
-          requester's permission is not a second person, whichever two
-          accounts are involved (the first-run account
-          holds both roles and could otherwise countersign what a second
-          account it created proposed).
-        - `countersigner_seasoned`: the seven-day rule, in either
-          direction, with the sentence that says who and when.
-        - `signer_assignment_seasoned` (F39, 2026-10-02): the approver must
-          have held the signer's permission on the case for the window
-          (`relax_seasoning`), with the sentence that names the rule and the
-          date they become eligible.
-
-        Each refusal is written out of band: the refusal is the detection
-        signal, and a caller's rollback must not take it.
-
-        `decided_at` is the database's `now()`: the approval guard insists
-        on it, because the ledger measures the seven-day window back from
-        it and the API's clock is not the database's.
+        `decided_at` is the database's `now()`: the approval guard insists on it, because the ledger
+        measures the seven-day window back from it and the API's clock is not the database's.
         """
         current = self.get(request_id)
         if current is None:
@@ -820,9 +706,8 @@ class ApprovalService:
                         "requested_by": str(record.requested_by),
                         "note": record.decision_note,
                     })
-        # Same shape as `request()` (N1, 2026-09-02): the decision is
-        # committed, so a failure to tell the requester is a fact on the
-        # record, not a 500 that says the decision was not made.
+        # As in `request()`: the decision is committed, so a failure to tell the requester is a fact
+        # on the record, not a 500 that says the decision was not made.
         told: bool | None = False
         try:
             if record.case_id is not None:
@@ -883,13 +768,11 @@ class ApprovalService:
 
     def _refuse_unseasoned_assignment(self, current: ApprovalRequest,
                                       op: Operation, decided_by: UUID) -> None:
-        """F39 (2026-10-02): the approver must have held the signer's
-        permission on the case for the window. Approving only, like the
-        refusals above: nobody is kept from rejecting. Written out of band
-        as DUAL_CONTROL_COUNTERSIGN_REFUSED with its own reason, so one
-        query finds every refusal of a second person. With the window at 0
-        the rule is off and nothing here runs, which is the behaviour of
-        every release before it."""
+        """The approver must have held the signer's permission on the case for the window.
+
+        Approving only, like the refusals above: nobody is kept from rejecting. Written out of band
+        as DUAL_CONTROL_COUNTERSIGN_REFUSED with its own reason, so one query finds every refusal of
+        a second person. With the window at 0 the rule is off and nothing here runs."""
         days = relax_seasoning_days()
         if not days:
             return
@@ -904,25 +787,21 @@ class ApprovalService:
 
     def refuse_unseasoned_spend(self, request: ApprovalRequest, *,
                                 actor_id: UUID) -> None:
-        """The same rule, asked again where a decided approval is spent
-        (F39, 2026-10-02), judged at `decided_at`: was the second person
-        seasoned when they signed. It closes what the decide route alone
-        cannot: a window declared after the decision, and an assignment
-        granted again or withdrawn between the decision and the spend.
-        Raises `ApprovalError` with the sentence, after recording it out of
-        band as DUAL_CONTROL_APPLY_REFUSED. Call it BEFORE the transaction
-        that spends the approval (the module's out-of-band rule). Silent for
-        an operation the rule does not cover, for a request not yet decided,
-        and with the window at 0.
+        """The same rule, asked again where a decided approval is spent and judged at `decided_at`:
+        was the second person seasoned when they signed.
 
-        `actor_id` is whoever is spending it: the row is about that person's
-        attempt, and the requester is not always the one who presents the
-        approval (the second person may). Naming the requester attributed an
-        act to someone who did not take it, and since 0150 the database
-        refuses a row that names a user other than the one the connection is
-        bound to, so the row was lost (g49v-apply-refusal-row-lost,
-        2026-10-03).
-        The requester stays in the detail."""
+        It closes what the decide route alone cannot: a window declared after the decision, and an
+        assignment granted again or withdrawn between the decision and the spend. Raises
+        `ApprovalError` with the sentence after recording it out of band as
+        DUAL_CONTROL_APPLY_REFUSED, so call it before the transaction that spends the approval (the
+        module's out-of-band rule). Silent for an operation the rule does not cover, for a request
+        not yet decided, and with the window at 0.
+
+        `actor_id` is whoever is spending it: the row is about that person's attempt, and the
+        requester is not always the one who presents the approval. Naming the requester would
+        attribute an act to someone who did not take it, and since migration 0150 the database
+        refuses a row that names a user other than the one the connection is bound to. The requester
+        stays in the detail."""
         op = OPERATIONS.get(request.operation)
         if (op is None or not op.signer_assignment_seasoned
                 or request.case_id is None or request.decided_by is None
@@ -946,12 +825,10 @@ class ApprovalService:
 
     def signer_block_for(self, request: ApprovalRequest,
                          viewer_id: UUID) -> dict | None:
-        """What stops `viewer_id` approving a waiting request yet, for the
-        listing to say before they try (F39, 2026-10-02): the sentence and
-        the instant they become eligible (None when they hold nothing that
-        would ever qualify). None when nothing stops them, when the rule
-        does not cover the operation, and for the requester, whom the
-        self-approval refusal already answers."""
+        """What stops `viewer_id` approving a waiting request yet, for the listing to say before
+        they try: the sentence and the instant they become eligible (None when they hold nothing
+        that would ever qualify). None when nothing stops them, when the rule does not cover the
+        operation, and for the requester, whom the self-approval refusal already answers."""
         op = OPERATIONS.get(request.operation)
         if (op is None or not op.signer_assignment_seasoned
                 or request.case_id is None or request.state != PENDING
@@ -970,16 +847,13 @@ class ApprovalService:
     def withdraw(self, request_id: UUID, *, actor_id: UUID,
                  scope: str | None = None,
                  case_id: UUID | None = None) -> ApprovalRequest:
-        """The requester changing their mind. Not a decision -- a withdrawn
-        request never had one, and the distinction matters when reading the
-        history back.
+        """The requester changing their mind. Not a decision: a withdrawn request never had one, and
+        the distinction matters when reading the history back.
 
-        `scope` binds the withdrawal to the route it came through (F9,
-        2026-09-24): "global" matches only a deployment-wide request, and
-        "case" only a request raised in `case_id`, so a requester who has
-        lost access to one case cannot withdraw its request through a case
-        they still hold. None keeps the unscoped form
-        for callers inside the service layer."""
+        `scope` binds the withdrawal to the route it came through: "global" matches only a
+        deployment-wide request, and "case" only a request raised in `case_id`, so a requester who
+        has lost access to one case cannot withdraw its request through a case they still hold. None
+        keeps the unscoped form for callers inside the service layer."""
         where = ""
         params: list = [WITHDRAWN, request_id, actor_id]
         if scope == "global":
@@ -1006,16 +880,14 @@ class ApprovalService:
 
     def consume(self, request_id: UUID, *, actor_id: UUID, operation: str,
                 case_id: UUID | None, payload: dict) -> ApprovalRequest:
-        """Spend an approval on the operation it was granted for.
+        """Spend an approval on the operation it authorises.
 
-        Call this INSIDE the transaction that performs the operation. If the
-        two are not atomic, a failure between them either burns an approval
-        without doing the work (annoying) or does the work without burning
-        the approval (the control is now reusable, which is the bad one).
+        Call this INSIDE the transaction that performs the operation. If the two are not atomic, a
+        failure between them either burns an approval without doing the work (annoying) or does the
+        work without burning the approval (the control becomes reusable, which is the bad one).
 
-        Every condition is in the WHERE clause rather than checked first,
-        so the whole thing is one atomic compare-and-set: two concurrent
-        attempts cannot both find the request APPROVED.
+        Every condition is in the WHERE clause rather than checked first, so the whole thing is one
+        atomic compare-and-set: two concurrent attempts cannot both find the request APPROVED.
         """
         digest = payload_hash(operation, case_id, payload)
         row = self._c.execute(
@@ -1032,11 +904,10 @@ class ApprovalService:
             (CONSUMED, request_id, actor_id, operation, case_id, digest),
         ).fetchone()
         if row is None:
-            # Deliberately one message for every failure mode. Which
-            # condition failed would tell a caller whether a given request
-            # id exists, who raised it, and whether an approval is
-            # outstanding -- and the legitimate caller can see all of that
-            # in the approvals list anyway.
+            # One message for every failure mode, deliberately: which condition failed would tell a
+            # caller whether a request id exists, who raised it and whether an approval is
+            # outstanding, and the legitimate caller can see all of that in the approvals list
+            # anyway.
             raise self._explain_consume_failure(request_id, actor_id, operation,
                                                 case_id, digest)
         record = _record(row)
@@ -1047,13 +918,11 @@ class ApprovalService:
         return record
 
     def attach_result(self, request_id: UUID, result_ref: UUID) -> None:
-        """Join the approval to what it produced. Best effort and separate
-        from `consume` so a failure to record the link can never roll back
-        the operation itself.
+        """Join the approval to what it produced. Best effort and separate from `consume`, so a
+        failure to record the link can never roll back the operation itself.
 
-        Caught and logged since 2026-09-24: the approval guard refuses a
-        second `result_ref`, and a refused convenience join raised after
-        the operation had succeeded would have answered 500 for an
+        Failures are caught and logged: the approval guard refuses a second `result_ref`, and a
+        refused convenience join raised after the operation succeeded would answer 500 for an
         operation that was done."""
         try:
             self._c.execute(
@@ -1090,20 +959,15 @@ class ApprovalService:
                            compartments: frozenset[str]) -> dict[str, int]:
         """Undecided, unexpired requests this person could sign, per case.
 
-        ux08-triage:no-work-waiting-at-sign-in (2026-09-23). A request
-        whose notification had been read left no trace anywhere on the
-        rail: the Triage badge counted proposals only. This is the set the
-        decide route would accept a signature from, as far as roles go:
-        not the requester, and a live assignment on the case whose role
-        carries the operation's own permission (the same join
-        `notify_events.approval_requested` uses to choose whom to tell).
-        Only over cases whose labels the person dominates; the step-up
-        half is checked when they sign. Case operations only, with the
-        signer's permission (F9, 2026-09-24); the deployment-wide ones are
+        This is the set the decide route would accept a signature from, as far as roles go: not the
+        requester, and a live assignment on the case whose role carries the operation's own
+        permission (the same join `notify_events.approval_requested` uses to choose whom to tell).
+        Only over cases whose labels the person dominates; the step-up half is checked when they
+        sign. Case operations only, with the signer's permission; the deployment-wide ones are
         `awaiting_global_signature`.
 
-        A merge request is the signer's to count only when they may see both
-        of its entities, as the listing shows it (http_ui-011, 2026-10-03)."""
+        A merge request is the signer's to count only when they may see both of its entities, as the
+        listing shows it."""
         pairs = [(k, op.signer_permission) for k, op in OPERATIONS.items()
                  if op.scope == "case"]
         rows = self._c.execute(
@@ -1140,12 +1004,9 @@ class ApprovalService:
         ).fetchall()
         return {str(r[0]): r[1] for r in rows}
 
-    # -- deployment-wide requests (F9, 2026-09-24) --------------------------
-    #
-    # Explicit about `case_id IS NULL` in every statement, and kept apart
-    # from the case reads above, so the row-level security that comes
-    # last (docs/00 decision 76) can see exactly which reads need a
-    # pending global request visible to its would-be signer.
+    # Deployment-wide requests. Explicit about `case_id IS NULL` in every statement and kept apart
+    # from the case reads above, so the row-level security (docs/00 decision 76) can see exactly
+    # which reads need a pending global request visible to its would-be signer.
 
     def awaiting_global_signature(self, user_id: UUID) -> int:
         """Undecided, unexpired deployment-wide requests this person could
@@ -1212,38 +1073,18 @@ class ApprovalService:
                                  case_id, digest) -> ApprovalError:
         """One message out, a specific reason in the log.
 
-        The caller gets a single uninformative refusal so a failed consume
-        is not an oracle for whether an approval exists. The server-side
-        audit row says which condition failed, because that is the
-        difference between "somebody tried to replay an approval" and
-        "somebody's approval timed out".
+        The caller gets a single uninformative refusal so a failed consume is not an oracle for
+        whether an approval exists; the server-side audit row says which condition failed, the
+        difference between "somebody tried to replay an approval" and "somebody's approval timed
+        out".
 
-        ## The row is written on its OWN connection, and has to be
-
-        Both production callers invoke `consume()` inside
-        `with conn.transaction():` and catch `ApprovalError` OUTSIDE that
-        block -- the dual-control merge endpoint and the out-of-schedule
-        evidence purge, and both are structured that way deliberately, so
-        a refused consume destroys nothing.
-
-        The consequence was that this INSERT went in on the same
-        connection and was rolled back by the very exception it was
-        written to explain. `audit.event` contained ZERO
-        APPROVAL_CONSUME_REFUSED rows in production no matter how many
-        replay or payload-substitution attempts occurred: the single
-        detection signal for the attack this module exists to stop --
-        get a signature for merging two obvious spam bots, then execute
-        the two nodes the case turns on -- was generated and immediately
-        destroyed.
-
-        The suite could not see it. `test_approvals_pg.py` calls
-        `consume()` directly on the autocommit fixture connection with no
-        enclosing transaction, so the row survives there and only there.
-
-        A second connection is the same technique `collection.py` uses to
-        keep a RUNNING row alive across an unwind. If it cannot be opened,
-        the refusal still stands: failing to record an attempt must never
-        become a way to make the attempt succeed.
+        The row is written on its own connection. Both production callers (the dual-control merge
+        endpoint and the out-of-schedule evidence purge) call `consume()` inside
+        `with conn.transaction():` and catch `ApprovalError` outside it, so a row inserted on the
+        same connection would be rolled back by the very exception it explains and replay attempts
+        would leave no trace. A second connection is the technique `collection.py` uses to keep a
+        RUNNING row alive across an unwind. If it cannot be opened the refusal still stands: failing
+        to record an attempt must never become a way to make the attempt succeed.
         """
         row = self._c.execute(
             """SELECT state, requested_by, operation, case_id, payload_hash,
@@ -1287,8 +1128,8 @@ class ApprovalService:
 
     def _record_out_of_band(self, action: str, actor_id, request_id,
                             case_id, detail: dict) -> None:
-        """A DENIED audit row about an approval request, written where the
-        caller's rollback cannot take it (F9, 2026-09-24)."""
+        """A DENIED audit row about an approval request, written where the caller's rollback cannot
+        take it."""
         record_out_of_band(self._c, action=action, actor_id=actor_id,
                            object_type="approval_request",
                            object_id=request_id, case_id=case_id,
@@ -1322,22 +1163,20 @@ def case_requires_dual_control(conn: psycopg.Connection, case_id: UUID,
                                operation: str) -> bool:
     """Whether `operation` needs a second signature in this case.
 
-    The deployment's mode first (F9, 2026-09-24): ALWAYS answers True for
-    every case. Under PER_CASE the case's own switch answers, read through
-    one literal statement per operation. The irreversible operations
-    docs/05 names have one mode, ALWAYS, because there is no version of
-    "delete the case" that is worth doing with one signature."""
+    The deployment's mode decides first: ALWAYS answers True for every case. Under PER_CASE the
+    case's own switch answers, read through one literal statement per operation. The irreversible
+    operations docs/05 names have one mode, ALWAYS, because no version of "delete the case" is worth
+    doing with one signature."""
     if policy_mode(conn, operation) == "ALWAYS":
         return True
     statement = _PER_CASE_READ.get(operation)
     if statement is None:
         return True
     row = conn.execute(statement, (case_id,)).fetchone()
-    # A case the read cannot find REQUIRES the second signature (S1,
-    # 2026-09-25). The gate runs first and 404s a case that does not exist,
-    # so this branch was unreachable; under row-level security it is
-    # reachable whenever the gate and the policy disagree, and a two-person
-    # control must fail closed then, not switch itself off.
+    # A case the read cannot find requires the second signature. The gate runs first and 404s a case
+    # that does not exist, but under row-level security this branch is reachable whenever the gate
+    # and the policy disagree, and a two-person control must fail closed then, not switch itself
+    # off.
     if row is None:
         return True
     return bool(row[0])
@@ -1370,13 +1209,11 @@ def holds_audit_chain_lock(conn: psycopg.Connection) -> bool:
 
 
 def _claims(actor_id, detail: dict):
-    """The attributions `record_out_of_band` tries, in order
-    (g49v-apply-refusal-row-lost, 2026-10-03): as asked, then, when the
-    database will not vouch for the actor, the same row demoted exactly as
-    `audit.pin_attribution()` demotes a claim nobody can verify (0150): no
-    actor, the claim kept in `detail.unverified_actor_id`. A refusal row is
-    the record that an attempt was made, and a writer that named the wrong
-    person is no reason to lose it."""
+    """The attributions `record_out_of_band` tries, in order: as asked, then, when the database will
+    not vouch for the actor, the same row demoted as `audit.pin_attribution()` demotes a claim
+    nobody can verify (0150): no actor, the claim kept in `detail.unverified_actor_id`. A refusal
+    row is the record that an attempt was made, and a writer that named the wrong person is no
+    reason to lose it."""
     yield actor_id, detail
     if actor_id is not None:
         yield None, {**detail, "unverified_actor_id": str(actor_id)}
@@ -1404,21 +1241,17 @@ def record_out_of_band(conn: psycopg.Connection, *, action: str, actor_id,
                        detail: dict) -> None:
     """Write one DENIED audit row that the caller's rollback cannot take.
 
-    On a second connection, unless `conn` holds the audit chain lock (see
-    the module docstring): then a second connection would wait on this
-    very caller, so the row goes on `conn` and a warning says it will not
-    survive that caller's rollback. Never raises: the refusal the row
-    records stands whether or not it was recorded, and losing the record
-    of an attempt must never become a way to make the attempt succeed.
+    On a second connection, unless `conn` holds the audit chain lock (see the module docstring):
+    then a second connection would wait on this very caller, so the row goes on `conn` and a warning
+    says it will not survive that caller's rollback. Never raises: the refusal the row records
+    stands whether or not it is recorded, and losing the record of an attempt must never become a
+    way to make the attempt succeed.
 
-    A request-role connection is bound to one user, and since 0150 the
-    database refuses a row that names another (a forgery, or a writer that
-    named the wrong person). That refusal must not cost the row: it is
-    written again without an actor and with the claim in the detail
-    (g49v-apply-refusal-row-lost, 2026-10-03), the shape the database itself
-    gives a claim from a connection bound to nobody. On the caller's own
-    connection each attempt runs in a savepoint, so a refused one does not
-    abort the caller's transaction."""
+    A request-role connection is bound to one user, and since 0150 the database refuses a row that
+    names another. That refusal must not cost the row: it is written again without an actor and with
+    the claim in the detail, as the database itself records a claim from a connection bound to
+    nobody. On the caller's own connection each attempt runs in a savepoint, so a refused one does
+    not abort the caller's transaction."""
     statement = """INSERT INTO audit.event
                        (actor_id, actor_kind, action, object_type, object_id,
                         case_id, outcome, detail)
@@ -1451,17 +1284,14 @@ def record_out_of_band(conn: psycopg.Connection, *, action: str, actor_id,
             log.exception("could not record %s for %s on the caller's "
                           "connection", action, object_id)
         return
-    # A connection of the caller's own kind (S1; 0150): the request role for a
-    # request, the system role for a system caller. An audit append needs
-    # nothing more.
+    # A connection of the caller's own kind (0150): the request role for a request, the system role
+    # for a system caller. An audit append needs nothing more.
     from noctornal_api.db import bind_like, connect_like
 
     def on_side_connection(claim) -> None:
         with connect_like(conn) as side:
-            # Bound to the caller's own session, so the database can verify
-            # the actor this row names; otherwise the audit trigger demotes it
-            # to an unverified claim in detail (0150, evidence-ledger-actor-
-            # time-forgeable, 2026-10-03).
+            # Bound to the caller's own session, so the database can verify the actor this row
+            # names; otherwise the audit trigger demotes it to an unverified claim in detail (0150).
             bind_like(side, conn)
             side.execute("SELECT set_config('lock_timeout', %s, false)",
                          (_SIDE_LOCK_TIMEOUT,))

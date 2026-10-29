@@ -1,70 +1,39 @@
 """Analyst account administration (docs/05, `user.manage`).
 
-Until now the ONLY way to create, unlock, or re-enrol an analyst was
-`scripts/bootstrap.py` on the server's own shell, with `DATABASE_URL` and
-the TOTP KEK exported by hand. That is a reasonable floor for the very
-first account and an unreasonable ceiling for every account after it: an
-administrator who has to shell into the box to add a colleague is an
-administrator who shares accounts instead.
+Creating, unlocking, re-enrolling and resetting an analyst happens here as well as from
+`scripts/bootstrap.py` on the server's shell, so an administrator does not have to share accounts.
 
-## What this deliberately is NOT
+What this is not:
 
-- It is not a password reader. Passwords and TOTP secrets are returned
-  exactly once, in the response to the call that generated them, and are
-  not retrievable afterwards — there is no endpoint that returns an
-  existing credential. (`collection_account.reveal` exists for personas;
-  nothing equivalent exists for analysts, on purpose.)
-- It is not a role editor. Granting and revoking GLOBAL roles is here;
-  changing what a role MEANS is `role.manage`, registered as a four-eyes
-  operation in the approvals catalogue, and has no endpoint at all yet.
-- It is not self-service. Every route is gated on `user.manage`, which
-  the seed marks step-up and grants to SYS_ADMIN alone.
+- Not a password reader. Passwords and TOTP secrets are returned exactly once, in the response to the call
+  that generated them; no endpoint returns an existing credential (`collection_account.reveal` exists for
+  personas; nothing equivalent exists for analysts, on purpose).
+- Not a role editor. Granting and revoking global roles is here; changing what a role means is
+  `role.manage`, a four-eyes operation in the approvals catalogue with no endpoint yet.
+- Not self-service. Every route is gated on `user.manage`, which the seed marks step-up and grants to
+  SYS_ADMIN alone.
 
-## The three refusals that keep an admin from locking the building
+Three refusals keep an admin from locking the building:
 
-1. You cannot deactivate yourself. The session doing the deactivating is
-   proof the account is in use.
-2. You cannot deactivate — or revoke the last role from — the last active
-   SYS_ADMIN. A deployment with zero user-managers can only be repaired
-   from the database shell, which is the situation this module exists to
-   end.
-3. The same for the last active SECURITY_OFFICER: break-glass REFUSES to
-   grant when nobody can review it, so removing the last officer quietly
-   disables emergency access everywhere.
+1. You cannot deactivate yourself.
+2. You cannot deactivate, or revoke the last role from, the last active SYS_ADMIN: a deployment with no
+   user-managers can only be repaired from the database shell.
+3. The same for the last active SECURITY_OFFICER: break-glass refuses to grant when nobody can review it.
 
-Lowering a user's clearance below a case they OWN is refused for the same
-reason `cases.py` refuses to raise a case above its owner: both create an
-owner who cannot read their own case, and there is no route back.
+Lowering a user's clearance below a case they own or deputise is refused for the same reason `cases.py`
+refuses to raise a case above its owner: both create an owner who cannot read their own case.
 
-## Passwords (gap-password-reset, 2026-09-23)
+Passwords are administrator issued, with no email path. `reset_password` sets a generated one-time
+password, returns it once, revokes every live session and sets `must_change_password` (0066); sign-in
+refuses to mint a session until the person chooses their own (`routers/auth.py`). It is refused for
+oneself: a person changes their own password through `change_password`, which asks for the current one
+and a code. `scripts/bootstrap.py reset-password` is the same call for the last administrator. The
+password `create_analyst` issues is administrator issued too and sets the same flag; first run does not,
+because its operator is creating their own account.
 
-There was no password reset anywhere, so a forgotten password had no way
-back. The owner decided it is ADMINISTRATOR ISSUED, with no email path:
-`reset_password` sets a generated one-time password, returns it once (the
-same one-time credentials the create route returns), revokes every live
-session and sets `must_change_password` (0066). Sign-in then refuses to
-mint a session until the person chooses their own (`routers/auth.py`), so
-the password the administrator saw never opens a session. It is refused
-for oneself: a person changes their own password through
-`change_password`, which asks for the current one and a code, because an
-administrator resetting their own password would be a way round that.
-`scripts/bootstrap.py reset-password` is the same call for the last
-administrator, who has nobody to ask.
-
-The password `create_analyst` issues with a new account is administrator
-issued too, with the TOTP secret beside it, and since 2026-09-24 it sets
-the same flag (final review c8). First run does not: its operator is
-creating their own account.
-
-## Compartments (0057)
-
-The registry lesson cited by the role allowlist below was, until
-2026-09-02, applied to roles and not to compartments: a user's read-ins
-had no product write path at all and were set with `psql`, where a typo
-was silent no-access. `register_compartment` and `set_compartments` are
-that write path, and both refuse an unknown key by NAME. Removing a
-compartment an owned (or deputised) case requires is refused exactly as
-lowering clearance is, and for the same reason.
+Compartments (0057): `register_compartment` and `set_compartments` are the write path for a user's
+read-ins, and both refuse an unknown key by name rather than letting a typo become silent no-access.
+Removing a compartment an owned (or deputised) case requires is refused exactly as lowering clearance is.
 """
 from __future__ import annotations
 
@@ -114,19 +83,15 @@ _LOAD_BEARING = ("SYS_ADMIN", "SECURITY_OFFICER")
 #: set from the panel, and the panel's select could not show it.
 _TLP = TLP_NAMES
 
-#: The key format, identical to 0057's CHECK constraint. Checked here too
-#: so the refusal is an authored message naming the rule, not a
-#: CheckViolation laundered through `safe_detail`. A key is compared
-#: byte-for-byte by the access gate, so case and whitespace variants are
-#: not "the same compartment"; they are a second one that nobody holds.
+#: The key format, identical to 0057's CHECK constraint. Checked here too so the refusal is an authored
+#: message naming the rule, not a CheckViolation laundered through `safe_detail`. The access gate compares
+#: keys byte-for-byte, so case and whitespace variants are a second compartment that nobody holds.
 COMPARTMENT_KEY = re.compile(r"^[A-Z0-9_-]{2,32}$")
 
-#: docs/05 sets "no rotation policy, no composition rules", so length is
-#: the whole of the rule for a password a person chooses. Twelve rather
-#: than eight because every account here reads case material and the
-#: second factor is the only other thing in front of it. The ceiling is
-#: not a strength rule: it stops one request buying an unbounded Argon2id
-#: input.
+#: docs/05 sets "no rotation policy, no composition rules", so length is the whole rule for a chosen
+#: password. Twelve rather than eight because every account reads case material and the second factor is
+#: the only other thing in front of it. The ceiling is not a strength rule: it stops one request buying an
+#: unbounded Argon2id input.
 MIN_PASSWORD_LENGTH = 12
 MAX_PASSWORD_LENGTH = 1024
 
@@ -135,12 +100,10 @@ def new_password_problem(new: str, *, email: str,
                          current: str | None = None) -> str | None:
     """Why `new` cannot be a person's password, or None when it can.
 
-    Checked BEFORE any credential is verified, by every path that takes a
-    chosen password (gap-password-reset, 2026-09-23): a rule failure then
-    costs no lockout attempt and spends no authenticator code, and nothing
-    here depends on the account, so it tells a caller nothing about one.
-    `current` is the password the same request proves, so "the same as the
-    one being replaced" is a string comparison and never a second hash.
+    Checked before any credential is verified, by every path that takes a chosen password: a rule failure
+    then costs no lockout attempt and spends no authenticator code, and nothing here depends on the
+    account, so it tells a caller nothing about one. `current` is the password the same request proves, so
+    "the same as the one being replaced" is a string comparison and never a second hash.
     """
     if len(new) < MIN_PASSWORD_LENGTH:
         return (f"a new password needs at least {MIN_PASSWORD_LENGTH} "
@@ -163,19 +126,13 @@ def change_password(conn: psycopg.Connection, user_id: UUID, new_password: str,
                     *, keep_session: UUID | None, via: str) -> int:
     """Store a password its owner chose, and sign out everywhere else.
 
-    The caller has already proved the current password and a second factor
-    (`routers/auth.py`, both the Account form and the sign-in that follows
-    a reset) and has already checked `new_password_problem`. Clears
-    `must_change_password` in the same statement that stores the hash, so
-    there is no moment at which the account holds a chosen password and
-    still demands a change, or the reverse.
+    The caller has already proved the current password and a second factor (`routers/auth.py`) and has
+    checked `new_password_problem`. Clears `must_change_password` in the same statement that stores the
+    hash, so the account never holds a chosen password and still demands a change, or the reverse.
 
-    Every OTHER session is revoked: a password is changed because it may be
-    known to someone else, and a session that someone else opened with it
-    carries its own token and never re-presents the password. The session
-    making the change is kept, or the person would be signed out by their
-    own success. Returns how many were revoked, for the audit row and the
-    notice.
+    Every other session is revoked: a password is changed because it may be known to someone else, and a
+    session opened with it carries its own token and never re-presents the password. The session making
+    the change is kept. Returns how many were revoked, for the audit row and the notice.
     """
     from datetime import datetime, timezone
     with conn.transaction():
@@ -245,16 +202,10 @@ class IamAdminService:
     def list_users(self) -> list[dict]:
         """Every account, with what the admin pane needs to read it right.
 
-        Three fields joined 2026-09-23. `compartments`: a user's read-ins
-        were invisible on the card, so "why can't Alice open OP-CORVID-26?"
-        was answered from her clearance and role and got the wrong cause
-        (ux16-admin:no-compartment-readins-in-ui). `last_active_at`: the
-        latest use of any of the account's sessions. `last_login_at` is
-        written only by a password sign-in, so a person working all day
-        through a `bootstrap.py session` link read as "never" signed in
-        and looked dormant (ux16-admin:last-login-never-misleads).
-        `must_change_password`: an administrator-issued password still
-        waiting to be replaced (0066).
+        `compartments` shows a user's read-ins on the card. `last_active_at` is the latest use of any of
+        the account's sessions: `last_login_at` is written only by a password sign-in, so a person working
+        through a `bootstrap.py session` link would read as never signed in. `must_change_password` marks
+        an administrator-issued password still waiting to be replaced (0066).
         """
         rows = self._c.execute(
             """SELECT u.id, u.email, u.display_name, u.tlp_clearance::text,
@@ -295,16 +246,11 @@ class IamAdminService:
                        ) -> OneTimeCredentials:
         """A new account and its one-time credentials.
 
-        `must_change_password` is True unless the caller is making its own
-        account (final review c8, 2026-09-24). The password generated here
-        is shown to the administrator with the TOTP secret beside it, so
-        whoever saw that card held both factors of a live account, and
-        until then could sign in as the new analyst for as long as they
-        left the password alone, every action audited under the analyst's
-        id. It is the same rule the reset follows: an administrator-issued
-        password opens no session (`routers/auth.py` `_password_change_due`).
-        The one caller passing False is `create_first_admin`, whose
-        operator creates, and proves on the same card, their own account.
+        `must_change_password` is True unless the caller is making its own account. The generated password
+        is shown to the administrator with the TOTP secret beside it, so whoever saw that card would hold
+        both factors of a live account; as with a reset, an administrator-issued password opens no session
+        (`routers/auth.py` `_password_change_due`). The one caller passing False is `create_first_admin`,
+        whose operator creates, and proves on the same card, their own account.
         """
         email = (email or "").strip()
         display_name = (display_name or "").strip()
@@ -318,12 +264,9 @@ class IamAdminService:
             raise AdminError("at least one global role is required: a user "
                              "with no role can see nothing and fix nothing")
         self._check_roles(roles)
-        # Read-ins at creation (ux16-admin:no-compartment-readins-in-ui,
-        # 2026-09-23), in the same transaction as the account, so an
-        # analyst created for a compartmented case never exists for a
-        # moment without the read-in the administrator chose. An unknown
-        # key is refused by name before anything is written, exactly as
-        # `set_compartments` refuses it.
+        # Read-ins are written in the same transaction as the account, so an analyst created for a
+        # compartmented case never exists without the read-in the administrator chose. An unknown key is
+        # refused by name before anything is written, as `set_compartments` refuses it.
         compartments = list(dict.fromkeys(
             k.strip() for k in (compartments or []) if k and k.strip()))
         unknown = self._unknown_compartments(compartments)
@@ -417,13 +360,9 @@ class IamAdminService:
             raise AdminError("no such user")
         if row[0] == clearance:
             return
-        # Lowering below a case they OWN **or DEPUTISE** strands them — the
-        # mirror of the raise `cases.py` refuses, and just as one-way once
-        # done. The deputy half was missed on the first pass, and
-        # `cases.py:88` checks a deputy's clearance at creation for exactly
-        # the same reason: a deputy exists to act when the owner cannot,
-        # so a deputy who cannot open the case is a succession plan that
-        # fails on the day it is needed, silently.
+        # Lowering below a case they own or deputise strands them: the mirror of the raise `cases.py`
+        # refuses, and just as one-way. A deputy exists to act when the owner cannot, so a deputy who cannot
+        # open the case is a succession plan that fails silently on the day it is needed.
         stranded = self._c.execute(
             """SELECT code,
                       CASE WHEN owner_user_id = %s THEN 'owner'
@@ -452,12 +391,8 @@ class IamAdminService:
     def grant_role(self, user_id: UUID, *, role: str, actor_id: UUID) -> None:
         role = role.strip().upper()
         self._check_roles([role])
-        # Checked, because the alternative is a raw ForeignKeyViolation
-        # reaching the catch-all handler as "Internal error: unexpected
-        # failure" — a 500 for a caller who simply named a user that is
-        # not there. Its sibling `revoke_role` had the mirror defect:
-        # DELETE matched nothing and answered 200 "revoked", reporting a
-        # no-op as a completed authz change.
+        # Checked because a raw ForeignKeyViolation would reach the catch-all handler as a 500 for a caller
+        # who simply named a user that is not there.
         self._require_user(user_id)
         with self._c.transaction():
             inserted = self._c.execute(
@@ -505,13 +440,9 @@ class IamAdminService:
         secret = totp.generate_secret()
         with self._c.transaction():
             PgUserStore(self._c).enroll_totp(user_id, secret)
-            # The scenario IS a stolen or lost phone, and a new secret
-            # alone does not evict whoever holds the device: an existing
-            # session carries its own token and never re-presents TOTP.
-            # Rotating the factor while leaving the sessions it authorised
-            # standing is a lockout that does not lock anybody out — and
-            # the panel's own copy promises the old authenticator "stops
-            # working immediately".
+            # The scenario is a stolen or lost phone, and a new secret alone does not evict whoever holds
+            # the device: an existing session carries its own token and never re-presents TOTP. Revoking the
+            # sessions is what makes the old authenticator stop working immediately, as the panel promises.
             from datetime import datetime, timezone
             revoked = PgSessionStore(self._c).revoke_all_for_user(
                 user_id, "TOTP re-enrolled", datetime.now(timezone.utc))
@@ -523,23 +454,18 @@ class IamAdminService:
 
     def reset_password(self, user_id: UUID, *,
                        actor_id: UUID | None) -> OneTimeCredentials:
-        """A generated one-time password, which the account must replace at
-        its next sign-in (gap-password-reset, 2026-09-23).
+        """A generated one-time password, which the account must replace at its next sign-in.
 
-        Refused for oneself: the person asking is signed in, so they can
-        change their own password from Account, which asks for the current
-        one and a code. An administrator who could reset their own would
-        have a way to replace a password without ever proving they knew it.
-        `actor_id=None` is `bootstrap.py reset-password`, the shell path for
-        the last administrator, and is audited as the system.
+        Refused for oneself: a signed-in person changes their own password from Account, which asks for
+        the current one and a code, and an administrator who could reset their own would replace a
+        password without proving they knew it. `actor_id=None` is `bootstrap.py reset-password`, the shell
+        path for the last administrator, audited as the system.
 
-        In one transaction: the new hash with `must_change_password` set,
-        every live session revoked (the reset is usually because the old
-        password is lost or known to someone else, and a session opened
-        with it carries its own token), and the lockout cleared, because
-        the failures that locked the account were against a password that
-        no longer exists and the person now has to sign in to change it.
-        The authenticator is untouched: re-enrolling it is its own action.
+        In one transaction: the new hash with `must_change_password` set, every live session revoked (the
+        old password is usually lost or known to someone else, and a session opened with it carries its own
+        token), and the lockout cleared, because the failures were against a password that no longer
+        exists and the person must sign in to change it. The authenticator is untouched: re-enrolling it
+        is its own action.
         """
         if actor_id is not None and user_id == actor_id:
             raise AdminError(
@@ -593,16 +519,10 @@ class IamAdminService:
     def list_compartments(self, *, held_by: UUID | None = None) -> list[dict]:
         """The registry, or the part of it one user is read into.
 
-        `held_by` is not a convenience filter, it is the access decision.
-        Until 2026-09-02 there was only the full listing and
-        `GET /compartments` returned it, with labels, to every
-        authenticated account: an analyst with no read-ins could enumerate
-        the whole codeword vocabulary and learn which operations exist,
-        which is precisely the fact a compartment is there to withhold.
-        0057 calls these "need-to-know locks" and `cases.py` refuses an
-        unregistered key because "a key is something typed into a warrant
-        schedule" -- so the key IS the lock, and the vocabulary is not
-        public. See `routers/compartments.py` for who gets which.
+        `held_by` is not a convenience filter, it is the access decision. The full listing, with labels,
+        would let an analyst with no read-ins enumerate the codeword vocabulary and learn which operations
+        exist, which is the fact a compartment withholds. 0057 calls these "need-to-know locks": the key is
+        the lock, so the vocabulary is not public. See `routers/compartments.py` for who gets which.
         """
         if held_by is None:
             rows = self._c.execute(
@@ -618,20 +538,16 @@ class IamAdminService:
         return [self._compartment(r) for r in rows]
 
     def holds_global_permission(self, user_id: UUID, permission_key: str) -> bool:
-        """Does this ACTIVE account hold `permission_key` through a global
-        role? The same question `deps.require_global` asks, WITHOUT the
-        step-up freshness clause, and only ever to widen a read.
+        """Does this active account hold `permission_key` through a global role? The same question
+        `deps.require_global` asks, without the step-up freshness clause, and only ever to widen a read.
 
-        Step-up re-challenges an action; this decides how much of a listing
-        an administrator is shown. Tying it to the 15-minute MFA clock
-        would make one GET return two different answers depending on when
-        the caller last typed a code, and the caller would have no way to
-        tell which they got -- so the endpoint reports its `scope` in the
-        response instead, and never silently narrows.
+        Step-up re-challenges an action; this decides how much of a listing an administrator is shown.
+        Tying it to the 15-minute MFA clock would make one GET return different answers depending on when
+        the caller last typed a code, so the endpoint reports its `scope` in the response and never
+        silently narrows.
 
-        This must not be used to authorise a WRITE. `require_global` is the
-        only thing that may do that, because a write is exactly what
-        step-up exists to re-challenge.
+        Never use this to authorise a write: `require_global` is the only thing that may, because a write
+        is what step-up exists to re-challenge.
         """
         return self._c.execute(
             """SELECT 1
@@ -677,32 +593,21 @@ class IamAdminService:
 
     def set_compartments(self, user_id: UUID, keys: list[str], *,
                          actor_id: UUID) -> list[str]:
-        """Replace the COMPLETE set of compartments a user holds.
+        """Replace the complete set of compartments a user holds.
 
-        Two refusals make this safe to expose. An unknown key is named and
-        refused -- the typo that used to be silent no-access. And a
-        compartment an OWNED or DEPUTISED case requires cannot be taken
-        away: the mirror of the clearance-lowering refusal in
-        `set_clearance`, for the same reason. An owner who cannot read
-        their own case has no route back, and a deputy who cannot is a
-        succession plan that fails on the day it is needed.
+        Two refusals make this safe to expose. An unknown key is named and refused (a typo would be silent
+        no-access). A compartment an owned or deputised case requires cannot be taken away: the mirror of
+        the clearance-lowering refusal in `set_clearance`, because an owner who cannot read their own case
+        has no route back and a deputy who cannot is a succession plan that fails when needed.
 
-        ASSIGNEES are deliberately outside the refusal, and are REPORTED
-        instead (2026-09-02). The refusal exists for the position with no
-        route back: an owner locked out of their own case cannot transfer
-        it, and a deputy is the succession plan. An assignee has both
-        routes -- the read-in can be granted again, or the assignment
-        removed -- and refusing for them would make it impossible to
-        narrow anyone's read-ins without first unpicking every case they
-        are on, which is how a control stops being used. But losing access
-        to a case you are assigned to IS silent no-access, so the audit row
-        names those cases in `stranded_assignments`: the act stays
-        possible and stops being invisible, the same trade break-glass
-        makes. `set_clearance` has the identical scope and does not report
-        yet; if that changes, both belong in one place.
+        Assignees are outside the refusal and are reported instead. They have a route back (the read-in
+        can be granted again, or the assignment removed), and refusing for them would make it impossible
+        to narrow anyone's read-ins without first unpicking every case they are on. But losing access to an
+        assigned case is silent no-access, so the audit row names those cases in `stranded_assignments`.
+        `set_clearance` has the same scope and does not report yet; if that changes, both belong in one
+        place.
 
-        Re-stating the set the user already holds is not an error and
-        writes no audit row: re-running an admin action is not a change.
+        Re-stating the set the user already holds is not an error and writes no audit row.
         """
         keys = list(dict.fromkeys(k.strip() for k in keys if k and k.strip()))
         row = self._c.execute(
@@ -715,19 +620,13 @@ class IamAdminService:
             return current
         unknown = self._unknown_compartments(keys)
         if unknown:
-            # This refusal, the strand refusal below and `_check_roles`
-            # agree with the keys they name, rather than hedging with a
-            # bracketed plural (README screenshot set review, 2026-09-23).
             n = len(unknown)
             raise AdminError(
                 f"{agree(n, 'compartment', 'compartments')} not registered: "
                 f"{', '.join(unknown)}. Register "
-                # Spelled with the mount prefix, for the reason cases.py
-                # gives at its twin refusal: until 2026-09-09 this said
-                # `POST /compartments`, which the router does not serve,
-                # and disagreed with the 0059 trigger's wording of the
-                # same rule. `test_compartment_binding_pg.py` pins all
-                # three to the migration constant and the route table.
+                # Spelled with the mount prefix, as in `cases.py`'s twin refusal and the 0059 trigger's
+                # wording of the same rule. `test_compartment_binding_pg.py` pins all three to the
+                # migration constant and the route table.
                 f"{agree(n, 'the key', 'the keys')} first "
                 f"(POST /api/v1/compartments); an unregistered "
                 f"key is a "
@@ -765,28 +664,20 @@ class IamAdminService:
                     "UPDATE iam.app_user SET compartments = %s WHERE id = %s",
                     (keys, user_id))
             except psycopg.errors.RaiseException as exc:
-                # 0059's binding on the column, refusing a key the check
-                # above did not catch -- which cannot happen while
-                # `_unknown_compartments` is called first, and is exactly
-                # why this exists: the trigger is the guarantee, the check
-                # is the readable error, and if the check is ever skipped
-                # or drifts the guarantee must still arrive as this
-                # surface's 409 naming the key (`safe_detail` forwards the
-                # trigger's first line), not as a 500. Until 2026-09-09 a
-                # raw UPDATE here was accepted whatever the key was.
+                # 0059's binding on the column refuses a key the check above did not catch. The trigger is
+                # the guarantee and the check is the readable error; if the check is ever skipped or
+                # drifts, the refusal must still arrive as this surface's 409 naming the key
+                # (`safe_detail` forwards the trigger's first line), not as a 500.
                 raise AdminError(str(exc)) from exc
             self._audit(actor_id, "USER_COMPARTMENTS_CHANGED", user_id, detail)
         return keys
 
     def _stranded_assignments(self, user_id: UUID, removed: list[str]) -> list[str]:
-        """Open cases this user is ASSIGNED to that they can no longer read.
+        """Open cases this user is assigned to that they can no longer read.
 
-        Reported, never refused -- see `set_compartments`. Only unexpired
-        assignments count, because an expired one already fails
-        `CHECK_ASSIGNMENT` at the gate and naming it would be reporting a
-        loss the user had already taken. Capped, because the audit row is
-        evidence that this happened and to which cases, not a report the
-        administrator is meant to work through in a JSON field.
+        Reported, never refused (see `set_compartments`). Only unexpired assignments count, because an
+        expired one already fails `CHECK_ASSIGNMENT` at the gate. Capped, because the audit row is
+        evidence that this happened and to which cases, not a report to work through in a JSON field.
         """
         return [r[0] for r in self._c.execute(
             """SELECT DISTINCT c.code
@@ -806,16 +697,13 @@ class IamAdminService:
                 f"the access gate compares it byte-for-byte")
 
     def _unknown_compartments(self, keys: list[str]) -> list[str]:
-        """The keys not in `iam.compartment`, ALL of them, in the caller's
-        order, so one refusal names every typo at once.
+        """The keys not in `iam.compartment`, all of them, in the caller's order, so one refusal names
+        every typo at once.
 
-        Kept after migration 0059 bound the column itself. The trigger is
-        the guarantee -- it refuses the same write from psql -- but it
-        names the keys in one authored sentence with a correlation id
-        appended by `safe_detail`, and it fires only after the stranding
-        query in `set_compartments` has already run. This check is the
-        readable, earlier refusal; `set_compartments` wraps the trigger's
-        refusal too, so the two can never disagree about the status.
+        Migration 0059 binds the column itself and is the guarantee, but its refusal is one authored
+        sentence with a correlation id appended by `safe_detail`, and it fires only after the stranding
+        query in `set_compartments` has run. This check is the readable, earlier refusal;
+        `set_compartments` wraps the trigger's refusal too, so the two cannot disagree about the status.
         """
         if not keys:
             return []
@@ -862,16 +750,11 @@ class IamAdminService:
     def _lock_role_census(self) -> None:
         """Serialise every read-then-write over the role census.
 
-        `_refuse_if_load_bearing` counts other active holders and the
-        caller then writes — an unlocked check-then-write. Two admins
-        deactivating the last two SYS_ADMINs at the same instant each see
-        the other still active, each pass, and the deployment lands with
-        zero user-managers: the exact state the guard exists to prevent,
-        reachable by two clicks a second apart.
-
-        `pg_advisory_xact_lock` releases at commit, and every caller here
-        wraps its write in a transaction, so the lock spans the check and
-        the write. Same technique as the first-run door and 0013's chain.
+        `_refuse_if_load_bearing` counts other active holders and the caller then writes, an unlocked
+        check-then-write: two admins deactivating the last two SYS_ADMINs at once would each see the other
+        still active and leave zero user-managers. `pg_advisory_xact_lock` releases at commit and every
+        caller wraps its write in a transaction, so the lock spans the check and the write. Same technique
+        as the first-run door and 0013's chain.
         """
         self._c.execute(
             "SELECT pg_advisory_xact_lock("
@@ -950,20 +833,17 @@ def create_first_admin(conn: psycopg.Connection, *, email: str,
                 "this deployment already has accounts; first-run setup is "
                 "closed. Sign in, or use bootstrap.py on the server.")
         svc = IamAdminService(conn)
-        # SECURITY_OFFICER included: break-glass cannot grant until one
-        # exists, and a fresh single-operator install IS that operator.
-        # Not asked to replace the password: the operator is creating
-        # their own account and proves it by signing in on the same card
-        # (final review c8, 2026-09-24, which flags every other creation).
+        # SECURITY_OFFICER is included: break-glass cannot grant until one exists, and a fresh
+        # single-operator install is that operator. The operator is not asked to replace the password: they
+        # are creating their own account and prove it by signing in on the same card.
         return svc.create_analyst(
             email=email, display_name=display_name, clearance="RED",
             roles=["SYS_ADMIN", "SECURITY_OFFICER", "CASE_OWNER", "ANALYST"],
             actor_id=None, must_change_password=False)
 
 
-# F13, 2026-09-24. One reader of "who holds this role now", for the
-# officer alerts: break-glass and prohibited-content screening both alert
-# every active Security Officer, and two copies of the query could drift.
+# One reader of "who holds this role now", for the officer alerts: break-glass and prohibited-content
+# screening both alert every active Security Officer, and two copies of the query could drift.
 def active_role_holders(conn: psycopg.Connection, role_key: str) -> list[UUID]:
     """Every ACTIVE account holding `role_key` through a global role, once
     each, in a stable order."""

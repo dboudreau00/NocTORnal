@@ -1,16 +1,11 @@
 """Redact the dead-letter fragments recorded before the redactor existed.
 
-docs/17 F15(d). `ingest.dead_letter` held verbatim fragments in a table
-with no classification, no compartments and no retention, and the route in
-was routine rather than adversarial: a partner whose schema drifts
-dead-letters their whole feed, and `categorise` sends anything with
-top-level `email` + `password` down that path.
-
-Migration 0040 labelled the table, put every row on a clock and made new
-rows redacted by construction. It deliberately did NOT rewrite the rows
-already there: redaction is not reversible and this project's rule is that
-a migration is. This is the irreversible half, so a human runs it
-deliberately and sees what it changed.
+`ingest.dead_letter` can hold third-party credentials: a partner whose schema drifts dead-letters
+a whole feed, and `categorise` sends anything with top-level `email` + `password` down that path.
+Migration 0040 labels the table, puts every row on a clock and makes new rows redacted by
+construction, but leaves the rows already there, because redaction is not reversible and a
+migration must be. This is the irreversible half, so a human runs it deliberately and sees what it
+changed.
 
     python scripts/redact_dead_letters.py            # report only
     python scripts/redact_dead_letters.py --apply    # rewrite
@@ -23,10 +18,8 @@ What it does to each row where `redacted` is false:
     be checked against the batch's raw object;
   * sets `redacted = true`.
 
-The verbatim bytes are NOT destroyed by this: they remain in the batch's
-raw object under the batch's own retention and access rules, which is
-where third-party credentials belong if they are held at all. What this
-removes is the second, unlabelled copy.
+The verbatim bytes stay in the batch's raw object, under the batch's own retention and access
+rules; what this removes is the second, unlabelled copy.
 """
 from __future__ import annotations
 
@@ -47,21 +40,16 @@ load_env_local()
 
 
 def connect():
-    """Every script connects as the system role (S1, 2026-09-25). A
-    script serves no request and binds no user, so on the request role it
-    would see nothing under row-level security; `db.connect_system` refuses
-    rather than hand it a connection that silently sees part of the data.
-    Named `connect` so the tests that replace it still find it."""
+    """Connect as the system role: a script binds no user, so under row-level security the request
+    role would see nothing. Named `connect` because the tests replace it by that name."""
     return connect_system(SystemPurpose.SCRIPT)
 
 BATCH = 500
 
 
 def _rows(n: int, described: str = "") -> str:
-    """`n` rows, agreed in number: "1 row", "0 rows", "3 unredacted
-    dead-letter rows". It printed a bracketed plural, and docs/18 quotes
-    this output word for word, so the two change together (Alpha 6
-    pre-release check, 2026-09-23)."""
+    """`n` rows, agreed in number: "1 row", "0 rows", "3 unredacted dead-letter rows". docs/18
+    quotes this output word for word, so the two change together."""
     noun = "row" if n == 1 else "rows"
     return f"{n} {described} {noun}" if described else f"{n} {noun}"
 

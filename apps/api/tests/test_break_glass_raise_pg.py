@@ -1,20 +1,11 @@
-"""Break-glass raises effective clearance -- the guarantee, finally held.
+"""Break-glass raises effective clearance.
 
-From 2026-08-10 to 2026-09-01 break_glass.py's own docstring said "AND IT
-DOES NOT CURRENTLY RAISE ANYTHING": invoke() wrote a grant and no access
-decision read it, so an analyst who invoked break-glass at 3am got a loud,
-audited, reviewable record and exactly the access they already had. The
-roadmap called it the most serious open finding: a stated emergency
-control with no implementation.
+An analyst who invokes break-glass at 3am must get more than a loud, audited, reviewable record: the
+grant must raise the access decision. These tests are written against `PgAccessResolver.resolve()`
+and `evaluate()` directly (the single construction site of the five-part gate's context, where the
+raise lives) rather than through HTTP, so that what is asserted is the decision and nothing else.
 
-These tests are written against `PgAccessResolver.resolve()` and
-`evaluate()` directly -- the single construction site of the five-part
-gate's context, which is where the raise now lives -- rather than through
-HTTP, so that what is asserted is the decision and nothing else.
-
-Every one of them FAILS on the commit before the raise was wired. The
-last one asserts the thing the module has always promised and must keep
-promising: a grant does not cross a compartment.
+The last one asserts the thing the module has always promised: a grant does not cross a compartment.
 
 Env-gated on DATABASE_URL, like every other *_pg.py file.
 """
@@ -34,16 +25,10 @@ pytestmark = pytest.mark.skipif(
 os.environ.setdefault("NOCTORNAL_TOTP_KEK", "A" * 43 + "=")
 
 
-#: THIS file's own prefix. The first version imported test_governance_pg's
-#: helpers and therefore its `gov-` prefix -- and did no cleanup, on the
-#: reasoning that audit.event names the users and is append-only. Half
-#: right, and it poisoned the shared dev database: every run left its
-#: priority-1 break-glass alerts behind, sixty of them accumulated, and a
-#: later full-suite run failed thirty-five tests in OTHER files with
-#: `notification_actor_id_fkey` when THEIR teardown deleted `gov-` users
-#: still named by these orphans. A distinct prefix means no other file's
-#: teardown can ever trip over this one's rows, and the teardown below
-#: removes everything that is removable.
+#: This file's own prefix. Sharing another file's prefix (and so its teardown) would leave priority-1
+#: break-glass alerts behind in the shared dev database, and a later run's teardown of the other file's
+#: users would fail on `notification_actor_id_fkey` for the orphans. A distinct prefix means no other
+#: file's teardown can trip over this one's rows, and the teardown below removes everything removable.
 PREFIX = "bgr-"
 
 
@@ -77,13 +62,11 @@ def _case(conn, owner):
 def conn():
     """Own connection, and a teardown that follows the foreign keys.
 
-    Deliveries before notifications; notifications by recipient, by actor
-    AND by case (a break-glass alert's actor is the analyst, its recipient
-    every officer, and a global grant has no case); grants, sessions and
-    assignments before cases; roles last. Users are NOT deleted:
-    audit.event names them as actor and raises on DELETE -- the
-    "append-only ledger outlives its subject" trap -- so they stay,
-    carrying the prefix, exactly as test_governance_pg leaves its own.
+    Deliveries before notifications; notifications by recipient, by actor and by case (a break-glass
+    alert's actor is the analyst, its recipient every officer, and a global grant has no case); grants,
+    sessions and assignments before cases; roles last. Users are not deleted: audit.event names them as
+    actor and raises on DELETE (the append-only ledger outlives its subject), so they stay, carrying
+    the prefix, as test_governance_pg leaves its own.
     """
     from noctornal_api.db import connect
     c = connect()
@@ -186,10 +169,9 @@ def test_a_live_grant_raises_clearance_for_the_case_it_names(conn):
 
 
 def test_a_use_is_counted_only_when_the_grant_made_the_difference(conn):
-    """An analyst reading a CLEAR node under an AMBER grant has not USED the
-    grant. Counting it would tell the reviewing officer the emergency was
-    busier than it was -- and the interesting review case is the grant
-    that was barely used."""
+    """An analyst reading a CLEAR node under an AMBER grant has not used the grant. Counting it would
+    tell the reviewing officer the emergency was busier than it was, and the interesting review case is
+    the grant that was barely used."""
     from noctornal_api.break_glass import BreakGlassService
     _, analyst, case_id = _green_analyst_on_an_amber_case(conn)
     svc = BreakGlassService(conn)
@@ -305,9 +287,8 @@ def test_a_grant_without_a_classification_raises_nothing(conn):
 
 
 def test_a_grant_never_crosses_a_compartment(conn):
-    """The promise the module has made since it was written, now asserted
-    at the gate rather than only at the service: an emergency is not
-    knowledge of the need. AMBER is raised; the compartment still refuses."""
+    """An emergency is not knowledge of the need: asserted at the gate rather than only at the
+    service, AMBER is raised and the compartment still refuses."""
     from noctornal_api.break_glass import BreakGlassService
     from noctornal_api.security.access import CHECK_CLEARANCE, CHECK_COMPARTMENTS
     _, analyst, case_id = _green_analyst_on_an_amber_case(conn)

@@ -1,11 +1,9 @@
 """RFC 6238 TOTP with ±1 window drift and replay protection.
 
-docs/05: 30 s step, SHA-1 (authenticator compatibility), ±1 window.
-Replay protection: the last accepted time-step counter is stored per user
-and a code is rejected unless its counter is strictly greater. This is the
-part frequently omitted and trivially exploitable — an attacker who
-shoulder-surfs or phishes one 6-digit code has 30-90 s to replay it
-otherwise.
+docs/05: 30 s step, SHA-1 (authenticator compatibility), ±1 window. Replay protection: the last accepted
+time-step counter is stored per user and a code is rejected unless its counter is strictly greater. This
+is the part frequently omitted and trivially exploitable: an attacker who shoulder-surfs or phishes one
+6-digit code otherwise has 30-90 s to replay it.
 """
 from __future__ import annotations
 

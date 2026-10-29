@@ -1,23 +1,17 @@
-"""What the Analysis pane's numbers claim about people, held to what they
-can support. Pure: no database.
+"""What the Analysis pane's numbers claim about people, held to what they can support. Pure: no
+database.
 
-The 2026-09-22 usability review (lens ux10-analytics) found four ways the
-suite's payload said more, or other, than its numbers do:
+- "Brokers worth a look" fires on constraint relative to the case, not an absolute threshold. In a
+  dense case nearly everyone is below 0.4, so an absolute rule makes the lead "the busiest third" and
+  claims each of them "profits from the gap between otherwise disconnected groups" in a network with
+  one component.
+- Constraint rank and percentile point the same way as the betweenness columns beside them.
+- The payload says whether the ties behind a removal set are unreviewed machine proposals with no
+  exhibit.
+- Communities carry sizes, not bare integers.
 
-- broker-lead-card-overclaims: "Brokers worth a look" fired on an
-  ABSOLUTE constraint below 0.4. In a dense case nearly everyone is below
-  0.4, so the lead was "the busiest third", and it told the analyst each
-  of them "profits from the gap between otherwise disconnected groups" in
-  a network with one component;
-- rank-percentile-opposite-directions: constraint rank 1 sat beside p2,
-  in the column next to a betweenness rank 1 at p98;
-- metrics-hide-review-and-evidence-state: nothing said the ties behind a
-  removal set were unreviewed machine proposals with no exhibit;
-- communities-anonymous-table-unsortable: communities were bare integers,
-  with no sizes anywhere.
-
-And a stored run computed before the fix must not bring the old answers
-back (`analytics_runs.upgrade_stored`).
+And a stored run computed before these rules must not bring the old answers back
+(`analytics_runs.upgrade_stored`).
 """
 from __future__ import annotations
 
@@ -36,8 +30,7 @@ from noctornal_api.projections import Projection, Subgraph
 
 
 def build(nodes, edges, *, review="ACCEPTED", evidenced=()):
-    """A Subgraph shaped as GraphService.project() returns it, review and
-    evidence columns included."""
+    """A Subgraph shaped as GraphService.project() returns it, review and evidence columns included."""
     ids = {k: uuid4() for k in nodes}
     ns = [{"id": ids[k], "label": k, "node_type": "IDENTITY",
            "classification": "AMBER", "attrs": {}, "valid_from": None,
@@ -79,8 +72,8 @@ def test_the_structural_hole_lead_is_relative_and_the_fixture_shows_why():
     n = len(nodes)
     assert out["cohesion"]["components"] == 1
 
-    # The OLD rule, applied to the same numbers, is what the review saw:
-    # most actors under 0.4, so it tagged actors from the constrained half.
+    # The absolute rule, applied to the same numbers, would tag most actors under 0.4, including
+    # actors from the constrained half.
     under = [x for x in nodes if x["constraint"] is not None and x["constraint"] < 0.4]
     assert len(under) >= n - 2, "the fixture must be dense like CORVID"
     old = [x for x in under if x["betweenness_percentile"] >= 70 and x["betweenness"] > 0]
@@ -184,8 +177,6 @@ def test_constraint_percentile_runs_the_way_its_rank_does():
                 assert a["constraint_percentile"] > b["constraint_percentile"]
 
 
-# --- metrics-hide-review-and-evidence-state -------------------------------
-
 def test_the_payload_says_what_the_ties_rest_on():
     sub, _ = build(["a", "b", "c", "d"],
                    [("a", "b"), ("b", "c"), ("c", "d"), ("a", "d")],
@@ -197,10 +188,9 @@ def test_the_payload_says_what_the_ties_rest_on():
 
 
 def test_a_disputed_tie_is_counted_as_disputed():
-    """Release review c11 (2026-09-24). DISPUTED is the one doubt tie review
-    can record (REJECTED is refused), and it landed in no bucket: three
-    disputed ties of five read as 0 proposed, 2 accepted, nothing else, so
-    the pane said every tie behind the brokers had been reviewed."""
+    """DISPUTED is the one doubt tie review can record (REJECTED is refused), and it must land in a
+    bucket: three disputed ties of five must not read as 0 proposed, 2 accepted, nothing else, as if
+    every tie behind the brokers had been reviewed."""
     sub, _ = build(["a", "b", "c", "d", "e"],
                    [("a", "b"), ("b", "c"), ("c", "d"), ("d", "e"), ("a", "e")],
                    review=["DISPUTED", "DISPUTED", "DISPUTED", "ACCEPTED", "ACCEPTED"])
@@ -210,9 +200,9 @@ def test_a_disputed_tie_is_counted_as_disputed():
 
 
 def test_a_stored_run_is_given_the_disputed_count_it_was_stored_without():
-    """A run computed before c11 counted its disputed ties nowhere. They are
-    the remainder, since a reviewer can set nothing else, so the stored run
-    warns as a fresh one would instead of reading as settled."""
+    """A run stored without a disputed count is given one. Disputed ties are the remainder, since a
+    reviewer can set nothing else, so the stored run warns as a fresh one would instead of reading as
+    settled."""
     sub, _ = build(["a", "b", "c", "d", "e"],
                    [("a", "b"), ("b", "c"), ("c", "d"), ("d", "e"), ("a", "e")],
                    review=["DISPUTED", "DISPUTED", "PROPOSED", "ACCEPTED", "REJECTED"])
@@ -241,10 +231,9 @@ def test_reviewing_or_evidencing_a_tie_changes_the_cache_key():
 
 
 def test_renaming_an_entity_changes_the_cache_key():
-    """Release review c16 (2026-09-24). The payload names people, and the
-    digest covered ids only, so a renamed entity kept its old name on a
-    cache hit and under "nothing it was computed from has changed". A name
-    corrected because it held personal data kept printing."""
+    """The payload names people, so the digest covers names as well as ids: a renamed entity must not
+    keep its old name on a cache hit, and a name corrected because it held personal data must not keep
+    printing."""
     p, params = proj(), AnalyticsParams()
     sub, ids = build(["rv_alpha", "rv_delta"], [("rv_alpha", "rv_delta")])
     base = graph_hash(sub, p, params)
@@ -279,11 +268,9 @@ def test_community_sizes_travel_with_the_answer_largest_first():
     assert {s["community"]: s["size"] for s in sizes} == counted
 
 
-# --- a run stored before the fix ------------------------------------------
-
 def _as_stored_before_the_fix(payload: dict) -> dict:
-    """What a pre-2026-09-23 run left in `metric_run.result`: the percentile
-    over raw constraint, the absolute lead rule, no sizes, no marker."""
+    """A run stored before the percentile re-rank: the percentile over raw constraint, the absolute
+    lead rule, no sizes, no marker."""
     old = {k: v for k, v in payload.items()
            if k not in ("constraint_order", "broker_rule", "review_coverage")}
     old["cohesion"] = {k: v for k, v in payload["cohesion"].items()
@@ -326,13 +313,10 @@ def test_a_stored_run_is_brought_up_to_the_current_rules():
 
 
 def test_a_stored_trend_point_is_re_ranked_not_turned_round():
-    """The trend reads a pre-fix run's percentile from `node_metric`, one
-    row per actor, and "100 minus it" was exact only without isolates: an
-    isolate sits below the actors in both directions, so turning the old
-    percentile round moved every actor down by the isolates' share. Found
-    reviewing the 2026-09-23 fix: a NIGHTJAR-shaped run put rank 1 at about
-    p68 in the trend table while the actor table said p98. Re-ranked from
-    the run's own counts, the two tables agree to the digit."""
+    """The trend reads a stored run's percentile from `node_metric`, one row per actor, and "100 minus
+    it" is exact only without isolates: an isolate sits below the actors in both directions, so
+    turning the old percentile round moves every actor down by the isolates' share. Re-ranked from the
+    run's own counts, the trend table and the actor table agree to the digit."""
     connected, _ = dense_one_component()
     names = [n["label"] for n in connected.nodes]
     iso = [f"iso{i}" for i in range(14)]

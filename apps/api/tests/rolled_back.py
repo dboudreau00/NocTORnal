@@ -1,19 +1,16 @@
-"""A connection whose whole test runs in ONE transaction that is rolled back
-(docs/17, test isolation, Beta 1.1). Not a test module: the suites import it.
+"""A connection whose whole test runs in one transaction that is rolled back (docs/17, test
+isolation). Not a test module: the suites import it.
 
-Why. A suite that commits its rows has to delete them again, and some rows
-cannot be deleted (Telegram chats and messages, the append-only ledgers), so
-they stay and the next suite that counts rows meets them. A readiness row
-that says "no list is loaded" or "no Telegram source is active" is a count
-over the whole database, and a test of it skipped whenever another suite had
-left a row, which CI's no-skip gate turns into a failure. In a transaction that
-is rolled back nothing was ever committed, and the test can switch off what
-others left for the length of its own transaction and only that.
+A suite that commits its rows has to delete them again, and some rows cannot be deleted (Telegram
+chats and messages, the append-only ledgers), so the next suite that counts rows meets them. A
+readiness row that says "no list is loaded" is a count over the whole database, and a test of it
+skipped whenever another suite had left a row, which CI's no-skip gate turns into a failure. In a
+transaction that is rolled back nothing was ever committed, and the test can switch off what others
+left for the length of its own transaction and only that.
 
-The connection is the autocommit one the application uses (`db.connect`),
-with an explicit BEGIN: the code under test opens `conn.transaction()` blocks
-as savepoints inside it, exactly as it does inside any caller's transaction.
-Code that COMMITs would commit the lot, so the end of the test checks the
+The connection is the autocommit one the application uses (`db.connect`), with an explicit BEGIN: the
+code under test opens `conn.transaction()` blocks as savepoints inside it, as it does inside any
+caller's transaction. Code that COMMITs would commit the lot, so the end of the test checks the
 transaction is still open and says so if it is not.
 """
 from __future__ import annotations
@@ -47,15 +44,14 @@ def rolled_back(connect: Callable[[], psycopg.Connection] | None = None
 
 
 def empty_ledgers(conn: psycopg.Connection) -> None:
-    """Inside the caller's transaction, remove every row of the audit log and
-    the custody ledger, so a chain walk meets only what the test writes next.
+    """Inside the caller's transaction, remove every row of the audit log and the custody ledger, so a
+    chain walk meets only what the test writes next.
 
-    A verification walks the whole of both chains, and a database that
-    another suite (or a real estate) left a break in no longer verifies
-    clean, so a test that tampers and expects the tamper to be the ONLY break
-    skipped (`_starts_clean`) or failed. The append-only guards are off for
-    the two statements and on again, and the transaction's end restores
-    every row."""
+    A verification walks the whole of both chains, and a database that another suite left a break in
+    no longer verifies clean, so a test that tampers and expects the tamper to be the only break would
+    skip or fail. The append-only guards are off for the two statements and on again, and the
+    transaction's end restores every row.
+    """
     for table in ("audit.event", "core.evidence_custody"):
         conn.execute(f"ALTER TABLE {table} DISABLE TRIGGER USER")
         conn.execute(f"DELETE FROM {table}")

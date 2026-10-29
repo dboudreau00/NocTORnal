@@ -1,27 +1,22 @@
-"""The approvals catalogue says only what the code does (F9, F9b, F9c,
-2026-09-24). No database.
+"""The approvals catalogue says only what the code does. No database.
 
-Administration, Two-person controls draws `approvals.OPERATIONS`: each
-operation's scope, who asks, who signs second, and whether anything
-actually enforces it. A screen that says "two people" over an operation
-nothing spends is a false assurance, and one that says "not enforced yet"
-over one that is enforced hides a control. So every claim the catalogue
-makes is held to the source here, by reading it (ast), not by trusting a
-docstring:
+Administration, Two-person controls draws `approvals.OPERATIONS`: each operation's scope, who asks,
+who signs second, and whether anything enforces it. A screen that says "two people" over an operation
+nothing spends is a false assurance, and one that says "not enforced yet" over one that is enforced
+hides a control. So every claim the catalogue makes is held to the source here, by reading it (ast),
+not by trusting a docstring:
 
-- each operation states its scope and exactly one of "the function that
-  spends it" and "why nothing does";
-- that function exists and calls `consume` with the operation's key as a
-  literal; no other function spends an operation said to be unenforced;
-- a separate signer is a pair declared in `iam.separated_duty` by some
-  migration, so the second person is a different role by construction;
-- the migrations after the policy tables arrived write them only through
-  the ledger, or with the guard disabled by name, and none after the
-  retirement names the dead column.
+- each operation states its scope and exactly one of "the function that spends it" and "why nothing
+  does";
+- that function exists and calls `consume` with the operation's key as a literal; no other function
+  spends an operation said to be unenforced;
+- a separate signer is a pair declared in `iam.separated_duty` by some migration, so the second person
+  is a different role by construction;
+- the migrations after the policy tables arrived write them only through the ledger, or with the guard
+  disabled by name, and none after the retirement names the dead column.
 
-Migrations are found by the stem of their file name and ordered by their
-own `down_revision` chain, never by number, so a renumbered migration is
-still found.
+Migrations are found by the stem of their file name and ordered by their own `down_revision` chain,
+never by number, so a renumbered migration is still found.
 """
 from __future__ import annotations
 

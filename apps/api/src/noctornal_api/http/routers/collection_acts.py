@@ -1,21 +1,9 @@
-"""Persona acts over HTTP: the act queue's answer to the routes that queue
-an act, and the caller's own acts (ROADMAP-REMAINING "A collector process",
-2026-10-02).
+"""Persona acts over HTTP: the answer to a route that queues an act, and the caller's own acts.
 
-A route that makes a persona act (a Telegram chat looked up, joined, its
-membership checked or marked, rebound; a Poll now of a source a persona
-reads) queues it in `collect.persona_act` through `act_answer`, which
-waits a short bounded time for the collector and answers with the act's
-outcome, exactly as the route answered before, or 202 with the act while
-it is still queued. The request thread never waits longer than
-NOCTORNAL_ACT_WAIT_SECONDS, and never more than 25 seconds.
-
-`GET /collection/acts` lists the caller's own acts, newest first, within
-their ceiling now; `GET /collection/acts/{id}` is one of them, with the
-body or the refusal the route would have given once it has run; a PENDING
-act can be cancelled. Another person's act, and one held above the caller,
-answer exactly as a missing one. Nothing here ever shows an act's
-parameters or a credential.
+`act_answer` queues an act in `collect.persona_act`, waits at most NOCTORNAL_ACT_WAIT_SECONDS
+(never over 25) for the collector, and answers with the act's outcome or 202 while it is queued.
+The caller sees only their own acts within their ceiling; another person's act, or one above them,
+answers as a missing one. Nothing here shows an act's parameters or a credential.
 """
 from __future__ import annotations
 

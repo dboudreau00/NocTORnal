@@ -1,60 +1,40 @@
-"""The egress proxy: the only way out of a production deployment (S2,
-2026-09-24; docs/00 decisions 68 and 77, docs/20 section 8).
+"""The egress proxy: the only way out of a production deployment (docs/00 decisions 68 and 77, docs/20 section 8).
 
     python -m noctornal_api.egress_proxy            serve
     python -m noctornal_api.egress_proxy --check    the compose healthcheck
     python -m noctornal_api.egress_proxy keys       the seal key ids it holds
     python -m noctornal_api.egress_proxy rewrap [--apply]
 
-## One listener, two protocols
+One listener binds NOCTORNAL_EGRESS_LISTEN (development default 127.0.0.1:3128; in production the proxy's fixed
+internal address, never a wildcard) and the first byte decides: 0x05 is SOCKS5 with RFC 1929 username and
+password, anything else HTTP/1.1 where only CONNECT is served. Both carry the same credentials (the wire username
+of docs/20 section 8.3 and the route's token) and feed one decision, so the rules exist once. A refusal is one
+code from egress_policy's closed table, never free text and never an address.
 
-It binds NOCTORNAL_EGRESS_LISTEN (development default 127.0.0.1:3128; in
-production the proxy's fixed internal address, never a wildcard) and the
-first byte decides: 0x05 is SOCKS5 with RFC 1929 username and password,
-anything else HTTP/1.1 where only CONNECT is served. Both carry the same
-credentials (the wire username of docs/20 section 8.3 and the route's token)
-and feed one decision, so the rules exist once. A refusal is one code from
-egress_policy's closed table, never free text and never an address.
+For each connection it decides: the credentials (a keyed token per route); the readiness probe route, which
+reaches nothing, resolves nothing and is never logged; the route and, for a persona route, the run, act or stop
+it claims (egress_authz); the destination under the route's policy through egress_policy alone
+(check_destination, then one resolve_and_pin whose answers are the only addresses dialled); the caps; then the
+ledger's OPEN row, COMMITTED before any dial. A connection whose row cannot be written is refused
+ledger_unavailable and nothing is dialled. Everything unrecognised refuses: a proxy that fails open is worse
+than none.
 
-## What it decides
+Chained exits (a residential pool, a VPN, a Tor sidecar) receive the target NAME and resolve it themselves, so a
+persona's forum names never reach this platform's resolver, unless the profile opted into resolve_at_proxy. An
+exit that is a local sidecar (inside NOCTORNAL_EGRESS_UPSTREAM_ALLOW, on the exits network) is handed a checked
+address instead unless it is Tor: a sidecar resolves and connects inside this host, where a forum answering with
+a private address would otherwise reach it.
 
-For each connection: the credentials (a keyed token per route); the
-readiness probe route, which reaches nothing, resolves nothing and is
-never logged; the route and, for a persona route, the run, act or stop it
-claims (egress_authz); the destination under the route's policy through
-egress_policy alone (check_destination, then one resolve_and_pin whose
-answers are the only addresses dialled); the caps; then the ledger's OPEN
-row, COMMITTED before any dial. A connection whose row cannot be written
-is refused ledger_unavailable and nothing is dialled. Everything
-unrecognised refuses: a proxy that fails open is worse than none.
+Blocking work never runs on the event loop: authorisation and ledger writes run on a bounded pool of database
+threads with a 3 second budget, DNS on its own pool with a 5 second budget. Every connection is capped (head
+size, handshake time, global, per-peer, per-route, idle, session and byte limits) and the splice applies back
+pressure, so a slow reader stalls its peer instead of growing a buffer. Open persona and integration tunnels are
+re-checked every 30 seconds and closed when their run finishes, their authority is revoked, their persona is
+withdrawn or their route is switched off, retired or narrowed; a re-check that cannot complete twice running
+closes the tunnels it could not verify.
 
-Chained exits (a residential pool, a VPN, a Tor sidecar) receive the
-target NAME and resolve it themselves, so a persona's forum names never
-reach this platform's resolver, unless the profile opted into
-resolve_at_proxy. An exit that is a local sidecar (inside
-NOCTORNAL_EGRESS_UPSTREAM_ALLOW, on the exits network) is handed a checked
-address instead unless it is Tor: a sidecar resolves and connects inside
-this host, where a forum answering with a private address would otherwise
-reach it (2026-09-24).
-
-## Bounds
-
-Blocking work never runs on the event loop: authorisation and ledger
-writes on a bounded pool of database threads with a 3 second budget, DNS
-on its own pool with a 5 second budget. The head is at most 8 KiB and 32
-lines, the handshake at most NOCTORNAL_EGRESS_HANDSHAKE_S; a global
-connection cap, a per-peer cap on unfinished handshakes, a per-route cap,
-idle and session limits per route, and byte caps on acts and stops. The
-splice awaits drain() after every write with a 256 KiB high-water mark on
-both sides, so a slow reader stalls its peer instead of growing a buffer.
-Open persona and integration tunnels are re-checked every 30 seconds and
-closed when their run finishes, their authority is revoked, their persona
-is withdrawn or their route is switched off, retired or narrowed; a
-re-check that cannot complete twice running closes the tunnels it could
-not verify.
-
-The process log carries a connection id, a route kind, a reason code and
-byte counts: never a destination, a route name or a credential.
+The process log carries a connection id, a route kind, a reason code and byte counts: never a destination, a
+route name or a credential.
 """
 from __future__ import annotations
 
@@ -124,15 +104,12 @@ PREAUTH_FLUSH_S = 60.0
 MAX_ANSWERS = 16
 REALM = 'Basic realm="noctornal-egress"'
 
-#: The platform's keys, DSNs and store credentials. The proxy talks to the
-#: internet and needs none of them, so it refuses to start holding one.
-#: POSTGRES_PASSWORD beside the owner's DSN since docs/17 F52 (2026-10-02):
-#: both halves of the schema owner's credential, which no runtime process
-#: may hold.
+#: The platform's keys, DSNs and store credentials. The proxy talks to the internet and needs none of them, so it
+#: refuses to start holding one. POSTGRES_PASSWORD sits beside the owner's DSN: both halves of the schema owner's
+#: credential, which no runtime process may hold.
 FORBIDDEN_ENV = ("NOCTORNAL_TOTP_KEK", "NOCTORNAL_TOTP_KEK_RETIRED", "DATABASE_URL",
                  "NOCTORNAL_MIGRATION_DATABASE_URL", "POSTGRES_PASSWORD",
                  "NOCTORNAL_INGEST_PEPPER", "MINIO_SECRET_KEY", "SAMPLE_SECRET_KEY",
-                 # The persona key (A collector process, 2026-10-02).
                  "NOCTORNAL_PERSONA_KEK", "NOCTORNAL_PERSONA_KEK_RETIRED")
 
 #: Refusals before the credentials held: counted per peer, never chained
@@ -190,11 +167,9 @@ def verify_proxy_environment(env: Mapping[str, str] | None = None) -> list[str]:
                             f"talks to the internet and needs none of the platform's "
                             f"keys.")
     if production:
-        # The one production process whose environment was never scanned for
-        # values the repository publishes: its own database password in the
-        # template is `replace-me`, which no key-shape check above forces
-        # anyone to edit (infra-12, 2026-10-03). Names the variable, never
-        # the value.
+        # Also scan this process's environment for values the repository publishes: its own database password in
+        # the template is `replace-me`, which no key-shape check above forces anyone to edit. Names the variable,
+        # never the value.
         problems.extend(p.refusal for p in published_credentials(env))
     try:
         internal = egress_policy.internal_networks(env, production=production)
@@ -792,10 +767,9 @@ class EgressProxy:
                             socks=socks)
 
     async def _probe(self, request: Request, writer, *, socks: bool) -> None:
-        """The readiness probe route: an IP literal goes through the
-        classifier (127.0.0.1:9 is blocked_address); a NAME is probe_only
-        with no lookup, so the one unlogged route is no DNS channel out
-        (2026-09-24). Nothing is dialled or logged."""
+        """The readiness probe route: an IP literal goes through the classifier (127.0.0.1:9 is blocked_address); a
+        NAME is probe_only with no lookup, so the one unlogged route is no DNS channel out. Nothing is dialled or
+        logged."""
         code = "probe_only"
         try:
             literal = ipaddress.ip_address(request.host)
@@ -852,10 +826,8 @@ class EgressProxy:
              connection_id: UUID, *, decision: Decision | None = None,
              reason: str, label: str | None = None, tied: bool = False,
              resolved: str | None = None) -> egress_ledger.Row:
-        """A REFUSED or OPEN row. The destination is written in the clear
-        only once it was TIED to a source or an allowlist entry; before that
-        it may be a case-derived name, so a keyed digest is written instead
-        (2026-09-24)."""
+        """A REFUSED or OPEN row. The destination is written in the clear only once it was TIED to a source or an
+        allowlist entry; before that it may be a case-derived name, so a keyed digest is written instead."""
         persona = claim.route_kind == "persona"
         row = egress_ledger.Row(
             event=event, route_id=f"{claim.route_kind}:{claim.name}", reason=reason,
@@ -879,10 +851,9 @@ class EgressProxy:
             row.collection_account_id = claim.context_id
         row.classification = (label or "GREEN") if persona else "GREEN"
         host = decision.host if decision is not None else request.host
-        # A persona row names its destination only when it also names what
-        # the reader labels it by (the matched source, the run, or the
-        # persona's bound sources): a host with nothing to label it by
-        # would sit at its insert-time label for ever (2026-09-25).
+        # A persona row names its destination only when it also names what the reader labels it by (the matched
+        # source, the run, or the persona's bound sources): a host with nothing to label it by would sit at its
+        # insert-time label for ever.
         if persona and (decision is None or not (decision.source_id or decision.run_id
                                                  or decision.persona_id)):
             tied = False

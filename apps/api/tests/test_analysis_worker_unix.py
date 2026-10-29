@@ -1,20 +1,14 @@
-"""The isolated analysis worker as its own process, on a real Unix socket
-(docs/17 F42, 2026-10-02).
+"""The isolated analysis worker as its own process, on a real Unix socket (docs/17 F42).
 
-test_analysis_runner.py drives the same Worker over a loopback stand-in
-on every platform; this file is what only a platform with AF_UNIX can
-show: the process refusing to start with a secret in its environment,
-serving with a clean one, its socket's mode, a stale socket replaced and
-anything else at its name refused, the client refusing a name that is not
-a socket, the healthcheck, and a caller told at once when the worker is
-killed mid-request. Linux CI runs it; Windows' CPython has no AF_UNIX.
+test_analysis_runner.py drives the same Worker over a loopback stand-in on every platform; this file
+is what only a platform with AF_UNIX can show: the process refusing to start with a secret in its
+environment, serving with a clean one, its socket's mode, a stale socket replaced and anything else at
+its name refused, the client refusing a name that is not a socket, the healthcheck, and a caller told
+at once when the worker is killed mid-request. Linux CI runs it; Windows' CPython has no AF_UNIX.
 
-Since the F42 review (2026-10-02) the worker gives each child a user of
-its own, which needs root with three capabilities: CI has neither, so
-these start it with --shared-uid (children as its own user), and one test
-shows that without the flag an ordinary user is refused. The supervised
-worker itself was shown in a container (the review's reproductions,
-re-run on 2026-10-03).
+The worker gives each child a user of its own, which needs root with three capabilities: CI has
+neither, so these start it with --shared-uid (children as its own user), and one test shows that
+without the flag an ordinary user is refused.
 
 Pure: no database. The worker and its children are real processes.
 """
@@ -161,8 +155,7 @@ def test_a_stale_socket_is_replaced_and_anything_else_is_refused(where):
     stale.close()
     proc = _start(_env(sock))
     try:
-        # The stale name is there from the start, so ask until the worker
-        # that replaced it answers.
+        # The stale name is there from the start, so ask until the worker that replaced it answers.
         end = time.monotonic() + 15
         while True:
             try:

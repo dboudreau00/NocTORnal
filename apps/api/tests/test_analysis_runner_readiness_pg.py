@@ -1,18 +1,14 @@
-"""The readiness row `sample_static_analysis` tells the truth about where
-analysis runs (docs/17 F42, 2026-10-02).
+"""The readiness row `sample_static_analysis` tells the truth about where analysis runs (docs/17 F42).
 
-Development's local child passes and says it is local; a production that
-chose the local child out loud fails and says so; the isolated worker
-passes only on its own account (a clean environment, children that are
-users of their own, three capabilities, no-new-privileges, a read-only
-root, loopback only, a child that cannot reach the database host) and
-says where it is. The paths that fail before the queue is read, and the
-pass and fail with the queue fixed, are test_analysis_runner.py's; these
-read this database's real triage queue.
+Development's local child passes and says it is local; a production that chose the local child out
+loud fails and says so; the isolated worker passes only on its own account (a clean environment,
+children that are users of their own, three capabilities, no-new-privileges, a read-only root,
+loopback only, a child that cannot reach the database host) and says where it is. The paths that fail
+before the queue is read, and the pass and fail with the queue fixed, are test_analysis_runner.py's;
+these read this database's real triage queue.
 
-No hedge (F42 review, 2026-10-02): the assertions used to read "passes,
-or fails for the queue", which cannot fail. The queue's state is read
-here by the row's own rule, and the row must agree with it exactly.
+No hedge: an assertion of "passes, or fails for the queue" cannot fail. The queue's state is read here
+by the row's own rule, and the row must agree with it exactly.
 
 Env-gated on DATABASE_URL. Writes nothing.
 """
@@ -144,8 +140,8 @@ def test_the_isolated_worker_passes_on_its_own_account_and_says_where(
 ])
 def test_a_worker_with_a_network_interface_or_none_reported_fails(
         conn, monkeypatch, clean_worker, interfaces, says):
-    """F42 review (2026-10-02): both passed, with a caveat or nothing at
-    all; the review's probe_ready.py printed ok = True for each."""
+    """A worker with a network interface besides loopback, or none reported, fails the row rather than
+    passing with a caveat or nothing at all."""
     monkeypatch.setattr(aw.Worker, "status",
                         lambda self: clean_worker(self, network_interfaces=interfaces))
     with tcp_worker() as (_w, connect):

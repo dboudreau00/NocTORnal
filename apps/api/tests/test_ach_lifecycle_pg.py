@@ -1,25 +1,17 @@
-"""The ACH matrix over HTTP: what the usability review found it could not
-say or do (ux11-ach, 2026-09-23).
+"""The ACH matrix over HTTP: stance notes, the hypothesis lifecycle, labelled columns and rows, and
+the report.
 
-- A stance's note was never returned, and a second save wiped it
-  (stance-note-erased-on-rescore). It is now returned with who wrote it
-  and when, kept unless the save carries a new one, and every replaced
-  text is kept in the audit trail and read back as an earlier note.
-- A cell scored by mistake could not go back to "not assessed", and a
-  hypothesis could not be rejected, reworded or reopened from the console
-  (no-hypothesis-lifecycle-in-console). Rejecting, and taking a rejection
-  back, now need a reason; a rejected hypothesis is scored for the record
-  and never ranked.
-- The columns were numbered by rank (h-numbers-unstable-and-unlabelled).
-  Each hypothesis now carries the number of its place in writing order.
-- A row was a bare name (evidence-row-is-a-name-not-a-claim). It now
-  carries the claim, both ends of a tie and the grade and weight.
-- The report never printed a note. It now prints the notes of the cells
-  it may show, and no other, and the reason recorded with each
-  hypothesis's current status.
-- A tie's row names both its ends, so the report's mark and compartments
-  count both ends as well as the tie (the verifier's regression: a GREEN
-  tie to a deleted AMBER node put the AMBER label in a GREEN document).
+- A stance's note is returned with who wrote it and when, kept unless the save carries a new one, and
+  every replaced text is kept in the audit trail and read back as an earlier note.
+- A cell can go back to "not assessed", and a hypothesis can be rejected, reworded or reopened from
+  the console. Rejecting, and taking a rejection back, need a reason; a rejected hypothesis is scored
+  for the record and never ranked.
+- Each hypothesis carries the number of its place in writing order, not its rank.
+- A row carries the claim, both ends of a tie, and the grade and weight.
+- The report prints the notes of the cells it may show, and no other, and the reason recorded with
+  each hypothesis's current status.
+- A tie's row names both its ends, so the report's mark and compartments count both ends as well as
+  the tie (a GREEN tie to a deleted AMBER node must not put the AMBER label in a GREEN document).
 
 Env-gated on DATABASE_URL.
 """
@@ -397,12 +389,9 @@ def test_a_rejected_hypothesis_is_in_the_report_and_out_of_the_ranking(conn, cli
 
 
 def test_the_report_prints_why_a_hypothesis_was_ruled_out(conn, client):
-    """The console's Reject sheet says the reason is "printed in the
-    report", and the report printed only the word REJECTED: the reason sat
-    in the audit trail and on the card (verifier of ux11-ach:no-hypothesis-
-    lifecycle-in-console, 2026-09-23). Only the reason given with the
-    CURRENT status is printed, and a SUPERSEDED hypothesis is not in the
-    report at all."""
+    """The console's Reject sheet says the reason is "printed in the report", so the report prints
+    the reason given with the current status, not only the word REJECTED. A SUPERSEDED hypothesis is
+    not in the report at all."""
     from noctornal_api.reports import ReportBuilder, render_markdown
     owner, auth, case_id, aid, h1, h2 = _setup(conn, client)
     h3 = _add(client, auth, case_id, "an imitator")
@@ -435,12 +424,10 @@ def test_the_report_prints_why_a_hypothesis_was_ruled_out(conn, client):
 # --- a tie's row marks the report with both its ends ---------------------------
 
 def test_a_tie_row_marks_the_report_with_both_its_ends(conn, client):
-    """A row names a tie as "src → type → dst", so the report's mark and
-    compartments must count both ends and not the tie alone. The ends the
-    projection drops (a deleted, merged or dissolved node) are counted
-    nowhere else: a GREEN tie to a deleted AMBER node printed the AMBER
-    label in a document marked GREEN, which the egress check then cleared
-    for a GREEN destination (verifier of ux11-ach, 2026-09-23)."""
+    """A row names a tie as "src → type → dst", so the report's mark and compartments count both ends
+    and not the tie alone. The ends the projection drops (a deleted, merged or dissolved node) are
+    counted nowhere else: a GREEN tie to a deleted AMBER node must not print the AMBER label in a
+    document marked GREEN, which the egress check would clear for a GREEN destination."""
     from datetime import datetime, timezone
 
     from noctornal_api.graph import GraphWriteService

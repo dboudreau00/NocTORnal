@@ -1,133 +1,63 @@
-# The image every NocTORnal process runs from. ONE image, five commands:
-# the API, the sample origin, the Alembic migration job, the cron loop and
-# the egress proxy (`python -m noctornal_api.egress_proxy`) are the same
-# code started differently (infra/production/compose.yml).
-#
-# That is not a packaging convenience, it is the architecture. CONVENTIONS
-# says "one process" and decision 30 says there is no worker: the sample
-# origin is the same FastAPI application with a different
-# NOCTORNAL_PUBLIC_ORIGIN, and the cron loop is `python scripts/...`. Two
-# images would be two dependency sets that can drift, and the first
-# symptom of that drift would be a notification drain that imports a
-# module the API has moved.
+# The image every NocTORnal process runs from. ONE image, five commands: the API, the sample origin,
+# the Alembic migration job, the cron loop and the egress proxy (`python -m noctornal_api.egress_proxy`)
+# are the same code started differently (infra/production/compose.yml). One image is the architecture
+# (CONVENTIONS, decision 30: one process, no worker); two would be two dependency sets that can drift.
 FROM python:3.13-slim@sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285
 
-# Pinned by digest (infra-7, 2026-10-03): a tag is whatever its registry says
-# it is at pull time, so two builds of one commit could start from two
-# different bases. The tag stays for the reader. The cost is that this base
-# no longer picks up Debian security updates by itself: move the digest when
-# you take a release (docker buildx imagetools inspect python:3.13-slim) and
-# build with --pull. infra/production/README.md, Hardening, says how.
-#
-# 3.13 because CI pins PYTHON_VERSION 3.13 and the suite is proven there.
-#
-# `slim` and NOT `alpine`. Every compiled dependency here (psycopg[binary],
-# cryptography, argon2-cffi, blake3, python-igraph, leidenalg) ships
-# manylinux wheels; on musl the picture is mixed and it only has to fail
-# once. psycopg is the one that settles it -- its `[binary]` distribution
-# is glibc-only by policy, so on alpine that extra resolves to nothing and
-# the database driver has to be built against libpq. Assume the others
-# would each need checking on every upgrade rather than that they are
-# fine, because the failure is a build that starts invoking a compiler
-# nobody installed.
+# Pinned by digest, since a tag is whatever its registry says at pull time; the tag stays for the
+# reader. The base does not pick up Debian security updates by itself: move the digest when you
+# take a release and build with --pull (infra/production/README.md, Hardening). 3.13 because CI
+# pins it. `slim`, not `alpine`: every compiled dependency ships manylinux wheels, and psycopg's
+# `[binary]` is glibc-only, so on musl the driver would have to be built against libpq.
 
-# No build toolchain is installed on purpose. If a `pip install` step below
-# ever starts compiling, that is the signal that a dependency stopped
-# shipping a wheel for this platform -- fix that upstream or add the
-# toolchain deliberately, rather than discovering it as a five-minute build.
-# Two known cases, both in opt-in extras (2026-09-24): pyaes, which
-# the telegram extra's Telethon needs, is published only as a pure-Python
-# sdist, so pip builds its wheel with setuptools and no compiler; and
-# yara-x needs glibc 2.28, which this Debian 13 (trixie) base (glibc 2.41,
-# measured in the pinned digest on 2026-10-07) has.
+# No build toolchain, on purpose: a `pip install` below that starts compiling means a dependency
+# stopped shipping a wheel for this platform, to fix upstream or by adding the toolchain
+# deliberately. In the opt-in extras, Telethon's pyaes is a pure-Python sdist that pip builds
+# with no compiler, and yara-x needs glibc 2.28, which this Debian 13 base (glibc 2.41) has.
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# gnupg for PGP verification (Comms, F10a, 2026-09-25). The distribution's
-# build reports a version below the floor the verifier enforces, so a
-# deployment attests it with NOCTORNAL_GPG_PATCHED_AS once it has checked
-# the changelog carries the fixes; until then every check records
-# NO_VERIFIER and pgp_verifier says why. No recommends: no agent, no pinentry.
+# gnupg for PGP verification. The distribution's build reports a version below the floor the
+# verifier enforces, so a deployment attests it with NOCTORNAL_GPG_PATCHED_AS once it has checked
+# the changelog carries the fixes; until then every check records NO_VERIFIER and pgp_verifier
+# says why. No recommends: no agent, no pinentry.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends gnupg \
     && rm -rf /var/lib/apt/lists/*
 
-# PYTHONUNBUFFERED: the cron loop's only channel back to its operator is
-# stdout (scripts/notify_drain.py prints its counters and exits non-zero on
-# a failed delivery). Block-buffered stdout on a pipe means `docker logs`
-# shows nothing for hours and then a burst, which reads as a hung job.
-#
-# PYTHONDONTWRITEBYTECODE: /app is root-owned and the process is not root,
-# so every import would attempt a __pycache__ write, fail, and silently
-# fall back. Not writing is the same outcome without the syscalls.
+# PYTHONUNBUFFERED: stdout is the cron loop's only channel to its operator, and block-buffered
+# it shows nothing in `docker logs` for hours, which reads as a hung job.
+# PYTHONDONTWRITEBYTECODE: /app is root-owned and the process is not root, so every
+# __pycache__ write would fail anyway.
 
-# /app IS the repository root, and three things depend on that literally:
-#
-#   * `alembic.ini` sets `script_location = db/migrations`, relative to the
-#     working directory. The migration job runs `alembic upgrade head` from
-#     here or it finds no scripts.
-#   * `readiness._MIGRATIONS_DIR` resolves `Path(__file__).parents[4]/db/
-#     migrations` -- four levels up from
-#     apps/api/src/noctornal_api/readiness.py. That arithmetic only lands
-#     on a repository root, which is why the install below is EDITABLE.
-#   * `scripts/_env.py` looks for `.env.local` at the parent of `scripts/`.
-#     There is deliberately none in the image (see .dockerignore); the
-#     production environment comes from compose.
+# /app is the repository root, which three things depend on: `alembic.ini`'s
+# `script_location = db/migrations` is relative to the working directory;
+# `readiness._MIGRATIONS_DIR` is `Path(__file__).parents[4]/db/migrations`, so the install below
+# is editable; and `scripts/_env.py` looks for `.env.local` beside `scripts/`, of which the image
+# has none (.dockerignore), the environment coming from compose.
 WORKDIR /app
 
-# The whole tree in one COPY, filtered by .dockerignore.
-#
-# No dependency-layer caching, deliberately. Every scheme for it (a
-# skeleton pyproject, a generated requirements.txt) puts a SECOND
-# declaration of the dependency set in the image that can silently fall
-# behind apps/api/pyproject.toml -- and the failure mode is an image that
-# builds fast and runs an old library. A slow rebuild is the cheaper
-# mistake.
+# The whole tree in one COPY, filtered by .dockerignore. No dependency-layer caching: every scheme
+# for it puts a second declaration of the dependency set in the image that can fall behind
+# apps/api/pyproject.toml, and a slow rebuild is cheaper than an image running an old library.
 COPY . /app
 
-# EDITABLE, and this is a correctness requirement rather than a
-# development habit. Two things break under a normal install:
+# Editable, which is a correctness requirement: under a normal install `readiness._MIGRATIONS_DIR`
+# would resolve under /usr/local/lib and report a migrated deployment as broken, and setuptools
+# would drop noctornal_api/http/static/ (pyproject.toml declares no package data), so /ui would
+# 404. Both workspace packages, in dependency order: noctornal-api imports noctornal_ontology at
+# startup. `-c constraints.txt` pins the versions the release's suite passed on, as the
+# installers and CI do; it adds no dependency of its own.
 #
-#   * `readiness._MIGRATIONS_DIR` (above) would resolve to
-#     /usr/local/lib/db/migrations, so the migrations_at_head check would
-#     report "migration scripts not found" on a correctly migrated
-#     deployment -- a working system reported as broken, which is exactly
-#     the defect readiness.py exists to prevent.
-#   * apps/api/pyproject.toml declares no `package-data` and no
-#     `include-package-data`, so setuptools would drop
-#     noctornal_api/http/static/ from the wheel. The console at /ui would
-#     404 with nothing in any log to say why.
+# NOCTORNAL_EXTRAS is "telegram", "yara" or both; empty by default, matching the installers. Any
+# other value is refused before pip runs: a typo would build an image without the extra and say
+# nothing, and the value is interpolated into a pip argument, which only a closed list may be.
 #
-# Fixing either of those in pyproject.toml is another workstream's file, so
-# the image is built to match the code as it stands.
-#
-# Both workspace packages, in dependency order: noctornal-api imports
-# noctornal_ontology at startup (the selector normalisers).
-#
-# `-c constraints.txt` (sec-pin-dependencies, 2026-09-23): the exact
-# versions the release's suite passed on, the same file the installers and
-# CI install with. Without it every build of this image resolved each `>=`
-# to whatever PyPI held that day, so two builds of one commit could run two
-# different stacks, neither of them the tested one. It is a constraints file
-# and not a second dependency list: it pins what the pyproject files ask
-# for and adds nothing, which is the drift the note above rules out.
-#
-# NOCTORNAL_EXTRAS (2026-09-24): the opt-in extras for this image,
-# "telegram", "yara" or "telegram,yara". The default is none, so the image
-# matches what the installers install unless a switch asks for more. Any
-# other value is refused before pip runs: a typo such as "socks" would
-# otherwise build an image without the extra and say nothing, and a value
-# is interpolated into a pip argument, which only a closed list may be.
-#
-# The final `find` (2026-10-03, g48 verification, the umask 077 finding): COPY keeps the file modes
-# of the build context, and a checkout made under a restrictive umask (a
-# non-root operator on a host that defaults to 077, or a `git pull` in a shell
-# that set it) holds 0600 files and 0700 directories. This image runs as uid
-# 10001 and /app is root's, so it could not read its own source: every
-# service failed at import with a permission error. It chmods only what is
-# NOT already world-readable, so a normal context adds no layer weight.
+# The final `find`: COPY keeps the build context's modes, and a checkout made under umask 077
+# holds 0600 files and 0700 directories, which uid 10001 could not read under root-owned /app.
+# It chmods only what is not already world-readable, so a normal context adds no layer weight.
 ARG NOCTORNAL_EXTRAS=""
 RUN case "$NOCTORNAL_EXTRAS" in \
       ""|telegram|yara|telegram,yara|yara,telegram) ;; \
@@ -137,21 +67,11 @@ RUN case "$NOCTORNAL_EXTRAS" in \
        -e "apps/api${NOCTORNAL_EXTRAS:+[$NOCTORNAL_EXTRAS]}" \
     && find /app \( -type f ! -perm -o=r -o -type d ! -perm -o=rx \) -exec chmod go+rX {} +
 
-# An unprivileged account: no login shell, and no home directory of its own
-# to write to.
-#
-# /app stays ROOT-OWNED and is never chowned: nothing in this application
-# writes to its own source tree at runtime (evidence goes to MinIO, state
-# goes to Postgres, .pyc writes are off above), so a runtime user that
-# cannot modify the code it is executing costs nothing and removes the
-# most useful thing an RCE could do next.
-#
-# The uid and gid are pinned rather than left to useradd. A named user is
-# for a human reading `ps`; the NUMBER is what the kernel checks against
-# file ownership, and pinning it is what makes an ownership decision here
-# still mean the same thing after a base-image update renumbers its
-# accounts. `--system` is deliberately not used: it allocates below
-# SYS_UID_MAX (999) and warns when given a uid above it.
+# An unprivileged account, with no login shell and no home directory. /app stays root-owned: the
+# application never writes its own source tree, so a runtime user that cannot modify its code
+# costs nothing and denies an RCE its most useful next step. The uid and gid are pinned because
+# the kernel checks the number and a base-image update may renumber its accounts; `--system`
+# would allocate below 999 and warn at 10001.
 RUN groupadd --gid 10001 noctornal \
     && useradd --uid 10001 --gid 10001 --no-create-home \
        --shell /usr/sbin/nologin noctornal
@@ -159,29 +79,16 @@ USER 10001:10001
 
 EXPOSE 8000
 
-# `python -c` rather than curl or wget, because slim ships neither and the
-# interpreter is already here. /healthz is the one path the auth middleware
-# lets through unauthenticated (http/app.py), returns `{"status": "ok"}`,
-# and deliberately carries no version for an unauthenticated caller.
-#
-# No explicit status comparison: `urlopen` raises HTTPError on any 4xx or
-# 5xx and URLError when nothing is listening, and an uncaught exception
-# exits non-zero. Testing the status as well would be a second statement of
-# the same rule, and a longer one than the line has room for.
-#
-# TRAP for anyone reading compose.yml next to this: a HEALTHCHECK is
-# inherited by EVERY container built from this image, including the ones
-# that serve no HTTP at all. The migration job and the cron loop would sit
-# permanently `unhealthy` -- and a `depends_on: service_healthy` elsewhere
-# would then wait for a container that is never going to answer. Those two
-# services disable it explicitly; that is why.
+# `python -c` because slim ships neither curl nor wget. /healthz is the one path the auth
+# middleware lets through unauthenticated, and carries no version. `urlopen` raises on any 4xx or
+# 5xx and when nothing listens, so the exit status is the check. Every container built from this
+# image inherits the HEALTHCHECK, so the migration job and the cron loop, which serve no HTTP,
+# disable it in compose.yml; otherwise they would sit `unhealthy` and block `service_healthy`.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD ["python", "-c", \
          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4)"]
 
-# 0.0.0.0 because the only route to this port is the compose network --
-# nothing publishes 8000 to the host (infra/production/compose.yml). The
-# production command adds workers and the proxy-header settings; this
-# default exists so `docker run` on the image alone does something
-# sensible and single-process.
+# 0.0.0.0 because the only route to this port is the compose network: nothing publishes 8000 to
+# the host (infra/production/compose.yml). The production command adds workers and the
+# proxy-header settings; this default is for `docker run` on the image alone, single-process.
 CMD ["uvicorn", "noctornal_api.http.app:app", "--host", "0.0.0.0", "--port", "8000", "--ws-max-size", "8192"]

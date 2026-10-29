@@ -36,15 +36,10 @@ from _env import load_env_local  # noqa: E402
 
 load_env_local()
 
-#: The Reply-To must sit on a real free-mail domain, because the free-mail
-#: signal reads the product's own list (deception.FREEMAIL_DOMAINS). Its
-#: local part holds an underscore, which Gmail does not allow in an
-#: address, so no real account can be this one: the README screenshots
-#: show it as an attacker's address, and a well-formed one could belong to
-#: somebody (README screenshot set review, 2026-09-23).
-#: The receiving server's Authentication-Results sits above every Received
-#: header, as an MTA that prepends writes it: a header below one is not
-#: believed (http_ui-007, 2026-10-03).
+#: The Reply-To sits on a real free-mail domain, because the free-mail signal reads
+#: deception.FREEMAIL_DOMAINS, but its local part holds an underscore, which Gmail does not allow,
+#: so it cannot be anybody's real address. The receiving server's Authentication-Results sits above
+#: every Received header, as a prepending MTA writes it: one below them is not believed.
 BEC_EML = b"""\
 Authentication-Results: mail.latticework-holdings.example; spf=fail smtp.mailfrom=vps-4471.hostmarket.example; dkim=fail header.d=latticework-holdings.example; dmarc=fail
 Received: from mx-edge.latticework-holdings.example (mx-edge.latticework-holdings.example [10.4.0.9]) by mail.latticework-holdings.example with ESMTPS id 7f2a; Fri, 17 Jul 2026 08:14:31 +0000
@@ -86,19 +81,8 @@ def main() -> int:
     from noctornal_api.evidence import EvidenceService, EvidenceStorage
 
     conn = connect_system(SystemPurpose.SCRIPT)
-    # The case's own label is fetched because the exhibit must carry AT
-    # LEAST it. `core.enforce_tlp_floor()` fires on core.evidence and
-    # refuses anything below the case floor -- an element is protected by
-    # both its own label and its case's, and a CLEAR exhibit inside an
-    # AMBER case would be a hole in that.
-    #
-    # R23 (2026-07-26): this script asked for a hardcoded CLEAR, so the
-    # BEC exhibit was refused on EVERY machine -- demo-case and
-    # demo-network both create their cases at AMBER. The Deception pane
-    # therefore showed a capture and a call but never the e-mail, which is
-    # the row carrying the Received-chain and DKIM reasoning the pane
-    # exists to demonstrate. Reading the floor rather than guessing it
-    # also makes --case work against a RED case.
+    # The case's own label is fetched because the exhibit must carry at least it:
+    # `core.enforce_tlp_floor()` on core.evidence refuses anything below the case floor.
     row = conn.execute(
         'SELECT id, owner_user_id, classification FROM core."case" '
         'WHERE code = %s',
@@ -173,11 +157,8 @@ def main() -> int:
         )
         evidence_id = exhibit.evidence_id
     except Exception as exc:                                  # noqa: BLE001
-        # PRINT THE ACTUAL ERROR. This handler used to report "evidence
-        # store unavailable" for anything at all, and the thing it was
-        # actually catching was a Postgres policy refusal -- so it sent
-        # whoever ran it to look at MinIO, which was working perfectly.
-        # A diagnostic that names the wrong subsystem is worse than none.
+        # Print the actual error: a policy refusal lands here too, and a diagnostic that names the
+        # wrong subsystem is worse than none.
         print(f"could not store the BEC exhibit, skipping the e-mail row:\n"
               f"  {type(exc).__name__}: {exc}", file=sys.stderr)
         evidence_id = None

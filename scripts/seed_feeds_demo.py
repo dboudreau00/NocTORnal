@@ -2,8 +2,7 @@
 
 Development only. Every row this writes goes through the real service, so
 what you see is what the parser, the categoriser, the redactor and the
-triage scorer actually do. A seed that INSERTs directly would show you a
-picture of the schema rather than a picture of the system.
+triage scorer actually do, not a picture of the schema.
 
     .venv\\Scripts\\python scripts\\seed_feeds_demo.py --case OP-NIGHTJAR-26
     .venv\\Scripts\\python scripts\\seed_feeds_demo.py --case OP-NIGHTJAR-26 --clean
@@ -11,26 +10,22 @@ picture of the schema rather than a picture of the system.
 What it puts there, and why each one:
 
   * a ransom-leak post and a MIRROR of the same post, so the folded
-    duplicate count is non-zero and you can see near-duplicate suppression
-    working rather than trusting that it does;
+    duplicate count is non-zero and near-duplicate suppression shows;
   * a stealer log on a compartmented key, with two credentials, so the
     masked view has something to mask;
-  * a wrapped stealer log (`{"log": {...}}`): the shape that used to
-    classify as UNKNOWN and skip the compartment check;
+  * a wrapped stealer log (`{"log": {...}}`), a shape that must not
+    classify as UNKNOWN and so skip the compartment check;
   * a fragment that will not parse AND is full of credentials, so the
     dead-letter queue shows a redacted fragment rather than an empty one;
   * an IOC feed record with a watched selector, so one row scores high and
     the queue is visibly ordered by something;
   * a collection source that is due and one that is unhealthy.
 
-The stealer feed's compartment (STEALER-2026) is REGISTERED in
-`iam.compartment` first if it is not already there: since migration 0059
-(2026-09-09) an ingest key cannot force an unregistered compartment, and
-before this script registered it, a fresh database (or any database on
-which seed_showcase.py had not happened to run first) killed the seeder
-with an IngestError at that exact call. The registration is printed and
-audited, because it widens the vocabulary every read-in is checked
-against. Reading the case owner INTO the compartment stays
+The stealer feed's compartment (STEALER-2026) is registered in
+`iam.compartment` first if it is not already there, because an ingest key
+cannot force an unregistered compartment (migration 0059). The registration
+is printed and audited, because it widens the vocabulary every read-in is
+checked against. Reading the case owner into the compartment stays
 seed_showcase.py's job; this script needs only the key to exist.
 """
 from __future__ import annotations
@@ -55,11 +50,8 @@ load_env_local()
 
 
 def connect():
-    """Every script connects as the system role (S1, 2026-09-25). A
-    script serves no request and binds no user, so on the request role it
-    would see nothing under row-level security; `db.connect_system` refuses
-    rather than hand it a connection that silently sees part of the data.
-    Named `connect` so the tests that replace it still find it."""
+    """Connect as the system role: a script binds no user, so under row-level security the request
+    role would see nothing. Named `connect` because the tests replace it by that name."""
     return connect_system(SystemPurpose.SCRIPT)
 
 FEED_NAME = "demo partner feed"
@@ -106,8 +98,8 @@ IOC_RECORD = {
     "note": "panel host observed in three unrelated intrusions",
 }
 
-# Unparseable AND full of credentials. This is the shape that made the
-# dead-letter queue a data-protection problem (docs/17 F15(d)).
+# Unparseable and full of credentials: the shape that makes the dead-letter queue a data-protection
+# problem.
 BROKEN_FRAGMENT = (
     b'{"email": "victim@northgate.example", "password": "Summer2026!"\n'
     b'another.victim@northgate.example:Wint3r-Palace-2026\n'
@@ -155,8 +147,7 @@ def ingest(svc, key, payloads, case):
 
 
 def _count(n: int, noun: str) -> str:
-    """`1 record`, `2 records`: agreed with the count rather than
-    bracketed (Alpha 6 pre-release check, 2026-09-23)."""
+    """`1 record`, `2 records`: the noun agreed with the count."""
     return f"{n} {noun if n == 1 else noun + 's'}"
 
 
@@ -176,17 +167,8 @@ def main() -> int:
         return 0
     clean(conn, owner)
 
-    # WITH raw storage, exactly as the API builds it (routers/ingest.py
-    # `_with_raw`). `IngestService(conn)` alone cannot `accept()` anything:
-    # docs/12 requires the raw payload to be persisted BEFORE parsing, so a
-    # service with no store refuses rather than acknowledging bytes it is
-    # about to drop.
-    #
-    # R24 (2026-07-26): this script passed no store, so it raised
-    # IngestError on its first accept() and seeded nothing at all. The
-    # ingest triage queue and the dead-letter pane were therefore empty on
-    # every machine, which reads as "that feature has no data yet" rather
-    # than "the seeder never ran".
+    # With raw storage, as the API builds it (routers/ingest.py `_with_raw`): docs/12 persists the
+    # raw payload before parsing, so a service with no store refuses every `accept()`.
     try:
         storage = RawBatchStorage()
     except RawStoreError as exc:
@@ -202,19 +184,10 @@ def main() -> int:
         name=FEED_NAME, owner_user_id=owner,
         declared_category="RANSOM_LEAK_POST").secret)
 
-    # The compartment must be in the REGISTRY before a key can force it.
-    # Since 2026-09-09 (migration 0059) `ingest.api_key.forced_compartment`
-    # is bound to `iam.compartment`, and `issue_key` refuses an
-    # unregistered key with an IngestError naming it -- which, uncaught,
-    # is where this script died on a fresh database, or on any database
-    # where seed_showcase.py (which registers the same key for its
-    # compartmented case) had not happened to run first. Guarded with a
-    # lookup rather than caught, because `register_compartment` REFUSES a
-    # duplicate by design (a re-registration would silently relabel what
-    # every case in the compartment is filed under) and this script is
-    # re-runnable. Said out loud, for seed_showcase.py's reason: widening
-    # the vocabulary the access gate compares against is not something a
-    # seed script should do quietly.
+    # The compartment must be registered before a key can force it: `issue_key` refuses an
+    # unregistered one (migration 0059). Looked up rather than caught, because
+    # `register_compartment` refuses a duplicate by design and this script is re-runnable. Said out
+    # loud, because widening the vocabulary the access gate compares against is never quiet.
     admin = IamAdminService(conn)
     if COMPARTMENT not in {r["key"] for r in admin.list_compartments()}:
         admin.register_compartment(key=COMPARTMENT,

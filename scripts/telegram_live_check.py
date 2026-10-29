@@ -1,25 +1,22 @@
 """The Telegram end-to-end check: enrolment, one read-only poll, a join check
 and a logout, as a persona, through the real egress proxy. An operator runs it
-with the deployment's own Telegram account (docs/17 F31, 2026-10-02).
+with the deployment's own Telegram account.
 
     python scripts/telegram_live_check.py --persona <uuid> [--source <uuid>]
     python scripts/telegram_live_check.py --persona <uuid> --self-check
 
 In production it runs in the collector service, as telegram_persona.py does
 (`sudo docker compose -f infra/production/compose.yml run --rm collector python
-scripts/telegram_live_check.py ...`): the enrolment, the poll and the
-logout open the persona's credential and session with the persona key,
-which only the collector holds (the persona vault split, decision 174), and
-it refuses anywhere else in production before it asks anybody to sign in.
+scripts/telegram_live_check.py ...`): the enrolment, the poll and the logout
+open the persona's credential and session with the persona key, which only the
+collector holds (decision 174), and it refuses anywhere else in production
+before it asks anybody to sign in.
 
-## What it does, in order, and what it prints
-
-One line per step, `[PASS]`, `[FAIL]` or `[SKIP]`, each followed by a
-sentence this codebase wrote (never a library's text, never a value that
-could be a secret: every line passes through the credential redactor
-before it is printed, and the transcript names no phone number, code,
-password, session or token). Exit 0 when nothing failed, 1 on any failure,
-2 when the environment is not usable at all.
+One line per step, `[PASS]`, `[FAIL]` or `[SKIP]`, each followed by a sentence
+this codebase wrote: never a library's text, never a value that could be a
+secret (every line passes through the credential redactor, and the transcript
+names no phone number, code, password, session or token). Exit 0 when nothing
+failed, 1 on any failure, 2 when the environment is not usable at all.
 
 1. environment: the egress proxy is configured and in force, Telethon is
    installed, the Telegram ceiling is declared, the deployment is ready;
@@ -41,20 +38,15 @@ password, session or token). Exit 0 when nothing failed, 1 on any failure,
 9. logout: the session is logged out at Telegram through a stop route and
    destroyed here (telegram_persona.logout).
 
-## What it never does
+It joins nothing, posts nothing, reads nothing it is not authorised to read,
+and prints no secret.
 
-It joins nothing, posts nothing, reads nothing it is not authorised to
-read, and prints no secret.
-
-## --self-check
-
-Steps 1 and 3 to 5 run exactly as above, against the database and the
-environment, connecting to nothing; step 2 is skipped (the check runs as
-the system); steps 6 to 9 run only when a transport factory has been set
-on this module (`TRANSPORT_FACTORY`, the test suite's fakes), and are
-reported SKIP otherwise. That is the dry run: it proves the gates, the
-authority and the three routes, and the shape of the transcript, before
-anybody signs in to Telegram.
+`--self-check` is the dry run: steps 1 and 3 to 5 run as above, connecting to
+nothing; step 2 is skipped (the check runs as the system); steps 6 to 9 run
+only when a transport factory is set on this module (`TRANSPORT_FACTORY`, the
+test suite's fakes) and are reported SKIP otherwise. It proves the gates, the
+authority, the three routes and the shape of the transcript before anybody
+signs in to Telegram.
 """
 from __future__ import annotations
 
@@ -126,8 +118,8 @@ def _sentence(exc: BaseException) -> str:
     answer = attended_answer(exc)
     if answer is not None:
         return answer[1]
-    # The class only: a library's own text can quote a phone number or an
-    # address with a user name, and the redactor does not mask either (2026-10-03).
+    # The class only: a library's own text can quote a phone number or an address with a user
+    # name, and the redactor does not mask either.
     return f"{type(exc).__name__} (the exception's own text is not printed)"
 
 
@@ -418,8 +410,8 @@ def run_check(conn, persona_id: UUID, *, source_id: UUID | None, self_check: boo
         row = conn.execute("SELECT tlp_clearance::text FROM iam.app_user WHERE id = %s",
                            (actor,)).fetchone()
         clearance = row[0] if row else None
-        # The operator's own compartments (F43): a chat filed under a key
-        # they do not hold is as missing to them as one above their ceiling.
+        # The operator's own compartments: a chat filed under a key they do not hold is as missing
+        # to them as one above their ceiling.
         from noctornal_api.http.deps import user_ceiling
         held = user_ceiling(conn, actor)[1]
     persona = step_persona(conn, persona_id, t)
@@ -478,12 +470,10 @@ def main(argv: list[str] | None = None) -> int:
     from noctornal_api.db import SystemPurpose, connect_system
     from noctornal_api.security import persona_envelope
 
-    # The persona vault split (2026-10-02): every step that touches the
-    # persona's credential or session needs the persona key, which in
-    # production only the collector holds. Refused before the operator is
-    # asked to sign in, and the ring is read here too, everywhere, as
-    # telegram_persona.py reads it (nothing is asked of anyone when the key
-    # is missing, the way a login burnt a code and then failed to seal).
+    # Every step that touches the persona's credential or session needs the persona key, which in
+    # production only the collector holds. Refused before the operator is asked to sign in, and the
+    # ring is read here too, everywhere, as telegram_persona.py reads it, so a missing key never
+    # costs a login code.
     try:
         enforce_persona_key_boundary(collector=True)
     except RuntimeError as exc:

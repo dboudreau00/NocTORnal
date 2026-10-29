@@ -1,21 +1,17 @@
 """The assumptions register (docs/08 Phase 6, migration 0056).
 
-docs/08 defines it in one paragraph: per case, list the load-bearing
-assumptions explicitly, with a review flag, so that "the same PGP key means
-the same operator" is written down where it can be challenged. Nothing
-existed for it until 2026-09-02 -- no table, no service, no route, and a
-report that stated its conclusions without stating what they rested on.
+docs/08 defines it in one paragraph: per case, list the load-bearing assumptions explicitly, with a
+review flag, so that "the same PGP key means the same operator" is written down where it can be
+challenged.
 
 The tests that carry this file:
 
-- the REVIEW rules, because a register whose flags can be flipped without
-  a trace is a to-do list, not a register: a REFUTED assumption cannot be
-  quietly re-opened, and a WITHDRAWN one stays withdrawn;
-- WHO MAY WRITE, read from both the router and the seed: the register is
-  gated on `case.update`, which ANALYST does not hold, so an analyst reads
-  it and a 403 is the answer to their POST;
-- the REPORT, because a disclosure document that does not say what it
-  assumes is a document whose reader cannot tell a finding from a premise.
+- the REVIEW rules, because a register whose flags can be flipped without a trace is a to-do list, not
+  a register: a REFUTED assumption cannot be quietly re-opened, and a WITHDRAWN one stays withdrawn;
+- WHO MAY WRITE, read from both the router and the seed: the register is gated on `case.update`, which
+  ANALYST does not hold, so an analyst reads it and a 403 is the answer to their POST;
+- the REPORT, because a disclosure document that does not say what it assumes is a document whose
+  reader cannot tell a finding from a premise.
 
 Env-gated on DATABASE_URL. Email prefix `asm-`, unique to this file.
 """
@@ -96,29 +92,20 @@ def _case(conn, owner, classification="AMBER"):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
-    is off in these tests.
+    """A signed-in caller, minted the way `scripts/bootstrap.py session` mints one: the account looked
+    up by email, then `SessionService` against the same store the API validates against.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Unbound (no address, no User-Agent), which 0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING`
+    refuses; it is off in these tests. It is not `POST /auth/login`, which answers 204 and leaves the
+    token only in `__Host-session`; nothing in this file is about the sign-in path. TOTP codes are
+    single-use, so two sign-ins for one account inside one 30-second step would fail on the code.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as both real mint sites pass: a session that never satisfied MFA is refused
+    # by every step-up gated route.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token
@@ -142,8 +129,8 @@ def _actions(conn, object_id) -> list[str]:
 # --- the service ----------------------------------------------------------
 
 def test_the_register_lifecycle_through_the_service(conn):
-    """Make, list, confirm, refute, withdraw -- each leaving an audit row
-    and a reviewer's name and time on the row itself."""
+    """Make, list, confirm, refute, withdraw: each leaves an audit row and a reviewer's name and time
+    on the row itself."""
     owner, _, _ = _user(conn)
     reviewer, _, _ = _user(conn)
     case_id = _case(conn, owner)
@@ -189,9 +176,8 @@ def test_the_register_lifecycle_through_the_service(conn):
 
 
 def test_a_refuted_assumption_cannot_be_reopened_without_a_note(conn):
-    """Refuting is a finding. Un-refuting it in silence would erase the
-    finding while leaving the assumption load-bearing again, which is the
-    exact move the register exists to make visible."""
+    """Refuting is a finding. Un-refuting it in silence would erase the finding while leaving the
+    assumption load-bearing again, the exact move the register exists to make visible."""
     from noctornal_api.assumptions import AssumptionError
     owner, _, _ = _user(conn)
     case_id = _case(conn, owner)
@@ -343,15 +329,13 @@ def test_the_register_over_http_and_who_may_write_to_it(conn, client):
 # --- the report -----------------------------------------------------------
 
 def test_the_report_states_what_it_assumes(conn):
-    """OPEN and CONFIRMED assumptions go into the document with who made
-    them and when; REFUTED and WITHDRAWN ones do not, because a report
-    that lists an assumption it has already refuted is presenting a
+    """OPEN and CONFIRMED assumptions go into the document with who made them and when; REFUTED and
+    WITHDRAWN ones do not, because a report that lists an assumption it has already refuted presents a
     premise it knows to be false.
 
-    The set of statuses the report includes is ONE constant shared by the
-    service and the builder, and this reads it from both: a report that
-    quietly disagreed with the register about what "still assumed" means
-    would be two consistent halves wrong together.
+    The set of statuses the report includes is one constant shared by the service and the builder, and
+    this reads it from both: a report that disagreed with the register about what "still assumed"
+    means would be two consistent halves wrong together.
     """
     from noctornal_api.assumptions import REPORTABLE_STATUSES
     from noctornal_api.reports import ReportBuilder, render_markdown
@@ -412,11 +396,9 @@ def test_an_empty_register_is_said_out_loud(conn):
 
 
 def test_the_register_is_withheld_with_the_case_header(conn):
-    """An assumption is free text an analyst wrote ABOUT the case -- "the
-    OP-KESTREL key is the operator's" -- so it is case content at the
-    case's own level, exactly like the title and summary (F19). A GREEN
-    document built from a RED case must not carry it, and must say that
-    it does not."""
+    """An assumption is free text an analyst wrote about the case ("the OP-KESTREL key is the
+    operator's"), so it is case content at the case's own level, like the title and summary. A GREEN
+    document built from a RED case must not carry it, and must say that it does not."""
     from noctornal_api.reports import ReportBuilder
     owner, _, _ = _user(conn, clearance="RED")
     case_id = _case(conn, owner, classification="RED")

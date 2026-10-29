@@ -1,14 +1,8 @@
-"""The FastAPI application factory.
+"""The FastAPI application factory: REST under /api/v1, problem+json errors, docs/05 headers.
 
-REST under /api/v1, problem+json errors, and the response hardening headers
-from the docs/05 checklist. Run it with:
-
-    uvicorn noctornal_api.http.app:app --reload
-
-Environment: DATABASE_URL, NOCTORNAL_TOTP_KEK, and (for evidence) the
-MINIO_* variables. Nothing has a default secret. With
-NOCTORNAL_ENV=production `create_app` refuses to build on a missing or
-development one -- see `noctornal_api.config`.
+Run with `uvicorn noctornal_api.http.app:app --reload`. Needs DATABASE_URL, NOCTORNAL_TOTP_KEK
+and, for evidence, the MINIO_* variables; nothing has a default secret, and with
+NOCTORNAL_ENV=production `create_app` refuses a missing or development one (`config.py`).
 """
 from __future__ import annotations
 
@@ -37,26 +31,26 @@ from noctornal_api.http.routers import (
     cases,
     collection,
     collection_authority,  # the two-person collection authority
-    collection_telegram,  # F5.2 and F5.3
+    collection_telegram,
     comms,
     compartments,
     curation,
     deception,
     dual_control,
-    egress,  # Administration, Egress (S2)
+    egress,
     evidence,
     governance,
     graph,
     graphview,
     ingest,
     lab_yara,
-    integrations,  # F8 and F7
+    integrations,
     live,
-    lookups,  # F15.3 and F15.4
+    lookups,
     merges,
     notifications,
     proposals,
-    providers,  # F15.2
+    providers,
     read,
     reports,
     roles,
@@ -64,9 +58,9 @@ from noctornal_api.http.routers import (
     search,
     setup,
 )
-# The persona act queue (A collector process, 2026-10-02).
+# The persona act queue.
 from noctornal_api.http.routers import collection_acts
-# Similarity reads and Administration, Embeddings (F6.3, 2026-09-24).
+# Similarity reads and Administration, Embeddings.
 from noctornal_api.http.routers import embeddings as embeddings_router
 from noctornal_api.http.routers import similarity
 
@@ -104,19 +98,12 @@ _UI_CSP = "; ".join(_UI_CSP_DIRECTIVES)
 
 
 def ui_csp() -> str:
-    """The console's CSP, with the sample origin in `connect-src` when one
-    is configured.
+    """The console's CSP, with the sample origin in `connect-src` when one is configured.
 
-    Invariant 10 puts sample bytes on a second origin, and until 2026-09-09
-    this policy was `connect-src 'self'` unconditionally -- so the Lab
-    pane could fetch the application origin and nothing else, and the
-    only configuration under which its download button worked was the
-    sample origin being the application origin, which is the one the
-    invariant forbids. The CSP and the download check were two halves
-    that were internally consistent and wrong together. The source added
-    here is `samples.origin_split().sample`, the same normalised value the
-    download compares against and the same one the policy endpoint hands
-    the console, so the three cannot name different origins.
+    Invariant 10 puts sample bytes on a second origin, so the Lab pane must be able to fetch it.
+    The source is `samples.origin_split().sample`, the same normalised value the download
+    compares against and the policy endpoint hands the console, so the three cannot name
+    different origins.
     """
     sample = origin_split().sample
     if not sample:
@@ -133,12 +120,9 @@ def ui_csp() -> str:
 _DOWNLOAD_PATH = re.compile(
     rf"^{re.escape(API_PREFIX)}/samples/[0-9a-fA-F-]{{36}}/download$")
 
-#: `POST /api/v1/cases/{case_id}/evidence/{evidence_id}/download`, where an
-#: exhibit of attacker markup is produced on a ticket (x-hostile-export,
-#: 2026-09-24). docs/19 section 1.1 sends those bytes out through the
-#: sample origin and nowhere else, and this process served nothing there
-#: but sample downloads, so an `.eml` exhibit could not leave at all. The
-#: second path the sample origin answers, matched by shape like the first.
+#: `POST /api/v1/cases/{case_id}/evidence/{evidence_id}/download`, where an exhibit of attacker
+#: markup is produced on a ticket. docs/19 section 1.1 sends those bytes out through the sample
+#: origin and nowhere else, so this is the second path that origin answers, matched by shape.
 _EXHIBIT_DOWNLOAD_PATH = re.compile(
     rf"^{re.escape(API_PREFIX)}/cases/[0-9a-fA-F-]{{36}}"
     rf"/evidence/[0-9a-fA-F-]{{36}}/download$")
@@ -158,20 +142,12 @@ _PREFLIGHT_MAX_AGE = "600"
 def _allowed_on_sample_origin(request: Request) -> bool:
     """What a process configured as the sample origin will serve.
 
-    The sample origin exists so that no page with an analyst's session
-    runs on it. This process is the same codebase as the application, so
-    left to itself it would serve the console, every case route and the
-    login form at the sample hostname -- and an analyst who signed in there
-    would put a session exactly where the split says none may be. Serving
-    only the download (and its preflight), the load balancer's health
-    check and the readiness register makes the split a property of the
-    process rather than of a proxy allow-list nobody tests. Until
-    2026-09-09 docs/16 C9 asked a human to confirm this by hand.
-
-    "The download" is two paths since 2026-09-24: a sample's, and the
-    production of an exhibit of attacker markup, which docs/19 section 1.1
-    sends out through this origin alone (x-hostile-export). Neither reads
-    a session; each takes a one-shot ticket minted on the application.
+    The sample origin exists so that no page with an analyst's session runs on it, but this
+    process is the same codebase as the application. Serving only the two downloads (a sample,
+    and an exhibit of attacker markup, docs/19 section 1.1) and their preflight, the health
+    check and the readiness register makes the split a property of the process rather than of
+    a proxy allow-list nobody tests. Neither download reads a session; each takes a one-shot
+    ticket minted on the application.
     """
     path = request.url.path
     if path == "/healthz":
@@ -203,23 +179,13 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 def create_app() -> FastAPI:
-    # First statement in the factory, before the FastAPI object exists,
-    # before the limiter is built and before anything has read a KEK, a
-    # DSN or a bucket credential: a production deployment configured with
-    # a development secret or a missing one is told the whole list here,
-    # rather than discovering it one failed analyst action at a time
-    # (config.py). Does nothing unless NOCTORNAL_ENV=production, so this
-    # line is invisible to a laptop, to CI and to every test in the suite.
-    #
-    # The router imports at the top of this module have already run by the
-    # time anything calls this, so "earliest possible" means earliest
-    # inside the factory. That is the right side of the line that matters:
-    # nothing has bound a port or touched a secret yet.
+    # First, before anything reads a KEK, a DSN or a bucket credential or binds a port: a
+    # production deployment with a missing or development secret is told the whole list here
+    # (config.py). Does nothing unless NOCTORNAL_ENV=production.
     enforce_environment()
-    # The egress proxy (S2, 2026-09-24). What only the database knows:
-    # a production process with outbound uses and no egress proxy refuses
-    # to start (docs/00 decision 68). Opens one connection, and only in
-    # that state.
+    # A production process with outbound uses and no egress proxy refuses to start (docs/00
+    # decision 68). Only the database knows the uses, so this opens one connection, and only in
+    # production with no proxy configured.
     from noctornal_api.egress_routes import enforce_production_egress
     enforce_production_egress()
 
@@ -243,14 +209,12 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def _validation(_: Request, exc: RequestValidationError):
-        """Uniform problem+json, built from loc + msg ONLY.
+        """Uniform problem+json, built from loc and msg only.
 
-        Pydantic's error entries include an `input` key holding the offending
-        value — on /auth/login with a missing field that is the submitted
-        password and live TOTP code, which would then sit in every proxy,
-        WAF and APM access log (docs/05 treats logs as lower-trust than the
-        database). `ctx`/`url` are dropped too: `url` discloses the exact
-        pydantic version.
+        Pydantic's error entries carry an `input` key holding the offending value, which on
+        /auth/login is the submitted password and live TOTP code, bound for every proxy, WAF and
+        APM log (docs/05 treats logs as lower-trust than the database). `ctx` and `url` are
+        dropped too: `url` discloses the exact pydantic version.
         """
         parts = [
             f"{'.'.join(str(p) for p in e.get('loc', ()))}: {e.get('msg', '')}"
@@ -263,40 +227,31 @@ def create_app() -> FastAPI:
     # next test's first request.
     app.state.limiter = build_limiter()
 
-    # The closed first-run door (2026-10-03), registered
-    # before everything else so it is the innermost wrapper, inside the
-    # body ceiling too: a closed door answers as an unknown path does
-    # BEFORE the body is read, or a 413 or a 422 would tell the two apart.
-    # Its path is the route's own, read from the router, so the two cannot
-    # drift.
+    # The closed first-run door, registered first so it is the innermost wrapper, inside the
+    # body ceiling too: a closed door answers as an unknown path does before the body is read,
+    # or a 413 or a 422 would tell the two apart. Its path is read from the router, so the two
+    # cannot drift.
     from noctornal_api.http.setup_token import install_closed_setup_door
     install_closed_setup_door(app, API_PREFIX + next(
         r.path for r in setup.router.routes
         if getattr(r, "endpoint", None) is setup.first_admin))
 
-    # The body ceiling (http_ui-005, 2026-10-03), registered next so it
-    # is the innermost wrapper but one: the limiter still counts the
-    # request and the 413 still leaves through the security headers.
+    # The body ceiling, registered next so it is the innermost wrapper but one: the limiter
+    # still counts the request and the 413 still leaves through the security headers.
     from noctornal_api.http.body_ceiling import install_body_ceiling
     install_body_ceiling(app)
 
-    # Registered BEFORE _headers, which makes _headers the outer wrapper.
-    # Order matters for a reason that is easy to get backwards: the last
-    # middleware registered runs first, so registering the limiter last
-    # would let a 429 return without ever passing through the security
-    # headers. A refusal is exactly the response an attacker sees most of,
-    # and it should not be the one served without nosniff and a CSP.
+    # Registered before _headers, which makes _headers the outer wrapper: the last middleware
+    # registered runs first, and a 429 must not leave without nosniff and a CSP.
     install_rate_limit_middleware(app)
 
     @app.middleware("http")
     async def _headers(request: Request, call_next):
         split = origin_split()
         if split.serves_here and not _allowed_on_sample_origin(request):
-            # This process is the sample origin. It serves sample bytes and
-            # nothing else -- see `_allowed_on_sample_origin`. Answered
-            # here, outermost, because the refusal is one configuration
-            # read and needs neither the limiter's Redis round trip nor a
-            # route.
+            # This process is the sample origin and serves only what `_allowed_on_sample_origin`
+            # allows. Refused here, outermost: it is one configuration read and needs neither
+            # the limiter's Redis round trip nor a route.
             response = problem_response(
                 404, "Not found",
                 f"this process is the sample origin and serves sample "
@@ -331,53 +286,42 @@ def create_app() -> FastAPI:
                    # empty) and the analyst-admin surface behind
                    # user.manage.
                    setup.router, admin.router,
-                   # The compartment vocabulary (0057): the closed set
-                   # both case creation and user read-ins are checked
-                   # against. Free text until 2026-09-02, and a typo in
-                   # it was silent no-access.
+                   # The compartment vocabulary (0057): the closed set both case creation and
+                   # user read-ins are checked against, so a typo cannot become silent no-access.
                    compartments.router,
-                   # Which roles hold which permission, so a refusal can
-                   # name a role rather than a code (2026-09-23).
+                   # Which roles hold which permission, so a refusal can name a role, not a code.
                    roles.router,
                    cases.router, graph.router,
-                   # Oversight, not case access: `audit.read` is held by
-                   # SECURITY_OFFICER alone, and the chain had no verifier
-                   # at all until 2026-07-26.
+                   # Oversight, not case access: `audit.read` is held by SECURITY_OFFICER alone.
                    audit.router,
                    evidence.router, search.router, read.router,
                    graphview.router, analytics.router,
                    proposals.router, merges.router,
                    approvals.router, approvals.policy_router,
-                   # Deployment-wide approvals and the two-person
-                   # policy (F9, 2026-09-24).
+                   # Deployment-wide approvals and the two-person policy.
                    approvals.global_router, dual_control.router,
-                   # F12, 2026-09-24. Before samples.router, so no
-                   # /samples/yara path is ever read as a sample id.
+                   # lab_yara.router before samples.router, so no /samples/yara path is read
+                   # as a sample id.
                    notifications.router, lab_yara.router, samples.router,
-                   # Outbound integrations (F8, F7) and lookup
-                   # providers and lookups (F15.2 to F15.4), 2026-09-24.
+                   # Outbound integrations, lookup providers and lookups.
                    integrations.router, integrations.case_router,
                    providers.router, lookups.router,
-                   # The assumptions register (docs/08 Phase 6, 0056):
-                   # what the report's findings rest on, listed where
-                   # they can be challenged. Nothing until 2026-09-02.
+                   # The assumptions register (docs/08, 0056): what the report's findings rest
+                   # on, listed where they can be challenged.
                    ach.router, assumptions.router, reports.router,
                    comms.router, comms.global_router,
                    governance.router, governance.break_glass_router,
-                   # `case_router` is the read path: the collector wrote
-                   # collect.document and collect.watch_hit from the start
-                   # and nothing read them until 2026-08-10.
+                   # `case_router` is the read path for what the collector writes
+                   # (collect.document, collect.watch_hit).
                    collection.router, collection.case_router, ingest.router,
                    # The two-person collection authority (docs/00
                    # decision 69).
                    collection_authority.router,
-                   # Telegram chats and personas (F5.2, F5.3).
+                   # Telegram chats and personas.
                    collection_telegram.router,
-                   # The caller's persona acts (A collector process,
-                   # 2026-10-02).
+                   # The caller's persona acts.
                    collection_acts.router,
-                   # Tags and node sets: schema and service since
-                   # 0009, no router until 2026-07-26.
+                   # Tags and node sets.
                    curation.router,
                    # Phishing / vishing / BEC evidence (docs/19).
                    deception.router,
@@ -385,12 +329,10 @@ def create_app() -> FastAPI:
                    # design — see `live.py`; the client refetches through
                    # the gated REST endpoints.
                    live.router,
-                   # Where anything may leave (S2, the egress proxy,
-                   # 2026-09-24): egress profiles, integration routes and
-                   # the connection log.
+                   # Where anything may leave: egress profiles, integration routes and the
+                   # egress proxy's connection log.
                    egress.router,
-                   # Similar wording and meaning (F6.3, F6.4) and their
-                   # administration, 2026-09-24.
+                   # Similar wording and meaning, and their administration.
                    similarity.router, embeddings_router.router):
         app.include_router(router, prefix=API_PREFIX)
 

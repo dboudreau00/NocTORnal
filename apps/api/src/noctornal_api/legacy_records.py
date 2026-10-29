@@ -1,47 +1,34 @@
-"""Records written under a rule that has since changed. Every function here
-lists and none writes (L1, L2 and L5, 2026-09-24).
+"""Records written under a rule that has since changed. Every function here lists and none writes.
 
-Four kinds, each listed by `scripts/legacy_records.py` on the server and
-counted on the readiness register:
+Four kinds, each listed by `scripts/legacy_records.py` on the server and counted on the readiness
+register:
 
-- **Undated Triage claims.** Since 2026-09-24 an accept
-  dates its claim from the cited document. Claims accepted earlier carry
-  no `observed_at`, so First seen and Last seen ignore them. Invariant 5
-  (CONVENTIONS.md) says a claim's own columns are never written again, and
-  the owner decided on 2026-10-02 that it is NOT amended (docs/00 open
-  question 11): nothing here fills the date, and no code path writes
-  `observed_at` on an existing claim. An analyst gives a claim its date by
-  supersession (`GraphWriteService.supersede_assertion`, the inspector's
-  Date this claim): a new claim carrying the date and the analyst's
-  rationale and citing the old one, which is stamped superseded and is
-  otherwise as it was recorded, and so leaves this listing. The listing
-  gives each claim the date its document gives.
-- **ATTRIBUTE claims below their material.** Since final review c1 an
-  accept refuses an ATTRIBUTE claim onto an entity labelled below what it
-  was found in, and since C12 the route refuses an entity in another case.
-  Claims accepted before either are still read by everyone who reads the
-  entity. Listed by the one rule the accept applies
-  (`proposals.attribute_label_problem`, with the entity's case's
-  compartments, as L1 leaves it), and every cross-case claim whatever its
-  labels. There is no verb that raises an existing entity's label, so the
-  remedy is to retract the claim, which the listing says.
-- **Captures no lock fits.** 0071 labelled captured documents from the
-  cases that cite them; one cited by an uncompartmented case, or by
-  compartmented cases with no key in common, keeps no compartment and is
-  listed to every collection reader at its label. Also the captures that
-  carry a compartment an ingest feed now uses for victim data, captured
-  before a key forced it.
-- **URLs whose identity changed.** `url_norm` keeps a fragment that names
-  a resource since L5, and drops a URL's userinfo and its password, token
-  and key parameters since 2026-10-03 (graph-url-selector-keeps-
-  credentials). Stored selectors are not rewritten: a shared row's raw
-  value is only its first observation, so no machine can split it. A
-  stored URL that carries a credential is listed, and printed without it.
+- **Undated Triage claims.** An accept dates its claim from the cited document. Claims accepted earlier
+  carry no `observed_at`, so First seen and Last seen ignore them. Invariant 5 (CONVENTIONS.md) says a
+  claim's own columns are never written again, and the owner decided it is not amended (docs/00 open
+  question 11): nothing here fills the date, and no code path writes `observed_at` on an existing claim.
+  An analyst gives a claim its date by supersession (`GraphWriteService.supersede_assertion`, the
+  inspector's Date this claim): a new claim carrying the date and the analyst's rationale and citing the
+  old one, which is stamped superseded and is otherwise as it was recorded, and so leaves this listing.
+  The listing gives each claim the date its document gives.
+- **ATTRIBUTE claims below their material.** An accept refuses an ATTRIBUTE claim onto an entity labelled
+  below what it was found in, and the route refuses an entity in another case. Claims accepted before
+  either rule are still read by everyone who reads the entity. Listed by the one rule the accept applies
+  (`proposals.attribute_label_problem`, with the entity's case's compartments), and every cross-case
+  claim whatever its labels. There is no verb that raises an existing entity's label, so the remedy is to
+  retract the claim, which the listing says.
+- **Captures no lock fits.** 0071 labelled captured documents from the cases that cite them; one cited by
+  an uncompartmented case, or by compartmented cases with no key in common, keeps no compartment and is
+  listed to every collection reader at its label. Also the captures that carry a compartment an ingest
+  feed now uses for victim data, captured before a key forced it.
+- **URLs whose identity changed.** `url_norm` keeps a fragment that names a resource, and drops a URL's
+  userinfo and its password, token and key parameters. Stored selectors are not rewritten: a shared row's
+  raw value is only its first observation, so no machine can split it. A stored URL that carries a
+  credential is listed, and printed without it.
 
-The output names cases, entities and identifiers (a Tox ID or a social
-URL is personal data): it is for the server, never for a ticket. Counts
-are what the readiness register shows, because the register's reader
-holds `user.manage`, not case content.
+The output names cases, entities and identifiers (a Tox ID or a social URL is personal data): it is for
+the server, never for a ticket. Counts are what the readiness register shows, because the register's
+reader holds `user.manage`, not case content.
 """
 from __future__ import annotations
 
@@ -115,10 +102,9 @@ class UndatedClaim:
 
 
 def undated_triage_claims(conn: psycopg.Connection) -> list[UndatedClaim]:
-    """Claims accepted from Triage before Alpha 6 that cite a document and
-    carry no observation date, with the date that document gives. A claim
-    citing no document is not listed: nothing says when it was seen, which
-    is also what the accept does."""
+    """Claims accepted from Triage in earlier releases that cite a document and carry no observation date,
+    with the date that document gives. A claim citing no document is not listed: nothing says when it was
+    seen, which is also what the accept does."""
     rows = conn.execute(_undated_query(
         """SELECT a.id, a.case_id, c.code,
                   CASE WHEN a.edge_id IS NOT NULL THEN 'edge' ELSE 'node' END,
@@ -196,10 +182,9 @@ def other_case_problem(proposal_case: str, entity_case: str) -> str:
 
 def underlabelled_claims(conn: psycopg.Connection
                          ) -> list[UnderlabelledClaim]:
-    """ATTRIBUTE claims accepted from Triage that the accept would now
-    refuse: readable below the label of what they were found in, or
-    attached to an entity in another case (listed whatever its labels,
-    since the route refused that only from C12 on)."""
+    """ATTRIBUTE claims accepted from Triage that the accept would now refuse: readable below the label of
+    what they were found in, or attached to an entity in another case (listed whatever its labels, since
+    the route now refuses that)."""
     out: list[UnderlabelledClaim] = []
     for r in conn.execute(_UNDERLABELLED_SQL).fetchall():
         (aid, pcode, ecode, estatus, nid, nlabel, ntype, path, value, pid,
@@ -411,8 +396,8 @@ def _renorm(selector_type: str, raw: str | None) -> str | None:
 
 
 def url_identity_changes(conn: psycopg.Connection) -> UrlIdentityReport:
-    """Every stored URL identity the current `url_norm` would write
-    differently, listed and never rewritten (L5, 2026-09-24)."""
+    """Every stored URL identity the current `url_norm` would write differently, listed and never
+    rewritten."""
     report = UrlIdentityReport()
     for (code, sid, stype, raw, norm, n, node) in conn.execute(
             """SELECT c.code, s.id, s.selector_type, s.raw_value,
@@ -477,7 +462,7 @@ def _deception_count(conn: psycopg.Connection, sql: str, *,
     for row in conn.execute(sql).fetchall():
         for i in range(pairs):
             raw, stored = row[2 * i], row[2 * i + 1]
-            # '@', '?' and ';': a credential url_norm now drops (2026-10-03).
+            # '@', '?' and ';': a credential url_norm now drops.
             if raw is None or stored is None or not any(
                     ch in raw for ch in "#@?;"):
                 continue

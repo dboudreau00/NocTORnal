@@ -1,71 +1,44 @@
-"""The XenForo and MyBB collection adapters (F3 and F4, 2026-09-24):
-public boards, read on the collection foundation.
+"""The XenForo and MyBB collection adapters: public boards, read on the collection foundation.
 
-## What the foundation already does, and this module does not repeat
-
-run_once (collection.py) refuses a source before any lock or run row when
-its ceiling is not declared, its label is above it, it has no egress
-profile or a persona is bound to it; takes the per-source lock; asks the
-two-person authority (PUBLIC_READ) and records it on the run; resolves the
-route from the source's OWN egress profile (never a persona's: a public
-read and a covert persona never share an exit); and stores what the
-walk returns, one savepoint per item, with its raw fragment, its retention
-clock and its watches. RunContext (collection_context.py) is the only way
-a request leaves: same origin only, paced, budgeted, logged for custody.
+run_once (collection.py) refuses a source before any lock or run row when its ceiling is not declared, its label
+is above it, it has no egress profile or a persona is bound to it; takes the per-source lock; asks the two-person
+authority (PUBLIC_READ) and records it on the run; resolves the route from the source's OWN egress profile (never
+a persona's: a public read and a covert persona never share an exit); and stores what the walk returns, one
+savepoint per item, with its raw fragment, its retention clock and its watches. RunContext
+(collection_context.py) is the only way a request leaves: same origin only, paced, budgeted, logged for custody.
 These adapters implement the walk and REGISTER in default_adapters().
 
-## Public boards only
+Public boards only. Nothing here signs in: persona_platform is None, `fetch` refuses a secret, and a page that
+asks for a sign-in is a LoginWall (a FAILED run, nothing stored), never a page to store. The honest agent
+(NocTORnal-collector/1) is what the forum sees, and the Poll now confirmation says so.
 
-Nothing here signs in. persona_platform is None, `fetch` refuses a
-secret, and a page that asks for a sign-in is a LoginWall (a FAILED run,
-nothing stored), never a page to store. The authenticated forum path is
-later work on the persona machinery (ROADMAP-REMAINING.md). The honest agent
-(NocTORnal-collector/1) is what the forum sees, and the Poll now
-confirmation says so.
+Not from this server. A forum read with no egress proxy configured would leave from this server's own address,
+which is exactly what the egress profile exists to prevent. So the adapters refuse, before any request, whenever
+no proxy is configured, unless NOCTORNAL_FORUM_ALLOW_DIRECT=1, which production refuses at start and readiness
+shows red.
 
-## Not from this server
+The walk. A thread source reads its thread; a board source reads its first page, then the threads it lists with
+new activity (most recent first), then rechecks the recently active threads it read before, least recently
+visited first. Every address is built from a validated id (forum_parse.thread_page_url and friends); pagination
+is a hint, and the page number kept is the one the page says it is. A first visit reads page 1, then the newest
+pages backwards. A later visit starts `recheck_pages` before where the last one stopped, so edits and deletions
+in recent pages are seen, and walks forward one page past the last page read.
 
-A forum read with no egress proxy configured would leave from this
-server's own address, which is exactly what the egress profile exists to
-prevent. So the adapters refuse, before any request, whenever no proxy is
-configured, unless NOCTORNAL_FORUM_ALLOW_DIRECT=1, which production
-refuses at start and readiness shows red (2026-09-24).
+Deletion is judged per thread and only between survivors: a post seen last time counts as gone only when a post
+before it and a post after it, both seen last time, were both read again this run on contiguous pages and it was
+not. A post that only moved to a page this run did not read is therefore never called deleted (docs/10: a false
+deletion is a confident false claim). A run with any drift reports no deletion at all.
 
-## The walk
+Pages are parsed in a bounded child process (forum_parse's docstring says why), so a page built to exhaust the
+parser costs at most its wall clock and is reported as drift. In production that child runs in the isolated
+analysis worker, and a poll with no worker to parse its pages is refused before its first request. A worker that
+fails during a poll is the sandbox's state, not drift: the poll stops BLOCKED and keeps its cursor
+(AnalysisUnavailable).
 
-A thread source reads its thread; a board source reads its first page,
-then the threads it lists with new activity (most recent first), then
-rechecks the recently active threads it read before, least recently
-visited first. Every address is built from a validated id
-(forum_parse.thread_page_url and friends); pagination is a hint, and the
-page number kept is the one the page says it is. A first visit reads page
-1, then the newest pages backwards. A later visit starts `recheck_pages`
-before where the last one stopped, so edits and deletions in recent pages
-are seen, and walks forward one page past the last page read.
-
-Deletion is judged per thread and only between survivors: a post seen
-last time counts as gone only when a post before it and a post after it,
-both seen last time, were both read again this run on contiguous pages
-and it was not. A post that only moved to a page this run did not read is
-therefore never called deleted (docs/10: a false deletion is a confident
-false claim). A run with any drift reports no deletion at all.
-
-Pages are parsed in a bounded child process (forum_parse's docstring
-says why), so a page built to exhaust the parser costs at most its wall
-clock and is reported as drift. In production that child runs in the
-isolated analysis worker (docs/17 F42, 2026-10-02), and a poll with no
-worker to parse its pages is refused before its first request. A worker
-that fails during a poll is the sandbox's state, not drift: the poll
-stops BLOCKED and keeps its cursor (AnalysisUnavailable).
-
-## Pacing per forum, not per source
-
-RunContext paces per source. Two sources on one forum (a board and a
-thread in it, or two boards) would otherwise each be paced alone and
-together double the rate the forum sees. `plan` takes a per-origin
-advisory lock for the whole poll, so two sources on one forum are never
-polled at once, and waits out the gap since the last request any source
-on that forum made; `settle` releases it.
+Pacing is per forum, not per source. RunContext paces per source, so two sources on one forum (a board and a
+thread in it, or two boards) would each be paced alone and together double the rate the forum sees. `plan` takes
+a per-origin advisory lock for the whole poll, so two sources on one forum are never polled at once, and waits
+out the gap since the last request any source on that forum made; `settle` releases it.
 """
 from __future__ import annotations
 
@@ -200,15 +173,12 @@ class ParseAbandoned(Exception):
 
 
 class AnalysisUnavailable(SourceBlocked):
-    """The isolated analysis worker, not the page, failed during a poll
-    (F42 review, 2026-10-02): busy, gone, answering garbage, refusing, or
-    not configured. Until then this was reported as parser drift, which
-    marked a healthy parser as drifted. Now the poll stops at once, since
-    fetching more pages nothing can parse only reads a hostile site for
-    nothing, and the run is BLOCKED: no failure is counted, no drift is
-    reported, nothing it fetched is stored, and the run keeps the cursor it
-    started from, so the next poll fetches the same pages again. The
-    sentence says which of those happened."""
+    """The isolated analysis worker, not the page, failed during a poll: busy, gone, answering garbage, refusing,
+    or not configured. That is not parser drift, which would mark a healthy parser as drifted. The poll stops at
+    once, since fetching more pages nothing can parse only reads a hostile site for nothing, and the run is
+    BLOCKED: no failure is counted, no drift is reported, nothing it fetched is stored, and the run keeps the
+    cursor it started from, so the next poll fetches the same pages again. The sentence says which of those
+    happened."""
 
 
 #: What each sandbox failure was, for AnalysisUnavailable's sentence.
@@ -241,11 +211,9 @@ def parse_in_process(platform: str, page_kind: str, fetched, *, config: dict,
 
 def parse_bounded(platform: str, page_kind: str, fetched, *, config: dict,
                   now: datetime, wall_s: float = PARSE_WALL_S) -> dict:
-    """One page parsed in a child process that limits its own CPU and
-    memory before it reads a byte, killed by lab_triage's runner at
-    `wall_s`: here, or in the isolated analysis worker when the deployment
-    runs one (docs/17 F42, 2026-10-02). Raises ParseAbandoned when there
-    is no usable answer."""
+    """One page parsed in a child process that limits its own CPU and memory before it reads a byte, killed by
+    lab_triage's runner at `wall_s`: here, or in the isolated analysis worker when the deployment runs one.
+    Raises ParseAbandoned when there is no usable answer."""
     from noctornal_api import lab_triage
 
     content_type = fetched.headers.get("Content-Type") if fetched.headers else None
@@ -492,14 +460,11 @@ class ForumAdapter(Adapter):
         return problems
 
     def refusal(self, conn: psycopg.Connection, source: SourceRow) -> str | None:
-        """Adapter refusals, before any lock, run row or request: the parser
-        library, the source's own shape and settings (a source written by
-        SQL meets the same rules as one made through the route), a read
-        that would leave from this server's own address, and no analysis
-        process to parse what it fetched (F42, 2026-10-02: a page that
-        cannot be parsed is not fetched). The worker's answer is
-        remembered for a few seconds (analysis_runner.unavailable), so a
-        source list of many forums asks it once."""
+        """Adapter refusals, before any lock, run row or request: the parser library, the source's own shape and
+        settings (a source written by SQL meets the same rules as one made through the route), a read that would
+        leave from this server's own address, and no analysis process to parse what it fetched (a page that
+        cannot be parsed is not fetched). The worker's answer is remembered for a few seconds
+        (analysis_runner.unavailable), so a source list of many forums asks it once."""
         if not forum_parse.parser_available():
             return PARSER_MISSING
         problems = (self.validate_source(source.base_url, source.parser_config)
@@ -646,7 +611,7 @@ class ForumAdapter(Adapter):
 
 
 class XenForoAdapter(ForumAdapter):
-    """F3: public XenForo 2 boards and threads."""
+    """Public XenForo 2 boards and threads."""
 
     key = "xenforo"
     version = "1"
@@ -658,7 +623,7 @@ class XenForoAdapter(ForumAdapter):
 
 
 class MyBBAdapter(ForumAdapter):
-    """F4: public MyBB 1.8 boards and threads, always in the linear view."""
+    """Public MyBB 1.8 boards and threads, always in the linear view."""
 
     key = "mybb"
     version = "1"
@@ -693,9 +658,8 @@ class MyBBAdapter(ForumAdapter):
 
 
 def forum_registry() -> dict[str, Adapter]:
-    """The four entries collection.default_adapters() registers: the two
-    public readers, and the two member readers (the authenticated forum
-    path, 2026-10-02, forum_member)."""
+    """The four entries collection.default_adapters() registers: the two public readers, and the two member
+    readers (forum_member)."""
     from noctornal_api.forum_member import member_registry
     return {"xenforo": XenForoAdapter(), "mybb": MyBBAdapter(), **member_registry()}
 
@@ -820,7 +784,7 @@ class _Walk:
             parsed = self.a.parse(page_kind, fetched, self.config, self.now, wall)
         except ParseAbandoned as exc:
             if exc.reason in analysis_runner.SANDBOX_FAILURES:
-                # The sandbox, not the page (F42 review, 2026-10-02).
+                # The sandbox, not the page.
                 raise AnalysisUnavailable(sandbox_sentence(exc.reason)) from None
             self.drift_codes.add("abandoned" if exc.reason == "timeout" else "failed")
             if primary:
@@ -1163,8 +1127,7 @@ def forum_details(conn: psycopg.Connection, document_id: UUID, *,
     if row is None:
         raise CollectionNotFound(
             "no such forum document, or it is above your clearance")
-    # The authenticated forum path (2026-10-02, 0162): how the page was
-    # read, and by which persona under which authority when as a member.
+    # How the page was read, and by which persona under which authority when as a member (0162).
     read_as = {"provenance": row[10] or "PUBLIC",
                "persona_id": str(row[11]) if row[11] else None,
                "authority_id": str(row[12]) if row[12] else None}

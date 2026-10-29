@@ -1,28 +1,11 @@
-"""Graph write endpoints — every create goes through GraphWriteService, so
-an assertion is written in the same transaction (invariant 1).
+"""Graph write endpoints: every create goes through GraphWriteService, so an assertion is
+written in the same transaction (invariant 1).
 
-Retraction lives here too. It is the operation that makes the assertion
-model mean something: retracting the last live assertion behind an element
-makes it dissolve from the live graph (`GraphService.project()` requires a
-non-retracted assertion) while its row and history survive for temporal
-replay. Nothing is ever deleted — invariant 5.
-
-So do corrections and retirements (`PATCH`/`DELETE` on nodes and edges).
-Three ways of taking something out of the live graph now meet in this
-file, and they are not interchangeable:
-
-- **Retract an assertion** — the source is withdrawn. The element goes
-  only if that was its LAST live support.
-- **Retire the element** (`DELETE`, a SOFT delete) — it should not be in
-  the case file at all: wrong, or a duplicate. Sets `deleted_at`, which
-  every read path filters on, so it leaves the live graph AND every as-of
-  view.
-- **`valid_to`** — it stopped being true in the WORLD. An as-of query into
-  the period when it WAS true must still show it, and does. Given at
-  creation, or later by a correction (`PATCH` with `valid_to`, review
-  2026-10-03).
-
-None of the three destroys a row.
+Three ways take something out of the live graph, and they are not interchangeable: retracting an
+assertion (the element goes only if that was its last live support), retiring the element
+(`DELETE`, a soft delete that sets `deleted_at` and hides it from every as-of view too), and
+`valid_to` (it stopped being true in the world, so an as-of query into its period still shows
+it). None destroys a row (invariant 5).
 """
 from __future__ import annotations
 
@@ -70,15 +53,9 @@ router = APIRouter(prefix="/cases/{case_id}", tags=["graph"])
 class AssertionBody(BaseModel):
     """The claim a write records, and its grading.
 
-    The four grading fields are REQUIRED (gap-api-grade-required,
-    2026-09-23). They used to default to DIRECT_OBSERVATION, F, 6 and LOW,
-    and the create bodies defaulted the whole assertion, so a script that
-    sent a bare label recorded "we saw this ourselves" in the caller's name
-    at a grade nobody chose. A reviewer six months later cannot tell that
-    from a considered F6, ACH weights the cell by it, and the confidence
-    filter acts on it. A missing field is now a 422 whose detail names it
-    (`body.assertion.basis: Field required`), and nothing is filled in. The
-    values themselves are checked by the database enums, as before.
+    The four grading fields are required and never defaulted: a grade nobody chose cannot later be
+    told from a considered one, and ACH and the confidence filter act on it. The values are checked
+    by the database enums.
     """
     basis: str
     reliability: str
@@ -105,22 +82,18 @@ class CreateNodeBody(BaseModel):
     # scrubber and trust decay both have nothing to work with without it.
     valid_from: datetime | None = None
     valid_to: datetime | None = None
-    # ux06-entry:selector-entities-bypass-normalisation (2026-09-23): what
-    # kind of selector the label IS, for a SELECTOR, COMMS_ACCOUNT or
-    # WALLET entity. Given, the label is normalised (and refused when it
-    # reduces to nothing) and recorded in the selector index against the
-    # new entity, in the same transaction. See `create_node`.
+    # What kind of selector the label is, for a SELECTOR, COMMS_ACCOUNT or WALLET entity. Given, the
+    # label is normalised (refused when it reduces to nothing) and recorded in the selector index
+    # against the new entity in the same transaction (`create_node`).
     selector_type: str | None = Field(default=None, max_length=64)
 
 
 class CreateEdgeBody(BaseModel):
     """A new tie and the assertion it rests on.
 
-    The tie's confidence is `assertion.confidence` and nothing else
-    (migration 0064). `confidence` is declared at the top level only so a
-    client that sends it there is TOLD, instead of having it dropped the
-    way pydantic drops an unknown field: that silent drop is exactly how a
-    HIGH tie became LOW before 2026-09-22 (ux06 edge-confidence-not-stored).
+    The tie's confidence is `assertion.confidence` and nothing else (migration 0064). `confidence`
+    is declared at the top level only so a client that sends it there is told, rather than having
+    it silently dropped as pydantic drops an unknown field.
     """
     edge_type: str
     src_node_id: UUID
@@ -208,14 +181,10 @@ def _check_evidence(conn: psycopg.Connection, case_id: UUID,
 class NodeCreatedOut(IdOut):
     """A new entity, and what became of its selector when it had one.
 
-    `selector_owner_id` is set when the selector was ALREADY recorded
-    against another entity the caller can see (re-attribution is deliberate,
-    never a side effect, so the earlier entity keeps its row), and the two
-    are a merge lead. A strong selector held by two entities is how one
-    actor becomes two. Since 0134 the new entity has a row of its own at its
-    own labels, and an entity above the caller is never named: the caller is
-    told of what they can read, so a value held above them reads as one held
-    nowhere."""
+    `selector_owner_id` is set when the selector is already recorded against another entity the
+    caller can see; the earlier entity keeps its row (re-attribution is never a side effect), and
+    the two are a merge lead. The new entity has its own row at its own labels (migration 0134), and
+    an entity above the caller is never named, so a value held above them reads as held nowhere."""
     selector_norm: str | None = None
     selector_owner_id: str | None = None
     selector_is_strong: bool | None = None
@@ -241,16 +210,11 @@ def create_node(case_id: UUID, body: CreateNodeBody,
 
     if selector is None:
         return NodeCreatedOut(id=str(write()))
-    # One transaction, so an entity whose selector could not be recorded
-    # does not exist either. The index is observation bookkeeping, not a
-    # graph element (selectors.py), so recording it needs no second
-    # assertion: the entity's founding claim is the observation, and its
-    # observed time dates the selector.
-    # At the creator's labels (graph-selector-record-oracle, 2026-10-03, both
-    # rounds): the entity's own row is stored at its own labels, so a value an
-    # entity above the creator holds is neither counted nor attributed, and
-    # is not told of either (the index is keyed by labels since 0134). The
-    # earlier holder named is one the creator may read.
+    # One transaction, so an entity whose selector could not be recorded does not exist either. The
+    # index is observation bookkeeping, not a graph element (selectors.py), so it needs no second
+    # assertion: the entity's founding claim is the observation and dates the selector. The index
+    # is keyed by labels, so a value held by an entity above the creator is neither counted,
+    # attributed nor told of; the earlier holder named is one the creator may read.
     clearance, held = user_ceiling(conn, user.user_id, case_id=case_id)
     store = SelectorStore(conn)
     with conn.transaction():
@@ -271,21 +235,14 @@ def create_node(case_id: UUID, body: CreateNodeBody,
 
 
 # --- before an entity is created: is it already here? ---------------------
-#
-# ux06-entry:no-duplicate-check-on-create and ux06-entry:selector-entities-
-# bypass-normalisation (2026-09-23). Add entity posted straight to /nodes:
-# "Harrow_Skua2" for an existing "harrow_skua2" made a second persona that
-# split the actor's ties and degree, and a hand-entered selector was taken
-# raw, so '@Vendor' never met 'vendor' and a bare Telegram id the Comms pane
-# refuses went in unchallenged. docs/01 calls merging "the operation most
-# likely to quietly corrupt a case"; the cheapest merge is the one never
-# needed. The form asks here as the label is typed.
+# The form asks as the label is typed: a near-duplicate persona splits an actor's ties and degree,
+# and the cheapest merge is the one never needed (docs/01).
 
 #: Entity types whose label IS a selector value.
 SELECTOR_NODE_TYPES = frozenset({"SELECTOR", "COMMS_ACCOUNT", "WALLET"})
 _SELECTOR_TYPES = {s.key: s for s in SELECTOR_TYPES}
-#: The most same-label matches returned. A list of ten look-alikes is
-#: already the finding; the check is a warning, not a search.
+#: The most same-label matches returned: ten look-alikes already make the point, and the check is
+#: a warning, not a search.
 CHECK_MATCHES_MAX = 10
 
 
@@ -305,8 +262,8 @@ def _selector_for(node_type: str, selector_type: str | None, label: str):
                       f"unknown selector type {selector_type!r}")
     if not normalise(st.key, label).strip():
         raise Problem(400, "Invalid request", refusal(st.key, label))
-    # graph-url-selector-keeps-credentials (2026-10-03): a link's password
-    # or token would be the entity's label, on the graph and in reports.
+    # A link's password or token would otherwise become the entity's label, on the graph and in
+    # reports.
     if carries_credential(st.key, label):
         raise Problem(400, "Invalid request", CREDENTIAL_REFUSAL)
     return st
@@ -329,18 +286,9 @@ def count_nodes(
     user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """How many live entities of this case the caller can see: the same
-    rows `GET /nodes` lists, without the page. The entity list fetches the
-    newest 1000 and counted that page as the case, so a larger case read
-    "1000 of 1000" while its oldest entities were missing from the list,
-    the Link pickers and the palette (ux06-entry:entity-list-no-find,
-    2026-09-23). Counting only what the caller can see keeps it from being
-    a measure of what they cannot.
-
-    `edges` is the same for the ties, by the rule `GET /edges` lists them
-    (both ends visible, inferred ties included, as the console loads
-    them): the count line's "N relationships in the case" was the length
-    of a page that stops at 1000 too (the 2026-09-23 verifier)."""
+    """How many live entities of this case the caller can see, the rows `GET /nodes` lists without
+    the page, and in `edges` the ties `GET /edges` lists (both ends visible, inferred ties
+    included). Counting only what the caller can see keeps it from measuring what they cannot."""
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     ceiling = (clearance.name, list(compartments))
     total = conn.execute(
@@ -401,14 +349,10 @@ def check_new_node(
 ) -> NodeCheckOut:
     """Is the entity about to be created already in this case?
 
-    Reads only, and only what the caller may see: every match is filtered
-    by their own ceiling, so a RED look-alike stays invisible to an AMBER
-    analyst, exactly as it is in the entity list. Case and runs of
-    whitespace are folded, which is the typing slip the review showed;
-    anything looser (edit distance, homoglyphs) would flood the form with
-    false leads on a forum full of "vendor1", "vendor_1", "vendorl".
-    For a selector type, the label is also normalised the way the index
-    will hold it, and the index is asked who already owns that value.
+    Reads only what the caller may see, filtered by their ceiling as the entity list is. Case and
+    runs of whitespace are folded; anything looser (edit distance, homoglyphs) would flood the form
+    with false leads. A selector label is also normalised as the index holds it, and the index is
+    asked who already owns that value.
     """
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     label = body.label.strip()
@@ -440,7 +384,7 @@ def check_new_node(
         out.selector_refusal = refusal(st.key, label)
         return out
     if carries_credential(st.key, label):
-        # The form says before Create what create refuses (2026-10-03).
+        # The form says before Create what create refuses.
         out.selector_refusal = CREDENTIAL_REFUSAL
         return out
     out.selector_norm = norm
@@ -492,18 +436,11 @@ def _gate_endpoints(conn: psycopg.Connection, user: CurrentUser,
                     case_id: UUID, node_ids) -> None:
     """A new tie's two entities, at their own labels, then live.
 
-    graph-edge-endpoints-not-gated and rls-1's chain (2026-10-03): the route
-    checked only the tie's own label, so an analyst holding a RED entity's
-    id attached an ACCEPTED tie to it, while the same caller was refused a
-    claim on that entity. Each endpoint now passes the gate at its own
-    labels, with one 404 for an entity that is missing, in another case or
-    above the caller.
-
-    graph-unmerge-500-and-ties-to-merged-nodes (2026-10-03): a tie to a
-    merged-away or retired entity was accepted, drawn nowhere, listed by
-    GET /edges, and later made the merge's reversal fail. Refused after the
-    gate, so the state is told only to a caller cleared for the entity; the
-    survivor is named only when it is theirs to see too."""
+    Each endpoint passes the gate at its own labels, with one 404 for an entity that is missing, in
+    another case or above the caller; the tie's own label is not enough. A tie to a merged-away or
+    retired entity is refused, since it would be drawn nowhere and would break the merge's reversal.
+    That refusal comes after the gate, so the state is told only to a caller cleared for the entity,
+    and the survivor is named only when it is theirs to see too."""
     for node_id in node_ids:
         gate_element(conn, user, case_id=case_id, kind="node",
                      element_id=node_id, permission_key="graph.edge.create",
@@ -539,44 +476,29 @@ def _element_case(conn: psycopg.Connection, table: str, element_id: UUID) -> UUI
 
 def _element_labels(conn: psycopg.Connection, table: str,
                     element_id: UUID) -> tuple[UUID, str, frozenset[str]] | None:
-    """The element's case AND its own labels, for the gate.
+    """The element's case and its own labels, for the gate.
 
-    CR7 (2026-07-26). `_add_assertion` and `retract_assertion` authorised
-    with `require(...)` alone — the CASE-level form, `classification=None`.
-    `create_node` and `create_edge` use `check_writable_labels`, and the
-    evidence router resolves the row's labels and passes them to
-    `authorize_object`. The assertion endpoints did neither, so
-    `deps.py`'s rule 1 ("an element is protected by BOTH its own labels and
-    its case's") did not hold on the writes that matter most.
-
-    It matters most because of what retraction DOES: the projection
-    requires a live assertion, so retracting the last one dissolves the
-    element from every analyst's graph. An AMBER analyst who once held RED
-    and noted a RED node's assertion id could therefore destroy that node
-    for everyone, while not being cleared to see it.
+    An element is protected by both its own labels and its case's (`deps.py` rule 1). This matters
+    most on assertion writes: retracting an element's last live assertion dissolves it from every
+    analyst's graph, so a caller not cleared to see a RED node must not be able to retract its
+    claims.
     """
     if table not in ("node", "edge"):  # not `assert`: stripped under python -O, and this guards SQL text
         raise ValueError("refused identifier outside the allow-list")
-    # The element's case and labels as facts (`deps.element_labels`,
-    # S1 2026-09-25), so the gate below still answers an element above the
-    # caller's labels with its AUTHZ_DENIED row, not a silent unrecorded 404
-    # from row-level security; the answer itself is the missing element's
-    # 404 since http_ui-016 (2026-10-03). Content is read only after the
-    # gate.
+    # The element's case and labels as facts (`deps.element_labels`), so the gate still writes its
+    # AUTHZ_DENIED row for an element above the caller's labels rather than row-level security
+    # giving a silent 404; the answer is the missing element's 404. Content is read after the gate.
     return element_labels(conn, table, element_id)
 
 
 def _gate_tie_endpoints(conn: psycopg.Connection, user: CurrentUser,
                         case_id: UUID, edge_id: UUID,
                         permission_key: str) -> None:
-    """A write on a tie is gated at its two entities' labels as well as its
-    own (graph-edge-endpoints-not-gated, 2026-10-03).
+    """A write on a tie is gated at its two entities' labels as well as its own.
 
-    A tie labelled AMBER between an AMBER entity and a RED one is drawn for
-    no AMBER reader, since the projection keeps only ties whose two ends
-    are visible, but its own label let an AMBER analyst who held the tie's
-    id correct, review or retire it, or add a claim to it. The same refusal
-    as the tie's own: the missing tie's 404, the AUTHZ_DENIED row kept."""
+    The projection draws a tie only when both ends are visible, so its own label alone would let a
+    reader who cannot see it correct, review or retire it. The refusal is the tie's own: the missing
+    tie's 404, with the AUTHZ_DENIED row kept."""
     ends = conn.execute(
         "SELECT src_node_id, dst_node_id FROM core.edge WHERE id = %s",
         (edge_id,)).fetchone()
@@ -596,13 +518,10 @@ def _add_assertion(conn, user, case_id, body, *, node_id=None, edge_id=None) -> 
     # another case must not be reachable through it.
     if found is None or found[0] != case_id:
         raise Problem(404, "Not found", f"no such {table} in this case")
-    # CR7: re-authorise against the ELEMENT's labels, not just the case's.
-    # A RED node can live in an AMBER case, and asserting about it is a
-    # write against the node.
-    # A second gate, after the route's at the case's labels: it counts a
-    # break-glass use only if that one did not (sec-breakglass-double-count).
-    # A refusal at the element's labels is the missing element's 404, its
-    # AUTHZ_DENIED row kept (http_ui-016, 2026-10-03).
+    # Re-authorise against the element's labels, not just the case's: a RED node can live in an
+    # AMBER case, and asserting about it is a write against the node. This second gate counts a
+    # break-glass use only if the route's did not. A refusal is the missing element's 404, its
+    # AUTHZ_DENIED row kept.
     authorize_element(conn, user, case_id=case_id,
                       permission_key="assertion.create",
                       classification=found[1], compartments=found[2],
@@ -646,39 +565,23 @@ def retract_assertion(
     user: CurrentUser = Depends(require("assertion.retract")),
     conn: psycopg.Connection = Depends(get_conn),
 ):
-    """Retract a claim. The row is preserved and stamped, never deleted
-    (invariant 5).
+    """Retract a claim. The row is preserved and stamped, never deleted (invariant 5).
 
-    The consequence is deliberate and load-bearing: an element whose LAST
-    live assertion is retracted loses all live support and disappears from
-    the projection, taking its degree, its centrality and its edges with
-    it. Withdraw a source and the part of the network that rested on it
-    dissolves — which is the whole point of grounding a graph in evidence.
-    The ROW survives, stamped, with its reason. The VIEW does not: the
-    projection's live-provenance leg is `retracted_at IS NULL AND
-    superseded_at IS NULL` with no as-of term, so the element is gone at
-    every as-of position, including ones before the retraction. (Corrected
-    2026-09-22, ux05 retract-confirmation-wrong: this said an earlier
-    `as_of` still showed it, and the console's confirmation repeated the
-    promise. The superseded half is the final review's U11, 2026-09-23.)
+    An element whose last live assertion is retracted disappears from the projection with its
+    edges, at every as-of position including those before the retraction, since the live-provenance
+    leg (`retracted_at IS NULL AND superseded_at IS NULL`) has no as-of term.
     """
     from fastapi import Response
-    # The element's case and labels as facts (`deps.element_labels`,
-    # S1 2026-09-25), so the gate below still answers an element above the
-    # caller's labels with its AUTHZ_DENIED row, not a silent unrecorded 404
-    # from row-level security; the answer itself is the missing element's
-    # 404 since http_ui-016 (2026-10-03). Content is read only after the
-    # gate.
+    # The element's case and labels as facts (`deps.element_labels`), so the gate still writes its
+    # AUTHZ_DENIED row for an element above the caller's labels rather than row-level security
+    # giving a silent 404; the answer is the missing element's 404. Content is read after the gate.
     subject = element_labels(conn, "assertion", assertion_id)
     if subject is None or subject[0] != case_id:
         raise Problem(404, "Not found", "no such assertion in this case")
-    # CR7: the element's own labels gate the retraction. Retracting the
-    # last live assertion dissolves the element from every projection, so
-    # this endpoint destroys graph structure — it must not be reachable by
-    # a caller who could not see what they are destroying. (The assertion's
-    # facts ARE its subject's labels.)
-    # A refusal at the claim's labels is the missing claim's 404, its
-    # AUTHZ_DENIED row kept (http_ui-016, 2026-10-03).
+    # The element's own labels gate the retraction (the assertion's facts are its subject's
+    # labels): retracting the last live assertion dissolves the element from every projection, so a
+    # caller must be able to see what they destroy. A refusal is the missing claim's 404, its
+    # AUTHZ_DENIED row kept.
     if subject is not None:
         authorize_element(conn, user, case_id=case_id,
                           permission_key="assertion.retract",
@@ -693,10 +596,9 @@ def retract_assertion(
         # Already retracted, or gone. Saying so is better than a silent
         # 204 that leaves a burned source live in the projection.
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
-    # A retracted correction gave its fields back to the values the live
-    # claims support; the audit row names them, and any whose value before
-    # the first correction was never recorded (graph-retracted-correction,
-    # 2026-10-03). The values themselves are in the claims.
+    # A retracted correction gives its fields back to the values the live claims support; the audit
+    # row names them, and any whose value before the first correction was never recorded. The
+    # values themselves are in the claims.
     detail = {"reason": body.reason}
     if restoration and restoration.restored:
         detail["restored"] = list(restoration.restored)
@@ -718,32 +620,21 @@ def supersede_assertion(
     user: CurrentUser = Depends(require("assertion.retract")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> SupersedeOut:
-    """Give a claim that never had an observation date one, by supersession
-    (docs/00 open question 11, settled 2026-10-02).
+    """Date a live claim that has none, by supersession (docs/00 open question 11).
 
-    Claims accepted from Triage before Alpha 6 carry no date, and invariant 5
-    is not amended to let one be written onto them. This records a new claim
-    that carries the date and the analyst's rationale, cites the old one
-    (`supersedes_id`), and stamps the old one superseded: the old row's own
-    columns are never written, the old claim leaves the live graph in the
-    same transaction, and the new one takes its place at the same grade, on
-    the same entity or tie, citing the same material. Only a live claim with
-    no date is dated this way; a dated claim is corrected by a retraction and
-    a new claim, as before.
-
-    Gated on BOTH verbs it uses, `assertion.retract` (a claim leaves the live
-    graph) and `assertion.create` (a claim is recorded), against the
-    element's own labels (CR7), after the case gate, so the break-glass use
-    is counted once. The state refusals come after the gates, so a caller who
-    may not see the claim is told nothing about it.
+    Older claims accepted from Triage carry no date, and invariant 5 forbids writing onto the old
+    row, so this records a new claim carrying the date and rationale, citing the old one
+    (`supersedes_id`) at the same grade on the same element and material, and stamps the old one
+    superseded in the same transaction. A dated claim is corrected by a retraction and a new claim
+    instead. Gated on `assertion.retract` and `assertion.create` at the element's labels; the state
+    refusals come after the gates, so a caller who may not see the claim is told nothing about it.
     """
     subject = element_labels(conn, "assertion", assertion_id)
     if subject is None or subject[0] != case_id:
         raise Problem(404, "Not found", "no such assertion in this case")
-    # A refusal at the claim's labels is the missing claim's 404, its
-    # AUTHZ_DENIED row kept (http_ui-016, 2026-10-03). The route's gate
-    # named assertion.retract only, so assertion.create is first asked at
-    # the case's labels, and a caller without it still gets the gate's 403.
+    # A refusal at the claim's labels is the missing claim's 404, its AUTHZ_DENIED row kept. The
+    # route's gate names assertion.retract only, so assertion.create is first asked at the case's
+    # labels, and a caller without it still gets the gate's 403.
     for permission in ("assertion.retract", "assertion.create"):
         authorize_element(conn, user, case_id=case_id, permission_key=permission,
                           classification=subject[1], compartments=subject[2],
@@ -763,8 +654,8 @@ def supersede_assertion(
                       "observed_at is in the future: a claim cannot have been "
                       "observed later than now")
     try:
-        # One transaction, so a claim is never replaced without its audit
-        # row, and never audited without having been replaced.
+        # One transaction, so a claim is never superseded without its audit row, and never audited
+        # without being superseded.
         with conn.transaction():
             new_id = GraphWriteService(conn).supersede_assertion(
                 assertion_id, case_id=case_id, observed_at=body.observed_at,
@@ -786,46 +677,18 @@ def supersede_assertion(
 
 
 # --- corrections and retirements ----------------------------------------
-#
-# The HTTP face of the "correcting and retiring" block in `graph.py`. Read
-# that first — it explains why every correction carries an assertion, and
-# why classification, compartments, `sign` and `edge_type` are deliberately
-# NOT editable through these verbs.
-#
-# Until now a mistyped node label was permanent: `graph.node.update`,
-# `graph.node.delete` and `graph.edge.update` were seeded in 0017 and
-# granted in 0021, `graph.edge.delete` was added in 0053, and nothing in
-# the product had ever checked any of them. These four endpoints are the
-# first callers.
-#
-# THREE THINGS ARE ENFORCED HERE rather than in the service, because they
-# are authorisation and HTTP concerns rather than model concerns:
-#
-# 1. **Same-case verification on the caller-supplied element id, before the
-#    id is used**, answering 404 rather than 403 so the endpoint is not an
-#    existence oracle. The service checks `case_id` in its own WHERE clause
-#    too — belt and braces — but a service-level miss surfaces as a 400
-#    "not found in this case", which reads like a malformed request rather
-#    than a missing object.
-# 2. **The ELEMENT's own labels, not just the case's** — the CR7 rule
-#    documented on `_element_labels` above. A RED node can live in an AMBER
-#    case, and correcting or retiring it is a write against the node. The
-#    `require(...)` dependency only gates on the case.
-# 3. **Element state**: already retired, or merged away. Both are checked
-#    AFTER the gate, so neither becomes a state oracle for a caller who is
-#    not cleared to know the element exists.
-#
-# One permission each, not two. A correction inserts an assertion, but it
-# is not gated on `assertion.create` as well: the assertion is part OF the
-# correction (invariant 1 applied to the change itself), not an independent
-# claim someone might be separately entitled to make. Requiring both would
-# also mean a role could hold `graph.node.update` and be unable to use it.
+# The HTTP face of the "correcting and retiring" block in `graph.py`, which explains why every
+# correction carries an assertion and why classification, compartments, `sign` and `edge_type`
+# are not editable here. Enforced here rather than in the service, as authorisation and HTTP
+# concerns: same-case verification of the element id before it is used (404, not 403, so it is no
+# existence oracle); the element's own labels as well as the case's; and element state (retired,
+# merged away), checked after the gate so it is no state oracle. One permission each: a
+# correction's assertion is part of the correction (invariant 1), so it is not also gated on
+# `assertion.create`.
 
-#: Columns each change endpoint needs in hand BEFORE the write: the values
-#: the UPDATE is about to overwrite (so `_audit_change` can record them —
-#: see there for why that matters) plus, for a node, the merge redirect.
-#: Literal per table and asserted against these keys, so nothing
-#: client-supplied ever reaches the f-string.
+#: Columns each change endpoint reads before the write: the values the UPDATE is about to overwrite
+#: (for `_audit_change`) plus, for a node, the merge redirect. Literal per table and checked against
+#: these keys, so nothing client-supplied reaches the f-string.
 _BEFORE_COLUMNS = {
     "node": "label, attrs, merged_into_id",
     "edge": "weight, confidence, attrs",
@@ -836,49 +699,26 @@ def _gate_for_change(
     conn: psycopg.Connection, user: CurrentUser, *, case_id: UUID, table: str,
     element_id: UUID, permission_key: str,
 ) -> tuple:
-    """Same-case check → element-label gate → not-already-retired check,
-    then hand back the element's current values.
+    """Same-case check, then the element-label gate, then the not-retired check; returns the
+    element's current values.
 
-    THE ORDER IS THE POINT.
-
-    A caller who names an element from another case gets the same 404 as
-    one who names an element that does not exist, so neither this endpoint
-    nor its status codes can be used to enumerate other cases' ids. Only
-    after that does the element's own classification and compartments reach
-    `authorize_object` — the CR7 rule, and the reason a RED node inside an
-    AMBER case cannot be quietly rewritten by an AMBER analyst who once saw
-    its id.
-
-    The retirement check comes LAST, after the gate, for the same reason
-    the hostile-markup refusal in the deception router does: "this one is
-    already retired" is a fact about the element, and telling it to someone
-    who failed the gate would leak state they are not cleared for.
-
-    **Call this OUTSIDE the write transaction, and leave it there.** A
-    denial inside `authorize_object` appends an `AUTHZ_DENIED` row to the
-    audit log and then raises. Tidying this call into the `with
-    conn.transaction()` block below would roll that row back on the way
-    out, so every refused correction and every refused retirement would
-    silently vanish from the security record — the opposite of what the
-    check is for. The cost of keeping it outside is a TOCTOU window: the
-    element can be retired by someone else between the check and the write,
-    in which case the service's own `deleted_at IS NULL` clause makes it a
-    400 rather than the 409 raised here. That is the right trade.
+    The order is the point: an element from another case gets the same 404 as a missing one, so ids
+    cannot be enumerated; only then do the element's own labels reach the gate; and the retired
+    check comes after the gate so it leaks no state. Call this outside the write transaction: a
+    denial appends an AUTHZ_DENIED row and raises, and inside the transaction that row would roll
+    back. The cost is a TOCTOU window, where the service's `deleted_at IS NULL` clause gives a 400
+    instead of this 409.
     """
     if table not in _BEFORE_COLUMNS:  # not `assert`: stripped under python -O, and this guards SQL text
         raise ValueError("refused identifier outside the allow-list")
-    # The element's case and labels as facts (`deps.element_labels`,
-    # S1 2026-09-25), so the gate below still answers an element above the
-    # caller's labels with its AUTHZ_DENIED row, not a silent unrecorded 404
-    # from row-level security; the answer itself is the missing element's
-    # 404 since http_ui-016 (2026-10-03). Content is read only after the
-    # gate.
+    # The element's case and labels as facts (`deps.element_labels`), so the gate still writes its
+    # AUTHZ_DENIED row for an element above the caller's labels rather than row-level security
+    # giving a silent 404; the answer is the missing element's 404. Content is read after the gate.
     facts = element_labels(conn, table, element_id)
     if facts is None or facts[0] != case_id:
         raise Problem(404, "Not found", f"no such {table} in this case")
-    # A refusal at the element's labels is the missing element's 404, its
-    # AUTHZ_DENIED row kept (http_ui-016, 2026-10-03): the 403 told a
-    # caller holding a leaked id that it named something in the case.
+    # A refusal at the element's labels is the missing element's 404, its AUTHZ_DENIED row kept: a
+    # 403 would tell a caller holding a leaked id that it names something in the case.
     authorize_element(conn, user, case_id=case_id,
                       permission_key=permission_key,
                       classification=facts[1], compartments=facts[2],
@@ -906,31 +746,15 @@ def _gate_for_change(
 def _audit_change(conn: psycopg.Connection, user: CurrentUser, case_id: UUID, *,
                   action: str, object_type: str, object_id: UUID,
                   detail: dict) -> None:
-    """Append the change to the audit log, carrying the OVERWRITTEN values.
+    """Append the change to the audit log, carrying the overwritten values.
 
-    This is not decoration. `update_node` / `update_edge` do a destructive
-    `UPDATE` on `core.node` / `core.edge`: the NEW value is recoverable
-    from the assertion the correction carries (`claim_value`), and the OLD
-    one is recoverable from nowhere else, because the column that held it
-    has just been overwritten. Invariant 5 says history is superseded, not
-    overwritten — for these two columns this row IS the superseded history.
-
-    `audit.event` is the right home for it rather than a new table:
-    append-only (invariant 6), hash-chained, and `detail` is deliberately
-    never returned by `/audit` (see `routers/audit.py` — the listing
-    returns structural columns only). So recording case content here does
-    not widen the one globally-scoped role's view of case material.
-
-    Called INSIDE the caller's transaction — the service's own transaction
-    becomes a savepoint under it — so a change that committed without its
-    audit row is not a state this code can reach. Nesting is safe on these
-    paths specifically, and it was checked rather than assumed: 0022's
-    deferred constraint triggers fire on INSERT to `core.node`/`core.edge`
-    and on DELETE/UPDATE of `assertion.node_id`/`edge_id`. A correction
-    UPDATEs node/edge and INSERTs an assertion; a retirement only UPDATEs.
-    Neither trips either trigger, so nothing new falls due at the outer
-    commit that would otherwise have surfaced as a clean 400 at the inner
-    one.
+    `update_node` and `update_edge` overwrite columns in place; the new value is in the
+    correction's assertion, but the old one survives only here, so for these columns this row is
+    the superseded history (invariant 5). `audit.event` is append-only and hash-chained, and
+    `/audit` never returns `detail`, so case content here widens no global role's view. Called
+    inside the caller's transaction, so a change cannot commit without its audit row. Nesting is
+    safe: migration 0022's deferred triggers fire on INSERT into core.node and core.edge and on
+    DELETE or UPDATE of an assertion's node_id or edge_id, none of which these paths do.
     """
     conn.execute(
         """INSERT INTO audit.event
@@ -950,12 +774,10 @@ def _claim_path(changed: dict) -> str | None:
 
 
 def _valid_to_given(body: BaseModel):
-    """The end date a correction sets: KEEP when the body leaves it out,
-    None when it sends null (the end date is cleared), else the time
-    (graph-valid-to-cannot-be-set-after-creation, 2026-10-03). An offset is
-    required, as for a supersession's date: a naive time would be read in
-    the database's zone, and this is the instant the as-of view and trust
-    decay are drawn from."""
+    """The end date a correction sets: KEEP when the body leaves it out, None when it sends null
+    (the end date is cleared), else the time. An offset is required, as for a supersession's date:
+    a naive time would be read in the database's zone, and the as-of view and trust decay are drawn
+    from this instant."""
     if "valid_to" not in body.model_fields_set:
         return KEEP
     end = body.valid_to
@@ -981,23 +803,16 @@ def _previous_valid_to(conn: psycopg.Connection, table: str,
 class UpdateNodeBody(BaseModel):
     """A correction to a node, with the assertion that justifies it.
 
-    `attrs` is a WHOLE-OBJECT REPLACEMENT, not a merge: sending
-    `{"attrs": {"role": "broker"}}` on a node that also had `country`
-    leaves it with `role` alone, and `{"attrs": {}}` clears every
-    attribute. That is the service's semantics (`COALESCE(%s, attrs)`) and
-    it is stated here because the alternative reading — "patch merges" — is
-    the one a caller assumes from the verb. Omit the field entirely to
-    leave attributes untouched.
+    `attrs` overwrites the whole attribute object, not a merge, whatever the verb suggests:
+    `{"attrs": {}}` clears every attribute, and omitting the field leaves them untouched
+    (`COALESCE(%s, attrs)` in the service).
     """
     label: str | None = None
     attrs: dict | None = None
-    # When the entity stopped being true in the world: a correction like
-    # any other, so the as-of view keeps the past and nothing is retired.
-    # Sent as null, it clears the end date; left out, it is unchanged
-    # (graph-valid-to-cannot-be-set-after-creation, 2026-10-03).
+    # When the entity stopped being true in the world: a correction like any other, so the as-of
+    # view keeps the past and nothing is retired. Null clears the end date; omitted, it is kept.
     valid_to: datetime | None = None
-    # A correction records a claim, so it is graded like one: required,
-    # with no defaults (gap-api-grade-required, 2026-09-23).
+    # A correction records a claim, so it is graded like one: required, with no defaults.
     assertion: AssertionBody
 
 
@@ -1024,10 +839,9 @@ class UpdateEdgeBody(BaseModel):
 class RetireBody(BaseModel):
     """Why this element is being retired.
 
-    Required, exactly as it is for a retraction. Retiring a node dissolves
-    every tie it carries, and the one thing a reviewer six months later
-    cannot reconstruct is what the analyst was thinking. The service takes
-    no reason argument, so this lands in the audit event.
+    Required, as for a retraction: retiring a node dissolves every tie it carries, and what the
+    analyst was thinking cannot be reconstructed later. The service takes no reason, so this lands
+    in the audit event.
     """
     reason: str = Field(min_length=1)
 
@@ -1039,28 +853,14 @@ def update_node(
     user: CurrentUser = Depends(require("graph.node.update")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """Correct a node's label and/or attributes.
+    """Correct a node's label or attributes, with a graded assertion as its basis (invariant 1).
 
-    **An assertion is required** — "we corrected this" is a claim about the
-    world and needs a basis like any other (invariant 1). So is its
-    grading: the body used to grade an ungraded correction F/6/LOW on the
-    caller's behalf, as DIRECT_OBSERVATION, and now a missing field is a 422
-    naming it (gap-api-grade-required, 2026-09-23). Cite the exhibit that
-    prompted it via `assertion.evidence_id` if there is one.
-
-    `attrs` REPLACES the attribute object wholesale. See `UpdateNodeBody`.
-
-    The previous label and attributes are written to `audit.event.detail`,
-    because this endpoint overwrites the columns that held them, and to
-    the correction's own `prior_value`, so retracting the correction puts
-    back what the remaining claims support (graph-retracted-correction,
-    2026-10-03). `valid_to` (null clears it) records when the entity
-    stopped being true. A corrected selector label moves the selector
-    index, and `selector_owner_id` names another visible entity already
-    holding the new value, a merge lead (graph-selector-index-drift).
-
-    Not editable here: classification and compartments (an egress decision,
-    invariant 8, not a typo fix) and `node_type`.
+    `attrs` overwrites the attribute object wholesale (`UpdateNodeBody`), and `valid_to` (null clears
+    it) records when the entity stopped being true. The previous values go to the audit row and the
+    correction's `prior_value`, so retracting it restores what the remaining claims support. A
+    corrected selector label moves the selector index, and `selector_owner_id` names a visible
+    entity already holding the new value. Classification, compartments (invariant 8) and
+    `node_type` are not editable here.
     """
     old_label, old_attrs, merged_into_id = _gate_for_change(
         conn, user, case_id=case_id, table="node", element_id=node_id,
@@ -1084,11 +884,9 @@ def update_node(
     if end is not KEEP:
         previous["valid_to"] = _previous_valid_to(conn, "node", node_id)
 
-    # No try/except around GraphWriteError: `install_error_handlers`
-    # already maps it to a 400 THROUGH `_safe_detail`, which is what keeps a
-    # raw psycopg message — constraint names, offending values, PL/pgSQL
-    # line numbers — out of the response. Catching it here to re-raise
-    # `Problem(400, ..., str(exc))` would hand exactly that to the client.
+    # No try/except around GraphWriteError: `install_error_handlers` maps it to a 400 through
+    # `_safe_detail`, which keeps raw psycopg text (constraint names, values, PL/pgSQL lines) out of
+    # the response; re-raising `str(exc)` here would hand exactly that to the client.
     clearance, held = user_ceiling(conn, user.user_id, case_id=case_id)
     with conn.transaction():
         lead = GraphWriteService(conn).update_node(
@@ -1106,22 +904,14 @@ def update_node(
     return {
         "node_id": str(node_id),
         "updated": sorted(changed),
-        # The corrected selector is already held by another entity the
-        # caller can see: a merge lead, as on create (graph-selector-index-
-        # drift, 2026-10-03). An owner the caller cannot see is not named.
+        # The corrected selector is already held by another entity the caller can see: a merge
+        # lead, as on create. An owner the caller cannot see is not named.
         "selector_owner_id": (str(lead) if lead is not None and _node_visible(
             conn, user, case_id, lead) else None),
-        # A node merged into another is excluded from every projection, so
-        # a correction to it will not appear on the canvas. Saying so beats
-        # a 200 the analyst reads as "done" and then cannot see (invariant
-        # 12). The edit is still allowed: unmerging restores the node with
-        # whatever label it now carries, so nothing is lost either way.
-        #
-        # The survivor's id only when the caller may read the survivor
-        # (graph-merged-into-pointer, 2026-10-03): an AMBER
-        # entity folded into a RED one is an alias of it, and the merge is
-        # withheld from the ledger and the approvals for exactly that reason.
-        # The pointer was the one place it was still said.
+        # A node merged into another is in no projection, so a correction to it will not appear on
+        # the canvas, and the response says so (invariant 12); unmerging restores it with its new
+        # label. The survivor's id only when the caller may read the survivor: an AMBER entity
+        # folded into a RED one is an alias of it, which the ledger and approvals also withhold.
         "merged_into_id": (
             str(merged_into_id)
             if merged_into_id
@@ -1139,33 +929,14 @@ def update_edge(
     user: CurrentUser = Depends(require("graph.edge.update")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """Correct an edge's weight, confidence and/or attributes.
+    """Correct an edge's weight, confidence or attributes, with a graded assertion as its basis.
 
-    **An assertion is required**, for the same reason as `update_node`.
-
-    `confidence` re-grades the tie, and since migration 0064 a tie's
-    confidence is the highest among its live claims about the tie, so the
-    re-grade is carried BY the correction's assertion: it is recorded
-    graded at the value it states. A correction to `weight` or `attrs`
-    alone grades that field, not the tie, and leaves the tie's confidence
-    where it was. Until 2026-09-22 this docstring called the two
-    "different fields", the column was overwritten, the assertion kept its
-    default LOW, and every correction opened a new disagreement between
-    the tie and its claims (ux05 two-disagreeing-confidences). Sending
-    both `confidence` and a different `assertion.confidence` is therefore
-    refused as contradictory rather than one being silently preferred.
-    Since the assertion's grading became required (gap-api-grade-required,
-    2026-09-23) a re-grade always carries both, so it sends the one value
-    twice: `confidence` says the correction IS a re-grade of the tie (its
-    `claim_path`), and `assertion.confidence` is that claim's grade.
-
-    Lowering a tie beneath a claim that is still live is a 409: see
-    `GraphWriteService.update_edge` for why, and for the remedy the
-    response names.
-
-    Not editable here: `sign` and `edge_type` (a different claim, not a
-    correction; record it as its own edge), classification and
-    compartments. See `GraphWriteService.update_edge`.
+    A tie's confidence is the highest among its live claims (migration 0064), so a re-grade is
+    carried by the correction's assertion: `confidence` marks the correction as a re-grade and must
+    equal `assertion.confidence`, or it is refused as contradictory. A `weight` or `attrs`
+    correction grades that field, not the tie. Lowering a tie beneath a live claim is a 409 that
+    names the remedy (`GraphWriteService.update_edge`). `sign`, `edge_type`, classification and
+    compartments are not editable here.
     """
     if (body.confidence is not None
             and body.assertion.confidence != body.confidence):
@@ -1214,9 +985,8 @@ def update_edge(
                           object_type="edge", object_id=edge_id,
                           detail={"fields": sorted(changed), "previous": previous})
     except TieConfidenceConflict as exc:
-        # Authored text naming the claims in the way and the remedy. The
-        # service raised it inside the transaction above, which rolled the
-        # correction back, and the audit row below it was never reached.
+        # Authored text naming the claims in the way and the remedy. It is raised inside the
+        # transaction above, so the correction is rolled back and no audit row is written.
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
 
     # The tie's confidence AFTER the write, as the rule derived it, so a
@@ -1236,51 +1006,21 @@ def soft_delete_node(
     user: CurrentUser = Depends(require("graph.node.delete")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """**Soft delete.** Sets `deleted_at`; destroys nothing.
+    """Soft delete: sets `deleted_at` and destroys nothing, for a node that should never have been
+    in the case file.
 
-    The row survives and so does every assertion behind it. Nothing is
-    destroyed, the act is attributed (`deleted_by`), and clearing the
-    column would bring the node back.
-
-    **It does not preserve visibility, and the difference from `valid_to`
-    is worth being exact about.** `as_of` is WORLD time — it filters
-    `valid_from`/`valid_to`, and `projections.py` applies `deleted_at IS
-    NULL` regardless of it. So a retired node is gone from the sociogram,
-    the metrics, the search results AND from an as-of view of last week.
-    That is the point: `valid_to` says "this stopped being true in March"
-    and an as-of query into February must still show it; this says "this
-    should never have been in the case file at all". Reach for the wrong
-    one and you either rewrite history or fail to remove a mistake.
-
-    **Every live edge touching this node is retired in the same
-    transaction**, and the count comes back as `edges_retired`. This is why
-    the endpoint answers 200 with a body rather than 204: retiring one
-    actor can remove six ties, and a bare 204 would let an analyst delete a
-    hub and never learn what went with it. Explained in
-    `GraphWriteService.soft_delete_node` — an edge left live against a
-    retired node is invisible on the canvas and still counted by anything
-    reading `core.edge` directly.
-
-    No assertion is required, and none is written: a retirement is not a
-    claim about the world, it is a statement that this should not have been
-    in the case file. The `reason` and the previous label go to the audit
-    log. To say instead "this stopped being true in March", set `valid_to`
-    — that is temporal validity and it must not be conflated with this.
-    It is set with a correction, `PATCH .../graph/nodes/{id}` with
-    `valid_to` (graph-valid-to-cannot-be-set-after-creation, 2026-10-03;
-    until then no endpoint could set it after creation).
+    Unlike `valid_to` (set by a `PATCH`, for something that stopped being true), it removes the node
+    from as-of views too, since `deleted_at IS NULL` applies whatever the as-of time. Every live edge
+    on the node is retired in the same transaction and counted in `edges_retired`, hence a 200 with
+    a body. No assertion is written; the `reason` and previous label go to the audit log.
     """
     label, _attrs, merged_into_id = _gate_for_change(
         conn, user, case_id=case_id, table="node", element_id=node_id,
         permission_key="graph.node.delete")
     if merged_into_id is not None:
-        # Refused, and this one is not fussiness. `MergeService.unmerge`
-        # restores the loser's edges and clears the redirect — it does NOT
-        # clear `deleted_at`. Retiring a merged-away node therefore leaves
-        # the reversal restoring live edges onto a deleted endpoint, which
-        # the projection drops: the merge becomes irreversible in effect
-        # while still reporting itself as reversed. Invariant 3 requires
-        # merges to be reversible, so this order of operations is refused.
+        # `MergeService.unmerge` restores the loser's edges and clears the redirect but not
+        # `deleted_at`, so retiring a merged-away node would make the merge irreversible in effect
+        # while it reports itself reversed (invariant 3).
         raise Problem(409, "Conflict",
                       "this node is merged into another; reverse the merge "
                       "before retiring it, or retire the surviving node")
@@ -1311,9 +1051,6 @@ def soft_delete_node(
         "destroyed": False,
         "deleted_at": at.isoformat(),
         "edges_retired": edges_retired,
-        # The incident edges were counted with a bracketed plural and
-        # printed verbatim; the count is known (README screenshot set
-        # review, 2026-09-23).
         "note": (f"Soft delete: deleted_at was set on this node and on "
                  f"{count_of(edges_retired, 'incident edge', 'incident edges')}"
                  f". Nothing was destroyed "
@@ -1325,19 +1062,15 @@ def soft_delete_node(
 
 def _refuse_live_merge_target(conn: psycopg.Connection, user: CurrentUser,
                               case_id: UUID, node_id: UUID) -> None:
-    """graph-unmerge-loses-ties-after-target-retired (2026-10-03). Retiring
-    the surviving side of a live merge retired the ties the merge had moved
-    onto it, and the merge's later reversal gave them back to the merged
-    entity still retired, while saying they were restored. The same order
-    is refused for the survivor as for the merged-away side.
+    """Refuse to retire the surviving side of a live merge, as for the merged-away side: its ties
+    would be retired, and the merge's reversal would hand them back to the merged entity still
+    retired while saying they were restored.
 
-    Looked for on the GRAPH_GUARD system connection, because a guard that
-    permits on zero must see every merge, and a merge of an entity the
-    caller cannot see is hidden from their own (0132). That one is refused
-    in the words of the hidden-ties refusal (`hidden_ties_refusal`, which
-    follows the case's `withheld_disclosure` as the other guard does,
-    `_refuse_if_ties_above_clearance`), with its status, so the two cannot be
-    told apart under any setting; a merge the caller can see is named."""
+    Looked for on the GRAPH_GUARD system connection, because a guard that permits on zero must see
+    every merge, and a merge of an entity the caller cannot see is hidden from their own (migration
+    0132). That one is refused in the words and status of `hidden_ties_refusal`, so the two guards
+    cannot be told apart under any withheld-disclosure setting; a merge the caller can see is
+    named."""
     from noctornal_api.db import SystemPurpose, system_connection
 
     with system_connection(SystemPurpose.GRAPH_GUARD, reuse=conn) as guard:
@@ -1380,18 +1113,11 @@ def soft_delete_edge(
     user: CurrentUser = Depends(require("graph.edge.delete")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """**Soft delete.** Sets `deleted_at` on one edge; destroys nothing.
+    """Soft delete: sets `deleted_at` on one edge and destroys nothing.
 
-    200 with a body rather than 204, for the same reason as the node
-    endpoint: DELETE reads as destruction and this is not that. The row and
-    its assertions survive and the act is attributed (`deleted_by`, added
-    in 0053 precisely so "who removed this tie?" has an answer).
-
-    It is still a removal from the live graph and from as-of views of the
-    past — see `soft_delete_node` for why `deleted_at` and `valid_to` are
-    not interchangeable. And retiring a single edge is not a small act:
-    dropping one tie can dissolve a broker and redraw the centrality of
-    everyone around them. The reason goes to the audit log.
+    The row and its assertions survive and the act is attributed (`deleted_by`). It still removes
+    the tie from the live graph and from as-of views (see `soft_delete_node`), and one tie can
+    dissolve a broker, so the reason goes to the audit log.
     """
     old_weight, old_confidence, _attrs = _gate_for_change(
         conn, user, case_id=case_id, table="edge", element_id=edge_id,
@@ -1422,27 +1148,11 @@ def soft_delete_edge(
 
 
 # --- reviewing a tie ------------------------------------------------------
-#
-# gap-tie-review and ux05 review-state-never-leaves-proposed (2026-09-23).
-# `core.edge.review` defaulted to PROPOSED and nothing anywhere set it, so
-# every tie in every case read "review PROPOSED", every node on the canvas
-# carried the "unreviewed proposal" ring, and the inspector's "Unreviewed
-# proposals" count always equalled its "Ties in projection". A signal that
-# can never clear carries no information, and this one told analysts there
-# was work pending that no control could complete.
-#
-# Two halves. A tie is now BORN in the right state (`GraphWriteService.
-# create_edge`: a person's own claim is ACCEPTED, a machine's is PROPOSED,
-# and a Triage acceptance passes ACCEPTED). And these two routes let a
-# person dispose of what is still pending, or reopen a disposal, with the
-# decision recorded where a Triage acceptance is: the audit log.
-#
-# Gated on `proposal.review`, the verb Triage disposes of a machine's
-# suggestion with, and so held by the Lead investigator (CASE_OWNER) and
-# the REVIEWER, not by the ANALYST: the owner's decision for this gap. The
-# gate runs against the TIE's own labels, the CR7 rule every other change
-# here follows, and outside the write transaction so a refusal's
-# AUTHZ_DENIED row is kept (see `_gate_for_change`).
+# A tie is born in its review state (`GraphWriteService.create_edge`: a person's claim is
+# ACCEPTED, a machine's PROPOSED); these routes let a person dispose of a pending tie or reopen a
+# disposal, recorded in the audit log as a Triage acceptance is. Gated on `proposal.review`, held
+# by CASE_OWNER and REVIEWER but not ANALYST, against the tie's own labels and outside the write
+# transaction so a refusal's AUTHZ_DENIED row is kept (see `_gate_for_change`).
 
 #: The longest review note accepted. A note is a sentence or two for the
 #: next reader, not a report; the cap keeps an audit row from carrying a
@@ -1479,17 +1189,10 @@ def review_edge(
 ) -> dict:
     """Accept or dispute a tie, or reopen its review.
 
-    Refused: REJECTED and SUPERSEDED (400, naming what to do instead; see
-    `graph.REVIEW_STATES`), a state the tie is already in (409, and no
-    audit row), a retired tie (409), a tie in another case or one that
-    does not exist (404, identical), a caller who lacks
-    `proposal.review` (403), and a caller below the tie's labels (the
-    same 404 as a missing tie, http_ui-016, 2026-10-03).
-
-    The decision goes to `audit.event` as EDGE_REVIEWED with the state
-    left, the state set and the note, in the same transaction as the
-    change, so a review that happened without its record is not a state
-    this code can reach. `GET .../review` reads it back.
+    REJECTED and SUPERSEDED are refused with a 400 naming what to do instead, the tie's current
+    state and a retired tie with a 409, and a missing tie, one in another case or one above the
+    caller's labels with the same 404. The decision is written to `audit.event` as EDGE_REVIEWED in
+    the same transaction as the change; `GET .../review` reads it back.
     """
     wanted = body.review.strip().upper()
     if wanted not in REVIEW_STATES:
@@ -1549,13 +1252,10 @@ def edge_review(
 ) -> ReviewOut:
     """Who put a tie in its review state, when, and why.
 
-    `edge.review` has no reviewer column (no migration was open for one),
-    so the record is the EDGE_REVIEWED audit rows `review_edge` writes.
-    Their `detail` is never returned by `/audit`, which keeps case content
-    away from the one role that reads the whole log; it is returned HERE
-    only to a caller who may read this case and this tie, the same reader
-    the tie's own assertions and their authors' names go to. A tie above
-    the caller's clearance is the same 404 as one that does not exist.
+    The record is the EDGE_REVIEWED audit rows `review_edge` writes, since `edge.review` has no
+    reviewer column. `/audit` never returns their `detail`; it is returned here only to a caller
+    who may read this case and this tie. A tie above the caller's clearance is the same 404 as one
+    that does not exist.
     """
     clearance, compartments = user_ceiling(conn, user.user_id, case_id=case_id)
     row = conn.execute(
@@ -1589,10 +1289,8 @@ def edge_review(
     history = []
     for detail, actor, name, at in events:
         d = detail or {}
-        # A row with no actor was written by the system, not a person: the
-        # upgrade (migration 0067) names itself in `by`
-        # (ux05-inspector:review-state-never-leaves-proposed, 2026-09-23),
-        # and the history says that rather than "by unknown".
+        # A row with no actor was written by the system: the upgrade (migration 0067) names itself
+        # in `by`, and the history says that rather than "by unknown".
         if actor is None and not name:
             name = d.get("by") or None
         history.append(ReviewEventOut(

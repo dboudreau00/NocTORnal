@@ -1,10 +1,6 @@
-# Phase 0 asked for "CI: lint, typecheck, test, migration round-trip" and
-# all four were run by hand for the whole build (docs/14 O1). This is that.
-#
-# The jobs are separated by what a failure MEANS, not to parallelise:
-# a lint failure is untidy, a drift failure means generated files no longer
-# match their source, and a test failure means the product is wrong. Reading
-# a red tick should immediately tell you which of those happened.
+# Lint, typecheck, test and migration round-trip (docs/14). The jobs are separated by what a
+# failure means, not to parallelise: a lint failure is untidy, a drift failure means generated
+# files do not match their source, and a test failure means the product is wrong.
 name: CI
 
 on:
@@ -25,53 +21,39 @@ env:
   # Mirrors infra/docker-compose.yml. These only ever address services
   # inside the runner, and are the same literals the compose file uses.
   DATABASE_URL: postgresql+psycopg://noctornal:dev_only_change_me@localhost:5432/noctornal
-  # The gate on apps/api/tests/test_app_role_privileges_pg.py, which asserts
-  # what migration 0060 granted the least-privilege runtime role. Same
-  # reasoning as REDIS_URL below: unset, that file skips every test it has
-  # and the "No tests were skipped" gate at the end then fails the build.
-  #
-  # It NAMES a role rather than switching a leg on, so it has to match
-  # 0060's APP_ROLE -- the first test in that file compares the two and
-  # fails on a mismatch rather than asserting nothing about a role the
-  # migration never touched. The role itself is created by the step below;
-  # set here with that step gone, the file FAILS rather than skipping, and
-  # the failure says the role does not exist.
+  # The gate on apps/api/tests/test_app_role_privileges_pg.py, which asserts what migration 0060
+  # granted the least-privilege runtime role; unset, the file skips and the "No tests were
+  # skipped" gate fails the build. It names a role, so it must match 0060's APP_ROLE: the first
+  # test compares the two. The role is created by a step below.
   NOCTORNAL_APP_DB_ROLE: noctornal_app
-  # S1 (2026-09-25): the system role the row-level security tests
-  # hold equal to the app role but for the IAM-plane writes.
+  # The system role the row-level security tests hold equal to the app role but for the IAM-plane
+  # writes.
   NOCTORNAL_WORKER_DB_ROLE: noctornal_worker
-  # The same for the egress proxy's own database role (2026-09-24):
-  # db/init/20-egress-role.sh creates it, a migration grants to it, and a
-  # test checks what it granted, which would skip without these.
+  # The same for the egress proxy's own database role: db/init/20-egress-role.sh creates it, a
+  # migration grants to it, and a test checks the grant, which would skip without these.
   # Throwaways like every credential here.
   NOCTORNAL_EGRESS_DB_ROLE: noctornal_egress
   NOCTORNAL_EGRESS_DB_PASSWORD: dev_only_change_me
-  # The runner's gpg is Ubuntu 24.04's distribution build, which reports
-  # 2.4.4, below the version floor PGP verification enforces (docs/17 F34's
-  # reasoning; comms F10a). Every VERIFIED test would record NO_VERIFIER
-  # without this attestation, which each verification row then records. A
-  # deployment sets it only after checking its own distribution's changelog.
+  # The runner's gpg is Ubuntu 24.04's distribution build, which reports 2.4.4, below the version
+  # floor PGP verification enforces (docs/17). Without this attestation, which each verification
+  # row records, every VERIFIED test would record NO_VERIFIER. A deployment sets it only after
+  # checking its own distribution's changelog.
   NOCTORNAL_GPG_PATCHED_AS: "2.4.9"
   # The rate limiter's Lua runs in Redis, not in Python, so the only way to
   # know the two implementations still agree is to run both. Without this
   # the Redis leg would skip -- and the "No tests were skipped" gate below
   # would then fail the build, which is the intended behaviour.
   REDIS_URL: redis://localhost:6379/0
-  # Same reasoning as REDIS_URL, for the SMTP leg: the Mailpit round-trip
-  # test is gated on SMTP_HOST, so without this it skips -- and the "No
-  # tests were skipped" gate below then fails the build, which is what it
-  # is for. 1025/8025 and the plaintext flag mirror infra/docker-compose.yml
-  # and what install.sh writes into .env.local.
+  # As for REDIS_URL, for the SMTP leg: the Mailpit round-trip test is gated on SMTP_HOST. The
+  # port and the plaintext flag mirror infra/docker-compose.yml and what install.sh writes into
+  # .env.local.
   SMTP_HOST: localhost
   SMTP_PORT: "1025"
   SMTP_ALLOW_PLAINTEXT: "1"
-  # Same reasoning again, for the production Redis ACL (2026-10-02):
-  # test_redis_limiter_acl.py proves the ACL confines the limiter, and the
-  # limiter works under it, only against a Redis started with the
-  # production compose file's own start script, which the "Start the ACL
-  # Redis" step below runs. Unset, those tests skip and the gate fails the
-  # build. The tenant is a second user that step adds, standing for another
-  # tenant of a shared Redis. Throwaways like every credential here.
+  # Again, for the production Redis ACL: test_redis_limiter_acl.py proves the ACL confines the
+  # limiter, and the limiter works under it, against a Redis started with the production compose
+  # file's own start script ("Start the ACL Redis" below). The tenant is a second user that step
+  # adds, standing for another tenant of a shared Redis. Throwaways like every credential here.
   NOCTORNAL_TEST_ACL_REDIS_URL: redis://noctornal_limiter:dev_only_change_me@localhost:6390/0
   NOCTORNAL_TEST_ACL_REDIS_TENANT_URL: redis://acl_tenant:dev_only_change_me@localhost:6390/0
   MINIO_ENDPOINT: localhost:9000
@@ -79,24 +61,11 @@ env:
   MINIO_SECRET_KEY: dev_only_change_me
   EVIDENCE_BUCKET: noctornal-evidence
   SAMPLE_BUCKET: noctornal-samples
-  # Raw markup of collected forum pages (the collection framework,
-  # 2026-09-24). No object lock: it is deleted with its document.
+  # Raw markup of collected forum pages. No object lock: it is deleted with its document.
   COLLECT_RAW_BUCKET: noctornal-collect-raw
-  # A fixed, throwaway KEK. Real deployments supply this from the
-  # environment or Vault and there is no default anywhere in the code --
-  # see security/envelope.py.
-  #
-  # It MUST decode to exactly 32 bytes. The previous value decoded to 35
-  # and every AES-256-GCM path in the suite died with
-  # "NOCTORNAL_TOTP_KEK must decode to 32 bytes, got 35" -- 147 failures.
-  #
-  # It had been wrong for as long as it had existed and nothing noticed,
-  # because the MinIO service container failed first and the job aborted at
-  # "Initialize containers" before a single test ran. Fixing that unmasked
-  # this. A job that dies in setup is not a passing job, and it hid a
-  # second defect for however long it was red.
-  #
-  # This is base64 of 32 'A' bytes, matching apps/api/tests/conftest.py.
+  # A fixed, throwaway KEK; real deployments supply it from the environment or Vault, and the code
+  # has no default (security/envelope.py). It must decode to exactly 32 bytes: base64 of 32 'A'
+  # bytes, matching apps/api/tests/conftest.py.
   NOCTORNAL_TOTP_KEK: QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=
 
 jobs:
@@ -120,11 +89,8 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      # docs/15 records this the hard way: the editing tools on the
-      # development machine have corrupted non-ASCII literals into NUL
-      # bytes more than once, and a NUL in a served .js file is a blank
-      # screen with nothing in the console. Cheap to check, expensive to
-      # debug.
+      # Editing tools have corrupted non-ASCII literals into NUL bytes (docs/15), and a NUL in a
+      # served .js file is a blank screen with nothing in the console.
       - name: No NUL bytes in source
         run: python scripts/check_source_hygiene.py
 
@@ -165,16 +131,11 @@ jobs:
       - name: Generated files match the definition
         run: python -m noctornal_ontology.generate --check
 
-  # TWO LEGS of one job (2026-09-24). The first installs every
-  # optional extra (telegram, yara) and runs the whole suite except the
-  # tests marked extras_absent, which are written for those libraries NOT
-  # being installed and would fail or skip here. The second is the
-  # configuration most deployments have, no optional extra at all, and
-  # runs exactly the marked tests. A matrix rather than a second job, so
-  # both legs get the same services, extensions, roles, buckets and
-  # migrations from ONE definition: a copy would drift, and the first sign
-  # would be a marked readiness test erroring on a missing table. The first
-  # leg keeps the job's old name, which is the check name branch rules use.
+  # Two legs of one job. The first installs every optional extra (telegram, yara) and runs the
+  # suite except the tests marked extras_absent; the second, the configuration most deployments
+  # have, installs none and runs only those. A matrix rather than a second job, so both legs get
+  # the same services, extensions, roles, buckets and migrations from one definition. The first
+  # leg's name is the check name branch rules use.
   test:
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
@@ -207,34 +168,10 @@ jobs:
         options: >-
           --health-cmd "redis-cli ping"
           --health-interval 5s --health-timeout 5s --health-retries 20
-      # MinIO is NOT a service container. It is started as a step below.
-      #
-      # It used to be `bitnami/minio:latest`, and on 2026-07-26 that stopped
-      # resolving: "manifest for bitnami/minio:latest not found". Bitnami
-      # moved their public catalogue and the tag went away, which failed CI
-      # on a repository whose own code had not changed.
-      #
-      # The obvious fix -- switch to the image infra/docker-compose.yml uses
-      # -- does not work as a service container: that image needs the
-      # argument `server /data`, and GitHub Actions service containers
-      # cannot specify a command. Bitnami was chosen originally precisely
-      # because its entrypoint needs none.
-      #
-      # So it runs as an explicit `docker run` instead. That gets the SAME
-      # image the compose file uses (CI and local should not disagree about
-      # what they are testing) and full control of the command.
-      #
-      # IT HAPPENED AGAIN ON 2026-09-16, to the replacement. Docker Hub's
-      # `minio/minio:latest` began answering "pull access denied for
-      # minio/minio, repository does not exist or may require 'docker
-      # login'" to an unauthenticated puller, and this step failed in one
-      # second on a commit that had touched documentation and nothing else.
-      # Both outages have the same shape: an unpinned tag on a registry
-      # somebody else controls. It then pulled from quay.io at a pinned
-      # RELEASE tag, until 2026-09-25, when quay.io, Docker Hub and dl.min.io
-      # all stopped serving MinIO's community builds to anonymous pullers.
-      # It now pulls the same pinned build, mirrored byte for byte to this
-      # project's GHCR namespace.
+      # MinIO is not a service container but a `docker run` step below: its image needs the
+      # argument `server /data`, which a service container cannot pass, and the step uses the
+      # same image as infra/docker-compose.yml. That is a pinned build mirrored byte for byte to
+      # this project's GHCR namespace, since public registries stopped serving it anonymously.
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
@@ -245,23 +182,13 @@ jobs:
 
       - name: Install
         run: |
-          # -c constraints.txt on every install (sec-pin-dependencies,
-          # 2026-09-23): the exact versions the release's suite passed on.
-          # Unpinned, this job tested whatever PyPI held that morning, which
-          # was not what a developer or an installer had, and a red build
-          # could arrive with no change in this repository to explain it.
-          # test_dependency_pins.py holds this file, the installers and the
-          # Dockerfile to it, and the installed environment to the pins.
+          # -c constraints.txt on every install: the exact versions the release's suite passed on,
+          # the same a developer or an installer has. test_dependency_pins.py holds this file, the
+          # installers and the Dockerfile to it, and the installed environment to the pins.
           pip install -c constraints.txt -r db/requirements.txt
-          # The `dev` extra is the declared test toolset. Listing pytest and
-          # httpx by hand here missed `qrcode`, the reference encoder the
-          # console's QR test checks against, so that test skipped and this
-          # job failed on the skip (2026-09-23).
-          #
-          # Plus the optional extras on the first leg (2026-09-24):
-          # "dev,telegram,yara" there, "dev" alone on the second. The
-          # extras' suites must RUN on the first leg, never skip, and the
-          # no-skip gate below holds them to it.
+          # The `dev` extra is the declared test toolset, so nothing the suite needs is listed by
+          # hand. The first leg adds the optional extras ("dev,telegram,yara"), whose suites must
+          # run there, never skip; the no-skip gate below holds them to it.
           pip install -c constraints.txt -e packages/ontology -e "apps/api[${{ matrix.extras }}]"
 
       - name: Start MinIO
@@ -285,15 +212,10 @@ jobs:
 
       - name: Start Mailpit
         run: |
-          # A service container, like MinIO, would be the obvious choice and
-          # is again the wrong one: the health check has to reach Mailpit's
-          # own /readyz, and `docker run` keeps CI on the same image and
-          # ports infra/docker-compose.yml uses.
-          #
-          # The SAME pinned tag as that file (sec-pin-dependencies,
-          # 2026-09-23), for the reason the MinIO step gives: `:latest` is a
-          # dependency on somebody else's release day. test_dependency_pins.py
-          # fails if the two tags ever differ.
+          # A step, not a service container: the health check has to reach Mailpit's own /readyz,
+          # and `docker run` keeps CI on the image and ports infra/docker-compose.yml uses. The
+          # same pinned tag as that file, since `:latest` is a dependency on somebody else's
+          # release day; test_dependency_pins.py fails if the two tags differ.
           docker run -d --name mailpit \
             -p 1025:1025 -p 8025:8025 \
             axllent/mailpit:v1.31.0
@@ -307,19 +229,13 @@ jobs:
           docker logs mailpit >&2
           exit 1
 
-      # The production Redis ACL (2026-10-02), for test_redis_limiter_acl.py's
-      # real-Redis leg. Not the `redis` service above: that one is the
-      # development shape, no user and no password, which the Lua agreement
-      # tests need. This is infra/production/compose.yml's own start script,
-      # rendered by apps/api/tests/acl_redis_support.py (compose's `$$`
-      # written back as `$`, plus one line adding the tenant user), run in
-      # the image that file names. Inside the container REDIS_URL names host
-      # `redis`, so the script's start check takes the branch production
-      # runs before it writes the ACL. A step rather than a service for the
-      # reason MinIO's is: a service container cannot be given a command.
-      # Both legs, like every other service here; the second deselects these
-      # tests, and starting it there too keeps one definition. After Install,
-      # because the renderer imports the test suite's compose reader.
+      # The production Redis ACL, for test_redis_limiter_acl.py's real-Redis leg; the `redis`
+      # service above is the development shape, with no user, which the Lua agreement tests need.
+      # This runs infra/production/compose.yml's own start script, rendered by
+      # apps/api/tests/acl_redis_support.py with the tenant user added, in the image that file
+      # names; REDIS_URL names host `redis` inside, so the script takes production's branch. A step
+      # because a service container cannot be given a command, and after Install because the
+      # renderer imports the suite's compose reader.
       - name: Start the ACL Redis
         run: |
           python apps/api/tests/acl_redis_support.py --tenant > /tmp/acl-redis-start.sh
@@ -343,64 +259,40 @@ jobs:
           docker logs acl-redis >&2
           exit 1
 
-      # CREATE EXTENSION needs superuser, which the migration role must
-      # never be -- so extensions are loaded out of band exactly as
-      # db/init does on a real deployment, and Alembic owns everything
+      # CREATE EXTENSION needs superuser, which the migration role must never be, so extensions
+      # are loaded out of band as db/init does on a real deployment, and Alembic owns everything
       # else (decision 17).
       - name: Load extensions
         run: |
           PGPASSWORD=dev_only_change_me psql -h localhost -U noctornal \
             -d noctornal -v ON_ERROR_STOP=1 -f db/init/00-extensions.sql
 
-      # The OTHER half of db/init, by name for the same reason as the step
-      # above: this job seeds a service container and never mounts that
-      # directory, so the postgres entrypoint never sources 10-app-role.sh
-      # and `noctornal_app` would not exist. Without it
-      # apps/api/tests/test_app_role_privileges_pg.py skips its whole file,
-      # and "No tests were skipped" below fails the build.
-      #
-      # BEFORE "Migrate to head", which is the load-bearing part: migration
-      # 0060 grants a role that already exists and is a complete no-op when
-      # it does not, so a role created after the migration is a role 0060
-      # has already declined to grant. db/README.md records the ordering.
-      #
-      # The script is RUN, not copied. A hand-written CREATE ROLE here would
-      # be a second declaration of the role's attributes, and it would drift
-      # silently in one direction -- the test checks the five cluster powers
-      # and LOGIN, not NOINHERIT. `sh <file>` rather than `./<file>` because
-      # it is committed 100644 deliberately: the postgres entrypoint SOURCES
-      # a non-executable init script, and git on Windows records no execute
-      # bit to lose.
-      #
-      # PGHOST and PGPASSWORD are the whole difference from a real
-      # deployment, where this runs inside the postgres container against a
-      # unix socket that does not exist on the runner.
+      # The other half of db/init, run by name: this job never mounts that directory, so the
+      # postgres entrypoint never sources 10-app-role.sh. Before "Migrate to head", because
+      # migration 0060 grants only a role that already exists (db/README.md). The script is run,
+      # not copied, so the role is declared once; `sh <file>` because it is committed 100644 on
+      # purpose, as the entrypoint sources a non-executable init script. PGHOST and PGPASSWORD are
+      # the only difference from a deployment, which runs it in the container over a unix socket.
       - name: Create the least-privilege runtime role
         env:
           PGHOST: localhost
           PGPASSWORD: dev_only_change_me
           POSTGRES_USER: noctornal
           POSTGRES_DB: noctornal
-          # A throwaway like every other credential here, and unused: the
-          # suite never connects AS this role. It reads the catalog over the
-          # owner's connection, because ten *_pg files need ownership to run
-          # ALTER TABLE ... DISABLE TRIGGER -- which is precisely what this
-          # role exists to be unable to do.
+          # A throwaway, and unused: the suite reads the catalog over the owner's connection,
+          # since the *_pg files that run ALTER TABLE ... DISABLE TRIGGER need ownership, which
+          # this role exists to lack.
           NOCTORNAL_APP_DB_PASSWORD: dev_only_change_me
-          # S1 (2026-09-25): the same script creates the system role
-          # noctornal_worker (BYPASSRLS) when this is set, before "Migrate
-          # to head" so migration 0108 grants it; the row-level security
+          # The same script creates the system role noctornal_worker (BYPASSRLS) when this is
+          # set, before "Migrate to head" so migration 0108 grants it; the row-level security
           # tests reach it with SET ROLE and fail, not skip, without it.
           NOCTORNAL_WORKER_DB_PASSWORD: dev_only_change_me
         run: sh db/init/10-app-role.sh
 
-      # The egress proxy's role, for the same reasons and in the same place
-      # (2026-09-24): BEFORE "Migrate to head", because the migration
-      # that grants to it declines to grant a role that does not exist yet.
-      # The script is db/init/20-egress-role.sh, the pattern of
-      # 10-app-role.sh; where there is no such file this step does
-      # nothing. The same env as the step above, because that pattern's
-      # psql has no --host of its own and finds the server through PGHOST.
+      # The egress proxy's role, before "Migrate to head" for the same reason: the migration that
+      # grants to it skips a role that does not exist yet. db/init/20-egress-role.sh follows
+      # 10-app-role.sh, and its psql finds the server through PGHOST; without the file the step
+      # does nothing.
       - name: Create the egress proxy role
         env:
           PGHOST: localhost
@@ -410,24 +302,11 @@ jobs:
         run: |
           if [ -f db/init/20-egress-role.sh ]; then sh db/init/20-egress-role.sh; fi
 
-      # The evidence bucket needs OBJECT LOCK, which cannot be enabled
-      # after creation -- getting it wrong here would make the WORM tests
-      # pass against a bucket with no WORM.
-      # `mc` came from https://dl.min.io until 2026-09-16, when that host
-      # began answering 410 Gone: "The open-source MinIO Server, MinIO
-      # Client (mc) and MinIO KES projects are archived and no longer
-      # maintained ... These files are no longer served from this site."
-      # `curl` without `-f` saves that notice as the binary and exits 0, so
-      # the failure arrived sixty seconds later as thirty alias retries.
-      #
-      # It runs from the same pinned image the compose files use instead.
-      # `MC_HOST_<alias>` is the alias-free form, which matters here
-      # because each `docker run --rm` is a fresh container and an alias
-      # written by one would not survive to the next.
-      #
-      # THE ARCHIVING IS A DECISION FOR THE OWNER, not a CI detail: this
-      # build's WORM evidence store is now an unmaintained upstream that
-      # will receive no security fix. Recorded in docs/17 and docs/16 C6.
+      # The evidence bucket needs object lock, which cannot be enabled after creation: wrong here,
+      # the WORM tests would pass against a bucket with no WORM. `mc` runs from the pinned image
+      # the compose files use, through `MC_HOST_<alias>`, because each `docker run --rm` is a fresh
+      # container and an alias would not survive to the next. Upstream MinIO is archived and gets
+      # no security fixes, a risk docs/17 and docs/16 record.
       - name: Create the object-store buckets
         run: |
           mc() {
@@ -442,44 +321,25 @@ jobs:
           mc mb --ignore-existing --with-lock local/noctornal-evidence
           mc retention set --default GOVERNANCE 365d local/noctornal-evidence
           mc mb --ignore-existing local/noctornal-raw
-          # R10 (2026-07-26): the samples bucket. CI had the same gap the
-          # compose file did -- nothing created it, so the first test to
-          # exercise a real sample upload would have got NoSuchBucket.
-          # NOT --with-lock: docs/11's rejection path must be able to
-          # destroy sample bytes, which an object lock would prevent.
+          # The samples bucket, not --with-lock: docs/11's rejection path must be able to destroy
+          # sample bytes, which an object lock would prevent.
           mc mb --ignore-existing local/noctornal-samples
-          # F2 (2026-09-22): rejected samples are PRESERVED here by default,
-          # under a per-object legal hold, so this one IS --with-lock and has
-          # no default retention. test_sample_preservation_pg.py writes held
-          # objects to it and needs the lock to be real, not assumed.
+          # Rejected samples are preserved here by default under a per-object legal hold, so this
+          # one is --with-lock, with no default retention; test_sample_preservation_pg.py needs
+          # the lock to be real.
           mc mb --ignore-existing --with-lock local/noctornal-preserved
-          # Raw markup of collected forum pages (2026-09-24). NOT
-          # --with-lock: it is deleted with its document.
+          # Raw markup of collected forum pages. Not --with-lock: it is deleted with its document.
           mc mb --ignore-existing local/noctornal-collect-raw
 
       - name: Migrate to head
         run: alembic upgrade head
 
-      # db/schema.sql is a GENERATED mirror of the schema at head. Until
-      # 2026-09-09 it was maintained by hand, named five of the ten schemas
-      # the migrations create, and nothing compared it to anything -- so the
-      # one file readers were sent to for "the whole schema" described a
-      # database six weeks gone. Same shape as the ontology drift gate:
-      # regenerate and diff against the committed file.
-      #
-      # It runs against the FIRST upgrade, before the round-trip below, so
-      # a residue left by a non-reversible migration fails the round-trip
-      # step under its own name rather than showing up here as "schema
-      # drift" -- a failure reported as the wrong thing.
-      #
-      # The dump uses the pg_dump INSIDE the postgres service container --
-      # the same pgvector/pgvector:pg16 image the compose file and a
-      # developer's WSL stack run -- rather than whatever client version the
-      # runner image happens to ship, so the two sides cannot disagree on
-      # pg_dump's own formatting.
-      #
-      # On the first leg only: the schema does not depend on which extras
-      # are installed, and the second leg is there to run the marked tests.
+      # db/schema.sql is a generated mirror of the schema at head: regenerate and diff against the
+      # committed file, as the ontology drift gate does. Against the first upgrade, before the
+      # round-trip, so a non-reversible migration's residue fails the round-trip under its own
+      # name. pg_dump runs inside the postgres service container (the pgvector:pg16 image the
+      # compose file uses) so both sides agree on its formatting. First leg only: the schema does
+      # not depend on the extras.
       - name: Schema mirror matches the migrations
         if: ${{ matrix.full }}
         env:
@@ -497,31 +357,21 @@ jobs:
           alembic upgrade head
           alembic current
 
-      # `-m` selects by the extras_absent marker (2026-09-24): the
-      # whole suite less the marked tests on the first leg, the marked
-      # tests alone on the second. A leg that selects nothing fails, which
-      # pytest's own exit status 5 already says.
+      # `-m` selects by the extras_absent marker: the whole suite less the marked tests on the
+      # first leg, the marked tests alone on the second. A leg that selects nothing fails (pytest
+      # exit status 5).
       - name: Tests
         run: |
-          # One run, kept with its skip reasons for the gate below
-          # (2026-09-25). The gate used to run the whole suite a second time
-          # on the database this run had written to, and since 0083, 0085 and
-          # 0086 refuse their downgrade over append-only history, the
-          # migration round-trip tests cannot pass on a used database.
-          # pipefail: the step's status is pytest's, not tee's.
+          # One run, kept with its skip reasons for the gate below: migrations 0083, 0085 and 0086
+          # refuse their downgrade over append-only history, so the round-trip tests cannot pass
+          # on a used database. pipefail: the step's status is pytest's, not tee's.
           set -o pipefail
           pytest apps/api/tests packages/ontology/tests -q -rs -m "${{ matrix.select }}" 2>&1 | tee /tmp/tests.out
 
-      # docs/09 Phase 0 asks for "a chain verification job" and there was
-      # none -- the audit chain was written by a trigger and never once
-      # recomputed, which makes tamper-evidence a claim rather than a
-      # control. This is that job.
-      #
-      # It runs AFTER the suite so it verifies a chain with real traffic in
-      # it: every audited action the tests performed is in this table.
-      # Verifying an empty chain would pass and prove nothing, so the step
-      # fails if nothing was checked. First leg only: the second runs too
-      # few tests to leave a chain worth verifying.
+      # The audit chain verification job (docs/09): a chain that is never recomputed makes
+      # tamper-evidence a claim rather than a control. After the suite, so the chain has real
+      # traffic in it; an empty chain would pass and prove nothing, so the step fails if nothing
+      # was checked. First leg only: the second leaves too short a chain to be worth verifying.
       - name: Audit chain verifies
         if: ${{ matrix.full }}
         run: |
@@ -537,13 +387,10 @@ jobs:
               print("::error::No audit events to verify. The suite ran "
                     "without writing any, or the chain was truncated.")
               sys.exit(1)
-          # A fork is two rows claiming one predecessor. Until migration 0149
-          # (2026-10-03) concurrent writers made them from ordinary traffic,
-          # because `seq` was drawn before the chaining trigger took its
-          # lock, so those are only noticed. A fork whose claimants were all
-          # written since 0149 cannot come from honest traffic and is in
-          # `report.breaks`, so the loop below fails the build on it. This
-          # database is built by the migrations from nothing, so every fork
+          # A fork is two rows claiming one predecessor. Rows written before migration 0149 can
+          # fork under honest concurrent traffic (`seq` was drawn before the chaining trigger took
+          # its lock), so those are only noticed; a fork among rows written since is in
+          # `report.breaks` and fails the build. This database is built from nothing, so every fork
           # here is the latter kind.
           print(f"tail seq {report.tail_seq}, hash {report.tail_row_hash}")
           if report.forks:
@@ -556,31 +403,15 @@ jobs:
           sys.exit(1 if report.breaks else 0)
           PY
 
-      # The same job for the OTHER tamper-evident ledger. core.evidence_custody
-      # was hash-chained in 0024 and, until 2026-09-02, nothing recomputed it
-      # either -- on the record that is actually produced to a court. Runs
-      # after the suite for the same reason: the evidence, provenance and e2e
-      # suites write real custody rows, and (since the same date) their
-      # teardowns leave them in place rather than deleting them with the
-      # trigger stood down, so this verifies a chain with traffic in it.
-      #
-      # `checked == 0` is a failure, not a pass: an empty ledger verifies
-      # trivially. What that catches is the SUITES having stopped writing
-      # custody rows (or the ledger having been emptied outright) -- it is
-      # NOT a truncation check, and until 2026-09-02 the comment and the
-      # error message here both said it was. A partial truncation leaves
-      # `checked` high and every check green: deleting the newest k rows
-      # orphans nothing, so the verifier reports intact. See "What this
-      # cannot see" in custody_verify.py.
-      #
-      # `tail_row_hash` is printed for that reason and no other: it is the
-      # value an operator records out of band and compares against the next
-      # run, and it is the only thing that reveals a tail deletion. This
-      # workflow does not store it either -- printing it into the log is
-      # where the chain of custody for the chain of custody currently ends.
-      #
-      # The anchor (`genesis_count`) is checked explicitly because it is the
-      # one removal the relative checks CAN see. First leg only, as above.
+      # The same for the other tamper-evident ledger, core.evidence_custody (hash-chained since
+      # migration 0024), the record produced to a court. After the suite, whose evidence,
+      # provenance and e2e tests leave real custody rows in place. `checked == 0` fails: it catches
+      # suites that write no custody rows, or an emptied ledger, but not a partial truncation,
+      # which leaves every check green (see "What this cannot see" in custody_verify.py). So
+      # `tail_row_hash` is printed for an operator to record out of band and compare on the next
+      # run, the only thing that reveals a tail deletion; the workflow does not store it. The
+      # anchor (`genesis_count`) is checked explicitly: the one removal the relative checks see.
+      # First leg only, as above.
       - name: Custody chain verifies
         if: ${{ matrix.full }}
         run: |

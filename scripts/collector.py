@@ -1,74 +1,45 @@
-"""The collector: the one process that holds the persona key (ROADMAP-REMAINING
-"A collector process", 2026-10-02).
+"""The collector: the one process that holds the persona key.
 
-Everything that needs a persona credential runs here and nowhere else in
-production: the persona acts the API queues in `collect.persona_act` (a
-Telegram chat looked up, joined, its membership checked or marked, rebound;
-a Poll now of a source a persona reads), and the scheduled collection polls
-(`scripts/collection_poll.py`, which this starts as a child on its own
-schedule). The API holds no persona key and cannot open a persona
-credential; the cron loop holds none either.
+Everything that needs a persona credential runs here and nowhere else in production: the
+persona acts the API queues in `collect.persona_act` (a Telegram chat looked up, joined, its
+membership checked or marked, rebound; a Poll now of a source a persona reads) and the scheduled
+collection polls (`scripts/collection_poll.py`, started as a child). The API and the cron loop
+hold no persona key and cannot open a persona credential.
 
     python scripts/collector.py            # run: acts as they arrive, polls on schedule
     python scripts/collector.py --once     # one pass of each, then exit with a code
 
-No framework and no broker: Postgres is the queue. A claim is `FOR UPDATE
-SKIP LOCKED`, the API's `pg_notify` wakes this loop within a second, and
-without a notification it looks again every `--wait` seconds. One
-connection, as the system role (PERSONA_ACTS).
+Postgres is the queue: a claim is `FOR UPDATE SKIP LOCKED`, the API's `pg_notify` wakes this
+loop within a second, and without one it looks again every `--wait` seconds. One connection, as
+the system role (PERSONA_ACTS).
 
-## What it re-checks
+Each act is re-checked as the person who asked, when it runs: their session, their global
+permissions through the route's own gate with the second factor the request carried, the
+blocking readiness checks and their ceiling; then the act's persona gate (visible, usable, free,
+in its hours, a live two-person collection authority, the persona's own route through the egress
+proxy). See persona_acts.py.
 
-Everything, as the person who asked, at the moment it runs an act:
-their session, their global permissions through the route's own gate with
-the second factor the request carried, the blocking readiness checks, their
-ceiling now; then the act's own persona gate (visible, usable, free, in its
-hours, a live two-person collection authority, the persona's own route
-through the egress proxy). See persona_acts.py.
+`collection_poll.py` runs as a child every `--poll-every` seconds (300 by default), so a long
+poll pass never holds back an act; each source's jittered `next_due_at` still decides when it is
+polled. The child inherits this environment, so it alone shares the persona key and the
+collector's mark. Its exit code is logged and the loop goes on.
 
-## The scheduled polls
+Output is one line of counts per pass that did anything, never an act's parameters, a source, a
+persona or an error's text: the log has no label, and the act row carries the outcome behind the
+API's ceiling. With `--once` the exit is 0 when nothing failed, 1 when an act failed or the poll
+pass exited non-zero, and 2 when this process may not run as the collector (the persona key or
+the mark missing in production, an unusable ring).
 
-`collection_poll.py` runs as a CHILD process, once every `--poll-every`
-seconds (300 by default, the old cron's resolution), so a long poll pass
-never holds back an act an analyst is waiting for. Each source's own
-jittered `next_due_at` still decides when it is polled; this only decides
-how often to LOOK. The child inherits this environment, so it holds the
-persona key and the collector's mark, and nothing else does. Its exit code
-is logged and the loop goes on, as the cron loop always did.
+SIGTERM finishes the act in hand and claims no other: the stop flag is read before every claim,
+so compose's 180 second `stop_grace_period` covers one act (a Telegram poll's 120 second
+session) plus the child's 30 seconds, and a stop never leaves an act RUNNING to be failed as
+"outcome unknown". The poll child is sent SIGTERM and has no handler, so a pass in progress ends
+at once; one that does not stop is killed after the 30 seconds.
 
-## What it prints
-
-One line per pass that did anything: `acts claimed=2 done=1 refused=1 ...`,
-counts only. Never an act's parameters, a source, a persona or an error's
-text: the log has no label and those do (collection_poll.py says why at
-length). The act row carries the outcome, behind the API's ceiling.
-
-## Exit codes
-
-`--once`: 0 when nothing failed, 1 when an act FAILED or the poll pass
-exited non-zero, 2 when this process may not run as the collector (the
-persona key or the mark missing in production, an unusable ring). Without
-`--once` it runs until stopped.
-
-## Stopping, and the heartbeat (2026-10-03)
-
-SIGTERM finishes the act in hand and claims no other: the stop flag is asked
-before EVERY claim, not once per pass of twenty, so compose's
-`stop_grace_period` (180 seconds) covers one act (a Telegram poll's whole
-session is 120) with the child's 30 seconds added as a margin, and the stop
-never leaves an act RUNNING for a sweep to fail as "outcome unknown". The
-poll child is sent SIGTERM and scripts/collection_poll.py installs no handler
-for it, so a scheduled poll pass in progress ends at once and is not
-finished; the 30 seconds only matter to a child that does not stop, which is
-then killed (2026-10-03).
-
-Started, it writes a heartbeat row (migration 0157) with the ring verdict it
-reached: how many persona credentials it sampled and how many its key ring
-would not open (a key changed under its id). It moves the heartbeat every
-30 seconds while it runs. The readiness row `collector_split` reads it, so a
-collector that is stopped or never started is red with an empty queue, and a
-wrong key is red by name. `--once` writes none: a heartbeat is the serving
-loop's.
+Started, it writes a heartbeat row (migration 0157) with its ring verdict, how many persona
+credentials it sampled and how many its key ring would not open, and moves it every 30 seconds.
+The readiness row `collector_split` reads it, so a collector stopped or never started is red even
+with an empty queue, and a wrong key is red by name. `--once` writes none.
 """
 from __future__ import annotations
 
@@ -97,7 +68,7 @@ DEFAULT_LIMIT = 20
 
 
 def connect():
-    """As the system role (S1). Named `connect` so a test can replace it."""
+    """As the system role. Named `connect` so a test can replace it."""
     from noctornal_api.db import SystemPurpose, connect_system
     return connect_system(SystemPurpose.PERSONA_ACTS)
 
@@ -152,8 +123,8 @@ CHILD_STOP_SECONDS = 30
 
 
 def _stop_child(child) -> None:
-    """End the poll child: terminate, wait, then kill what will not stop
-    (a TimeoutExpired used to escape and leave the child behind)."""
+    """End the poll child: terminate, wait, then kill what will not stop, so a
+    TimeoutExpired never leaves the child behind."""
     if child is None or child.poll() is not None:
         return
     child.terminate()
@@ -171,14 +142,10 @@ def _start_poll():
 def main(argv: list[str] | None = None, *, conn=None, start_poll=None,
          adapters=None, transport_factory=None,
          stop: threading.Event | None = None, clock=time.monotonic) -> int:
-    # First, before the arguments are read or anything is connected to (docs/17
-    # F52 and infra-12, 2026-10-02 and 2026-10-03): the one helper every job
-    # calls. Under NOCTORNAL_ENV=production a published credential or the
-    # schema owner's refuses the collector, which never receives the owner's
-    # credential (compose gives it secrets.env, egress-client.env and
-    # collector.env only). The persona key half is not asked of it: the key
-    # is the collector's by design, and `refusal()` below makes the
-    # collector's own half. Exit 2, as for every job and as `refusal()` does.
+    # First, before the arguments are read or anything is connected to: the one helper every job
+    # calls. In production a published credential or the schema owner's refuses the collector.
+    # The persona key half is not asked of it, since the key is the collector's by design;
+    # `refusal()` below makes the collector's own half. Exit 2, as for every job.
     refusals = refuse_unsafe_job_environment("collector", holds_persona_key=True)
     if refusals:
         print("\n".join(refusals), file=sys.stderr)
@@ -219,8 +186,8 @@ def main(argv: list[str] | None = None, *, conn=None, start_poll=None,
         signal.signal(signal.SIGTERM, _stop)
     instance = persona_acts.instance_name()
     try:
-        # S2, the egress proxy: a production process with outbound uses and
-        # no proxy stops here, as the API and the cron loop do.
+        # A production process with outbound uses and no egress proxy stops here, as the API and
+        # the cron loop do.
         from noctornal_api.egress_routes import enforce_production_egress
         try:
             enforce_production_egress(conn)

@@ -1,42 +1,36 @@
-"""Prohibited-content screening of samples by exact hash (F13, 2026-09-24).
+"""Prohibited-content screening of samples by exact hash.
 
-docs/16 L1 item 5 and C3: whether this deployment may hold known-material
-hash sets at all is counsel's question. So nothing is compared until an
-operator has recorded TWO authorities: the ingest policy the Lab already
-requires (`samples.policy_declared`) and counsel's determination that this
-deployment may hold hash lists (`NOCTORNAL_HASH_SET_AUTHORITY`, copied onto
-every list at import so a later change of the variable does not rewrite
-history). Each list also carries its own licence reference.
+docs/16 L1 item 5 and C3: whether this deployment may hold known-material hash sets at all is counsel's
+question. So nothing is compared until an operator has recorded two authorities: the ingest policy the Lab
+already requires (`samples.policy_declared`) and counsel's determination that this deployment may hold hash
+lists (`NOCTORNAL_HASH_SET_AUTHORITY`, copied onto every list at import so a later change of the variable
+does not rewrite history). Each list also carries its own licence reference.
 
 ## What a match does
 
-Every held and incoming sample is compared, by exact md5, sha1 and sha256,
-with the lists that are active. A match isolates the sample at once and
-for good: it leaves every Lab reader (one line in `samples.LAB_EXCLUSIONS`),
-is never downloadable, retrievable or sent anywhere, and its bytes are
-preserved under a legal hold (or, for a submission under a deployment that
-destroys rejected material, never stored). The Security Officers and the
-designated person are alerted without content, the case owner is told at
-the sample's own labels that a sample was withdrawn, and an append-only
-record is kept (`lab.screening_result`).
+Every held and incoming sample is compared, by exact md5, sha1 and sha256, with the lists that are active.
+A match isolates the sample at once and for good: it leaves every Lab reader (one line in
+`samples.LAB_EXCLUSIONS`), is never downloadable, retrievable or sent anywhere, and its bytes are preserved
+under a legal hold (or, for a submission under a deployment that destroys rejected material, never stored).
+The Security Officers and the designated person are alerted without content, the case owner is told at the
+sample's own labels that a sample was withdrawn, and an append-only record is kept
+(`lab.screening_result`).
 
 ## What it does not claim
 
     Screening compares exact hashes against the lists this deployment
     imported. No match does not mean the material is lawful to hold.
 
-Exact hashes are trivially evaded (re-encoding, cropping, one appended
-byte), archive members are not expanded, and MD5 and SHA-1 collisions can
-be crafted, so a false match is possible and permanent in the product. The
-derived gaps, the console and the readiness row all say so.
+Exact hashes are trivially evaded (re-encoding, cropping, one appended byte), archive members are not
+expanded, and MD5 and SHA-1 collisions can be crafted, so a false match is possible and permanent in the
+product. The derived gaps, the console and the readiness row all say so.
 
 ## Where the work runs
 
-Screening runs in `submit()` after the hashes are computed and before the
-duplicate check and any write, and in `rescan`, which the list import
-starts in the request (database work only, budgeted) and the cron worker
-(scripts/sample_screen.py) runs with the byte moves. A hash lookup needs no
-bytes, so none of this decrypts anything.
+Screening runs in `submit()` after the hashes are computed and before the duplicate check and any write,
+and in `rescan`, which the list import starts in the request (database work only, budgeted) and the cron
+worker (scripts/sample_screen.py) runs with the byte moves. A hash lookup needs no bytes, so none of this
+decrypts anything.
 """
 from __future__ import annotations
 
@@ -67,8 +61,8 @@ CATEGORY_WORDS = {"KNOWN_CSAM": "known child sexual abuse material",
                   "OTHER_PROHIBITED": "other prohibited material"}
 NOT_SCREENED, NO_MATCH, MATCH = "NOT_SCREENED", "NO_MATCH", "MATCH"
 OUTCOMES = (NOT_SCREENED, NO_MATCH, MATCH)
-#: ARCHIVE_MEMBER (0159, phase 8 2026-10-02): isolated because a member of
-#: its archive tree matched; the result's detail names which.
+#: ARCHIVE_MEMBER (0159): isolated because a member of its archive tree matched; the result's detail names
+#: which.
 TRIGGERS = ("SUBMISSION", "LIST_IMPORT", "RESCAN", "ARCHIVE_MEMBER")
 REVIEW_ACTIONS = ("ACKNOWLEDGED", "REFERRED", "FALSE_POSITIVE_SUSPECTED",
                   "DISPOSED_OUTSIDE", "NOTE")
@@ -96,10 +90,8 @@ SCREENING_REJECT_REASON = (
 EXACT_HASH_SENTENCE = (
     "Screening compares exact hashes against the lists this deployment "
     "imported. No match does not mean the material is lawful to hold.")
-#: Corrected 2026-10-03: a zip or tar archive the Lab
-#: expands has each member screened as a sample of its own; what is still
-#: not compared is a RAR or 7-Zip archive's members and any entry the
-#: expansion refused with bytes behind it.
+#: A zip or tar archive the Lab expands has each member screened as a sample of its own; what is not
+#: compared is a RAR or 7-Zip archive's members and any entry the expansion refused with bytes behind it.
 ARCHIVE_MEMBERS_SENTENCE = (
     "Archive members are screened only where the Lab expands the archive "
     "(zip and tar kinds, each member a sample of its own); for any other "
@@ -124,7 +116,6 @@ PASS_BUDGET_S = 240
 POLICY_PASS_WINDOW = timedelta(hours=24)
 #: The file types whose members are not expanded, so not screened.
 ARCHIVE_TYPES = frozenset({"ZIP or OOXML", "RAR", "7-Zip", "gzip",
-                           # phase 8, 2026-10-02: the kinds the Lab now types.
                            "bzip2", "xz", "tar"})
 
 
@@ -289,8 +280,7 @@ def submission_disposition_for(setting: str | None, case_held: bool
 
 
 def screening_gaps(outcome: str, file_type: str | None) -> list[dict]:
-    """The derived gaps, in F11's vocabulary, computed when a sample is read
-    and never stored: a later import changes them."""
+    """The derived gaps, computed when a sample is read and never stored: a later import changes them."""
     if outcome == NOT_SCREENED:
         gaps = [{"step": "prohibited_content_screening", "status": "unavailable",
                  "reason": "no prohibited-content hash list is loaded; nothing "
@@ -380,13 +370,12 @@ SAMPLE_MAY_LEAVE_SENTENCES = {
 
 def sample_may_leave(conn: psycopg.Connection, sample_id: UUID
                      ) -> tuple[bool, str]:
-    """THE reader of "may this sample's bytes or hashes leave the host",
-    for the sandbox (a target whose exposure is not NONE) and the lookups.
+    """The reader of "may this sample's bytes or hashes leave the host", for the sandbox (a target whose
+    exposure is not NONE) and the lookups.
 
-    True only when the ingest policy holds, a list is active, the sample
-    is not REJECTED, and it was screened NO_MATCH against every active
-    list (its seq at or above the newest active list's; a retired newest
-    list lowers the bar, never strands a sample). The reason is a key of
+    True only when the ingest policy holds, a list is active, the sample is not REJECTED, and it was
+    screened NO_MATCH against every active list (its seq at or above the newest active list's; a retired
+    newest list lowers the bar, never strands a sample). The reason is a key of
     SAMPLE_MAY_LEAVE_SENTENCES."""
     declared, _detail = _policy()
     if not declared:
@@ -413,19 +402,15 @@ def sample_may_leave(conn: psycopg.Connection, sample_id: UUID
 
 
 def bytes_may_move(conn: psycopg.Connection, sample_id: UUID) -> bool:
-    """False when an ACTIVE list matches this sample now, asked just in
-    time by every path that moves or reads its bytes (download, ticket,
-    retrieval, a NONE sandbox, static triage).
+    """False when an active list matches this sample now, asked just in time by every path that moves or
+    reads its bytes (download, ticket, retrieval, a NONE sandbox, static triage).
 
-    lab-2 (2026-10-03): those paths excluded only screening_outcome =
-    'MATCH', so a list imported while a pass was running (the import's own
-    pass skips on the lock) or past a pass's budget did not bind until a
-    later pass reached the sample, and its bytes were served meanwhile.
-    A sample already screened NO_MATCH at or above the newest active list
-    costs one read; one that is behind costs `screen_digests`' three index
-    lookups. A match is not isolated here (the pass does that, with its
-    custody and notices); the caller refuses as it refuses a sample it
-    cannot see. No active list leaves the answer as it was: True."""
+    Those paths exclude only screening_outcome = 'MATCH', so without this a list imported while a pass was
+    running (the import's own pass skips on the lock) or past a pass's budget would not bind until a later
+    pass reached the sample, and its bytes would be served meanwhile. A sample already screened NO_MATCH at
+    or above the newest active list costs one read; one that is behind costs `screen_digests`' three index
+    lookups. A match is not isolated here (the pass does that, with its custody and notices); the caller
+    refuses as it refuses a sample it cannot see. No active list leaves the answer True."""
     row = conn.execute(
         """SELECT s.screening_outcome, s.screening_list_seq,
                   (SELECT max(seq) FROM lab.screening_list
@@ -456,7 +441,7 @@ def submission_disposition(conn: psycopg.Connection, *, case_id: UUID | None
     setting, _problem = disposition_setting()
     held = False
     if case_id is not None:
-        # A hold is a lock fact (iam.case_facts, S1 2026-09-25).
+        # A hold is a lock fact (iam.case_facts).
         row = conn.execute("SELECT legal_hold FROM iam.case_facts(%s)",
                            (case_id,)).fetchone()
         held = bool(row and row[0])
@@ -502,10 +487,9 @@ def state(conn: psycopg.Connection, *, with_last_pass: bool = True
     # `NOT s.data_key_destroyed`, not `octet_length(s.data_key_ciphertext) > 0`: the sealed column is
     # refused to the request role (0180), and this runs on that role's connection too, in the blocking
     # readiness probes (`blocking_failures`, `blocking_state`). The generated column says the same thing.
-    # `absent` counts only the absences no review has answered: the worker
-    # stops retrying the move after two looks, and only the officer's
-    # recorded review, made after the absence was recorded, ends the
-    # question (F13, 2026-09-24).
+    # `absent` counts only the absences no review has answered: the worker stops retrying the move after
+    # two looks, and only the officer's recorded review, made after the absence was recorded, ends the
+    # question.
     behind, pending, absent = conn.execute(
         """SELECT count(*) FILTER (WHERE s.screening_outcome <> 'MATCH'
                                      AND %(max)s::bigint IS NOT NULL
@@ -537,8 +521,7 @@ def state(conn: psycopg.Connection, *, with_last_pass: bool = True
             WHERE purge_requested AND entries_purged_at IS NULL""").fetchone()[0]
     last = None
     if with_last_pass:
-        # Through the fact function (0167), as the policy block reads it,
-        # so the fact has one reader (F51, 2026-10-02).
+        # Through the fact function (0167), as the policy block reads it, so the fact has one reader.
         last = conn.execute(
             "SELECT audit.last_screening_pass(interval '30 days')").fetchone()[0]
     algorithms = tuple(sorted({a for x in active for a in x["algorithms"]}))
@@ -693,9 +676,8 @@ class ScreeningService:
         reason = (reason or "").strip()
         if len(reason) < 10:
             raise ScreeningError("say why the list is retired, in a sentence")
-        # One transaction: a retirement never stands without its audit row
-        # (the router's connection autocommits each statement;
-        # 2026-09-24).
+        # One transaction: a retirement never stands without its audit row (the router's connection
+        # autocommits each statement).
         with self._c.transaction():
             row = self._c.execute(
                 """UPDATE lab.screening_list
@@ -775,16 +757,13 @@ class ScreeningService:
 
     def rescan(self, *, trigger: str, actor_id: UUID | None,
                move_bytes: bool, budget_seconds: float) -> dict:
-        """Screen every held sample not yet screened against the newest
-        active list, isolate each match, purge what is asked for and, in
-        the worker only (`move_bytes`), move matched bytes into the
+        """Screen every held sample not yet screened against the newest active list, isolate each match,
+        purge what is asked for and, in the worker only (`move_bytes`), move matched bytes into the
         preservation store.
 
-        EVERY row is a candidate whatever its state (live, rejected,
-        preserved, destroyed): the record of what was held is screened, not
-        only what is live. A keyset cursor walks the rows once per pass, so
-        a match whose isolation fails is left for the next pass rather than
-        selected again. One pass at a
+        Every row is a candidate whatever its state (live, rejected, preserved, destroyed): the record of
+        what was held is screened, not only what is live. A keyset walk covers the rows once per pass, so a
+        match whose isolation fails is left for the next pass rather than selected again. One pass at a
         time, under a session advisory lock."""
         if trigger not in ("LIST_IMPORT", "RESCAN"):
             raise ValueError("a pass is started by LIST_IMPORT or RESCAN")
@@ -867,11 +846,9 @@ class ScreeningService:
                     counters["failed"] += 1
                     log.warning("isolating matched sample %s failed; the next "
                                 "pass retries it", sample_id, exc_info=True)
-        # Archive trees whose isolation stopped half way (a sibling locked
-        # past the timeout, a crash after the matched row committed): the
-        # matched sample is no longer a candidate above, so the retry the
-        # log line promises is made here, from the database alone (2026-10-03). Runs even
-        # with no active list.
+        # Archive trees whose isolation stopped half way (a sibling locked past the timeout, a crash after
+        # the matched row committed): the matched sample is no longer a candidate above, so the retry the
+        # log line promises is made here, from the database alone. Runs even with no active list.
         from noctornal_api.lab_archive import complete_isolations
         trees = complete_isolations(self._samples, ends=ends)
         counters["trees_completed"] = trees["completed"]
@@ -913,11 +890,11 @@ class ScreeningService:
 
     def results(self, *, clearance: str, compartments, unreviewed_only: bool = False,
                 limit: int = 200) -> list[dict]:
-        """The officer's label-free list of matches: a hash prefix, the time,
-        the list names, the disposition then and now, the alert state and
-        the reviews. Newest first. By an explicit owner decision the officer
-        sees every match whatever its labels; `you_may_open` says whether
-        the full record is within the officer's ceiling."""
+        """The officer's label-free list of matches: a hash prefix, the time, the list names, the
+        disposition then and now, the alert state and the reviews. Newest first.
+
+        By design the officer sees every match whatever its labels; `you_may_open` says whether the full
+        record is within the officer's ceiling."""
         from noctornal_api.samples import gate_params, lab_gate
         rows = self._c.execute(
             f"""SELECT r.id, r.screened_at, r.trigger, r.sha256,
@@ -1050,9 +1027,10 @@ class ScreeningService:
 
     def review(self, result_id: UUID, *, actor_id: UUID, action: str,
                reference: str | None = None, note: str | None = None) -> dict:
-        """Record the officer's review. DISPOSED_OUTSIDE records that counsel
-        directed disposal of the held copy outside the product; it changes
-        nothing here (the storage administrator lifts the hold)."""
+        """Record the officer's review.
+
+        DISPOSED_OUTSIDE records that counsel directed disposal of the held copy outside the product; it
+        changes nothing here (the storage administrator lifts the hold)."""
         if action not in REVIEW_ACTIONS:
             raise ScreeningError(
                 f"the review action is one of {', '.join(REVIEW_ACTIONS)}")
@@ -1120,9 +1098,8 @@ class ScreeningService:
 
 def _disposition_now(preserved: bool, key_present: bool, absent: bool,
                      answered: bool = False) -> str:
-    """Where a matched sample's bytes are NOW, derived from its row: the
-    result records only what was intended at match time. An absence stays
-    "needs a review" until the officer records one after it
+    """Where a matched sample's bytes are now, derived from its row: the result records only what was
+    intended at match time. An absence stays "needs a review" until the officer records one after it
     (bytes_not_found_reviewed)."""
     if preserved:
         return "preserved"
@@ -1136,13 +1113,10 @@ def _disposition_now(preserved: bool, key_present: bool, absent: bool,
 def policy_block(conn: psycopg.Connection) -> dict:
     """GET /samples/policy's screening block: counts only, no list names.
 
-    `last_pass_at` is the newest pass in the last POLICY_PASS_WINDOW, read
-    only while a list is active. It is read on every Lab visit, and audit
-    events carry no index on the action, so the walk is bounded: the worker
-    passes every five minutes, so while it runs the newest pass is a few
-    rows back, and while it does not, a null here says so after a day,
-    which is what the card needs to know. The officer's section and the
-    readiness row read 30 days."""
+    `last_pass_at` is the newest pass in the last POLICY_PASS_WINDOW, read only while a list is active. It
+    is read on every Lab visit and audit events carry no index on the action, so the walk is bounded: the
+    worker passes every five minutes, so while it runs the newest pass is a few rows back, and while it
+    does not, a null here says so after a day. The officer's section and the readiness row read 30 days."""
     lists = conn.execute(
         """SELECT count(*), coalesce(array_agg(DISTINCT a), '{}')
              FROM lab.screening_list l, unnest(l.algorithms) a
@@ -1151,9 +1125,8 @@ def policy_block(conn: psycopg.Connection) -> dict:
                          "WHERE retired_at IS NULL").fetchone()[0]
     last = None
     if count:
-        # A fact read as the definer (0167): the pass rows carry no case and
-        # are the worker's or the officer's, so an analyst's request reads
-        # none of them under row security on the log (F51, 2026-10-02).
+        # A fact read as the definer (0167): the pass rows carry no case and are the worker's or the
+        # officer's, so an analyst's request reads none of them under row security on the log.
         last = conn.execute("SELECT audit.last_screening_pass(%s)",
                             (POLICY_PASS_WINDOW,)).fetchone()[0]
     reference, _problem = hash_set_authority()

@@ -1,50 +1,39 @@
-"""The attended Telegram acts, the enrolment gate and the facts the console
-shows (roadmap F5.2 and F5.3, 2026-09-24).
+"""The attended Telegram acts, the enrolment gate and the facts the console shows.
 
 ## Acts
 
-Every act that touches Telegram (looking up a chat, joining one, checking
-membership, rebinding a chat to another persona, enrolling and logging out
-a persona) runs through the collection foundation's persona gate: the
-persona must be visible to the caller, usable, not in use elsewhere,
-inside its active hours and covered by a live authority confirmed by a
-second person; the route is the persona's own with an `act` context (a
-`stop` context for a logout); and a platform's answer (a flood wait, a
-revoked or duplicated session, an abandoned connection) is recorded on the
-persona BEFORE the persona lock is released. The Telegram part then runs
-off the calling thread with TELEGRAM_ACT_SECONDS.
+Every act that touches Telegram (looking up a chat, joining one, checking membership, rebinding a chat to
+another persona, enrolling and logging out a persona) runs through the collection foundation's persona
+gate: the persona must be visible to the caller, usable, not in use elsewhere, inside its active hours and
+covered by a live authority confirmed by a second person; the route is the persona's own with an `act`
+context (a `stop` context for a logout); and a platform's answer (a flood wait, a revoked or duplicated
+session, an abandoned connection) is recorded on the persona before the persona lock is released. The
+Telegram part then runs off the calling thread with TELEGRAM_ACT_SECONDS.
 
 ## Re-enrolling a persona Telegram locked
 
-The gate refuses a persona under a machine lock, and a lock clears only
-when a new credential is stored, so a persona whose session Telegram
-revoked could never be enrolled again, and its account and exit would be
-lost with it (2026-09-24). The enrolment gate below
-admits ONE more persona than the foundation's: one whose only obstacle is
-a machine lock AND which holds no credential (the logout destroyed it).
-The lock is about a credential that no longer exists; the store() that
-ends the enrolment clears it, as 0082's guard allows. The egress proxy's
-act rule admits a machine-locked persona for the same reason.
+The gate refuses a persona under a machine lock, and a lock clears only when a new credential is stored, so
+a persona whose session Telegram revoked could never be enrolled again, and its account and exit would be
+lost with it. The enrolment gate below admits one more persona than the foundation's: one whose only
+obstacle is a machine lock and which holds no credential (the logout destroyed it). The lock is about a
+credential that no longer exists; the store() that ends the enrolment clears it, as 0082's guard allows.
+The egress proxy's act rule admits a machine-locked persona for the same reason.
 
 ## Labels
 
-A Telegram source is found only when it is visible under the foundation's
-one predicate (`collection._SOURCE_VISIBLE`), so every chat route answers a
-hidden source exactly like a missing one. A persona is seen only under
-PERSONA_VISIBLE_SQL. Counts a caller may read (chats bound, deleted
-upstream) count only what the caller's labels reach.
+A Telegram source is found only when it is visible under the foundation's one predicate
+(`collection._SOURCE_VISIBLE`), so every chat route answers a hidden source exactly like a missing one. A
+persona is seen only under PERSONA_VISIBLE_SQL. Counts a caller may read (chats bound, deleted upstream)
+count only what the caller's labels reach.
 
 ## Row security
 
-`collect.telegram_chat` is under a policy (0129, F51, 2026-10-02): the
-request role sees a chat only where its source is within the caller's
-case-less ceiling, the same reading as `_SOURCE_VISIBLE`. So the duplicate
-check of a new chat, which must see a chat added under a source above the
-adder, runs as the TELEGRAM_INTAKE purpose, and every act that writes a
-chat refuses a write that changed no row. An act runs on a system
-connection (the collector's, and since 0179 the inline runner's), where no
-policy applies, so before it writes it also reads the chat's source again
-at its caller's labels now and holds it until the write commits.
+`collect.telegram_chat` is under a policy (0129): the request role sees a chat only where its source is
+within the caller's case-less ceiling, the same reading as `_SOURCE_VISIBLE`. So the duplicate check of a
+new chat, which must see a chat added under a source above the adder, runs as the TELEGRAM_INTAKE purpose,
+and every act that writes a chat refuses a write that changed no row. An act runs on a system connection
+(the collector's, and since 0179 the inline runner's), where no policy applies, so before it writes it also
+reads the chat's source again at its caller's labels now and holds it until the write commits.
 """
 from __future__ import annotations
 
@@ -363,12 +352,12 @@ def set_window(conn: psycopg.Connection, persona_id: UUID, window: str | None, *
 
 
 def attach_due_facts(conn: psycopg.Connection, rows: list[dict]) -> list[dict]:
-    """Each due Telegram source gains `telegram` {chat, access_mode,
-    egress}: the chat's durable id and how it is read, and the reading
-    persona's egress profile name when the persona is visible (the row
-    already carries the persona, or HIDDEN_PERSONA). The rows are the
-    caller's due list, filtered at the ceiling the chat's policy holds
-    them to, so it reads on the request connection (F51, 2026-10-02)."""
+    """Each due Telegram source gains `telegram` {chat, access_mode, egress}: the chat's durable id and
+    how it is read, and the reading persona's egress profile name when the persona is visible (the row
+    already carries the persona, or HIDDEN_PERSONA).
+
+    The rows are the caller's due list, filtered at the ceiling the chat's policy holds them to, so it
+    reads on the request connection."""
     ids = [str(r["id"]) for r in rows if r.get("kind") == "TELEGRAM"]
     if not ids:
         return rows
@@ -419,18 +408,15 @@ def attach_message_meta(conn: psycopg.Connection, docs: list[dict]) -> list[dict
 
 def attach_target_chats(conn: psycopg.Connection,
                         targets: dict[UUID, list[dict]]) -> None:
-    """Each Telegram target an officer is shown gains `chat` {durable
-    id, peer type, access mode, name and title at lookup}, read under the
-    target's already-filtered source: a Telegram source has no address, so
-    without this the confirmer saw only a name the recorder typed
-    (2026-09-24).
+    """Each Telegram target an officer is shown gains `chat` {durable id, peer type, access mode, name and
+    title at lookup}, read under the target's already-filtered source: a Telegram source has no address, so
+    without this the confirmer would see only a name the recorder typed.
 
-    On the request connection (F51, 2026-10-02): an authority is never
-    labelled below a source it covers (`_target_sources` refuses one, and
-    `collect.raise_authority_labels` raises it with a reclassified source),
-    so an officer who may see the authority may read every target's
-    source, and `CollectionAuthorityService._targets` withholds any other
-    before this runs, at the case-less ceiling the chat's policy applies."""
+    On the request connection: an authority is never labelled below a source it covers
+    (`_target_sources` refuses one, and `collect.raise_authority_labels` raises it with a reclassified
+    source), so an officer who may see the authority may read every target's source, and
+    `CollectionAuthorityService._targets` withholds any other before this runs, at the case-less ceiling
+    the chat's policy applies."""
     wanted = [t for rows in targets.values() for t in rows
               if t.get("source_kind") == "TELEGRAM"]
     if not wanted:
@@ -524,11 +510,11 @@ _CHAT_COLUMNS = (
 
 def _chat_row(conn, source_id: UUID, clearance: str,
               compartments=None) -> dict:
-    """A Telegram source and its chat, or CollectionNotFound: a source the
-    caller may not see under the foundation's one predicate (its label AND,
-    since F43, its compartments: a holder of the key acts on the chat, a
-    reader without it meets a missing one; 2026-10-03)
-    answers exactly like a missing one."""
+    """A Telegram source and its chat, or CollectionNotFound.
+
+    A source the caller may not see under the foundation's one predicate (its label and its compartments: a
+    holder of the key acts on the chat, a reader without it meets a missing one) answers exactly like a
+    missing one."""
     row = conn.execute(
         f"""SELECT {_CHAT_COLUMNS}, s.name, s.classification::text,
                    s.collection_account_id, s.is_active, s.parser_config
@@ -549,23 +535,22 @@ def _chat_row(conn, source_id: UUID, clearance: str,
 
 
 def _changed_the_chat(cursor) -> None:
-    """An act's write changed its one chat, or the act is refused as for a
-    missing chat (F51, 2026-10-02). The persona act runs between
-    `_chat_row` and the write, and a source raised above the caller in
-    between leaves the write matching no row the policy shows: silent,
-    while the act's audit row and the source's own change in the same
-    transaction recorded a change that never happened."""
+    """An act's write changed its one chat, or the act is refused as for a missing chat.
+
+    The persona act runs between `_chat_row` and the write, and a source raised above the caller in between
+    leaves the write matching no row the policy shows: silent, while the act's audit row and the source's
+    own change in the same transaction would record a change that never happened."""
     if cursor.rowcount != 1:
         raise CollectionNotFound(CHAT_NOT_FOUND)
 
 
 def _still_yours(conn, source_id: UUID, actor_id: UUID) -> None:
-    """An act writes its chat only while the caller may still see it, at
-    their labels now, with the source held FOR SHARE until the write
-    commits (Beta 1.1). An act runs on a system connection, the collector's
-    and since 0179 the inline runner's too, where no policy hides a chat
-    whose source was raised above the caller, or whose caller was lowered,
-    while the persona acted: answered exactly as a missing chat."""
+    """An act writes its chat only while the caller may still see it, at their labels now, with the source
+    held FOR SHARE until the write commits.
+
+    An act runs on a system connection (the collector's, and since 0179 the inline runner's), where no
+    policy hides a chat whose source was raised above the caller, or whose caller was lowered, while the
+    persona acted. Such a chat is answered exactly as a missing chat."""
     from noctornal_api.http.deps import user_ceiling
 
     ceiling, held = user_ceiling(conn, actor_id)
@@ -580,12 +565,11 @@ def _still_yours(conn, source_id: UUID, actor_id: UUID) -> None:
 
 def _existing_chat(conn, durable_id: str, clearance: str,
                    compartments=None) -> tuple | None:
-    """(source id, source name, visible to the caller) of the chat already
-    added as `durable_id`, or None. As the TELEGRAM_INTAKE purpose (F51,
-    2026-10-02): the request role sees no chat under a source above the
-    caller, so the check would find nothing there and the INSERT would
-    meet the unique durable id instead, a duplicate-key error about a chat
-    the caller may not know exists. The caller's own clearance still
+    """(source id, source name, visible to the caller) of the chat already added as `durable_id`, or None.
+
+    Runs as the TELEGRAM_INTAKE purpose: the request role sees no chat under a source above the caller, so
+    the check would find nothing there and the INSERT would meet the unique durable id instead, a
+    duplicate-key error about a chat the caller may not know exists. The caller's own clearance still
     decides which answer it gets."""
     with system_connection(SystemPurpose.TELEGRAM_INTAKE, reuse=conn) as sconn:
         return sconn.execute(
@@ -629,15 +613,13 @@ def _refuse_offline_problems(*, classification: str | None) -> None:
 def check_create_request(ref, access_mode: str,
                          classification: str | None, *, compartments=(),
                          held_compartments=None) -> telegram.ChatRef:
-    """What `TelegramChats.create` refuses before it reaches the persona,
-    needing no key and no network: a reference that is not a public chat
-    (a private invite link above all: a bearer join credential the product
-    refuses to take), an access mode, a basic group asked for as public,
-    and the offline sentences. One function, so the route that queues the
-    act (it refuses at the door, before anything is stored) and the
-    collector that runs it cannot disagree (2026-10-03: a
-    pasted invite link was queued first, and kept for ever in a table whose
-    rows are never deleted)."""
+    """What `TelegramChats.create` refuses before it reaches the persona, needing no key and no network.
+
+    A reference that is not a public chat (a private invite link above all: a bearer join credential the
+    product refuses to take), an access mode, a basic group asked for as public, and the offline sentences.
+    One function, so the route that queues the act (it refuses at the door, before anything is stored) and
+    the collector that runs it cannot disagree; a pasted invite link must not be queued and kept for ever
+    in a table whose rows are never deleted."""
     try:
         parsed = telegram.parse_chat_reference(ref)
     except ReferenceRefused as exc:
@@ -648,10 +630,9 @@ def check_create_request(ref, access_mode: str,
         raise TelegramActError(400, "Basic groups are never public. Add it "
                                     "as a member chat.")
     _refuse_offline_problems(classification=classification)
-    # F43 (2026-10-03): a chat is filed only under keys its creator holds,
-    # the sentence `create_source` gives, said here so a request that would
-    # be refused there is refused before it is queued and before the persona
-    # looks anything up.
+    # A chat is filed only under keys its creator holds, the sentence `create_source` gives, said here so
+    # a request that would be refused there is refused before it is queued and before the persona looks
+    # anything up.
     keys = frozenset(str(k) for k in (compartments or ()))
     if keys and not keys <= frozenset(held_compartments or ()):
         raise TelegramActError(
@@ -710,14 +691,11 @@ class TelegramChats:
                access_mode: str, poll_interval_s: int, jitter_pct: int,
                max_rps: float, actor_id: UUID, clearance: str,
                compartments=(), held_compartments=None) -> dict:
-        """Look the chat up as the persona, then create the source and its
-        chat row in one transaction. `compartments` file the source (and so
-        its chat, under 0164's policy and everything it collects) under keys
-        the creator holds (`held_compartments`); until 2026-10-03 this route
-        could not set them, so the chat policy was reachable only by editing
-        a row by hand (2026-10-03). A key the creator does not hold
-        is refused with the other offline refusals, before the persona is
-        asked anything."""
+        """Look the chat up as the persona, then create the source and its chat row in one transaction.
+
+        `compartments` file the source (and so its chat, under 0164's policy and everything it collects)
+        under keys the creator holds (`held_compartments`). A key the creator does not hold is refused with
+        the other offline refusals, before the persona is asked anything."""
         parsed = check_create_request(ref, access_mode, classification,
                                       compartments=compartments,
                                       held_compartments=held_compartments)
@@ -785,11 +763,9 @@ class TelegramChats:
         except psycopg.errors.UniqueViolation as exc:
             if exc.diag.constraint_name != "telegram_chat_one_source":
                 raise
-            # F51 (2026-10-02): the same chat was added between the check
-            # and this insert, and the transaction is rolled back. The same
-            # check answers it, so a caller below that chat's source is told
-            # what an unresolvable reference tells them, never a
-            # duplicate-key error.
+            # The same chat was added between the check and this insert, and the transaction is rolled
+            # back. The same check answers it, so a caller below that chat's source is told what an
+            # unresolvable reference tells them, never a duplicate-key error.
             self._refuse_existing(found.durable_id, actor_id=actor_id,
                                   clearance=clearance,
                                   compartments=held_compartments)
@@ -910,13 +886,11 @@ class TelegramChats:
         chat = _chat_row(self._c, source_id, clearance, compartments)
         if chat["access_mode"] != "PUBLIC_READ":
             raise TelegramActError(409, "This chat is already read as a member.")
-        # The persona's lock first, then the mark (docs/17, "a member mark's
-        # requeue"). The mark committed before the membership check took the
-        # lock, so a busy persona refused the act with the chat already
-        # marked, the collector requeued it, and the retry met a member chat
-        # and answered "already read as a member". Busy now means nothing
-        # was done and the retry starts clean; the mark and the check hold
-        # the one lock.
+        # The persona's lock first, then the mark (docs/17, "a member mark's requeue"). If the mark
+        # committed before the membership check took the lock, a busy persona would refuse the act with the
+        # chat already marked, the collector would requeue it, and the retry would meet a member chat and
+        # answer "already read as a member". Busy now means nothing was done and the retry starts clean;
+        # the mark and the check hold the one lock.
         locked = (persona_locked(self._c, chat["persona_id"])
                   if chat["persona_id"] is not None else contextlib.nullcontext())
         with locked:
@@ -925,8 +899,8 @@ class TelegramChats:
                          compartments)["access_mode"] != "PUBLIC_READ":
                 raise TelegramActError(409, "This chat is already read as a member.")
             with self._c.transaction():
-                # The chat first: a mark that changed no chat must not leave
-                # the source alone read as a member chat (F51, 2026-10-02).
+                # The chat first: a mark that changed no chat must not leave the source alone read as a
+                # member chat.
                 _still_yours(self._c, source_id, actor_id)
                 _changed_the_chat(self._c.execute(
                     """UPDATE collect.telegram_chat

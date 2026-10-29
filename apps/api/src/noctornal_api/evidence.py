@@ -2,38 +2,26 @@
 
 Prosecution-grade (decision 13, US + Canada). The load-bearing properties:
 
-- The SHA-256 is computed from the ORIGINAL bytes at ingest and stored;
-  integrity verification re-reads from the object store and recomputes,
-  never trusting a mutated copy. The row's hashes, size, case and stored
-  object cannot be rewritten by any role once lodged (0140), the exhibit
-  names the object VERSION it was lodged as (0139) and is read at exactly
-  that version, and verification also compares the hash-chained ACQUIRED
-  custody row, so substituting an object and rewriting the row to match
-  is detected (review finding evidence-integrity-anchors-mutable,
-  2026-10-03).
-- Bytes land in a MinIO bucket with object-lock retention (WORM), so the
-  exhibit cannot be altered or deleted before its retention expires — the
-  API process included.
-- Every touch — ACQUIRED, VIEWED, EXPORTED, HASH_VERIFIED — is written to
-  the append-only custody ledger AND to the hash-chained audit log, so
-  "who looked at this exhibit, and when" is answerable and tamper-evident
+- The SHA-256 is computed from the ORIGINAL bytes at ingest and stored; integrity verification re-reads from the
+  object store and recomputes, never trusting a mutated copy. The row's hashes, size, case and stored object
+  cannot be rewritten by any role once lodged (0140), the exhibit names the object VERSION it was lodged as
+  (0139) and is read at exactly that version, and verification also compares the hash-chained ACQUIRED custody
+  row, so substituting an object and rewriting the row to match is detected.
+- Bytes land in a MinIO bucket with object-lock retention (WORM), so the exhibit cannot be altered or deleted
+  before its retention expires, the API process included.
+- Every touch (ACQUIRED, VIEWED, EXPORTED, HASH_VERIFIED) is written to the append-only custody ledger AND to
+  the hash-chained audit log, so "who looked at this exhibit, and when" is answerable and tamper-evident
   (docs/05: reads matter as much as writes).
 
-Object-store and DB config come from the environment (no default
-secrets). `export()` goes through the shared TLP egress gate
-(`noctornal_api.egress`, Phase 5) — the same one function SMTP, Jira and
-webhooks call, so invariant 8 has exactly one implementation to keep
-right.
+Object-store and DB config come from the environment (no default secrets). `export()` goes through the shared
+TLP egress gate (`noctornal_api.egress`), the same one function SMTP, Jira and webhooks call, so invariant 8 has
+exactly one implementation to keep right.
 
-Destruction goes through `EvidenceStorage.delete_all_versions()`, which
-`retention._purge_evidence` has called since 2026-09-02. The keyless
-`delete()` is NOT a destruction path on this bucket: the bucket is
-versioned (forced by `--with-lock`), so a keyless delete inserts a delete
-marker and returns success with every byte still retrievable by version
-id — measured live on 2026-08-10 and again on 2026-09-02. It is kept only
-so `tests/test_evidence_lock_live_pg.py` can keep demonstrating that.
-`is_retention_refusal()` is the ONE classifier both this module and
-`retention` use to tell a lock refusal from a plain failure.
+Destruction goes through `EvidenceStorage.delete_all_versions()`, which `retention._purge_evidence` calls. The
+keyless `delete()` is NOT a destruction path on this bucket: the bucket is versioned (forced by `--with-lock`),
+so a keyless delete inserts a delete marker and returns success with every byte still retrievable by version id.
+It is kept only so `tests/test_evidence_lock_live_pg.py` can keep demonstrating that. `is_retention_refusal()` is
+the ONE classifier both this module and `retention` use to tell a lock refusal from a plain failure.
 """
 from __future__ import annotations
 
@@ -63,43 +51,30 @@ from noctornal_api.samples import (
     _SampledWarning,
 )
 
-#: How long the storage layer's COMPLIANCE lock holds an exhibit, counted
-#: from the moment the server LODGES the bytes (the put in `ingest`), not
-#: from the acquisition time the uploader states. Once it ends the object
-#: store no longer refuses a delete, and what protects the bytes is the
-#: case's retention date, any legal hold and the dual-control purge
-#: (`retention.py`). The day is kept per exhibit in
-#: `core.evidence.retention_until`, the exact instant in the custody row
-#: that set it (`lock_ends_at`), and the console shows it on the chip
-#: (ux07-evidence:worm-chip-outlives-lock, 2026-09-23): a flag that said
-#: "cannot be replaced or deleted" for ever was a claim an analyst could
-#: repeat under oath and be wrong about from day 366.
+#: How long the storage layer's COMPLIANCE lock holds an exhibit, counted from the moment the server LODGES the
+#: bytes (the put in `ingest`), not from the acquisition time the uploader states. Once it ends the object store
+#: no longer refuses a delete, and what protects the bytes is the case's retention date, any legal hold and the
+#: dual-control purge (`retention.py`). The day is kept per exhibit in `core.evidence.retention_until`, the exact
+#: instant in the custody row that set it (`lock_ends_at`), and the console shows it on the chip, so no screen
+#: claims "cannot be replaced or deleted" for ever.
 #:
-#: Since 2026-09-24 (x-lock-extension) this is the SHORTEST lock, not the
-#: only one: `ingest` locks to the case's retention date when that is later
-#: (`lock_target`), and extending the case's date lengthens every live
-#: exhibit's lock to it (`EvidenceService.extend_locks`). Until then
-#: nothing did, so a case kept for longer kept its exhibits deletable at
-#: the store from day 366 while every other record said they were held.
-#: Nothing shortens a lock, because nothing can: COMPLIANCE only lengthens.
+#: This is the SHORTEST lock, not the only one: `ingest` locks to the case's retention date when that is later
+#: (`lock_target`), and extending the case's date lengthens every live exhibit's lock to it
+#: (`EvidenceService.extend_locks`). Nothing shortens a lock, because nothing can: COMPLIANCE only lengthens.
 DEFAULT_RETENTION = timedelta(
     days=int(os.environ.get("EVIDENCE_RETENTION_DAYS", "365"))
 )
 
-#: The furthest ahead of NOW one step sets a lock that follows the case's
-#: retention date: at lodging, on an extension, or when the Evidence pane
-#: lengthens older locks. Ten years unless the deployment says otherwise.
+#: The furthest ahead of NOW one step sets a lock that follows the case's retention date: at lodging, on an
+#: extension, or when the Evidence pane lengthens older locks. Ten years unless the deployment says otherwise.
 #:
-#: A bound because a COMPLIANCE lock is a commitment nobody can take back,
-#: an administrator and the dual-control purge included, while the case's
-#: date is one field that one `case.update` holder types (x-lock-extension,
-#: verifier, 2026-09-24: a mistyped year such as 2208 would have made every
-#: exhibit undeletable at the store for good). The DATE is kept as typed:
-#: it is what the purge reads, and a database row can be corrected where
-#: a lock cannot. Only the lock stops here, and a case retained past the horizon has its locks
-#: offered for lengthening again as they fall behind (`lock_short_before`).
-#: `tests/conftest.py` sets it to one day, as it does the default lock,
-#: so test runs do not lock objects in the dev bucket to test cases' dates.
+#: A bound because a COMPLIANCE lock is a commitment nobody can take back, an administrator and the dual-control
+#: purge included, while the case's date is one field that one `case.update` holder types: a mistyped year such
+#: as 2208 would make every exhibit undeletable at the store for good. The DATE is kept as typed: it is what the
+#: purge reads, and a database row can be corrected where a lock cannot. Only the lock stops here, and a case
+#: retained past the horizon has its locks offered for lengthening again as they fall behind
+#: (`lock_short_before`). `tests/conftest.py` sets it to one day, as it does the default lock, so test runs do
+#: not lock objects in the dev bucket.
 LOCK_HORIZON = timedelta(
     days=int(os.environ.get("EVIDENCE_LOCK_HORIZON_DAYS", "3650"))
 )
@@ -127,16 +102,13 @@ def lock_target(case_retention: date, now: datetime) -> tuple[datetime, bool]:
 
 def lock_short_before(case_retention: date | None,
                       now: datetime) -> datetime | None:
-    """A live exhibit's lock that ends before this instant is SHORT of its
-    case: the store would let its bytes be deleted while the case still
-    holds them, and lengthening would change that. None when nothing can
-    be lengthened, because the case is already due.
+    """A live exhibit's lock that ends before this instant is SHORT of its case: the store would let its bytes be
+    deleted while the case still holds them, and lengthening would change that. None when nothing can be
+    lengthened, because the case is already due.
 
-    Within the horizon that is the case's own retention instant. Past it,
-    a lock is only as long as the horizon allowed when it was set, so it
-    counts as short once it has fallen a whole default lock period behind
-    the horizon: a case retained for decades is asked about once a year,
-    not every day its horizon moves on (x-lock-extension, 2026-09-24)."""
+    Within the horizon that is the case's own retention instant. Past it, a lock is only as long as the horizon
+    allowed when it was set, so it counts as short once it has fallen a whole default lock period behind the
+    horizon: a case retained for decades is asked about once a year, not every day its horizon moves on."""
     if case_retention is None:
         return None
     start = case_lock_start(case_retention)
@@ -154,16 +126,13 @@ _NO_EGRESS = frozenset(t.name for t in NEVER_EGRESS)
 
 
 def own_key(plain: str, evidence_id: UUID) -> str:
-    """The storage key of an exhibit whose bytes another exhibit already
-    holds under `plain`: beside it, never under it.
+    """The storage key of an exhibit whose bytes another exhibit already holds under `plain`: beside it, never
+    under it.
 
-    2026-10-07. It was `plain/evidence_id`, and MinIO does not list an
-    object whose name continues another object's name past a "/": measured
-    against the dev store, a versioned listing of that key returns nothing
-    while the object is served by version id. Both `delete_all_versions` and
-    `extend_lock` find versions by listing, so every such exhibit was
-    reported by the purge as having no object, stayed due for ever with its
-    bytes kept, and could not have its lock lengthened."""
+    MinIO does not list an object whose name continues another object's name past a "/": a versioned listing of
+    `plain/evidence_id` returns nothing while the object is served by version id. Both `delete_all_versions` and
+    `extend_lock` find versions by listing, so such an exhibit would be reported by the purge as having no
+    object, stay due for ever with its bytes kept, and could not have its lock lengthened."""
     return f"{plain}.{evidence_id}"
 
 
@@ -184,10 +153,8 @@ class EvidenceError(Exception):
 
 
 class StoreUnavailable(EvidenceError):
-    """The object store did not answer a put, so the exhibit was not lodged
-    and the caller may try again. The HTTP layer answers it with a 503
-    (2026-10-08): a store that was down answered a raw 500 after about 18
-    seconds."""
+    """The object store did not answer a put, so the exhibit was not lodged and the caller may try again. The
+    HTTP layer answers it with a 503."""
 
 
 def store_did_not_answer(exc: BaseException) -> bool:
@@ -228,15 +195,12 @@ def store_never_reached(exc: BaseException) -> bool:
 class VersionedDeleteResult:
     """What a versioned delete actually did, per key.
 
-    Three counts rather than a boolean, because "the bytes are gone" and
-    "the store refused" are different facts that a caller has to record
-    differently — and merging them into a single success is precisely how
-    `delete()` came to report destructions it had not performed.
+    Three counts rather than a boolean, because "the bytes are gone" and "the store refused" are different facts
+    that a caller has to record differently, and merging them into one success is how a keyless `delete()`
+    reports destructions it has not performed.
 
-    `versions_seen` includes delete markers; `versions_removed` never
-    does. Removing a marker is tidying up after a keyless delete, not
-    destruction, and counting it as one would restate the original defect
-    in the new method's own numbers.
+    `versions_seen` includes delete markers; `versions_removed` never does. Removing a marker is tidying up after
+    a keyless delete, not destruction, and counting it as one would report a destruction that did not happen.
     """
     key: str
     versions_seen: int
@@ -253,17 +217,12 @@ class VersionedDeleteResult:
     def outcome(self) -> str:
         """A one-word summary for logs and tests. NOT the tombstone vocabulary.
 
-        Until 2026-09-02 this docstring claimed to match
-        `retention.STORAGE_*`. It never did: retention's words — and the
-        CHECK on `core.purge_tombstone.storage_outcome` (migration 0032) —
-        are DELETED / LOCKED_UNTIL_RETENTION / FAILED / NOT_APPLICABLE, and
-        two of the three values here, DESTROYED and NOTHING_TO_DELETE,
-        would be refused by that CHECK. Only LOCKED_UNTIL_RETENTION
-        coincides, which is what made the claim look true. So
-        `retention._purge_evidence` maps the three COUNTS above onto its
-        own vocabulary and never writes this string anywhere;
-        `tests/test_evidence_versioned_delete.py` reads both sides and the
-        migration to keep it that way.
+        The tombstone words (the CHECK on `core.purge_tombstone.storage_outcome`, migration 0032) are DELETED /
+        LOCKED_UNTIL_RETENTION / FAILED / NOT_APPLICABLE, and two of the three values here, DESTROYED and
+        NOTHING_TO_DELETE, would be refused by that CHECK. Only LOCKED_UNTIL_RETENTION coincides. So
+        `retention._purge_evidence` maps the three COUNTS above onto its own vocabulary and never writes this
+        string anywhere; `tests/test_evidence_versioned_delete.py` reads both sides and the migration to keep it
+        that way.
         """
         if self.versions_locked:
             return "LOCKED_UNTIL_RETENTION"
@@ -286,37 +245,25 @@ _LOCK_WORDS = ("worm", "retention", "object lock")
 def is_retention_refusal(exc: Exception) -> bool:
     """True only when the store said the object is under a retention lock.
 
-    LOCKED_UNTIL_RETENTION is a specific claim — "the bytes will become
-    deletable when a retention expires" — and it is written into an
-    append-only tombstone. So this errs towards FAILED: a failure an
-    operator investigates is recoverable; a permissions refusal recorded
-    as a lawful lock is a false record nobody revisits.
+    LOCKED_UNTIL_RETENTION is a specific claim ("the bytes will become deletable when a retention expires") and
+    it is written into an append-only tombstone. So this errs towards FAILED: a failure an operator investigates
+    is recoverable; a permissions refusal recorded as a lawful lock is a false record nobody revisits.
 
-    What was wrong until 2026-09-02: `retention._is_retention_refusal`
-    returned True on a bare `AccessDenied` or `InvalidRequest`, so a
-    read-only key or a bucket policy denying `s3:DeleteObject` was
-    recorded as a retention lock — and it listed
-    `ObjectLockConfigurationNotFoundError`, which means the bucket has NO
-    lock configuration, as one. Meanwhile `delete_all_versions` kept its
-    own code-only tuple with the same defect. Both halves now share this
-    one function so they cannot drift: `delete_all_versions` uses it to
-    decide locked-versus-raise, and retention uses it to classify what a
+    A bare `AccessDenied` or `InvalidRequest` is not enough, since a read-only key or a bucket policy denying
+    `s3:DeleteObject` would be recorded as a retention lock, and `ObjectLockConfigurationNotFoundError` means the
+    bucket has NO lock configuration. `delete_all_versions` and retention share this one function so they cannot
+    drift: `delete_all_versions` uses it to decide locked-versus-raise, and retention uses it to classify what a
     store without version enumeration raises.
 
-    `AccessDenied` and `InvalidRequest` therefore need the MESSAGE to say
-    worm / retention / object lock. The message is read, not `str(exc)`:
-    minio's `S3Error.__str__` quotes the resource and object name, and an
-    exhibit whose key contains the word "retention" must not turn a
-    policy denial into a lock. Message-only refusals from clients that
-    carry no code (the governance test stubs raise
-    RuntimeError("object is under a retention lock")) still count.
+    `AccessDenied` and `InvalidRequest` therefore need the MESSAGE to say worm / retention / object lock. The
+    message is read, not `str(exc)`: minio's `S3Error.__str__` quotes the resource and object name, and an
+    exhibit whose key contains the word "retention" must not turn a policy denial into a lock. Message-only
+    refusals from clients that carry no code (the governance test stubs raise RuntimeError("object is under a
+    retention lock")) still count.
 
-    Measured against the live MinIO 2026-09-02: a COMPLIANCE-locked
-    version is refused with code `InvalidRequest` and message "Object is
-    WORM protected and cannot be overwritten" — not `AccessDenied`, as the
-    docstring below said until then. `tests/test_evidence_lock_live_pg.py`
-    re-measures that on every run so a vocabulary drift shows up here
-    rather than in a tombstone.
+    MinIO refuses a COMPLIANCE-locked version with code `InvalidRequest` and message "Object is WORM protected
+    and cannot be overwritten", not `AccessDenied`. `tests/test_evidence_lock_live_pg.py` re-measures that on
+    every run so a vocabulary drift shows up here rather than in a tombstone.
     """
     code = getattr(exc, "code", None)
     if code in _NOT_A_LOCK_CODES:
@@ -343,13 +290,11 @@ class EvidenceStorage:
             )
         secure = os.environ.get("MINIO_SECURE", "false").lower() == "true"
         self._bucket = os.environ.get("EVIDENCE_BUCKET", "noctornal-evidence")
-        # A pool that gives up in seconds (2026-10-08). minio-py's own waits
-        # five minutes on a connect and retries five times, so a store that
-        # was down held an upload for about 18 seconds and a store that
-        # swallowed packets for far longer. Writes are never resent after a
-        # server answer or a read timeout: an exhibit's object is locked and
-        # versioned, and a resent put whose answer was lost writes a second
-        # version nothing can delete (`samples._bounded_http`).
+        # A pool that gives up in seconds. minio-py's own waits five minutes on a connect and retries five times,
+        # so a store that was down would hold an upload for about 18 seconds and a store that swallowed packets
+        # for far longer. Writes are never resent after a server answer or a read timeout: an exhibit's object is
+        # locked and versioned, and a resent put whose answer was lost writes a second version nothing can delete
+        # (`samples._bounded_http`).
         self._client = Minio(endpoint, access_key=access, secret_key=secret,
                              secure=secure,
                              http_client=_bounded_http(resend_writes=False))
@@ -369,143 +314,53 @@ class EvidenceStorage:
             content_type=media_type,
             retention=Retention(COMPLIANCE, retain_until),
         )
-        # The version the store kept, so reads ask for exactly it: a locked
-        # key still accepts a newer version, and the latest is whatever was
-        # written last (evidence-integrity-anchors-mutable, 2026-10-03).
+        # The version the store kept, so reads ask for exactly it: a locked key still accepts a newer version, and
+        # the latest is whatever was written last.
         return getattr(result, "version_id", None)
 
     def delete(self, key: str) -> None:
-        """Keyless delete. On this bucket it destroys NOTHING — read on.
+        """Keyless delete. On this bucket it destroys NOTHING: it is not a destruction path and production code
+        does not call it (`retention._purge_evidence` calls `delete_all_versions()`, and
+        `tests/test_evidence_versioned_delete.py` asserts that it does). It survives only so
+        `tests/test_evidence_lock_live_pg.py` can keep measuring the defect below against the live store.
 
-        Not a destruction path and not called by production code since
-        2026-09-02; `retention._purge_evidence` calls
-        `delete_all_versions()` instead, and
-        `tests/test_evidence_versioned_delete.py` asserts that it does.
-        This method survives only so `tests/test_evidence_lock_live_pg.py`
-        can keep measuring the defect below against the live store. The
-        two paragraphs that follow are what it was believed to do; the
-        section after them is what it does.
+        The evidence bucket is created `--with-lock`, which forces VERSIONING on. `remove_object(bucket, key)`
+        with no `version_id` does not remove anything on a versioned bucket: it inserts a DELETE MARKER and
+        returns success, with no exception, while the real version is still listed and `get_object(version_id)`
+        returns the original bytes. The refusal a COMPLIANCE lock would raise never arrives, because there is
+        nothing to refuse, so a purge built on this would record a destruction in the tombstone while the bytes
+        sit in the store. A refusal, were there one, is not swallowed here: the caller records it.
 
-        THIS CLASS HAD NO `delete` AT ALL until 2026-08-07, and nothing
-        else in the repository removed an evidence object either — only
-        `SampleStorage` could. `RetentionService` has always looped over
-        `self._storage.delete(key)`, and every production caller
-        constructed it with `storage=None`, so `_purge_evidence` took its
-        `return STORAGE_NA` branch and the bytes were never touched. The
-        row was marked `purged_at`, the exhibit vanished from every read
-        path, and the tombstone — the record that is supposed to outlive
-        the data — recorded NOT_APPLICABLE.
-
-        **The refusal is not swallowed here.** Evidence is written under a
-        COMPLIANCE-mode object lock, so a delete before `retain_until` is
-        expected to fail and that failure is the honest answer: the caller
-        records STORAGE_LOCKED and warns that the object store disagrees
-        with the database. Catching it here would turn "the bytes are
-        still there" into silence, which is the whole defect this method
-        exists to end.
-
-        ## AND IT DOES NOT DO WHAT IT SAYS. Measured 2026-08-10.
-
-        The evidence bucket is created `--with-lock`, which forces
-        VERSIONING on. `remove_object(bucket, key)` with no `version_id`
-        does not remove anything on a versioned bucket: it inserts a
-        DELETE MARKER and returns success. Reproduced against this stack —
-        an object written under a COMPLIANCE lock, then:
-
-            remove_object(key)      -> returned normally, no exception
-            list(include_version)   -> the real version is STILL THERE
-            get_object(version_id)  -> returned the original bytes
-
-        So the refusal this docstring promises never arrives, because
-        there is nothing to refuse. `RetentionService` records
-        `evidence_purged`, the tombstone — the record that is supposed to
-        outlive the data — says DESTROYED, and the bytes are sitting in
-        the store, retrievable by anyone who can name a version.
-
-        That is the same defect a third time: `retention._purge_evidence`
-        and `ingest._with_raw` both reported a destruction they had not
-        performed, and both were fixed. This one reports it while holding
-        the object.
-
-        `delete_all_versions()` below is the honest version, and since
-        2026-09-02 it is the one the purge calls. Re-measured that day
-        against the live stack with the same result:
         `tests/test_evidence_lock_live_pg.py::
-        test_the_old_keyless_delete_returns_success_while_holding_the_bytes`
-        asserts this behaviour STILL happens, so a change in MinIO's
-        semantics shows up as a test failure rather than a silent change
-        in what a tombstone means.
+        test_the_old_keyless_delete_returns_success_while_holding_the_bytes` asserts this behaviour still
+        happens, so a change in MinIO's semantics shows up as a test failure rather than a silent change in what
+        a tombstone means.
         """
         self._client.remove_object(self._bucket, key)
 
-    # ---------------------------------------------------------------
-    # The destruction path. `retention._purge_evidence` calls this
-    # since 2026-09-02, and nothing else does.
-    # ---------------------------------------------------------------
+    # The destruction path: `retention._purge_evidence` calls this, and nothing else does.
     def delete_all_versions(self, key: str) -> "VersionedDeleteResult":
         """Remove every version of `key`, reporting refusals as refusals.
 
-        Enumerate every version under the key, delete each by
-        `version_id`, and separate the two outcomes that `delete()` merges
-        into silence — bytes actually gone, versus the store refusing
-        because a retention has not expired. A refusal is RETURNED as a
-        count, not raised, because the caller (`retention._purge_evidence`)
-        has to record it against the tombstone rather than abort a batch;
-        anything that is neither a deletion nor a recognised lock refusal
-        raises, because an unrecognised storage failure is not an outcome
-        to write down as a lock. `is_retention_refusal` is the one
-        classifier for that, shared with retention.
+        Enumerate every version under the key, delete each by `version_id`, and separate the two outcomes that
+        `delete()` merges into silence: bytes actually gone, versus the store refusing because a retention has
+        not expired. A refusal is RETURNED as a count, not raised, because the caller
+        (`retention._purge_evidence`) has to record it against the tombstone rather than abort a batch; anything
+        that is neither a deletion nor a recognised lock refusal raises, because an unrecognised storage failure
+        is not an outcome to write down as a lock. `is_retention_refusal` is the one classifier for that, shared
+        with retention.
 
-        ## Written 2026-08-10, deliberately held back, wired 2026-09-02
+        A purge under an unexpired COMPLIANCE lock records `LOCKED_UNTIL_RETENTION`, leaves the row unpurged and
+        due, and warns that the store refused; the sweep after expiry finishes the job. On the shipped
+        configuration (`infra/docker-compose.yml` sets a bucket DEFAULT of `GOVERNANCE 365d` and `put()` applies
+        COMPLIANCE for `DEFAULT_RETENTION` per object) a purge therefore refuses for the object's whole
+        retention. This method deliberately does NOT send the GOVERNANCE-bypass header: acquiring that power
+        silently is not a decision to make in a helper, and COMPLIANCE ignores it anyway.
 
-        It was held back because enabling it changed what the system does
-        to evidence and what it records having done. What was decided,
-        item by item, when it was enabled:
-
-        1. **It flips production outcomes.** A purge under an unexpired
-           COMPLIANCE lock used to record DELETED; now it records
-           `LOCKED_UNTIL_RETENTION`, leaves the row unpurged and due, and
-           warns that the store refused. Previously-quiet purges now
-           report refusals. That is the point.
-
-        2. **Tombstones already written are wrong and cannot be fixed.**
-           `core.purge_tombstone` is append-only. Every DELETED tombstone
-           written between 2026-08-07 and 2026-09-02 for an object that
-           was still locked is a false record and remains one. Whether
-           those are reportable is a docs/18 question, not a code one;
-           nothing here rewrites history.
-
-        3. **It genuinely destroys bytes.** `delete()` never did. Its
-           first live run was `tests/test_evidence_lock_live_pg.py` on
-           2026-09-02, against throwaway `_itest-lock/` keys with
-           seconds-long locks.
-
-        4. **Its integration test creates objects nobody can delete
-           early.** A COMPLIANCE retention cannot be shortened, lifted or
-           overridden by any credential. The live test therefore uses
-           `put(retain_until=)` with a lock of seconds, sweeps its own
-           prefix on the next run, and FAILS (not skips) unless the
-           bucket's object-lock configuration and versioning are on:
-           against a bucket where locking is off, every assertion about a
-           refusal passes for the wrong reason. `tests/conftest.py` also
-           caps `EVIDENCE_RETENTION_DAYS` at 1 for every other test that
-           ingests, so runs stop adding 365-day objects to the dev bucket.
-
-        5. **On the shipped configuration a purge refuses for the object's
-           whole retention.** `infra/docker-compose.yml` sets a bucket
-           DEFAULT of `GOVERNANCE 365d` and `put()` applies COMPLIANCE for
-           `DEFAULT_RETENTION` per object, so a purge before that expires
-           records `LOCKED_UNTIL_RETENTION` — which is *correct*, and is
-           why the row now stays due: the sweep after expiry finishes the
-           job. This method deliberately does NOT send the
-           GOVERNANCE-bypass header; acquiring that power silently is not
-           a decision to make in a helper, and COMPLIANCE ignores it
-           anyway.
-
-        Both branches are measured against a live MinIO on every run of
-        the live test: a COMPLIANCE-locked object reports a locked version
-        with its bytes intact, and a versioned object with no lock is
-        removed, every version.
+        `tests/test_evidence_lock_live_pg.py` measures both branches against a live MinIO (a COMPLIANCE-locked
+        object reports a locked version with its bytes intact; a versioned object with no lock is removed, every
+        version) and FAILS, not skips, unless the bucket's object lock and versioning are on, because against a
+        bucket where locking is off every assertion about a refusal passes for the wrong reason.
         """
         removed, locked = 0, 0
         # `include_version=True` is the whole fix. Without it the listing
@@ -527,15 +382,10 @@ class EvidenceStorage:
                     self._bucket, key, version_id=v.version_id)
                 removed += 1
             except S3Error as exc:
-                # MinIO answers a locked version with InvalidRequest and
-                # "Object is WORM protected and cannot be overwritten"
-                # (measured 2026-09-02; this comment said AccessDenied
-                # before, and the code-only tuple it guarded counted a
-                # plain policy denial as a lock). The shared classifier
-                # decides; anything it does not recognise as a refusal
-                # raises, because treating an unknown failure as either
-                # a lock or a successful delete is the failure this
-                # method exists to end.
+                # MinIO answers a locked version with InvalidRequest and "Object is WORM protected and cannot be
+                # overwritten". The shared classifier decides; anything it does not recognise as a refusal
+                # raises, because treating an unknown failure as either a lock or a successful delete is the
+                # failure this method exists to end.
                 if is_retention_refusal(exc):
                     locked += 1
                 else:
@@ -630,12 +480,10 @@ class IntegrityError(EvidenceError):
 
 
 class ExhibitUnavailable(EvidenceError):
-    """The exhibit's bytes cannot be read, and it is not tampering:
-    retention destroyed them, or a purge is destroying them now. Raised
-    before anything is recorded against the exhibit, because a destroyed
-    exhibit has no integrity to fail and the custody and audit ledgers are
-    court-facing and append-only (verify-destroyed-exhibit, 2026-10-03).
-    The router answers 409 with the sentence."""
+    """The exhibit's bytes cannot be read, and it is not tampering: retention destroyed them, or a purge is
+    destroying them now. Raised before anything is recorded against the exhibit, because a destroyed exhibit has
+    no integrity to fail and the custody and audit ledgers are court-facing and append-only. The router answers
+    409 with the sentence."""
 
 
 log = logging.getLogger("noctornal.evidence")
@@ -645,11 +493,9 @@ _MISSING_CODES = frozenset({"NoSuchKey", "NoSuchVersion", "NoSuchObject"})
 
 
 def _object_missing(exc: BaseException) -> bool:
-    """The store holds nothing at an exhibit's key or version: a concealed or
-    destroyed object, which is a tamper alarm and not a 500
-    (evidence-integrity-anchors-mutable, 2026-10-03). A store that did not
-    answer at all is not this, and is raised as it was. The test doubles
-    raise KeyError for a key they never held."""
+    """The store holds nothing at an exhibit's key or version: a concealed or destroyed object, which is a tamper
+    alarm and not a 500. A store that did not answer at all is not this, and is raised as it was. The test
+    doubles raise KeyError for a key they never held."""
     if getattr(exc, "code", None) in _MISSING_CODES:
         return True
     return isinstance(exc, (KeyError, FileNotFoundError))
@@ -658,10 +504,9 @@ def _object_missing(exc: BaseException) -> bool:
 def _refuse_unstorable(**fields: str | None) -> None:
     """Refuse text the exhibit's row cannot hold, before a byte is locked.
 
-    A NUL character is refused by every text column, and the refusal used to
-    arrive at the INSERT, after the object was already in the bucket under a
-    COMPLIANCE lock nobody can shorten: a 500 and a permanent object no row
-    names (http_ui-003, evidence-orphan-locked-object, 2026-10-03)."""
+    A NUL character is refused by every text column, and a refusal at the INSERT would arrive after the object
+    was already in the bucket under a COMPLIANCE lock nobody can shorten: a 500 and a permanent object no row
+    names."""
     for name, value in fields.items():
         if value is not None and "\x00" in value:
             raise EvidenceError(
@@ -751,15 +596,11 @@ class CustodyEntry:
     actor_id: UUID
     occurred_at: datetime
     hash_verified: bool | None
-    #: Who, as a person: the log answers "who touched this exhibit", and
-    #: an eight-hex id ("actor fcfd6f27") answered it for nobody (README
-    #: screenshot review, 2026-09-23). None only for an account row that
-    #: no longer resolves; the id is still there.
+    #: Who, as a person: the log answers "who touched this exhibit", and an eight-hex id ("actor fcfd6f27")
+    #: answers it for nobody. None only for an account row that no longer resolves; the id is still there.
     actor_name: str | None = None
-    #: What the row itself says: how an exhibit was acquired, that bytes
-    #: already held were re-acquired, what a check found. Returned so two
-    #: ACQUIRED rows can be told apart (ux07-evidence:custody-rows-not-
-    #: court-legible, 2026-09-23); the route decides what leaves.
+    #: What the row itself says: how an exhibit was acquired, that bytes already held were re-acquired, what a
+    #: check found. Returned so two ACQUIRED rows can be told apart; the route decides what leaves.
     detail: dict | None = None
 
 
@@ -790,31 +631,23 @@ class EvidenceService:
     ) -> IngestResult:
         """Store bytes as an exhibit.
 
-        `reader_ceiling` is the uploader's (clearance, compartments) on this
-        case (2026-10-03, rls-4): an existing exhibit of the same bytes is
-        reused only when it is within it. Left out, the connection's own view
-        decides, which on a request connection is row security's answer.
+        `reader_ceiling` is the uploader's (clearance, compartments) on this case: an existing exhibit of the same
+        bytes is reused only when it is within it. Left out, the connection's own view decides, which on a request
+        connection is row security's answer.
 
-        `is_hostile_markup` (migration 0046, docs/19) marks attacker-authored
-        markup — a captured phishing DOM, a HAR, a `.eml`. Left as None it
-        is DERIVED from the media type, so a caller cannot forget it; pass
-        True explicitly to mark something the type does not reveal. Passing
-        False overrides the derivation and is the only way to un-mark a
-        hostile type, which is deliberately the awkward direction.
+        `is_hostile_markup` (migration 0046, docs/19) marks attacker-authored markup: a captured phishing DOM, a
+        HAR, a `.eml`. Left as None it is DERIVED from the media type, so a caller cannot forget it; pass True
+        explicitly to mark something the type does not reveal. Passing False overrides the derivation and is the
+        only way to un-mark a hostile type, which is deliberately the awkward direction.
 
-        `acquired_at` is when the material was OBTAINED, which the caller
-        states; the row's `created_at` is when the server received it, and
-        the two are shown apart. `authority_ref` names the warrant or
-        production order a legal-process acquisition rests on. Both, and
-        whether a time was stated at all, are written into the ACQUIRED
-        custody row, the record that goes to court (ux07-evidence:upload-
-        drops-provenance, 2026-09-23: the form recorded the upload moment
-        as "acquired" and had nowhere to put the authority).
+        `acquired_at` is when the material was OBTAINED, which the caller states; the row's `created_at` is when
+        the server received it, and the two are shown apart. `authority_ref` names the warrant or production order
+        a legal-process acquisition rests on. Both, and whether a time was stated at all, are written into the
+        ACQUIRED custody row, the record that goes to court.
         """
         from noctornal_api.deception import is_hostile_media_type
 
-        # Everything the row would refuse is refused before anything is
-        # stored (http_ui-003, evidence-orphan-locked-object, 2026-10-03).
+        # Everything the row would refuse is refused before anything is stored.
         _refuse_unstorable(title=title, description=description,
                            source_url=source_url, authority_ref=authority_ref,
                            acquisition_method=acquisition_method,
@@ -828,17 +661,12 @@ class EvidenceService:
         digest = _sha256(data)
         blake = _blake3d(data)
         shahex = digest.hex()
-        # acquired_at, when the caller gives none, is stamped by the
-        # DATABASE inside the INSERT below: COALESCE(..., now()) in the same
-        # transaction as the ACQUIRED custody row, whose occurred_at the
-        # custody trigger pins to the clock at its append (migration 0149,
-        # 2026-10-03; it was now(), 0024). So acquired_at is the start of
-        # the transaction and the ACQUIRED row a few milliseconds later,
-        # never earlier. Until 2026-09-23 it was self._now(),
-        # the API host's clock, read before the object store put: a
-        # database clock behind the host showed an exhibit "acquired" a
-        # minute AFTER its own ACQUIRED, VIEWED and HASH_VERIFIED rows
-        # (README screenshot set review, 03-evidence).
+        # acquired_at, when the caller gives none, is stamped by the DATABASE inside the INSERT below:
+        # COALESCE(..., now()) in the same transaction as the ACQUIRED custody row, whose occurred_at the custody
+        # trigger pins to the clock at its append (migration 0149). So acquired_at is the start of the transaction
+        # and the ACQUIRED row a few milliseconds later, never earlier. The API host's clock is not used: a
+        # database clock behind it would show an exhibit "acquired" after its own ACQUIRED, VIEWED and
+        # HASH_VERIFIED rows.
         acquired = acquired_at
         retain = retain_until or self._lodging_lock(case_id)
         # What the ACQUIRED row says about how the material came in. Keys
@@ -853,28 +681,19 @@ class EvidenceService:
         if authority_ref:
             provenance["authority_ref"] = authority_ref
 
-        # Dedup within the case: identical bytes are one exhibit, among the
-        # exhibits THIS uploader may see. Every ingest attempt, a
-        # deduplicated re-acquisition included, leaves a custody trail.
+        # Dedup within the case: identical bytes are one exhibit, among the exhibits THIS uploader may see. Every
+        # ingest attempt, a deduplicated re-acquisition included, leaves a custody trail.
         #
-        # rls-4 and evidence-ingest-dedup-oracle (2026-10-03): the lookup
-        # ran on the uploader's own connection, so under row security an
-        # exhibit above them was invisible to it; the bytes were then put as
-        # a new locked version under THAT exhibit's key, the INSERT hit the
-        # old UNIQUE (case_id, sha256), and the retry indexed a None row: a
-        # 500 against a 201, a one-bit oracle on the content of a hidden
-        # exhibit and an undeletable version on its object per probe. Now
-        # every exhibit of these bytes is read on a system connection, one
-        # the uploader may see is reused, and otherwise the upload is a new
-        # exhibit at the uploader's labels with an object of its own (0141),
-        # indistinguishable from novel bytes. A purged exhibit is never
-        # reused (evidence-reingest-after-purge-dropped, same date): its
-        # bytes are gone, so lodging them again stores them again.
-        # Nor is one at other labels than the ones asked for (2026-10-07): AMBER bytes and
-        # then the same bytes as
-        # RED used to answer `deduplicated` with the AMBER exhibit, and the
-        # RED request was dropped without a word. One live exhibit per
-        # labels is what 0141 keeps.
+        # The lookup runs on a system connection, not the uploader's own: under row security an exhibit above them
+        # is invisible to it, so the bytes would be put as a new locked version under THAT exhibit's key, the
+        # INSERT would hit the UNIQUE (case_id, sha256), and the retry would index a None row: a 500 against a
+        # 201, a one-bit oracle on the content of a hidden exhibit and an undeletable version on its object per
+        # probe. So every exhibit of these bytes is read on a system connection, one the uploader may see is
+        # reused, and otherwise the upload is a new exhibit at the uploader's labels with an object of its own
+        # (0141), indistinguishable from novel bytes. A purged exhibit is never reused: its bytes are gone, so
+        # lodging them again stores them again. Nor is one at other labels than the ones asked for: AMBER bytes
+        # and then the same bytes as RED must not answer `deduplicated` with the AMBER exhibit and drop the RED
+        # request. One live exhibit per labels is what 0141 keeps.
         existing, keys_taken = self._existing_for(
             case_id, digest, reader_ceiling, classification, compartments)
         if existing is not None:
@@ -889,18 +708,13 @@ class EvidenceService:
             # upload ever adds a version to another exhibit's object.
             storage_key = own_key(storage_key, evidence_id)
 
-        # The ROW first, the object second, one transaction (http_ui-003,
-        # evidence-orphan-locked-object, 2026-10-03). The object used to be
-        # put before the INSERT, so anything the INSERT refused (a floor
-        # trigger, row security, a NUL) left a COMPLIANCE-locked object no
-        # row, custody entry or audit row names, that nobody can delete. Now
-        # the INSERT runs its triggers and checks first and a failed put
-        # rolls it back. The custody and audit rows come AFTER the put: each
-        # takes its chain's global lock to COMMIT, and a slow put must not
-        # hold every audited write in the deployment behind it.
-        # Two attempts at most: the second only after the first lost a race
-        # for the plain key to a concurrent upload of the same bytes at
-        # labels this uploader cannot see, and it takes a key of its own.
+        # The ROW first, the object second, one transaction. Anything the INSERT refuses (a floor trigger, row
+        # security, a NUL) must not leave a COMPLIANCE-locked object that no row, custody entry or audit row names
+        # and nobody can delete, so the INSERT runs its triggers and checks first and a failed put rolls it back.
+        # The custody and audit rows come AFTER the put: each takes its chain's global lock to COMMIT, and a slow
+        # put must not hold every audited write in the deployment behind it.
+        # Two attempts at most: the second only after the first lost a race for the plain key to a concurrent
+        # upload of the same bytes at labels this uploader cannot see, and it takes a key of its own.
         for attempt in (1, 2):
             put_sent = False
             try:
@@ -928,11 +742,8 @@ class EvidenceService:
                                               retain_until=retain)
                     except Exception as exc:
                         if store_never_reached(exc):
-                            # Nothing was sent, so nothing is stored under a
-                            # lock for a row to name: no orphan is recorded
-                            # (it was, with the object marked "may be stored
-                            # with no row naming it", for a store that was
-                            # down; 2026-10-08).
+                            # Nothing was sent, so nothing is stored under a lock for a row to name: no orphan
+                            # is recorded.
                             put_sent = False
                         if store_did_not_answer(exc):
                             raise StoreUnavailable(
@@ -951,22 +762,14 @@ class EvidenceService:
                         self._c.execute(
                             "UPDATE core.evidence SET storage_version_id = %s "
                             "WHERE id = %s", (version, evidence_id))
-                    # hash_verified=True because the read-back above has just
-                    # confirmed the STORED object hashes to the digest recorded
-                    # here. Until 2026-09-22 this row said NULL, which the
-                    # custody view rendered as "hash not checked" on every clean
-                    # acquisition: a lapse in custody that never happened, on
-                    # the record that goes to court (ux07 custody-failed-hash-
-                    # shown-as-not-checked). The deduplicated branch above stays
-                    # NULL: it stored nothing and read nothing back.
-                    # The lock's exact end, which `retention_until` (a date)
-                    # cannot carry: the store's COMPLIANCE lock ends at this
-                    # instant, part way through that day, and a register that
-                    # counted the whole day overstated the storage guarantee by
-                    # up to 24 hours (ux07-evidence:worm-chip-outlives-lock,
-                    # verifier, 2026-09-23). Only on the original row: a
-                    # deduplicated re-acquisition stores nothing and locks
-                    # nothing.
+                    # hash_verified=True because the read-back above has just confirmed the STORED object hashes
+                    # to the digest recorded here; NULL would render in the custody view as "hash not checked" on
+                    # every clean acquisition, on the record that goes to court. The deduplicated branch above
+                    # stays NULL: it stored nothing and read nothing back.
+                    # The lock's exact end, which `retention_until` (a date) cannot carry: the store's COMPLIANCE
+                    # lock ends at this instant, part way through that day, and a register that counted the whole
+                    # day would overstate the storage guarantee by up to 24 hours. Only on the original row: a
+                    # deduplicated re-acquisition stores nothing and locks nothing.
                     detail = {"sha256": shahex, "bytes": len(data),
                               "lock_ends_at": retain.isoformat(), **provenance}
                     if version:
@@ -977,20 +780,15 @@ class EvidenceService:
                                 {"sha256": shahex})
                 return IngestResult(evidence_id, shahex, deduplicated=False)
             except psycopg.errors.UniqueViolation as exc:
-                # Raised by the INSERT, so nothing was put. A concurrent upload
-                # of the same bytes at the same labels won the race; that
-                # exhibit is at this uploader's labels, so it is theirs to
-                # reuse. Never an index into a row this connection cannot see
-                # (rls-4, 2026-10-03): one that cannot be found is a lost
-                # race for the plain key to an upload this uploader may not
-                # see, so the second attempt takes a key of its own and
-                # answers exactly as a novel upload does.
+                # Raised by the INSERT, so nothing was put. A concurrent upload of the same bytes at the same
+                # labels won the race; that exhibit is at this uploader's labels, so it is theirs to reuse. Never
+                # an index into a row this connection cannot see: one that cannot be found is a lost race for the
+                # plain key to an upload this uploader may not see, so the second attempt takes a key of its own
+                # and answers exactly as a novel upload does.
                 if put_sent:
-                    # A unique index refused something AFTER the put (the
-                    # custody or audit append, the version update, the commit):
-                    # raised from inside this handler, so the sibling below
-                    # never sees it, and the locked object would be named by
-                    # nothing (unique-after-put, 2026-10-03).
+                    # A unique index refused something AFTER the put (the custody or audit append, the version
+                    # update, the commit): raised from inside this handler, so the sibling below never sees it,
+                    # and the locked object would be named by nothing.
                     self._record_orphan(evidence_id, case_id, storage_key,
                                         shahex, acquired_by, exc)
                     raise
@@ -1015,11 +813,9 @@ class EvidenceService:
     def _existing_for(self, case_id: UUID, digest: bytes,
                       reader_ceiling: tuple | None, classification: str,
                       compartments: list[str]) -> tuple[UUID | None, set[str]]:
-        """(the live exhibit of these bytes this uploader may see AT THE
-        LABELS ASKED FOR, or None; every storage key any exhibit of these
-        bytes holds). Read on a system connection, so an exhibit above the
-        uploader is seen here and never written on, and is never named to
-        them (rls-4, 2026-10-03). `compartments` is the sorted set `ingest`
+        """(the live exhibit of these bytes this uploader may see AT THE LABELS ASKED FOR, or None; every storage
+        key any exhibit of these bytes holds). Read on a system connection, so an exhibit above the uploader is
+        seen here and never written on, and is never named to them. `compartments` is the sorted set `ingest`
         writes."""
         from noctornal_api.db import SystemPurpose, system_connection
         from noctornal_api.security.access import tlp_from_name
@@ -1064,10 +860,9 @@ class EvidenceService:
         return IngestResult(evidence_id, shahex, deduplicated=True)
 
     def _refuse_below_case_floor(self, case_id: UUID, classification: str) -> None:
-        """An exhibit is never labelled below its case. `core.enforce_tlp_floor`
-        refuses it at the INSERT; asked here as well, so the answer is a 400
-        that says why rather than a raw trigger error, and before anything is
-        stored (http_ui-003, 2026-10-03). The case's label is a lock fact."""
+        """An exhibit is never labelled below its case. `core.enforce_tlp_floor` refuses it at the INSERT; asked
+        here as well, so the answer is a 400 that says why rather than a raw trigger error, and before anything
+        is stored. The case's label is a lock fact."""
         from noctornal_api.security.access import AccessResolutionError, tlp_from_name
 
         row = self._c.execute(
@@ -1086,11 +881,9 @@ class EvidenceService:
 
     def _record_orphan(self, evidence_id: UUID, case_id: UUID, storage_key: str,
                        shahex: str, actor_id: UUID, exc: BaseException) -> None:
-        """A put was sent and the row that would own it did not commit: the
-        object may now sit under a lock with nothing naming it. Said in the
-        audit log, on the connection's own next statement after the rollback,
-        and in the server log if even that fails, so a sweep can find it
-        (evidence-orphan-locked-object, 2026-10-03)."""
+        """A put was sent and the row that would own it did not commit: the object may now sit under a lock with
+        nothing naming it. Said in the audit log, on the connection's own next statement after the rollback, and
+        in the server log if even that fails, so a sweep can find it."""
         detail = {"storage_key": storage_key, "sha256": shahex,
                   "bucket": getattr(self._s, "bucket", None),
                   "reason": type(exc).__name__}
@@ -1110,22 +903,16 @@ class EvidenceService:
         return self._s.get(key)
 
     def _refuse_if_retention_has_it(self, evidence_id: UUID) -> None:
-        """Called when the store holds nothing at a live exhibit's key.
-        Raises `ExhibitUnavailable` when that is retention's doing and
-        returns when it is not, so the caller raises the alarm.
+        """Called when the store holds nothing at a live exhibit's key. Raises `ExhibitUnavailable` when that is
+        retention's doing and returns when it is not, so the caller raises the alarm.
 
-        verify-destroyed-exhibit (2026-10-03): the first read of the row
-        said live, and a purge may have committed since (the row is then
-        destroyed), or be part way through (it deleted the object and holds
-        the row until it commits, which can be minutes on a large batch). Both
-        used to be written as a tamper alarm, an URGENT notification and a
-        failed HASH_VERIFIED custody row. The row is asked again under a
-        share lock that does not wait: a row a purge holds answers "being
-        destroyed" at once rather than stalling a request for the length of
-        the sweep. A live row nobody is changing whose object is gone is a
-        concealment, and stays an alarm. Read on a system connection, as the
-        purge and the holds are, so the answer is the row's own whatever the
-        reader's labels."""
+        The first read of the row said live, and a purge may have committed since (the row is then destroyed), or
+        be part way through (it deleted the object and holds the row until it commits, which can be minutes on a
+        large batch). Neither is a tamper alarm. The row is asked again under a share lock that does not wait: a
+        row a purge holds answers "being destroyed" at once rather than stalling a request for the length of the
+        sweep. A live row nobody is changing whose object is gone is a concealment, and stays an alarm. Read on a
+        system connection, as the purge and the holds are, so the answer is the row's own whatever the reader's
+        labels."""
         from noctornal_api.db import SystemPurpose, system_connection
 
         with system_connection(SystemPurpose.RETENTION, reuse=self._c) as sconn:
@@ -1140,11 +927,9 @@ class EvidenceService:
             raise ExhibitUnavailable(PURGED_DETAIL)
 
     def _acquired_anchor_ok(self, evidence_id: UUID, stored_sha) -> bool | None:
-        """Whether the row's SHA-256 is the one the ORIGINAL ACQUIRED custody
-        row recorded at lodging, which is hash-chained and append-only. None
-        when there is no such row to compare (a row written by hand).
-        Nothing compared the two before 2026-10-03, so a rewritten row
-        verified clean (evidence-integrity-anchors-mutable)."""
+        """Whether the row's SHA-256 is the one the ORIGINAL ACQUIRED custody row recorded at lodging, which is
+        hash-chained and append-only. None when there is no such row to compare (a row written by hand). Without
+        the comparison a rewritten row would verify clean."""
         row = self._c.execute(
             """SELECT detail->>'sha256' FROM core.evidence_custody
                 WHERE evidence_id = %s AND action = 'ACQUIRED'
@@ -1175,17 +960,13 @@ class EvidenceService:
         if row is None:
             raise EvidenceError(f"evidence {evidence_id} not found")
         key, stored_sha, stored_blake, case_id, version, purged_at = row
-        # verify-destroyed-exhibit (2026-10-03): retention destroyed the
-        # bytes of a purged exhibit on purpose, so there is nothing to
-        # verify and nothing to alarm about. Said before any read.
+        # Retention destroyed the bytes of a purged exhibit on purpose, so there is nothing to verify and nothing
+        # to alarm about. Said before any read.
         if purged_at is not None:
             raise ExhibitUnavailable(PURGED_DETAIL)
-        # The anchors (evidence-integrity-anchors-mutable, 2026-10-03): the
-        # row's hashes, which the request role can no longer rewrite (0140),
-        # AND the hash-chained ACQUIRED row, which nothing compared before;
-        # the version the exhibit was lodged as, not whatever was put on
-        # the key since; and an object that is not there at all, a
-        # concealment, is an alarm rather than a 500 with no record.
+        # The anchors: the row's hashes, which the request role cannot rewrite (0140), AND the hash-chained
+        # ACQUIRED row; the version the exhibit was lodged as, not whatever was put on the key since; and an
+        # object that is not there at all, a concealment, is an alarm rather than a 500 with no record.
         missing = False
         try:
             data = self._read(key, version)
@@ -1212,19 +993,13 @@ class EvidenceService:
             self._audit("EVIDENCE_HASH_VERIFIED", actor_id, evidence_id, case_id,
                         {"ok": ok})
             if not ok:
-                # N2 (2026-09-02). The explicit verify wrote only
-                # HASH_VERIFIED on a mismatch; only the incidental read path
-                # wrote EVIDENCE_INTEGRITY_ALARM. Same event, two names, and
-                # the one an auditor greps for was missing from the path an
-                # auditor would use.
+                # A mismatch is audited as EVIDENCE_INTEGRITY_ALARM here too, as on the read path, so the entry
+                # an auditor greps for exists on the explicit verify path.
                 self._audit("EVIDENCE_INTEGRITY_ALARM", actor_id, evidence_id,
                             case_id, {**detail, "on_read": False})
         if not ok:
-            # After the transaction, not inside it: the custody and audit
-            # rows are the record, and a failed notify write must neither
-            # roll them back nor turn a correctly detected mismatch into a
-            # 500. Function-local imports keep this hunk inside the method;
-            # another group owns the delete region and both must merge.
+            # After the transaction, not inside it: the custody and audit rows are the record, and a failed
+            # notify write must neither roll them back nor turn a correctly detected mismatch into a 500.
             import logging
 
             from noctornal_api import notify_events
@@ -1243,32 +1018,19 @@ class EvidenceService:
                destination_ceiling: str | None = None) -> bytes:
         """Release bytes across the boundary, through the ONE egress gate.
 
-        Invariant 8 used to be enforced by a local frozenset here. It now
-        goes through `egress.can_egress`, which is the single function
-        docs/07 requires every outbound path to share — export, SMTP, Jira
-        and webhooks alike. A second copy of this rule is how the copies
-        drift apart, and the one that drifts is the leak.
+        It goes through `egress.can_egress`, the single function docs/07 requires every outbound path to share:
+        export, SMTP, Jira and webhooks alike. A second copy of this rule is how the copies drift apart, and the
+        one that drifts is the leak.
 
-        Bytes are re-verified before release, so a swapped object can never
-        be exported with a clean log.
+        Bytes are re-verified before release, so a swapped object can never be exported with a clean log.
 
-        ## The gate is fed the EFFECTIVE labels, not the exhibit's own
-
-        F19, 2026-07-26. This used to pass `core.evidence.compartments`
-        alone. That column defaults to `'{}'`, and — unlike classification,
-        which has `core.enforce_tlp_floor` — **no trigger propagates the
-        case's compartments to it and no code path sets it**. So it was
-        empty on essentially every row, `DENY_COMPARTMENTED` could never
-        fire for evidence, and the one control that says "compartmented
-        material does not cross the boundary at all" was decorative on the
-        exhibit path.
-
-        The access gate has always composed the two (`deps.effective_labels`:
-        stricter classification, union of compartments). Egress now composes
-        them the same way. Doing it here rather than adding a trigger is
-        deliberate: composing at read time is what every other gate in the
-        system does, and a trigger would have to backfill every existing row
-        to be worth anything.
+        The gate is fed the EFFECTIVE labels, not the exhibit's own. `core.evidence.compartments` defaults to
+        `'{}'` and, unlike classification (which has `core.enforce_tlp_floor`), no trigger propagates the case's
+        compartments to it and no code path sets it, so it is empty on essentially every row and
+        `DENY_COMPARTMENTED` could never fire for evidence. The access gate composes the two
+        (`deps.effective_labels`: stricter classification, union of compartments), and egress composes them the
+        same way. Composing at read time rather than adding a trigger is what every other gate in the system
+        does, and a trigger would have to backfill every existing row to be worth anything.
         """
         from noctornal_api.egress import can_egress
         from noctornal_api.security.access import tlp_from_name
@@ -1315,12 +1077,10 @@ class EvidenceService:
         if row is None:
             raise EvidenceError(f"evidence {evidence_id} not found")
         key, stored_sha, case_id, stored_blake, version, purged_at = row
-        # verify-destroyed-exhibit (2026-10-03): see `verify_integrity`.
         if purged_at is not None:
             raise ExhibitUnavailable(PURGED_DETAIL)
-        # evidence-integrity-anchors-mutable (2026-10-03): the version it was
-        # lodged as, a missing object alarmed instead of a 500, BLAKE3 as
-        # well as SHA-256 on every read, and the hash-chained ACQUIRED row.
+        # The version the exhibit was lodged as, a missing object alarmed instead of a 500, BLAKE3 as well as
+        # SHA-256 on every read, and the hash-chained ACQUIRED row.
         found: dict | None = None
         try:
             data = self._read(key, version)
@@ -1343,11 +1103,9 @@ class EvidenceService:
                               hash_verified=False)
                 self._audit("EVIDENCE_INTEGRITY_ALARM", actor_id, evidence_id,
                             case_id, {"on_read": True, **found})
-            # N2 (2026-09-02): this path wrote the AUDIT row and never raised
-            # the URGENT notification the kind promises. After the
-            # transaction and before the raise, for the reasons given in
-            # `verify_integrity`: the record is committed, and a failure to
-            # notify must not change what the caller is told.
+            # The URGENT notification goes with the audit row. After the transaction and before the raise, for the
+            # reasons given in `verify_integrity`: the record is committed, and a failure to notify must not
+            # change what the caller is told.
             import logging
 
             from noctornal_api import notify_events
@@ -1408,21 +1166,14 @@ class EvidenceService:
 
     def refuse_if_hostile(self, evidence_id: UUID, actor_id: UUID,
                           *, purpose: str) -> bool:
-        """True, with the refusal audited, when the exhibit is attacker-
-        authored markup and so may not be served from the API origin.
+        """True, with the refusal audited, when the exhibit is attacker-authored markup and so may not be served
+        from the API origin.
 
-        docs/19 section 1.1: a DOM, HAR or `.eml` exhibit is download-only,
-        and only from the separate sample origin; "the API origin never
-        serves those bytes". `GET .../content` and `POST .../export` served
-        them anyway until 2026-09-23 (found while answering ux07-evidence:
-        no-exhibit-export-control, whose verifier pointed out that the
-        flagship case's only exhibit is an `.eml`). Deliberately NOT inside
-        `view()`: the seeders read through `view()` below the HTTP layer,
-        and the rule is about which origin answers a browser, so the
-        routes ask this after their access gate, where a refusal cannot
-        tell a caller anything about a row they may not see. Audited
-        because a refused egress unrecorded is indistinguishable from
-        nobody having tried."""
+        docs/19 section 1.1: a DOM, HAR or `.eml` exhibit is download-only, and only from the separate sample
+        origin; "the API origin never serves those bytes". Deliberately NOT inside `view()`: the seeders read
+        through `view()` below the HTTP layer, and the rule is about which origin answers a browser, so the
+        routes ask this after their access gate, where a refusal cannot tell a caller anything about a row they
+        may not see. Audited because a refused egress unrecorded is indistinguishable from nobody having tried."""
         row = self._c.execute(
             "SELECT is_hostile_markup, case_id FROM core.evidence WHERE id = %s",
             (evidence_id,),
@@ -1435,17 +1186,12 @@ class EvidenceService:
                          "destination": "api_origin"})
         return True
 
-    # -- attacker markup, produced through the sample origin (0068) -------
-    #
-    # x-hostile-export, 2026-09-24. `refuse_if_hostile` kept the API origin
-    # from serving these bytes and nothing let anybody produce them, so an
-    # `.eml` exhibit could never leave for a court or a partner. They now
-    # leave the way docs/19 section 1.1 says: from the separate sample
-    # origin, through the gate a Lab download passes. A one-shot ticket is
-    # minted HERE on the application origin under `evidence.export` and a
-    # fresh sign-in (the gate `POST /export` applies), and spent THERE,
-    # which re-derives the mint's decision before serving the Lab's
-    # password-protected archive and writing the EXPORTED custody row.
+    # Attacker markup is produced through the sample origin (0068). `refuse_if_hostile` keeps the API origin from
+    # serving these bytes, so an exhibit leaves the way docs/19 section 1.1 says: from the separate sample
+    # origin, through the gate a Lab download passes. A one-shot ticket is minted HERE on the application origin
+    # under `evidence.export` and a fresh sign-in (the gate `POST /export` applies), and spent THERE, which
+    # re-derives the mint's decision before serving the Lab's password-protected archive and writing the EXPORTED
+    # custody row.
 
     def _producible(self, evidence_id: UUID, case_id: UUID, actor_id: UUID,
                     *, stage: str) -> None:
@@ -1530,26 +1276,18 @@ class EvidenceService:
     def redeem_production_ticket(self, presented: str, *, case_id: UUID,
                                  evidence_id: UUID, ip_hash: bytes | None = None,
                                  ) -> tuple[UUID, UUID]:
-        """Spend a production ticket. Returns `(holder, ticket_id)`; raises
-        `ProductionRefused`, with one sentence whatever the reason, on
-        anything else. `samples.redeem_download_ticket`'s shape, for its
-        reasons:
+        """Spend a production ticket. Returns `(holder, ticket_id)`; raises `ProductionRefused`, with one sentence
+        whatever the reason, on anything else. `samples.redeem_download_ticket`'s shape, for its reasons:
 
-        - ONE `UPDATE ... RETURNING` decides it, so two presentations of
-          one ticket cannot both succeed;
-        - the exhibit, its case and the purpose are in the predicate, so a
-          ticket presented on another exhibit's path (or a Lab ticket on
-          this one) matches nothing and is not burnt;
-        - an unknown string is counted in a sampled log line and never
-          written to the audit chain, because that refusal needs no
-          credential at all; the other reasons name a real ticket and a
-          real person and are audited;
-        - the holder's authority is RE-DERIVED here: an active account
-          holding `evidence.export` on this case at the exhibit's live
-          labels. Asked with `count_use=False`, since the mint already
-          counted any break-glass use and one request is one use, and with
-          the step-up satisfied at the ticket's issue, which the mint
-          demanded no more than sixty seconds ago. The SESSION is not
+        - ONE `UPDATE ... RETURNING` decides it, so two presentations of one ticket cannot both succeed;
+        - the exhibit, its case and the purpose are in the predicate, so a ticket presented on another exhibit's
+          path (or a Lab ticket on this one) matches nothing and is not burnt;
+        - an unknown string is counted in a sampled log line and never written to the audit chain, because that
+          refusal needs no credential at all; the other reasons name a real ticket and a real person and are
+          audited;
+        - the holder's authority is RE-DERIVED here: an active account holding `evidence.export` on this case at
+          the exhibit's live labels, asked with `count_use=False` (the mint already counted any break-glass use,
+          and one request is one use) and with the step-up satisfied at the ticket's issue. The SESSION is not
           re-read: the residual 0061 states, unchanged.
         """
         from noctornal_api.security.access import (
@@ -1561,12 +1299,10 @@ class EvidenceService:
         from noctornal_api.stores import PgAccessResolver
 
         digest = hash_token(presented or "")
-        # The exhibit's case through `iam.element_facts` (S1,
-        # 2026-09-25). The sample origin spends the ticket BEFORE anybody is
-        # bound, and an unbound connection sees no exhibit under row-level
-        # security, so an EXISTS on core.evidence here refused every valid
-        # ticket. As the definer since 0180: the request role reads no
-        # ticket's hash and writes no ticket.
+        # The exhibit's case through `iam.element_facts`. The sample origin spends the ticket BEFORE anybody is
+        # bound, and an unbound connection sees no exhibit under row-level security, so an EXISTS on core.evidence
+        # here would refuse every valid ticket. As the definer since 0180: the request role reads no ticket's hash
+        # and writes no ticket.
         row = self._c.execute(
             """SELECT id, user_id, session_id, token_hash, issued_at
                  FROM lab.spend_production_ticket(%s, %s, %s, %s)""",
@@ -1597,10 +1333,9 @@ class EvidenceService:
             raise ProductionRefused(_PRODUCTION_REFUSED)
         ticket_id, holder, session_id, issued_at = row[0], row[1], row[2], row[4]
         failed: list[str]
-        # The effective labels, composed as `deps.effective_labels` does
-        # (stricter classification, union of compartments), read live.
-        # As lock facts (`iam.element_facts`, `iam.case_facts`), because
-        # this connection is not bound yet and must still decide (S1).
+        # The effective labels, composed as `deps.effective_labels` does (stricter classification, union of
+        # compartments), read live. As lock facts (`iam.element_facts`, `iam.case_facts`), because this connection
+        # is not bound yet and must still decide.
         labels = self._c.execute(
             """SELECT e.classification, e.compartments,
                       c.classification, c.compartments
@@ -1618,13 +1353,10 @@ class EvidenceService:
             failed = list(decision.failed_checks)
         except AccessResolutionError:
             failed = ["account_inactive"]
-        # The decision is made on a connection that is not bound yet, as
-        # above. The ticket is spent, so bind it to its holder now and the
-        # rows below keep the holder as their actor: the database attributes
-        # a request-role row only to the user its connection is bound to
-        # (0150, evidence-ledger-actor-time-forgeable, 2026-10-03). A holder
-        # whose account is no longer active binds to nobody, and that row is
-        # demoted to an unverified claim in its detail.
+        # The decision is made on a connection that is not bound yet, as above. The ticket is spent, so bind it to
+        # its holder now and the rows below keep the holder as their actor: the database attributes a request-role
+        # row only to the user its connection is bound to (0150). A holder whose account is no longer active binds
+        # to nobody, and that row is demoted to an unverified claim in its detail.
         from noctornal_api.db import bind_ticket
         bind_ticket(self._c, presented)
         if failed:
@@ -1645,8 +1377,8 @@ class EvidenceService:
         """Why a presentation matched nothing, for the audit row only: the
         reason, the holder, and the (exhibit, case) the row is filed under,
         which is the ticket's own exhibit when it names one."""
-        # The exhibit's case as a fact (S1): unbound here, see above. The
-        # ticket through its definer (0180), keyed on the presented hash.
+        # The exhibit's case as a fact: unbound here, see above. The ticket through its definer (0180), keyed on
+        # the presented hash.
         row = self._c.execute(
             """SELECT user_id, evidence_id, redeemed_at, expired, evidence_case
                  FROM lab.ticket_by_hash(%s)""",
@@ -1699,15 +1431,9 @@ class EvidenceService:
     # -- the storage lock follows the case's retention --------------------
 
     def _lodging_lock(self, case_id: UUID) -> datetime:
-        """The lock a newly lodged exhibit gets: the default period from
-        now, or the case's retention date when that is later, up to the
-        horizon (`lock_target`).
-
-        x-lock-extension, verifier, 2026-09-24. Only an EXTENSION followed
-        the case, so an exhibit lodged into a case already retained past a
-        year kept the year: OP-NIGHTJAR-26 is retained to 2028-12-31 and
-        its .eml was locked to 2027-09-23, while the policy said the lock
-        followed the case. Asked at the put, as the case stands then."""
+        """The lock a newly lodged exhibit gets: the default period from now, or the case's retention date when
+        that is later, up to the horizon (`lock_target`). Asked at the put, as the case stands then, so an exhibit
+        lodged into a case already retained past a year is locked for the case's period and not just the year."""
         now = self._now()
         shortest = now + DEFAULT_RETENTION
         row = self._c.execute(
@@ -1721,36 +1447,25 @@ class EvidenceService:
     def extend_locks(self, case_id: UUID, retention_until: date,
                      actor_id: UUID, *,
                      ceiling: tuple[str, list[str]] | None = None) -> dict:
-        """Lengthen every live exhibit's storage lock in the case toward the
-        start of `retention_until`, UTC: the instant the purge starts
-        treating the case as due (`retention.due` selects on
-        `c.retention_until <= today`, deadline midnight UTC). No further
-        than `LOCK_HORIZON` from now, which the report says (`capped`).
+        """Lengthen every live exhibit's storage lock in the case toward the start of `retention_until`, UTC: the
+        instant the purge starts treating the case as due (`retention.due` selects on `c.retention_until <=
+        today`, deadline midnight UTC). No further than `LOCK_HORIZON` from now, which the report says
+        (`capped`).
 
-        x-lock-extension, 2026-09-24. The lock was fixed at lodging, so a
-        case whose retention was extended past it kept exhibits the store
-        would let anyone with the bucket's credentials delete, while the
-        register and the chip read as held. Called by `PATCH /cases/{id}`
-        AFTER the case's new date has committed, and by the Evidence pane's
-        "Lengthen" for locks set before they followed the case; it never
-        undoes the date: a lock that could not be lengthened is reported
-        and audited per exhibit, and the date stands, because the date is
-        what the purge reads and a date refused over a storage outage would
-        leave the case due sooner, the opposite of what was asked.
+        Called by `PATCH /cases/{id}` AFTER the case's new date has committed, and by the Evidence pane's
+        "Lengthen" for locks that are short of the case. It never undoes the date: a lock that could not be
+        lengthened is reported and audited per exhibit, and the date stands, because the date is what the purge
+        reads and a date refused over a storage outage would leave the case due sooner, the opposite of what was
+        asked.
 
-        Each lengthened exhibit gets a LOCK_EXTENDED custody row carrying
-        the new `lock_ends_at` (the register reads the newest one) and the
-        previous end, and its `retention_until` day moves to the lock's.
-        An exhibit already held that long is left alone and counted.
-        Purged exhibits have no bytes to lock.
+        Each lengthened exhibit gets a LOCK_EXTENDED custody row carrying the new `lock_ends_at` (the register
+        reads the newest one) and the previous end, and its `retention_until` day moves to the lock's. An exhibit
+        already held that long is left alone and counted. Purged exhibits have no bytes to lock.
 
-        EVERY live exhibit is locked, and the report counts only those
-        within `ceiling`, the caller's (clearance, compartments), when one
-        is given (verifier, 2026-09-24): `case.update` says nothing about
-        exhibits above the caller, and a count that included them told an
-        AMBER owner a case held three exhibits where their register showed
-        one, as often as they cared to save the date. Which exhibits failed
-        is in the audit log, never in the answer."""
+        EVERY live exhibit is locked, and the report counts only those within `ceiling`, the caller's
+        (clearance, compartments), when one is given: `case.update` says nothing about exhibits above the caller,
+        and a count that included them would tell an AMBER owner a case held three exhibits where their register
+        showed one. Which exhibits failed is in the audit log, never in the answer."""
         now = self._now()
         until, capped = lock_target(retention_until, now)
         clr, comp = ceiling if ceiling is not None else (None, None)

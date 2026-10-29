@@ -1,36 +1,23 @@
-"""The outbound lookup provider registry and its credential vault
-(F15.2, 2026-09-24).
+"""The outbound lookup provider registry and its credential vault.
 
-An administrator registers a provider, seals its key, names the egress
-route it leaves by (docs/00 decision 68), determines and justifies its
-exposure, and sets its quota.
-Nothing is seeded and nothing is enabled, and nothing leaves until the host
-operator also turns NOCTORNAL_OUTBOUND_LOOKUPS on: the administrator and
-the host operator are two acts before anything goes.
+An administrator registers a provider, seals its key, names the egress route it leaves by (docs/00
+decision 68), determines and justifies its exposure, and sets its quota. Nothing is seeded and
+nothing is enabled, and nothing leaves until the host operator also turns NOCTORNAL_OUTBOUND_LOOKUPS
+on: the administrator and the host operator are two acts before anything goes.
 
-## The key goes only where it was entered for
+The key goes only where it was entered for. `ProviderVault` has the shape PersonaVault set
+(invariant 7): no method returns a secret; `use()` audits PROVIDER_SECRET_USED BEFORE it decrypts
+and yields the fields inside secret_in_scope, so redact() removes them from every message. The key
+is bound to the origin (host and port) and the route it was entered with: changing either destroys
+it, so pointing a provider at your own server and waiting is not a way to read a key.
 
-`ProviderVault` has the shape PersonaVault set (invariant 7): no method
-returns a secret; `use()` audits PROVIDER_SECRET_USED BEFORE it decrypts
-and yields the fields inside secret_in_scope, so redact() removes them
-from every message. The key is bound to the origin (host and port) and the
-route it was entered with: changing either destroys it, so pointing a
-provider at your own server and waiting is not a way to read a key.
-
-## Exposure
-
-NONE (your own instance, on your network), VENDOR (the vendor learns what
-was asked, under your account) or PUBLIC (anyone watching the provider can
-see it). The level is the operator's determination with a written basis.
-Every determination below PUBLIC, and every lowering, is a second
-administrator's act, held by the database (0098). The ceiling follows the
-level: only NONE may take AMBER, VENDOR takes GREEN at most and PUBLIC
-CLEAR.
-
-NONE is checked where the code can check it: its route's admitting entry
-must name a private network and no public entry may also admit the
-host. That proves the first hop only, and the console and the docs say
-so.
+Exposure is NONE (your own instance, on your network), VENDOR (the vendor learns what was asked,
+under your account) or PUBLIC (anyone watching the provider can see it). The level is the operator's
+determination with a written basis. Every determination below PUBLIC, and every lowering, is a
+second administrator's act, held by the database (0098). The ceiling follows the level: only NONE
+may take AMBER, VENDOR takes GREEN at most and PUBLIC CLEAR. NONE is checked where the code can
+check it: its route's admitting entry must name a private network and no public entry may also admit
+the host. That proves the first hop only, and the console and the docs say so.
 """
 from __future__ import annotations
 
@@ -327,9 +314,7 @@ class ProviderVault:
             yield MappingProxyType(fields)
 
 
-# ---------------------------------------------------------------------------
-# Routes (docs/00 decision 68)
-# ---------------------------------------------------------------------------
+# Routes (docs/00 decision 68).
 
 def _default_route_for():
     from noctornal_api import egress
@@ -360,10 +345,9 @@ def route_state(conn, provider: Provider, *, route_for: Callable | None = None) 
     the connection could leave through that one."""
     route_for = route_for or _default_route_for()
     try:
-        # The declared rule carries a NONE provider's private network
-        # (docs/20 section 9, the lookups row), so where no administrator
-        # route exists it is the whole allowlist and where one does it
-        # narrows it (2026-09-25).
+        # The declared rule carries a NONE provider's private network (docs/20 section 9, the
+        # lookups row), so where no administrator route exists it is the whole allowlist and where
+        # one does it narrows it.
         route = route_for("integration", provider.egress_route, conn=conn,
                           declared=(Rule.for_url(provider.base_url,
                                                  network=provider.private_cidr),))
@@ -498,7 +482,7 @@ class ProviderRegistry:
         self._route_for = route_for
 
     def _on(self, conn: psycopg.Connection) -> ProviderRegistry:
-        """This registry on `conn` (a LOOKUPS connection, F51, 2026-10-02)."""
+        """This registry on `conn` (a LOOKUPS connection)."""
         return self if conn is self._c else ProviderRegistry(conn, route_for=self._route_for)
 
     # -- reads ------------------------------------------------------------------
@@ -702,11 +686,10 @@ class ProviderRegistry:
         sets: dict = {}
         clear_reason = None
         disable = False
-        # A new destination: another host or port, or (for NONE) another
-        # private network. A second administrator approved the exposure of
-        # ONE destination, so a move below PUBLIC is a new determination
-        # (2026-09-25; 0098's guard_provider holds the same rule, reading
-        # the authority of base_url as the SQL does).
+        # A new destination: another host or port, or (for NONE) another private network. A second
+        # administrator approved the exposure of ONE destination, so a move below PUBLIC is a new
+        # determination (0098's guard_provider holds the same rule, reading the authority of
+        # base_url as the SQL does).
         moved = False
         if changes.get("base_url"):
             base, host, port = _check_base_url(changes["base_url"])
@@ -790,15 +773,13 @@ class ProviderRegistry:
         if not sets:
             return p
         cols = ", ".join(f"{k} = %s" for k in sets)
-        # A move withdraws every case's waiting and queued lookups of this
-        # provider, which the administrator holds no assignment to see, so
-        # the update then runs as the LOOKUPS purpose, on one connection
-        # (F51, 2026-10-02).
+        # A move withdraws every case's waiting and queued lookups of this provider, which the
+        # administrator holds no assignment to see, so the update then runs as the LOOKUPS purpose,
+        # on one connection.
         withdraw = moved or redetermine
-        # egress-lookup-signoff-exposure (2026-10-03): a raise (the only
-        # direction this method takes; a lowering is a second administrator's
-        # and cancels its waiting sign-offs in decide_exposure_change) also
-        # reaches every case's waiting lookups, so it too runs as LOOKUPS.
+        # A raise (the only direction this method takes; a lowering is a second administrator's and
+        # cancels its waiting sign-offs in decide_exposure_change) also reaches every case's waiting
+        # lookups, so it too runs as LOOKUPS.
         raised = "exposure_level" in sets
         try:
             with (system_connection(SystemPurpose.LOOKUPS, reuse=self._c)
@@ -900,10 +881,9 @@ class ProviderRegistry:
         p = self.require(provider_id)
         if p.retired_at is not None:
             raise ProviderError("A retired provider is final.", status=409)
-        # A disable withdraws every case's waiting and queued lookups, which
-        # the administrator holds no assignment to see, so it runs as the
-        # LOOKUPS purpose, the provider's change and the withdrawal on one
-        # connection so they commit together (F51, 2026-10-02).
+        # A disable withdraws every case's waiting and queued lookups, which the administrator holds
+        # no assignment to see, so it runs as the LOOKUPS purpose, the provider's change and the
+        # withdrawal on one connection so they commit together.
         withdraw = action == "PROVIDER_DISABLED"
         with (system_connection(SystemPurpose.LOOKUPS, reuse=self._c) if withdraw
               else nullcontext(self._c)) as conn, conn.transaction():
@@ -916,9 +896,8 @@ class ProviderRegistry:
 
     @staticmethod
     def _withdraw_queued(conn: psycopg.Connection, provider_id: UUID, why: str) -> int:
-        """Queued rows of a disabled or retired provider are cancelled, never
-        left to send months later: every case's, so `conn` is a LOOKUPS
-        connection (F51, 2026-10-02)."""
+        """Queued rows of a disabled or retired provider are cancelled, never left to send months
+        later: every case's, so `conn` is a LOOKUPS connection."""
         if conn.execute("SELECT to_regclass('ingest.lookup')").fetchone()[0] is None:
             return 0
         return len(conn.execute(
@@ -929,9 +908,8 @@ class ProviderRegistry:
     @staticmethod
     def _cancel_awaiting_signoff(conn: psycopg.Connection, provider_id: UUID,
                                  why: str) -> int:
-        """The waiting sign-offs of a provider, every case's, cancelled;
-        `conn` is a LOOKUPS connection (F51, 2026-10-02). Queued rows are
-        left to the drain, which refuses a changed exposure by name."""
+        """The waiting sign-offs of a provider, every case's, cancelled; `conn` is a LOOKUPS
+        connection. Queued rows are left to the drain, which refuses a changed exposure by name."""
         if conn.execute("SELECT to_regclass('ingest.lookup')").fetchone()[0] is None:
             return 0
         return len(conn.execute(
@@ -956,9 +934,8 @@ class ProviderRegistry:
         p = self.require(provider_id)
         if p.retired_at is not None:
             raise ProviderError("A retired provider is final.", status=409)
-        # As a disable: every case's waiting and queued lookups are
-        # withdrawn, so the retirement runs as the LOOKUPS purpose, on one
-        # connection (F51, 2026-10-02).
+        # As a disable: every case's waiting and queued lookups are withdrawn, so the retirement
+        # runs as the LOOKUPS purpose, on one connection.
         with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as conn, \
                 conn.transaction():
             change = conn.execute(
@@ -997,9 +974,8 @@ class ProviderRegistry:
 
     def _open_change(self, provider: Provider, *, from_level: str, to_level: str,
                      basis: str, actor_id: UUID, private_cidr=None) -> UUID:
-        """The change names the destination it is about: the origin as the
-        row stands and, for NONE, the private network. 0098's guard clears
-        the flag only for an approval of exactly those (2026-09-25)."""
+        """The change names the destination it is about: the origin as the row stands and, for NONE,
+        the private network. 0098's guard clears the flag only for an approval of exactly those."""
         if to_level == "NONE" and private_cidr is None:
             private_cidr = provider.private_cidr
         if to_level != "NONE":
@@ -1074,8 +1050,7 @@ class ProviderRegistry:
                                 status=403)
         p = self.require(provider_id)
         if approve and row[7] != p.origin:
-            # Asked about another destination: an approval of that one says
-            # nothing about this one (2026-09-25).
+            # Asked about another destination: an approval of that one says nothing about this one.
             self._c.execute(
                 """UPDATE ingest.provider_exposure_change
                       SET decision = 'EXPIRED', decided_at = now(),
@@ -1086,10 +1061,9 @@ class ProviderRegistry:
                                 "lapsed; ask again for the address the provider names "
                                 "now.", status=409)
         try:
-            # An approval cancels every case's sign-offs waiting on this
-            # provider, which the administrator holds no assignment to see,
-            # so the decision runs as the LOOKUPS purpose, on one connection
-            # (F51, 2026-10-02).
+            # An approval cancels every case's sign-offs waiting on this provider, which the
+            # administrator holds no assignment to see, so the decision runs as the LOOKUPS purpose,
+            # on one connection.
             with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as conn, \
                     conn.transaction():
                 if not approve:
@@ -1154,10 +1128,9 @@ class ProviderRegistry:
     # -- counts, and counts only ------------------------------------------------------
 
     def usage(self, provider_id: UUID) -> dict:
-        """Counts across every case and the provider tests, for the
-        administrator who runs the provider, as the LOOKUPS purpose (F51,
-        2026-10-02): their own view holds no case's lookups, and a usage
-        panel that counted only those would read as idle. Counts only."""
+        """Counts across every case and the provider tests, for the administrator who runs the
+        provider, as the LOOKUPS purpose: their own view holds no case's lookups, and a usage panel
+        that counted only those would read as idle. Counts only."""
         p = self.require(provider_id)
         from noctornal_api import lookups
         with system_connection(SystemPurpose.LOOKUPS, reuse=self._c) as conn:
@@ -1186,10 +1159,6 @@ def _first_line(exc: Exception) -> str:
     return words.get(name or "", text.splitlines()[0][:300] if text else
                      "That provider configuration is not allowed.")
 
-
-# ---------------------------------------------------------------------------
-# Readiness (F15.2)
-# ---------------------------------------------------------------------------
 
 def readiness_verdict(conn: psycopg.Connection, *, route_for: Callable | None = None):
     """(ok, evidence, action, caveat)."""

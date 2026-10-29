@@ -1,50 +1,38 @@
-"""Sealing an egress exit for the egress proxy alone (S2, 2026-09-24;
-docs/00 decision 68).
+"""Sealing an egress exit for the egress proxy alone (docs/00 decision 68).
 
 ## Why a key of its own, and why the API cannot open what it seals
 
-An exit is the address and credentials of an upstream proxy a persona's
-traffic leaves through (a residential pool, a VPN, a Tor sidecar). The
-only key ring the platform had, NOCTORNAL_TOTP_KEK, also opens every TOTP
-secret, persona credential and sample data key. Sealing exits under it
-would have put that whole ring into the one container that talks to the
-internet. So an exit is sealed with HPKE to an X25519 key pair whose
-PRIVATE half only the egress proxy holds (NOCTORNAL_EGRESS_SEAL_KEY, in
-egress-proxy.env). The API holds the PUBLIC half
-(NOCTORNAL_EGRESS_SEAL_PUBLIC, in egress-client.env): it seals and can
-never open, so a compromise of the API yields no exit credentials, and a
-compromise of the proxy yields no platform key.
+An exit is the address and credentials of an upstream proxy a persona's traffic leaves through (a
+residential pool, a VPN, a Tor sidecar). NOCTORNAL_TOTP_KEK also opens every TOTP secret, persona
+credential and sample data key, and sealing exits under it would put that whole ring into the one container
+that talks to the internet. So an exit is sealed with HPKE to an X25519 key pair whose private half only
+the egress proxy holds (NOCTORNAL_EGRESS_SEAL_KEY, in egress-proxy.env). The API holds the public half
+(NOCTORNAL_EGRESS_SEAL_PUBLIC, in egress-client.env): it seals and can never open, so a compromise of the
+API yields no exit credentials, and a compromise of the proxy yields no platform key.
 
 ## What the blob is bound to
 
-The HPKE `info` is b"noctornal-egress-exit-v1" NUL profile id NUL exit
-kind. A blob copied onto another profile, or an exit kind flipped in the
-table (an https exit relabelled http, which would send the credentials in
-clear), fails to open with InvalidTag and the proxy refuses the connection
-as config_error. The exit kind is part of the exit because the transport
-to the upstream is (2026-09-24: an https upstream had nowhere to be
-recorded).
+The HPKE `info` is b"noctornal-egress-exit-v1" NUL profile id NUL exit kind. A blob copied onto another
+profile, or an exit kind flipped in the table (an https exit relabelled http, which would send the
+credentials in clear), fails to open with InvalidTag and the proxy refuses the connection as config_error.
+The exit kind is part of the exit because the transport to the upstream is.
 
 ## The fingerprint
 
-`fingerprint` is an HMAC over the exit kind, host, port and USER NAME under
-NOCTORNAL_EGRESS_FINGERPRINT_KEY, a key of its own that the API and the
-proxy both hold and that is never rotated. It is what the reach trigger
-compares: a new host, port, user name (residential pools choose a country
-or a pool through the user name) or exit kind is a WIDENING that voids the
-collection authorities recorded before it, while a password-only rotation
-keeps the fingerprint and so the authorities. It is keyed, so the column
-says nothing about the endpoint to a reader of the table.
+`fingerprint` is an HMAC over the exit kind, host, port and user name under NOCTORNAL_EGRESS_FINGERPRINT_KEY,
+a key of its own that the API and the proxy both hold and that is never rotated. It is what the reach
+trigger compares: a new host, port, user name (residential pools choose a country or a pool through the
+user name) or exit kind is a widening that voids the collection authorities recorded before it, while a
+password-only rotation keeps the fingerprint and so the authorities. It is keyed, so the column says
+nothing about the endpoint to a reader of the table.
 
-Losing or changing that key is not free: the proxy refuses every exit
-whose opened endpoint does not match its stored fingerprint, so every
-chained exit stops until it is sealed again, and each re-seal counts as a
-widening that voids the authorities on its profile. The two copies (the
-API's and the proxy's) must also agree, which scripts/egress_setup.py
-preflight checks.
+Losing or changing that key is not free: the proxy refuses every exit whose opened endpoint does not match
+its stored fingerprint, so every chained exit stops until it is sealed again, and each re-seal counts as a
+widening that voids the authorities on its profile. The API's and the proxy's copies must also agree, which
+scripts/egress_setup.py preflight checks.
 
-The plaintext endpoint lives in one ExitEndpoint for the life of one dial
-and is never stored, logged, audited or returned.
+The plaintext endpoint lives in one ExitEndpoint for the life of one dial and is never stored, logged,
+audited or returned.
 """
 from __future__ import annotations
 

@@ -1,28 +1,21 @@
-"""Embedders: the built-in wording embedder and the operator's model
-endpoint (F6.1 and F6.2, embeddings, 2026-09-24).
+"""Embedders: the built-in wording embedder and the operator's model endpoint.
 
-A similarity SPACE is one embedder fingerprint; vectors are compared only
-inside one space (embeddings.py keeps the spaces). Two roles:
+A similarity SPACE is one embedder fingerprint; vectors are compared only inside one space (embeddings.py keeps
+the spaces). Two roles:
 
-- WORDING is `HashedNgramEmbedder`, which runs in this process, reads no
-  model file and sends nothing anywhere. It is on unless
-  NOCTORNAL_EMBED_WORDING=off. It finds reposts, light edits and the same
-  passage written in another alphabet or another transliteration scheme.
-- MEANING is `EndpointEmbedder`: an operator's model server speaking the
-  OpenAI embeddings protocol, reached only through the `embeddings`
-  integration route (docs/20 section 9) and off
-  unless NOCTORNAL_EMBED_MEANING_URL is set. Nothing here decides WHETHER
-  an item may be sent: embeddings.meaning_gate does, per item, before
-  anything leaves.
+- WORDING is `HashedNgramEmbedder`, which runs in this process, reads no model file and sends nothing anywhere.
+  It is on unless NOCTORNAL_EMBED_WORDING=off. It finds reposts, light edits and the same passage written in
+  another alphabet or another transliteration scheme.
+- MEANING is `EndpointEmbedder`: an operator's model server speaking the OpenAI embeddings protocol, reached
+  only through the `embeddings` integration route (docs/20 section 9) and off unless
+  NOCTORNAL_EMBED_MEANING_URL is set. Nothing here decides WHETHER an item may be sent: embeddings.meaning_gate
+  does, per item, before anything leaves.
 
-This module is pure apart from the endpoint's one call site
-(`Endpoint.post`), which goes through pinned_http and nothing else: no
-socket of its own, no proxy environment, no second address classifier.
+This module is pure apart from the endpoint's one call site (`Endpoint.post`), which goes through pinned_http
+and nothing else: no socket of its own, no proxy environment, no second address classifier.
 
-`configured()` is the one reader of every NOCTORNAL_EMBED_* variable
-(readiness.py's "one reader per fact"): config.verify_environment, both
-readiness rows, the pass and the routes all borrow it, and
-test_embeddings_config.py holds that no other module reads one.
+`configured()` is the one reader of every NOCTORNAL_EMBED_* variable: config.verify_environment, both readiness
+rows, the pass and the routes all borrow it, and test_embeddings_config.py holds that no other module reads one.
 """
 from __future__ import annotations
 
@@ -97,13 +90,12 @@ def vector_literal(vector: Sequence[float]) -> str:
 
 
 def padded(vector: Sequence[float]) -> tuple[float, ...]:
-    """Zero-padded to EMBED_DIM and L2-normalised. Padding with zeros
-    leaves every cosine between two padded vectors what it was.
+    """Zero-padded to EMBED_DIM and L2-normalised. Padding with zeros leaves every cosine between two padded
+    vectors what it was.
 
-    Scaled by the largest magnitude first: a model endpoint's answer is
-    hostile input, and finite values near 1e308 square to infinity, which
-    would turn the whole vector into zeros or NaN (2026-09-25). Scaling first
-    changes no direction."""
+    Scaled by the largest magnitude first: a model endpoint's answer is hostile input, and finite values near
+    1e308 square to infinity, which would turn the whole vector into zeros or NaN. Scaling first changes no
+    direction."""
     values = [float(x) for x in vector] + [0.0] * (EMBED_DIM - len(vector))
     largest = max((abs(x) for x in values), default=0.0)
     if largest == 0.0:
@@ -188,12 +180,10 @@ def normalise_for_similarity(text: str) -> str:
     return prepare(text)[0]
 
 
-# Function words, dropped before features are made. A FIXED list, part of
-# the model version: an IDF learned from the corpus would move every
-# vector whenever a document arrived. Measured 2026-09-24 on the fixtures
-# in apps/api/tests/fixtures/embeddings: two long unrelated posts from the
-# same marketplace scored 0.466 with function words and 3-grams, 0.222
-# without them and with word pairs (see WORDING_BANDS).
+# Function words, dropped before features are made. A FIXED list, part of the model version: an IDF learned from
+# the corpus would move every vector whenever a document arrived. On the fixtures in
+# apps/api/tests/fixtures/embeddings, two long unrelated posts from the same marketplace score 0.466 with
+# function words and 3-grams, and 0.222 without them and with word pairs (see WORDING_BANDS).
 _STOP_EN = (
     "a about above after again against all also am an and any are as at be "
     "because been before being below between both but by can could did do "
@@ -240,28 +230,20 @@ PAIR_WEIGHT = 2.0
 
 
 class HashedNgramEmbedder:
-    """hashed-ngrams-v1: words, character 4- and 5-grams of each word padded
-    with spaces, and pairs of adjacent content words, after the normaliser
-    and with function words dropped; weight 1 + ln(tf), word pairs doubled;
-    each feature to a slot and a sign by blake2b (8 bytes, person
-    noct-embed-v1): index = h % 768, sign + when bit 63 is set; L2
-    normalised. No IDF, so a vector never changes because the corpus did.
+    """hashed-ngrams-v1: words, character 4- and 5-grams of each word padded with spaces, and pairs of adjacent
+    content words, after the normaliser and with function words dropped; weight 1 + ln(tf), word pairs doubled;
+    each feature to a slot and a sign by blake2b (8 bytes, person noct-embed-v1): index = h % 768, sign + when
+    bit 63 is set; L2 normalised. No IDF, so a vector never changes because the corpus did.
 
-    Measured on CPython 3.13 over real-shaped, non-repeating prose
-    (apps/api/tests/fixtures/embeddings; the numbers the tests assert):
-    a light edit 0.99; the first 1,000 characters of a 3,500-character
-    post reposted 0.57 to 0.67; the first 2,000, 0.79 to 0.88; a
-    400-character excerpt reposted alone or inside another post 0.27 to
-    0.42; unrelated posts from the same marketplace, long or short, at
-    most 0.23; a Russian notice against itself in ICAO 9303, GOST 7.79 B,
-    ISO 9, BGN/PCGN and informal spelling, 1.00 each. Word pairs are what
-    separate an excerpt from a post about the same things: two unrelated
-    posts share words and 3-grams by the hundred and share almost no pair
-    of adjacent content words.
+    Measured on real-shaped, non-repeating prose (apps/api/tests/fixtures/embeddings; the numbers the tests
+    assert): a light edit 0.99; the first 1,000 characters of a 3,500-character post reposted 0.57 to 0.67; the
+    first 2,000, 0.79 to 0.88; a 400-character excerpt 0.27 to 0.42; unrelated posts from the same marketplace
+    at most 0.23; a Russian notice against itself in ICAO 9303, GOST 7.79 B, ISO 9, BGN/PCGN and informal
+    spelling, 1.00 each. Word pairs are what separate an excerpt from a post about the same things: unrelated
+    posts share words and 3-grams by the hundred and almost no pair of adjacent content words.
 
-    The feature-to-slot lookup is memoised per instance (an LRU of
-    `cache_slots`, about 200 bytes an entry: 50,000 in an API worker,
-    500,000 in scripts/embed_pass.py)."""
+    The feature-to-slot lookup is memoised per instance (an LRU of `cache_slots`, about 200 bytes an entry:
+    50,000 in an API worker, 500,000 in scripts/embed_pass.py)."""
 
     role = ROLE_WORDING
     provider = "builtin"
@@ -340,16 +322,10 @@ def builtin(model: str = BUILTIN_CURRENT, cache_slots: int = 50_000):
     return _BUILTIN_CACHE[key]
 
 
-# ---------------------------------------------------------------------------
-# Bands and explanations (F6.3)
-# ---------------------------------------------------------------------------
-
-#: Similar wording is shown as a band, never as a number (docs/13 #9: a
-#: bare 0.87 is either over-trusted or ignored). Set from the measurements
-#: in HashedNgramEmbedder's docstring (bands from real prose, not from
-#: repeated text): a light edit, or most of
-#: a post reposted, is a near duplicate; a third of it reposted is much of
-#: the same wording; a short excerpt is some shared wording.
+#: Similar wording is shown as a band, never as a number (docs/13 #9: a bare 0.87 is either over-trusted or
+#: ignored). Set from the measurements in HashedNgramEmbedder's docstring: a light edit, or most of a post
+#: reposted, is a near duplicate; a third of it reposted is much of the same wording; a short excerpt is some
+#: shared wording.
 WORDING_BANDS = ((0.85, "near duplicate"), (0.55, "much of the same wording"),
                  (0.20, "some shared wording"))
 #: Below it a hit is not returned. Between it and the second band a hit is
@@ -396,10 +372,8 @@ _SPELT_WORD = re.compile(r"\w+(?:[" + re.escape("'`\"’‘ʹʺ′″´") + r"]+
 
 @functools.lru_cache(maxsize=65_536)
 def _word_parts(word: str) -> tuple[str, ...]:
-    """The content tokens one written word normalises to. Memoised: a
-    similarity answer normalises every word of up to 200 hits of up to
-    20,000 characters, and nearly all of them repeat (64 ms a hit without
-    it, measured 2026-09-25)."""
+    """The content tokens one written word normalises to. Memoised: a similarity answer normalises every word of
+    up to 200 hits of up to 20,000 characters, and nearly all of them repeat (64 ms a hit without it)."""
     stops = stopwords()
     return tuple(p for p in _WORD.findall(normalise_for_similarity(word))
                  if p not in stops)
@@ -422,20 +396,14 @@ class SharedQuery:
                         for i in range(len(self.tokens) - PHRASE_WORDS + 1)}
 
     def against(self, hit: str) -> SharedTerms:
-        """What the query shares with `hit`, shown as spelt in the hit: up
-        to 5 selectors that extraction.find_selectors finds in both
-        (compared on their normalised value), up to 8 content words of 4 or
-        more characters, longest first, and up to 3 shared passages (runs
-        of at least PHRASE_WORDS adjacent content words, longest first),
-        none of whose words is repeated among the shared words. Over the
-        first MAX_CHARS characters of each.
+        """What the query shares with `hit`, shown as spelt in the hit: up to 5 selectors that
+        extraction.find_selectors finds in both (compared on their normalised value), up to 8 content words of 4
+        or more characters, longest first, and up to 3 shared passages (runs of at least PHRASE_WORDS adjacent
+        content words, longest first), none of whose words is repeated among the shared words. Over the first
+        MAX_CHARS characters of each.
 
-        A passage is quoted as the hit's own text from its first shared word
-        to its last, function words and punctuation included. Joining the
-        content tokens instead quoted a string found in neither text
-        ("crew named three separate forum threads distinct crew",
-        2026-09-25), and a passage must show the terms as spelt in the
-        hit."""
+        A passage is quoted as the hit's own text from its first shared word to its last, function words and
+        punctuation included: joining the content tokens would quote a string found in neither text."""
         from noctornal_api.extraction import find_selectors
 
         b_text = (hit or "")[:MAX_CHARS]
@@ -775,10 +743,6 @@ def outbound_use(_conn) -> str | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# The endpoint: route, locality and the one call site (F6.2)
-# ---------------------------------------------------------------------------
-
 ROUTE_NAME = "embeddings"
 USER_AGENT = "NocTORnal-embedder/1"
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
@@ -799,18 +763,14 @@ class EndpointError(Exception):
 
 @dataclass(frozen=True)
 class Locality:
-    """Where the endpoint is, decided from the route and the one lookup
-    pinned_http made (docs/20 section 9), never from a lookup of our own.
+    """Where the endpoint is, decided from the route and the one lookup pinned_http made (docs/20 section 9),
+    never from a lookup of our own.
 
-    `kind` is 'this_host' only for a loopback answer on a DIRECT route,
-    outside production, with NOCTORNAL_EMBED_MEANING_LOCAL_HOST naming the
-    host: nothing else is ever treated as inside this host (a LAN box on
-    the shipped development install took RED under the old platform
-    proof, and the egress proxy refuses the deployment's own networks,
-    so a production 'platform' could not be configured anyway).
-    Everything else is 'loopback_undeclared', 'private_network' or
-    'internet', and goes to Destination.MODEL_REMOTE, where invariant 8's
-    floor applies."""
+    `kind` is 'this_host' only for a loopback answer on a DIRECT route, outside production, with
+    NOCTORNAL_EMBED_MEANING_LOCAL_HOST naming the host: nothing else is ever treated as inside this host (a LAN
+    box on a development install is not, and the egress proxy refuses the deployment's own networks, so a
+    production 'platform' could not be configured anyway). Everything else is 'loopback_undeclared',
+    'private_network' or 'internet', and goes to Destination.MODEL_REMOTE, where invariant 8's floor applies."""
 
     kind: str
     words: str
@@ -915,11 +875,9 @@ class Endpoint:
         try:
             return json.loads(fetched.body.decode("utf-8"))
         except (UnicodeDecodeError, ValueError, RecursionError):
-            # RecursionError: a body nested a few thousand deep, well inside
-            # the 16 MiB cap, exhausts the JSON decoder's recursion limit.
-            # Uncaught it ended the pass after EMBED_BATCH_SENT with no
-            # FAILED row, so every pass sent the same batch again
-            # (2026-09-25).
+            # RecursionError: a body nested a few thousand deep, well inside the 16 MiB cap, exhausts the JSON
+            # decoder's recursion limit. Uncaught it would end the pass after EMBED_BATCH_SENT with no FAILED row,
+            # so every pass would send the same batch again.
             raise EndpointError("endpoint_bad_response", "the model endpoint's answer "
                                 "is not JSON") from None
 
@@ -1038,19 +996,15 @@ class EndpointEmbedder:
 
 def parse_response(answer, count: int, *, expect_dims: int | None = None
                    ) -> list[tuple[float, ...]]:
-    """The vectors of an embeddings answer, in input order, each padded and
-    normalised. Raises EndpointError and nothing else: 'endpoint_bad_response'
-    (not one entry per input, an index missing or repeated, a value that is
-    not a finite number, a vector of zeros, mixed lengths),
-    'dimension_unsupported' (longer than 768), 'dimension_changed' (not the
-    space's recorded dimension).
+    """The vectors of an embeddings answer, in input order, each padded and normalised. Raises EndpointError and
+    nothing else: 'endpoint_bad_response' (not one entry per input, an index missing or repeated, a value that is
+    not a finite number, a vector of zeros, mixed lengths), 'dimension_unsupported' (longer than 768),
+    'dimension_changed' (not the space's recorded dimension).
 
-    The answer is hostile input. Anything else escaping from here reaches
-    the pass after EMBED_BATCH_SENT and before any FAILED row, which is how
-    a 400-digit integer (OverflowError on the float conversion) made every
-    pass re-send and re-audit the same batch
-    (2026-09-25). So every value is converted here, under a guard, and any
-    Python error the answer's shape can provoke becomes a bad response."""
+    The answer is hostile input. Anything else escaping from here reaches the pass after EMBED_BATCH_SENT and
+    before any FAILED row, so the pass would re-send and re-audit the same batch (a 400-digit integer raises
+    OverflowError on the float conversion). Every value is converted here, under a guard, and any Python error
+    the answer's shape can provoke becomes a bad response."""
     try:
         return _parse_response(answer, count, expect_dims=expect_dims)
     except EndpointError:

@@ -1,26 +1,18 @@
-"""Where notifications actually get raised: one function per event, so the
-wording, the priority and the classification of each are decided once.
+"""Notification events: one function per event, so its wording and labels are decided once.
 
-Kept out of `notifications.py` (which is the mechanism) and out of the
-routers (which would each invent their own wording) for the reason docs/07
-gives: the *content rules* are the security-relevant part, and they are only
-checkable if there is one place to check them.
+Kept out of `notifications.py` (the mechanism) and out of the routers so the content rules, which
+are the security-relevant part, can be checked in one place (docs/07).
 
-## The three-field discipline, applied
+Every function obeys the three-field contract of migration 0029:
 
-Every function here obeys the contract migration 0029 states:
+- `subject`: no intelligence, only the case CODE and what happened. It renders on a phone lock
+  screen.
+- `summary`: no entity names, handles or selectors. It can go in an email body.
+- `body`: may name entities. In-app only; the reader has already passed the five-part gate.
 
-- `subject` — no intelligence. The case CODE and what happened. This string
-  renders on a phone lock screen.
-- `summary` — no entity names, no handles, no selectors. This string can go
-  in an email body.
-- `body` — may name entities. In-app only; the reader has already passed the
-  five-part gate.
-
-A merge notification is the sharp case. "shadowbroker merged into A. Petrov"
-is exactly the sentence that must not leave the building, and exactly the
-sentence the case owner needs to see. So it lives in `body`, and the summary
-says only that a merge happened and how many edges moved.
+A merge notification is the sharp case: "shadowbroker merged into A. Petrov" is the sentence the
+owner needs and the one that must not leave the building. It lives in `body`; the summary says only
+that a merge happened and how many edges moved.
 """
 from __future__ import annotations
 
@@ -46,11 +38,9 @@ log = logging.getLogger("noctornal.notify_events")
 def _case(conn: psycopg.Connection, case_id: UUID) -> tuple[str, str, frozenset[str]]:
     """(code, classification, compartments). A notification about a case is
     at least as classified as the case."""
-    # The labels are lock facts (`iam.case_facts`) and the code comes
-    # through `iam.case_code` (S1, 2026-09-25), so a notification is never
-    # labelled below its case because row-level security hid the case row
-    # from whoever triggered it. A case that does not exist is refused
-    # rather than guessed at: the old fallback labelled it AMBER.
+    # The labels are lock facts (`iam.case_facts`) and the code comes through `iam.case_code`, so a
+    # notification is never labelled below its case because row-level security hid the case row from
+    # whoever triggered it. A case that does not exist is refused, not guessed at.
     row = conn.execute(
         "SELECT iam.case_code(%s), classification, compartments "
         "  FROM iam.case_facts(%s)", (case_id, case_id)).fetchone()
@@ -68,26 +58,22 @@ def merge_performed(conn: psycopg.Connection, *, case_id: UUID, merge_id: UUID,
                     #: which is a destruction described as a move.
                     self_loops_deleted: int = 0,
                     #: Duplicates of a tie the survivor already held, set
-                    #: aside because the merger could not read them.
+                    #: aside because the caller could not read them.
                     duplicates_folded: int = 0,
                     element_classification: str | None = None,
                     element_compartments: frozenset[str] = frozenset()) -> None:
-    """docs/01 asks for this one by name: "Merges require `graph.merge` with
-    step-up auth, and generate an audit event and a case-owner
-    notification." The audit event has existed since decision 41; this is
-    the other half.
+    """Tell the case owner a merge happened (docs/01: a merge generates an audit event and a
+    case-owner notification).
 
-    The owner, not the deputy. Two people told about every merge is two
-    people who mute it, and the owner is who docs/01 names.
+    The owner, not the deputy: two people told about every merge are two people who mute it.
     """
     code, classification, compartments = _case(conn, case_id)
     NotificationService(conn).notify_case_owner(
         case_id,
         kind="MERGE_PERFORMED",
         subject=f"{code}: two entities were merged",
-        # No labels here: this line may be emailed.
-        # Counts agreed, never a bracketed plural (F7, 2026-09-24): the
-        # summary reaches Jira as well as email now.
+        # No labels here: this line may be emailed. Counts agree in number (no bracketed plurals)
+        # because the summary also reaches Jira.
         summary=(f"A merge in {code} re-pointed "
                  f"{count_of(edges_repointed, 'relationship', 'relationships')}. "
                  f"Sign in to review it."),
@@ -147,29 +133,21 @@ def merge_reversed(conn: psycopg.Connection, *, case_id: UUID, merge_id: UUID,
 def approval_requested(conn: psycopg.Connection, *, case_id: UUID,
                        request_id: UUID, operation: str, permission: str,
                        justification: str, actor_id: UUID,
-                       # The labels of what the request names (a node.merge
-                       # names two entities): the body quotes the
-                       # justification, so a signer below them is not sent
-                       # it (http_ui-011, 2026-10-03).
+                       # Labels of what the request names (a node.merge names two entities): the
+                       # body quotes the justification, so a signer below them is not sent it.
                        element_classification: str | None = None,
                        element_compartments: frozenset[str] = frozenset(),
                        ) -> int:
     """Tell everyone on the case who could actually approve it.
 
-    Not the case owner, and not everyone assigned: the people who hold the
-    OPERATION's permission on this case, which is the same set the decide
-    endpoint will accept. Notifying anyone else produces a queue item they
-    cannot action, and a queue full of those is a queue nobody reads.
+    Not the owner and not everyone assigned: the people who hold the OPERATION's permission on this
+    case, the same set the decide endpoint accepts. Anyone else gets a queue item they cannot
+    action. An approval nobody is told about is an approval nobody gives, and dual control becomes a
+    merge button that does not work.
 
-    An approval nobody is told about is an approval nobody gives, and then
-    dual control is just a merge button that does not work.
-
-    The `expires_at` predicate is not decoration. Without it this notified
-    every user who was EVER assigned to the case, which is a fresh WRITE of
-    case material — the justification quotes case facts — to somebody the
-    access gate would answer 404. It is also the same set the decide
-    endpoint accepts, and that endpoint has always checked expiry, so the
-    queue item was one the recipient could not have actioned anyway.
+    The `expires_at` predicate matters: without it every user ever assigned to the case would be
+    sent a fresh write of case material (the justification quotes case facts) when the access gate
+    would answer 404 for them.
     """
     code, classification, compartments = _case(conn, case_id)
     rows = conn.execute(
@@ -183,8 +161,8 @@ def approval_requested(conn: psycopg.Connection, *, case_id: UUID,
         (case_id, permission, actor_id)).fetchall()
     svc = NotificationService(conn)
     sent = 0
-    # One request is one event however many signers are told (F8,
-    # 2026-09-24): Jira posts it once, not once per recipient.
+    # One request is one event however many signers are told, so Jira posts it once rather than once
+    # per recipient.
     event = uuid4()
     for (user_id,) in rows:
         raised = svc.notify(
@@ -214,16 +192,11 @@ def approval_decided(conn: psycopg.Connection, *, case_id: UUID,
                      request_id: UUID, operation: str, requested_by: UUID,
                      approved: bool, note: str | None,
                      actor_id: UUID) -> Notification | None:
-    """Tell the requester their request was decided. Returns the row, or
-    None when the requester could not be told -- suppressed because they
-    may no longer read the case, or because they decided it themselves.
+    """Tell the requester their request was decided. Returns the row, or None when the requester
+    could not be told (suppressed because they may no longer read the case, or because they decided
+    it themselves).
 
-    N1 (2026-09-02). This returned nothing, and `ApprovalService.decide`
-    reported `requester_notified` as `... is not None` -- two halves each
-    consistent with itself and wrong together: every decision, including
-    one whose notification was written and delivered, was reported to the
-    approver as "the requester was not notified". The return value IS the
-    contract now; the router's warning depends on it.
+    The return value is the contract: the router's `requester_notified` warning depends on it.
     """
     code, classification, compartments = _case(conn, case_id)
     verdict = "approved" if approved else "declined"
@@ -246,35 +219,22 @@ def approval_decided(conn: psycopg.Connection, *, case_id: UUID,
 
 def proposals_queued(conn: psycopg.Connection, *, case_id: UUID, count: int,
                      actor_id: UUID, classification: str | None = None) -> bool:
-    """Triage had no notification at all: an analyst found out there was work
-    by looking. Low priority and digest-friendly by default, because a
+    """Tell the case owner that triage has work waiting. Low priority and digest-friendly, because a
     capture that raises forty proposals must not raise forty emails.
 
-    Returns whether the owner was actually told. False when there was
-    nothing to say (no proposals), when the owner is the person who pasted
-    the material (suppression 1), or when the owner may not read the case
-    (suppression 2). The router publishes it as `owner_notified` so the
-    analyst can see that nobody is coming to triage this.
+    Returns whether the owner was actually told: False when there are no proposals, when the owner
+    is the person who pasted the material (suppression 1), or when the owner may not read the case
+    (suppression 2). The router publishes it as `owner_notified`.
 
-    Until N2 (2026-09-02) this function existed, was correct, and was called
-    by NOTHING -- the same shape `effective_labels_for_notification` had
-    before F19. PROPOSAL_QUEUED sat in the preferences panel as a kind the
-    user could tune for an event that could not happen.
-
-    `classification` is the capture's own label (final review u12,
-    2026-09-24), composed over the case's as an element's is. The notice
-    was labelled at the case alone, so a RED paste into an AMBER case told
-    an AMBER owner, by an email-safe summary, how many proposals RED
-    material had raised, and its Open led to a queue that showed them
-    nothing, since the queue filters each proposal by what it came from.
-    Now suppression 2 keeps it from anyone who could not read them.
+    `classification` is the capture's own label, composed over the case's as an element's is.
+    Labelled at the case alone, a RED paste into an AMBER case would tell an AMBER owner, by an
+    email-safe summary, how many proposals RED material raised; suppression 2 keeps it from anyone
+    who could not read them.
     """
     if count <= 0:
         return False
     code, case_classification, compartments = _case(conn, case_id)
-    # Agreed in number, because the text is stored and read verbatim: the
-    # inbox printed "3 proposal(s) were raised" (README screenshot set
-    # review, 2026-09-23).
+    # Agreed in number, because the text is stored and read verbatim.
     one = count == 1
     noun = "proposal" if one else "proposals"
     raised = NotificationService(conn).notify_case_owner(
@@ -290,9 +250,7 @@ def proposals_queued(conn: psycopg.Connection, *, case_id: UUID, count: int,
               f"dispose."),
         classification=case_classification, compartments=compartments,
         element_classification=classification,
-        # What the card's Open goes to: this case's triage queue. It named
-        # nothing, so the notice about waiting work had no route to the
-        # work (ux08-triage:notifications-no-path-to-object, 2026-09-23).
+        # What the card's Open goes to: this case's triage queue.
         object_type="triage", object_id=case_id,
         actor_id=actor_id)
     return raised is not None
@@ -301,82 +259,30 @@ def proposals_queued(conn: psycopg.Connection, *, case_id: UUID, count: int,
 def evidence_integrity_alarm(conn: psycopg.Connection, *, case_id: UUID,
                              evidence_id: UUID, actor_id: UUID,
                              on_read: bool) -> Notification | None:
-    """The tamper alarm. `KINDS` has registered EVIDENCE_INTEGRITY_ALARM at
-    URGENT -- one of two priority-1 kinds in the system, "it wakes people
-    up" -- since Phase 5, and until N2 (2026-09-02) nothing raised it. The
-    string existed in `evidence.py` only as an AUDIT action on the
-    incidental read path; the explicit verify wrote HASH_VERIFIED and
-    stopped. A kind that cannot fire is a promise in the preferences panel.
+    """The tamper alarm: raises EVIDENCE_INTEGRITY_ALARM, one of the two URGENT kinds.
 
-    `on_read` says how the mismatch was found, because the two are
-    different events for the owner: an explicit verify is somebody
-    checking; a mismatch on read is an analyst who tried to open the
-    exhibit and was refused it, which means the case is working from
-    evidence that cannot currently be served.
+    `on_read` says how the mismatch was found: an explicit verify is somebody checking; a mismatch
+    on read is an analyst refused the exhibit, so the case is working from evidence that cannot be
+    served. Labelled with the exhibit's own labels composed over the case's, since the label decides
+    whether the summary may go out by email. Suppression 1 applies: an owner who ran the verify is
+    not told what they just did. The custody and audit rows are written by `evidence.py` regardless
+    and are the durable record.
 
-    Labelled with the exhibit's own labels composed over the case's, the
-    same way a merge notification carries its nodes' labels: an exhibit may
-    be classified above its case, and the label is what decides whether the
-    summary may go out by email.
-
-    Suppression 1 applies: an owner who ran the verify themselves is not
-    told what they just did -- they hold the `ok=False`, and the custody and
-    audit rows are written regardless. The notification is for the owner
-    finding out from somebody ELSE's discovery, and its URGENT priority is
-    what puts it in front of `escalate_unacknowledged` if they then sit on
-    it.
-
-    ## One alarm per exhibit while it is unanswered (2026-09-02)
-
-    Returns None -- writing nothing -- when an unacknowledged alarm for
-    this exhibit already exists. Until this fix the alarm fired on EVERY
-    detection, which made the evidence read path an outbound-email
-    amplifier: `GET /cases/{id}/evidence/{id}/content` and
-    `POST /{id}/verify` carry no `rate_limit` dependency, so any caller
-    holding `evidence.read` on a case with one corrupt exhibit minted one
-    priority-1 notification plus one PENDING SMTP delivery to the case
-    owner per HTTP request, on a path that previously wrote only a cheap
-    internal audit row. Suppression 1 was no defence, because the owner is
-    the RECIPIENT and the looper is anyone else. Worse, because the owner
-    is the recipient, `notifications.escalate_unacknowledged` skips the
-    owner and fans every one of those out to EVERY active
-    SECURITY_OFFICER, once per drain until each is acknowledged
-    individually -- so the party with the motive to bury the tamper alarm
-    could drown it, and the system's only tamper alarm is the last thing
-    that may be drowned.
-
-    Keyed on `acknowledged_at IS NULL` rather than on existence, so a
-    genuinely NEW failure after the owner has answered the last one is
-    still raised. Deliberately the same shape as this module's other two
-    producers -- `case_reviews_due`'s deterministic `object_id` and
-    `escalate_unacknowledged`'s NOT EXISTS -- which were made idempotent
-    on the same day precisely to stop fan-out; the one producer a hostile
-    caller can drive got neither, which is the inconsistency this closes.
-    Like theirs, the guard is a read-then-write with no unique index
-    behind it, so it bounds a loop rather than winning a race: two
-    simultaneous reads of the same tampered exhibit can still write two.
-    That is a cap of one per concurrent request rather than one per
-    request, which is the difference the amplifier turned on.
-
-    The guard runs inside `notify.enqueue` since F51 (2026-10-02): the
-    open alarm is the OWNER'S row, which row security hides from the
-    analyst whose read found the mismatch, so a read here would always
-    find nothing and the amplifier would be back.
-
-    The custody and audit rows are written by `evidence.py` regardless and
-    are the durable record; this only decides whether the OWNER'S PHONE
-    rings again about something they have already been told.
+    Returns None and writes nothing while an unacknowledged alarm for this exhibit exists. The read
+    path has no `rate_limit`, so without the guard any holder of `evidence.read` on a case with one
+    corrupt exhibit could mint an URGENT notification and a PENDING SMTP delivery per request, and
+    `escalate_unacknowledged` would fan each out to every SECURITY_OFFICER. Keyed on
+    `acknowledged_at IS NULL`, so a new failure after the owner has answered is still raised. The
+    guard is a read-then-write with no unique index: it bounds a loop, not a race. It runs inside
+    `notify.enqueue` because the open alarm is the owner's row, which row security hides from the
+    analyst whose read found the mismatch.
     """
     code, classification, compartments = _case(conn, case_id)
     labels = conn.execute(
         "SELECT classification, compartments, title FROM core.evidence "
         "WHERE id = %s", (evidence_id,)).fetchone()
-    # The exhibit by its TITLE in the body, which renders in-app only and
-    # may name case material; the id stays beside it as the durable
-    # reference. The body named a 36-character id and nothing else, so the
-    # most urgent notification in the product sent the analyst hunting
-    # for an exhibit by UUID (ux08-triage:notifications-no-path-to-object,
-    # 2026-09-23).
+    # The exhibit by its TITLE in the body, which renders in-app only and may name case material;
+    # the id stays beside it as the durable reference.
     named = (f"Exhibit {labels[2]!r} ({evidence_id})"
              if labels and labels[2] else f"Exhibit {evidence_id}")
     how = ("found on read: an analyst opened the exhibit and the bytes served "
@@ -417,45 +323,27 @@ def evidence_integrity_alarm(conn: psycopg.Connection, *, case_id: UUID,
 
 def case_reviews_due(conn: psycopg.Connection, *, as_of: date | None = None,
                      horizon_days: int = 14) -> int:
-    """Tell each owner of an ACTIVE case whose review falls within the
-    horizon, once per (case, review_due). Returns how many notifications
-    were WRITTEN -- not how many cases were seen -- so a sweep whose every
-    owner was suppressed reports 0 and does not claim to have told anyone.
+    """Tell each owner of an ACTIVE case whose review falls within the horizon, once per (case,
+    review_due). Returns how many notifications were WRITTEN, so a sweep whose every owner was
+    suppressed reports 0.
 
-    Idempotent ACROSS sweeps rather than by a "last swept" column: the
-    `object_id` is a uuid5 over the case id and the due date, so the row
-    the sweep writes is the row the next sweep looks for, and a review that
-    is moved to a new date is a new deadline and is announced again. The
-    table has no slot for the date itself and a migration is out of scope
-    for this change; a deterministic id is the honest substitute and is
-    stated here so nobody later reads the object_id as a reference.
+    Idempotent across sweeps: the `object_id` is a uuid5 over the case id and the due date, so the
+    row a sweep writes is the row the next one looks for, and a review moved to a new date is
+    announced again. The table has no slot for the date, so do not read the object_id as a
+    reference. The dedupe is a SELECT into `already` followed by INSERTs, with no lock or unique
+    index (`notification_object_idx` is a plain partial btree), so it holds only while one sweep
+    runs at a time; `transports.dispatch_due` guarantees that with a session advisory lock across
+    the drain.
 
-    That dedupe is a SELECT into `already` followed by INSERTs, with no
-    lock and no unique index behind it (`notification_object_idx` is a
-    plain partial btree on `object_id`), so it holds only while ONE sweep
-    runs at a time. `transports.dispatch_due` is what guarantees that: it
-    takes a session advisory lock across the whole drain. Corrected
-    2026-09-02, when this docstring still said "idempotent by
-    construction" without qualification and nothing serialised the callers.
-
-    Overdue reviews are included (`review_due <= as_of + horizon`, not a
-    band). A sweep that only looked forward would never announce a review
-    whose date passed while nothing was running the drain -- which is the
-    exact week a review most needs announcing.
-
-    `as_of` defaults to the DATABASE's current date, for the same reason
-    `_queue_deliveries` uses the database clock: one clock, and it has to
-    be the one the rows are compared against.
-
-    Called from `transports.dispatch_due` (N3), so one drain does the
-    outbox, this sweep and the escalations. Until N2 (2026-09-02)
-    CASE_REVIEW_DUE was a description in `KINDS` and nothing else.
+    Overdue reviews are included (`review_due <= as_of + horizon`): a forward-only sweep would never
+    announce a review whose date passed while nothing was draining. `as_of` defaults to the
+    database's current date, the one clock the rows are compared against (as `_queue_deliveries`
+    does). Called from `transports.dispatch_due`.
     """
     if as_of is None:
         as_of = conn.execute("SELECT current_date").fetchone()[0]
-    # Every case and every owner's earlier reminder: the drain's NOTIFY
-    # system connection reads both whole (F51, 2026-10-02), and on a
-    # filtered one this sweep would remind owners twice.
+    # Every case and every owner's earlier reminder: the drain's NOTIFY system connection reads both
+    # whole, and on a filtered connection this sweep would remind owners twice.
     rows = conn.execute(
         """SELECT id, code, review_due, classification, compartments
              FROM core."case"
@@ -514,14 +402,12 @@ def _review_object_id(case_id: UUID, review_due: date) -> UUID:
 
 def escalation_to_owner(conn: psycopg.Connection, *, original: Notification,
                         owner_id: UUID, age: timedelta) -> Notification | None:
-    """An unacknowledged priority-1, escalated to the owner of the case it
-    is about. Carries the original's subject -- which by the three-field
-    discipline holds the case code and what happened, nothing more -- and
-    is labelled with the case's labels because it names the case.
+    """An unacknowledged priority-1, escalated to the owner of the case it is about.
 
-    `object_type="notification"` / `object_id=original.id` is the idempotence
-    key `notifications.escalate_unacknowledged` looks for. Raised with no
-    actor: nobody DID this, somebody failed to.
+    Carries the original's subject (case code and what happened, nothing more) and the case's
+    labels, because it names the case. `object_type="notification"` / `object_id=original.id` is the
+    idempotence key `notifications.escalate_unacknowledged` looks for. Raised with no actor: nobody
+    did this, somebody failed to.
     """
     code, classification, compartments = _case(conn, original.case_id)
     minutes = int(age.total_seconds() // 60)
@@ -545,14 +431,12 @@ def escalation_to_owner(conn: psycopg.Connection, *, original: Notification,
 
 def escalation_to_officer(conn: psycopg.Connection, *, original: Notification,
                           officer_id: UUID, age: timedelta) -> Notification | None:
-    """The same escalation, to a SECURITY_OFFICER, when the case owner IS the
-    unresponsive recipient (or there is no case owner to go to).
+    """The same escalation, to a SECURITY_OFFICER, when the case owner is the unresponsive recipient
+    (or there is no owner).
 
-    Carries NO case material, for the reason `break_glass._alert` gives at
-    length: the officer holds `audit.read` and no case-content permission,
-    so this is GREEN, case-less, and says that a notification of a given
-    kind went unanswered by a given user id. The kind name and the user id
-    are facts about the system, not about the case.
+    Carries no case material, as `break_glass._alert` explains: the officer holds `audit.read` and
+    no case-content permission, so this is GREEN and case-less, and says only that a notification of
+    a given kind went unanswered by a given user id.
     """
     minutes = int(age.total_seconds() // 60)
     return NotificationService(conn).notify(
@@ -576,26 +460,22 @@ def escalation_to_officer(conn: psycopg.Connection, *, original: Notification,
         object_type="notification", object_id=original.id)
 
 
-# Deployment-wide approvals (F9, 2026-09-24).
-
 def global_approval_requested(conn: psycopg.Connection, *, request_id: UUID,
                               operation: str, description: str,
                               permission: str, requester_permission: str,
                               actor_id: UUID) -> int:
     """Tell everyone who could sign a deployment-wide request.
 
-    The recipients are the people the global decide route will accept: an
-    active account whose GLOBAL role carries `permission` (the signer's),
-    and, where the requester's permission is a different one, whose roles
-    do not carry that too (`approvals.eligible_signers_sql`), minus the
-    requester. No case, GREEN, and the justification is NOT quoted: a
-    Security officer holds no case access, and free text written by an
-    administrator can quote a case (the break-glass rule, F19). The subject
-    and summary name only the operation's description; the justification
-    is read in the console, under the officer's own gate.
+    The recipients are the people the global decide route accepts: an active account whose GLOBAL
+    role carries `permission` (the signer's) and, where the requester's permission differs, whose
+    roles do not carry that too (`approvals.eligible_signers_sql`), minus the requester. No case,
+    GREEN, and the justification is not quoted: a Security officer holds no case access, and free
+    text written by an administrator can quote a case (the break-glass rule). The subject and
+    summary name only the operation's description; the justification is read in the console, under
+    the officer's own gate.
 
-    Returns how many were raised. One notification per recipient, each its
-    own event in the delivery ledger: no shared event id is passed.
+    Returns how many were raised. Each is its own event in the delivery ledger: no shared event id
+    is passed.
     """
     from noctornal_api.approvals import eligible_signers_sql
 
@@ -651,7 +531,7 @@ def global_approval_decided(conn: psycopg.Connection, *, request_id: UUID,
         actor_id=actor_id)
 
 
-# The collection foundation (docs/00 decision 69, 2026-09-24).
+# The collection foundation (docs/00 decision 69).
 
 def _global_holders(conn: psycopg.Connection, permission: str) -> list[UUID]:
     """Every active account whose GLOBAL role carries `permission`."""
@@ -665,26 +545,21 @@ def _global_holders(conn: psycopg.Connection, permission: str) -> list[UUID]:
 
 def persona_suspended(conn: psycopg.Connection, *, persona_id: UUID,
                       reason: str) -> int:
-    """A platform refused a persona's credential: tell the collection
-    managers who may see the persona.
+    """A platform refused a persona's credential: tell the collection managers who may see the
+    persona.
 
-    Labelled with the highest classification among EVERY source the persona
-    is registered on or bound to, active or not (the set set_status's
-    visibility predicate reads), AMBER when there is none, so a manager that
-    predicate hides from the persona is never told about it: the
-    notification service refuses a recipient below the label (suppression
-    2). Since F43 (2026-10-03) the union of those
-    sources' compartments is on it too, so a manager who does not hold every
-    key of a source the persona reads is not told about it either. One
-    unacknowledged notification per persona at a time, the integrity
-    alarm's guard: a platform refusing a credential on every poll must not
-    ring a phone on every poll. Returns how many were raised.
+    Labelled with the highest classification among every source the persona is registered on or
+    bound to, active or not (the set `set_status`'s visibility predicate reads), AMBER when there is
+    none, plus the union of those sources' compartments. A manager the predicate hides the persona
+    from, or who lacks a source's key, is never told: the notification service refuses a recipient
+    below the label (suppression 2). At most one unacknowledged notification per persona, as for the
+    integrity alarm: a platform refusing a credential on every poll must not ring a phone on every
+    poll. Returns how many were raised.
 
-    The guard is asked of `notify.enqueue` with the first manager's notice
-    (F51, 2026-10-02): an open one held by ANY manager is another person's
-    row, which row security hides from the operator whose act was refused.
-    Once the first call has answered, the rest of this fan-out is not
-    coalesced against the notice it has just written."""
+    The guard is asked of `notify.enqueue` with the first manager's notice, because an open one held
+    by any manager is another person's row, which row security hides from the operator whose act was
+    refused. After that first call the rest of the fan-out is not coalesced against the notice it
+    just wrote."""
     row = conn.execute(
         """SELECT a.handle, a.platform_uid,
                   (SELECT max(s.classification)::text FROM collect.source s
@@ -753,12 +628,10 @@ def persona_credential_alert(conn: psycopg.Connection, *,
 
 def collection_authority_pending(conn: psycopg.Connection, *,
                                  authority_id: UUID, actor_id: UUID) -> int:
-    """An authority was recorded or extended: tell everyone who could
-    confirm it, except the person who acted (who is never the second
-    person). GREEN, case-less, naming no persona and no source, and at most
-    one unacknowledged per authority and recipient, so adding sources one at
-    a time does not stack notifications. That check is the recipient's row,
-    so `notify.enqueue` makes it (F51, 2026-10-02)."""
+    """An authority was recorded or extended: tell everyone who could confirm it, except the person
+    who acted (who is never the second person). GREEN, case-less, naming no persona and no source,
+    and at most one unacknowledged per authority and recipient, so adding sources one at a time does
+    not stack notifications. `notify.enqueue` makes that check because it is the recipient's row."""
     svc = NotificationService(conn)
     raised = 0
     for user_id in _global_holders(conn, "collection.authority.confirm"):
@@ -781,12 +654,10 @@ def collection_authority_pending(conn: psycopg.Connection, *,
     return raised
 
 
-# F15.2 and F15.3 (2026-09-24). Lowering a lookup
-# provider's exposure takes a second administrator, and a lookup that sends
-# case material to a vendor or the public takes a named second person's
-# sign-off (docs/00 decision 75). Neither is ever routed to Jira
-# (jira.JIRA_NEVER_KINDS). No selector value appears in any of these: the
-# authoriser reads it in the product, behind the case gate.
+# Lowering a lookup provider's exposure takes a second administrator, and a lookup that sends case
+# material to a vendor or the public takes a named second person's sign-off (docs/00 decision 75).
+# Neither is ever routed to Jira (jira.JIRA_NEVER_KINDS). No selector value appears in any of these:
+# the authoriser reads it in the product, behind the case gate.
 
 def provider_change_requested(conn: psycopg.Connection, *, change_id: UUID,
                               provider_name: str, from_level: str, to_level: str,
@@ -859,7 +730,7 @@ def lookup_signoff_decided(conn: psycopg.Connection, *, case_id: UUID,
         object_type="lookup", object_id=lookup_id, actor_id=actor_id)
 
 
-# Prohibited-content screening (F13) and the sandbox (F14), 2026-09-24.
+# Prohibited-content screening and the sandbox.
 
 @dataclass(frozen=True)
 class Reach:
@@ -906,13 +777,12 @@ _DISPOSITION_WORDS = {
 def screening_match(conn: psycopg.Connection, *, result_id: UUID,
                     list_ids, trigger: str, disposition: str,
                     detonations_sent: int = 0) -> Reach:
-    """The officers' and the designated person's alert (F13). URGENT, GREEN
-    and caseless, like the break-glass alert: it names the lists, what set
-    it off and what happened to the bytes, and never a case code, a
-    filename or a hash, because the Security Officer reads no case content
-    and this goes out by email. Coalesced: a recipient already holding an
-    unacknowledged alert of this kind from the last hour is not alerted
-    again, so a bulk import of fifty matches raises one alert each."""
+    """The officers' and the designated person's alert. URGENT, GREEN and caseless, like the
+    break-glass alert: it names the lists, what set it off and what happened to the bytes, and never
+    a case code, a filename or a hash, because the Security Officer reads no case content and this
+    goes out by email. Coalesced: a recipient already holding an unacknowledged alert of this kind
+    from the last hour is not alerted again, so a bulk import of fifty matches raises one alert
+    each."""
     from noctornal_api.notifications import URGENT
     from noctornal_api.screening import ALERT_WINDOW
     from noctornal_api.wording import count_of
@@ -939,8 +809,7 @@ def screening_match(conn: psycopg.Connection, *, result_id: UUID,
             + " already sent to a sandbox, which nothing here can recall. "
               "The record names where.")
     for recipient in recipients:
-        # The recipient's open alert is their row: `notify.enqueue` reads it
-        # (F51, 2026-10-02).
+        # The recipient's open alert is their row: `notify.enqueue` reads it.
         result = svc.enqueue(
             open_notice=OpenNotice(within=ALERT_WINDOW),
             recipient_id=recipient, case_id=None,
@@ -984,9 +853,8 @@ def sample_withdrawn(conn: psycopg.Connection, *, sample_id: UUID,
         (sample_id,)).fetchone()
     if own is None:
         return False
-    # The owner as a lock fact (S1, 2026-09-25), whoever is asking, and
-    # their open notice read by `notify.enqueue`, since it is their row
-    # (F51, 2026-10-02).
+    # The owner as a lock fact, whoever is asking, and their open notice read by `notify.enqueue`,
+    # since it is their row.
     result = NotificationService(conn).enqueue_case_owner(
         case_id, open_notice=OpenNotice(within=ALERT_WINDOW, same_case=True,
                                         unread=True),
@@ -1009,14 +877,12 @@ def sample_withdrawn(conn: psycopg.Connection, *, sample_id: UUID,
 
 
 def _sample_labels(conn: psycopg.Connection, sample_id: UUID):
-    """(case id, case code, case classification, case compartments, the
-    sample's own classification and compartments).
+    """(case id, case code, case classification, case compartments, the sample's own classification
+    and compartments).
 
-    The case through `iam.case_facts` (S1, 2026-09-25): the Lab analyst
-    who asks for a detonation is on no case, and under row-level security
-    a LEFT JOIN to `core."case"` read their sample's case as absent, so
-    the notice lost the case's labels (a case notice was raised at no
-    classification at all and the request failed)."""
+    The case comes through `iam.case_facts`: the Lab analyst who asks for a detonation is on no
+    case, and under row-level security a LEFT JOIN to `core."case"` would read their sample's case
+    as absent and lose the case's labels."""
     return conn.execute(
         """SELECT s.case_id, c.code, c.classification, c.compartments,
                   s.classification, s.compartments
@@ -1059,9 +925,8 @@ def detonation_signoff_requested(conn: psycopg.Connection, *,
                                  detonation_id: UUID, sample_id: UUID,
                                  authoriser_id: UUID, requester_id: UUID,
                                  target: str) -> Notification | None:
-    """The named authoriser is asked for their sign-off (F14). At the case's
-    labels with the sample's own composed in, so an authoriser who cannot
-    read the sample is told nothing."""
+    """The named authoriser is asked for their sign-off. At the case's labels with the sample's own
+    composed in, so an authoriser who cannot read the sample is told nothing."""
     row = _sample_labels(conn, sample_id)
     code = row[1] if row else None
     head = (f"{code}: a detonation needs your sign-off" if code
@@ -1081,11 +946,9 @@ def detonation_signoff_requested(conn: psycopg.Connection, *,
 def detonation_named(conn: psycopg.Connection, *, detonation_id: UUID,
                      sample_id: UUID, named_id: UUID, requester_id: UUID,
                      target: str, exposure_level: str) -> Notification | None:
-    """A record-only VENDOR or PUBLIC detonation names this person as its
-    authoriser (lab-3, 2026-10-03). The record is the requester's word; the
-    named person is told so they can object, which they could not before.
-    Labelled as the sign-off request is, so a person who cannot read the
-    sample is told nothing."""
+    """A record-only VENDOR or PUBLIC detonation names this person as its authoriser. The record is
+    the requester's word; the named person is told so they can object. Labelled as the sign-off
+    request is, so a person who cannot read the sample is told nothing."""
     row = _sample_labels(conn, sample_id)
     code = row[1] if row else None
     head = (f"{code}: you are named as a detonation's authoriser" if code
@@ -1107,11 +970,10 @@ def detonation_signoff_decided(conn: psycopg.Connection, *,
                                detonation_id: UUID, sample_id: UUID,
                                requester_id: UUID, approved: bool,
                                actor_id: UUID) -> Notification | None:
-    """The requester is told the sign-off was given or declined (F14).
-    Caseless and labelled at the sample's composed labels, like the result:
-    the requester is a malware analyst who holds no case assignment, and a
-    notice filed under the case would be suppressed for them. For the same
-    reason the subject does not name the case."""
+    """The requester is told the sign-off was given or declined. Caseless and labelled at the
+    sample's composed labels, like the result: the requester is a malware analyst who holds no case
+    assignment, and a notice filed under the case would be suppressed for them. For the same reason
+    the subject does not name the case."""
     verdict = "approved" if approved else "declined"
     return _detonation_notice(
         conn, recipient=requester_id, sample_id=sample_id,
@@ -1127,10 +989,9 @@ def detonation_signoff_decided(conn: psycopg.Connection, *,
 def sandbox_result(conn: psycopg.Connection, *, detonation_id: UUID,
                    sample_id: UUID, requester_id: UUID,
                    outcome: str) -> Notification | None:
-    """The requester is told a sandbox run ended (F14): `outcome` says it
-    finished, failed, was refused or ended without a result. Caseless and
-    labelled at the sample's composed labels: a malware analyst holds no
-    case assignment."""
+    """The requester is told a sandbox run ended: `outcome` says it finished, failed, was refused or
+    ended without a result. Caseless and labelled at the sample's composed labels: a malware analyst
+    holds no case assignment."""
     return _detonation_notice(
         conn, recipient=requester_id, sample_id=sample_id,
         kind="SANDBOX_RESULT", subject="A sandbox run ended",

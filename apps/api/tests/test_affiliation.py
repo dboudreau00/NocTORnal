@@ -1,18 +1,14 @@
-"""F2: bipartite to one-mode projection for the forum and wallet families
-(2026-09-24), without a database.
+"""Bipartite to one-mode projection for the forum and wallet families, without a database.
 
-Every world here is spelled out vertex by vertex and row by row, with the
-sign and directedness each edge type has in the ontology, and fed through
-`projections.one_mode_subgraph`, the code `project()` runs after its
-fetch. A row is included only when the real query would fetch it (in the
-preset, or an affiliation or identity type of a listed family), so a test
-cannot pass on a row production never sees. Ids are UUID(int=k), so a
-failure reproduces.
+Every world here is spelled out vertex by vertex and row by row, with the sign and directedness each
+edge type has in the ontology, and fed through `projections.one_mode_subgraph`, the code `project()`
+runs after its fetch. A row is included only when the real query would fetch it (in the preset, or an
+affiliation or identity type of a listed family), so a test cannot pass on a row production never
+sees. Ids are UUID(int=k), so a failure reproduces.
 
-Each of the following has a test that fails without its fix: sizes and
-caps under the accepted scope and the confidence floor, the per-type
-oversized count, the leg arithmetic, disputed identity links, parallel
-memberships and PAID in either direction.
+Each of the following has a test that fails without its fix: sizes and caps under the accepted scope
+and the confidence floor, the per-type oversized count, the leg arithmetic, disputed identity links,
+parallel memberships and PAID in either direction.
 
 Pure: no database.
 """
@@ -56,8 +52,8 @@ def _world(nodes: dict[str, str], rows: list, *, preset: str = "all",
            min_confidence: str = "LOW", review_scope: str = "all",
            weighting: str = "NEWMAN", max_venue_size: int = 50,
            min_shared: int = 1, order_seed: int | None = None):
-    """(subgraph, ids). `rows` are (src, edge_type, dst) or (src,
-    edge_type, dst, {vf, vt, review, confidence, ev})."""
+    """(subgraph, ids). `rows` are (src, edge_type, dst) or (src, edge_type, dst, {vf, vt, review,
+    confidence, ev})."""
     ids = {name: UUID(int=100 + i) for i, name in enumerate(nodes)}
     node_out = [{"id": ids[n], "node_type": t, "label": n,
                  "attrs": (attrs or {}).get(n, {}), "classification": "AMBER"}

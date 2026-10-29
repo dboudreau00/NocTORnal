@@ -1,67 +1,35 @@
-"""Notification: raising one, deciding which channels get it, and reading
-the centre back.
+"""Notification: raising one, deciding which channels get it, and reading the centre back.
 
-Phase 5. `transports.py` does the actual sending; this module decides
-whether anything should be sent at all, which is where the interesting
-rules live.
+`transports.py` does the actual sending; this module decides whether anything should be sent at all,
+which is where the interesting rules live.
 
-## The rule that shapes everything
+docs/07: "A system that cries wolf gets muted, and then the one alert that mattered is also muted." So the
+defaults are conservative in a specific direction: better to under-notify by email and over-notify
+in-app. In-app is free, sits behind the access gate, and does not follow anyone home.
 
-docs/07:
+Four suppressions:
 
-    A system that cries wolf gets muted, and then the one alert that
-    mattered is also muted.
+1. Never tell someone what they just did. `actor_id == recipient_id` is dropped before a row is written.
+2. Never notify someone who could not read it. The recipient's clearance and compartments are checked at
+   write time against the notification's own labels. Writing a row nobody may read would put case content
+   in a table keyed by a user who has no business with it, and rely on the read filter forever after. The
+   database makes that check: `notify.enqueue` (0125) is the one writer of a notification, a definer that
+   checks the recipient whoever calls it, because row-level security shows a notification to its
+   recipient alone (0126) and the caller, who is somebody else, can neither write nor read the row.
+3. Quiet hours defer, they do not drop. A deferred delivery has a `deliver_after` in the future and is
+   still a row. Priority 1 ignores them, which is the only reason quiet hours are acceptable at all.
+4. Digest defers too, to the next digest boundary: the notification exists, its delivery is later.
 
-So the defaults here are conservative in a specific direction: it is better
-to under-notify by email and over-notify in-app. In-app is free, sits behind
-the access gate, and does not follow anyone home.
+Reading is filtered by the current clearance and the current assignment, not by what the recipient had
+when the row was written. A revoked clearance has to hide old notifications, or the centre becomes a
+retention loophole; and taking somebody off a case is far commoner than downgrading their clearance, so
+an analyst removed from a case must stop reading its merges, approvals and triage counts from
+`/notifications`. `readable_predicate()` is that rule, written once: three copies of a predicate are three
+chances for one to go stale and make the outbox drain disagree with the centre it drains.
 
-## Four suppressions, and why each exists
-
-1. **Never tell someone what they just did.** `actor_id == recipient_id` is
-   dropped before a row is written. This is the single commonest reason
-   people turn a notification system off.
-2. **Never notify someone who could not read it.** The recipient's clearance
-   and compartments are checked at WRITE time against the notification's own
-   labels. Writing a row nobody may read is not a safe default -- it puts
-   case content in a table keyed by a user who has no business with it, and
-   relies on the read filter forever after. Since F51 (2026-10-02) the
-   database makes that check: `notify.enqueue` (0125) is the one writer of a
-   notification, a definer that checks the RECIPIENT whoever calls it,
-   because row-level security shows a notification to its recipient alone
-   (0126) and the caller, who is somebody else, can no longer write or
-   read the row itself.
-3. **Quiet hours defer, they do not drop.** A deferred delivery has a
-   `deliver_after` in the future and is still a row. Priority 1 ignores
-   them, which is the only reason quiet hours are acceptable at all.
-4. **Digest defers too**, to the next digest boundary. Same principle:
-   the notification exists, its delivery is later.
-
-## Reading is filtered by CURRENT clearance AND CURRENT assignment
-
-Not the clearance the recipient had when the row was written. A revoked
-clearance has to hide old notifications, or the centre quietly becomes a
-retention loophole for everything the analyst used to be able to see.
-
-The assignment half was missing until F19 (2026-07-26), and it was the
-larger hole of the two: clearance is a property of the person, assignment
-is the thing that actually ties them to *this* case, and taking somebody
-off a case is far commoner than downgrading their clearance. Every other
-"which cases can this caller see" query in the repo carried the
-`expires_at` predicate; this one did not, so an analyst removed from a case
-kept reading its merges, its approvals and its triage counts from
-`/notifications` forever.
-
-`readable_predicate()` is that rule, written once. Three copies of a
-predicate is three chances for one of them to be the stale one — which is
-exactly how the outbox drain came to disagree with the centre it drains.
-
-## What this module will not do
-
-It does not send. It does not open a socket. `dispatch_due()` in
-`transports.py` drains the outbox, so a failing SMTP server can never make
-a merge fail -- the graph write and the notification are in the same
-transaction, but the notification and its DELIVERY are not.
+This module does not send and does not open a socket. `dispatch_due()` in `transports.py` drains the
+outbox, so a failing SMTP server can never make a merge fail: the graph write and the notification are in
+the same transaction, but the notification and its delivery are not.
 """
 from __future__ import annotations
 
@@ -94,9 +62,8 @@ FAILED = "FAILED"
 REFUSED = "REFUSED"
 SUPPRESSED = "SUPPRESSED"
 
-# What one raise did (`NotificationService.enqueue`, F51 2026-10-02): the
-# row was written, or it was suppressed (SUPPRESSED, above), or an open
-# notice already covered it.
+# What one raise did (`NotificationService.enqueue`): the row was written, or it was suppressed
+# (SUPPRESSED, above), or an open notice already covered it.
 WRITTEN = "WRITTEN"
 COALESCED = "COALESCED"
 
@@ -111,29 +78,24 @@ class NotificationError(Exception):
 
 
 def readable_predicate(alias: str = "n") -> str:
-    """SQL that is true when `alias`'s recipient may STILL read it.
+    """SQL that is true when `alias`'s recipient may still read it.
 
-    Both halves of the case gate, against the world as it is NOW:
+    Both halves of the case gate, against the world as it is now:
 
-    - the **labels** — the recipient's current clearance dominates the
-      notification's classification, and their current compartments contain
-      its compartments;
-    - the **assignment** — for a notification that names a case, a live
-      `iam.case_assignment` row, unexpired.
+    - the labels: the recipient's current clearance dominates the notification's classification, and their
+      current compartments contain its compartments;
+    - the assignment: for a notification that names a case, a live `iam.case_assignment` row, unexpired.
 
-    A notification with no `case_id` skips the assignment half because there
-    is nothing to be assigned to. Nothing in this build raises one; the
-    branch exists so that adding a genuinely case-independent notification
-    later is a decision rather than an accident.
+    A notification with no `case_id` skips the assignment half because there is nothing to be assigned to.
+    Nothing in this build raises one; the branch exists so that adding a genuinely case-independent
+    notification later is a decision rather than an accident.
 
-    The labels half reads the case's labels as they stand too (2026-10-07): a case raised
-    above the recipient, or given a compartment they do
-    not hold, shuts them out of the case, and its notifications stayed
-    readable in the centre and deliverable, labelled as they were raised.
+    The labels half reads the case's labels as they stand too: a case raised above the recipient, or given
+    a compartment they do not hold, shuts them out of the case, and its notifications must stop being
+    readable in the centre and deliverable.
 
-    Aliases are deliberately obscure (`ru`, `rca`, `rcs`): this fragment is
-    embedded in queries that already join `u` and `c`, and a collision would
-    silently re-bind the outer alias rather than fail.
+    Aliases are deliberately obscure (`ru`, `rca`, `rcs`): this fragment is embedded in queries that
+    already join `u` and `c`, and a collision would silently re-bind the outer alias rather than fail.
     """
     return f"""
         EXISTS (SELECT 1 FROM iam.app_user ru
@@ -154,25 +116,19 @@ def readable_predicate(alias: str = "n") -> str:
 
 
 def element_rows_sql(alias: str = "n") -> str:
-    """SQL for the labels, as they stand NOW, of what `alias`'s notification
-    is about: one `(classification, compartments)` row for each element the
-    notification names through `object_type` and `object_id`, and none when
-    it names no element that carries labels of its own or the element is
-    gone.
+    """SQL for the labels, as they stand now, of what `alias`'s notification is about: one
+    `(classification, compartments)` row for each element the notification names through `object_type` and
+    `object_id`, and none when it names no element that carries labels of its own or the element is gone.
 
-    A notification is labelled, when it is raised, with its case's labels
-    composed with those of the element it is about (`enqueue`,
-    `element_classification`): the exhibit of an integrity alarm, the two
-    entities of a merge, the sample of a withdrawal. The case's labels are read
-    again at the drain (`transports.CASE_LABELS_SQL`), and these are the
-    element's, so an exhibit, entity, sample or feed record raised after the
-    notice was queued is judged at its label and not the one it had
-    (docs/17, "a notice raised after it was queued").
+    A notification is labelled, when it is raised, with its case's labels composed with those of the
+    element it is about (`enqueue`, `element_classification`): the exhibit of an integrity alarm, the two
+    entities of a merge, the sample of a withdrawal. The case's labels are read again at the drain
+    (`transports.CASE_LABELS_SQL`), and these are the element's, so an exhibit, entity, sample or feed
+    record raised after the notice was queued is judged at its present label.
 
-    Read through `iam.element_facts` where it answers (a definer function: it
-    reads the element whoever asks) and from the tables where it does not.
-    The drain reads as a system role. The centre reads the notice's own
-    labels and its case's, as before; this is the egress side's check."""
+    Read through `iam.element_facts` where it answers (a definer function: it reads the element whoever
+    asks) and from the tables where it does not. The drain reads as a system role. The centre reads the
+    notice's own labels and its case's; this is the egress side's check."""
     return f"""
         SELECT f.classification, f.compartments
           FROM iam.element_facts('evidence', {alias}.object_id) f
@@ -267,46 +223,38 @@ KINDS: dict[str, Kind] = {
         "Emergency access was used on a case you own, or needs your review"),
     "CASE_REVIEW_DUE": Kind(
         "CASE_REVIEW_DUE", LOW, "A case you own is due for review"),
-    # ux12-feeds:feeds-badge-never-set (2026-09-23). A feed record that
-    # contains a selector one of the case's watches names is the one thing
-    # the ingest queue exists to surface, and nothing outside the Feeds
-    # pane said one had arrived. NORMAL, not URGENT: it is work, not an
-    # alarm. Raised by `IngestService._notify_selector_hits`.
+    # A feed record that contains a selector one of the case's watches names is the one thing the ingest
+    # queue exists to surface. NORMAL, not URGENT: it is work, not an alarm. Raised by
+    # `IngestService._notify_selector_hits`.
     "FEED_SELECTOR_HIT": Kind(
         "FEED_SELECTOR_HIT", NORMAL,
         "A feed record matched a selector a watch on your case is looking for"),
-    # N3 (2026-09-02). Raised by `escalate_unacknowledged` when a priority-1
-    # notification has sat unacknowledged past the window. URGENT itself,
-    # and the one kind the sweep will never escalate -- or one silence
-    # becomes a chain of escalations about escalations.
+    # Raised by `escalate_unacknowledged` when a priority-1 notification has sat unacknowledged past the
+    # window. URGENT itself, and the one kind the sweep never escalates, or one silence becomes a chain of
+    # escalations about escalations.
     "ESCALATION": Kind(
         "ESCALATION", URGENT,
         "An urgent notification went unacknowledged and was escalated to you"),
-    # Collection personas (docs/00 decision 69, 2026-09-24). A platform
-    # refused a persona's credential, so collection through it is paused.
-    # NORMAL: work for a collection manager, not an alarm. Raised by
+    # Collection personas (docs/00 decision 69). A platform refused a persona's credential, so collection
+    # through it is paused. NORMAL: work for a collection manager, not an alarm. Raised by
     # notify_events.persona_suspended.
     "PERSONA_SUSPENDED": Kind(
         "PERSONA_SUSPENDED", NORMAL,
         "A collection persona was suspended by its platform"),
-    # Collection personas (2026-09-24). One persona credential in use from
-    # two places at once is how a copied credential shows itself: URGENT, to
-    # the security officers, naming no handle.
+    # One persona credential in use from two places at once is how a copied credential shows itself:
+    # URGENT, to the security officers, naming no handle.
     "PERSONA_CREDENTIAL_ALERT": Kind(
         "PERSONA_CREDENTIAL_ALERT", URGENT,
         "A collection persona's credential may have been copied"),
-    # Collection authorities (docs/00 decision 69, 2026-09-24). Nothing is
-    # read under a collection authority until a second person confirms it,
-    # so an unconfirmed one nobody is told about is collection that silently
+    # Collection authorities (docs/00 decision 69). Nothing is read under a collection authority until a
+    # second person confirms it, so an unconfirmed one nobody is told about is collection that silently
     # never starts.
     "COLLECTION_AUTHORITY_PENDING": Kind(
         "COLLECTION_AUTHORITY_PENDING", NORMAL,
         "A collection authority waits for your confirmation"),
-    # Lookups, F15.2 and F15.3 (2026-09-24). Lowering a lookup
-    # provider's exposure takes a second administrator, and a lookup that
-    # sends case material to a vendor or the public takes a named second
-    # person's sign-off (docs/00 decision 75); nobody is told otherwise. None
-    # is ever routed to Jira (jira.JIRA_NEVER_KINDS).
+    # Lookups. Lowering a lookup provider's exposure takes a second administrator, and a lookup that sends
+    # case material to a vendor or the public takes a named second person's sign-off (docs/00 decision
+    # 75); nobody is told otherwise. None is ever routed to Jira (jira.JIRA_NEVER_KINDS).
     "PROVIDER_CHANGE_REQUESTED": Kind(
         "PROVIDER_CHANGE_REQUESTED", NORMAL,
         "An administrator asks you to approve lowering a lookup provider's exposure"),
@@ -316,25 +264,24 @@ KINDS: dict[str, Kind] = {
     "LOOKUP_SIGNOFF_DECIDED": Kind(
         "LOOKUP_SIGNOFF_DECIDED", NORMAL,
         "Your lookup was signed off, declined, refused or lapsed"),
-    # Screening (F13, 2026-09-24). A sample matched a prohibited-content
-    # hash list: the Security Officers and the designated person,
-    # content-free, GREEN and caseless like the break-glass alert, coalesced
-    # to one open alert per recipient per hour.
+    # Screening. A sample matched a prohibited-content hash list: the Security Officers and the designated
+    # person, content-free, GREEN and caseless like the break-glass alert, coalesced to one open alert per
+    # recipient per hour.
     "SAMPLE_SCREENING_MATCH": Kind(
         "SAMPLE_SCREENING_MATCH", URGENT,
         "A sample matched a prohibited-content hash list"),
-    # Screening (F13): the case owner, at the sample's own labels.
+    # Screening: the case owner, at the sample's own labels.
     "SAMPLE_WITHDRAWN": Kind(
         "SAMPLE_WITHDRAWN", NORMAL,
         "A sample attached to your case was withdrawn by screening"),
-    # The sandbox sign-off and its result (F14, 2026-09-24).
+    # The sandbox sign-off and its result.
     "DETONATION_SIGNOFF_REQUESTED": Kind(
         "DETONATION_SIGNOFF_REQUESTED", NORMAL,
         "A detonation needs your sign-off"),
     "DETONATION_SIGNOFF_DECIDED": Kind(
         "DETONATION_SIGNOFF_DECIDED", NORMAL,
         "Your detonation request was signed off or declined"),
-    # lab-3 (2026-10-03): a record-only exposed detonation names you.
+    # A record-only exposed detonation names you.
     "DETONATION_NAMED": Kind(
         "DETONATION_NAMED", NORMAL,
         "A recorded detonation names you as the person who agreed to it"),
@@ -342,12 +289,12 @@ KINDS: dict[str, Kind] = {
         "SANDBOX_RESULT", NORMAL, "A sandbox run you requested ended"),
 }
 
-# Channel defaults when a user has no preference row. IN_APP takes
-# everything; email only takes what would justify an interruption. A new
-# user who has never opened the settings page still gets the urgent things.
+# Channel defaults when a user has no preference row. IN_APP takes everything; email only takes what would
+# justify an interruption. A new user who has never opened the settings page still gets the urgent
+# things.
 #
-# JIRA takes LOW (F7, 2026-09-24): the destination's routed kinds are
-# the real filter, and a work item is not an interruption.
+# JIRA takes LOW: the destination's routed kinds are the real filter, and a work item is not an
+# interruption.
 _DEFAULTS = {
     IN_APP: {"enabled": True, "min_priority": LOW, "digest": False},
     SMTP: {"enabled": True, "min_priority": NORMAL, "digest": False},
@@ -355,8 +302,7 @@ _DEFAULTS = {
     JIRA: {"enabled": False, "min_priority": LOW, "digest": False},
 }
 
-#: Channels whose every enable and disable is audited (F8 H): the ones
-#: that leave the building.
+#: Channels whose every enable and disable is audited: the ones that leave the building.
 OUTBOUND_CHANNELS = (SMTP, WEBHOOK, JIRA)
 
 
@@ -396,18 +342,15 @@ class Preference:
 class OpenNotice:
     """Write nothing when an open notice already covers this one.
 
-    F51 (2026-10-02). The producers that coalesce (one open integrity
-    alarm per exhibit, one suspension notice per persona, one screening
-    alert per officer per hour) used to read `notify.notification`
-    themselves before raising. Those rows are other people's, which row
-    security hides from the caller, so the check now runs inside
-    `notify.enqueue`, as the definer, in the same statement as the write.
-    It counts a notice only within the caller's own reach (0125).
+    The producers that coalesce (one open integrity alarm per exhibit, one suspension notice per persona,
+    one screening alert per officer per hour) cannot read `notify.notification` themselves: those rows are
+    other people's, which row security hides from the caller. So the check runs inside `notify.enqueue`,
+    as the definer, in the same statement as the write. It counts a notice only within the caller's own
+    reach (0125).
 
-    Always matched on the kind. `anyone`: any recipient's notice, not only
-    this recipient's. `same_object` and `same_case`: the same object, the
-    same case. `within`: raised that recently. `unread`: open means unread,
-    not unacknowledged."""
+    Always matched on the kind. `anyone`: any recipient's notice, not only this recipient's.
+    `same_object` and `same_case`: the same object, the same case. `within`: raised that recently.
+    `unread`: open means unread, not unacknowledged."""
 
     anyone: bool = False
     same_object: bool = False
@@ -457,40 +400,30 @@ class NotificationService:
                 ) -> Raised:
         """Raise one notification and queue its deliveries.
 
-        `event_id` groups the rows one event fans out to (F8, 2026-09-24):
-        a caller notifying several people about ONE thing passes one id,
-        and Jira then posts that event once however many recipients it
-        reaches. Left out, every call is its own event.
+        `event_id` groups the rows one event fans out to: a caller notifying several people about one
+        thing passes one id, and Jira then posts that event once however many recipients it reaches. Left
+        out, every call is its own event.
 
-        `classification` / `compartments` are the CASE's. When the
-        notification is about a specific element that carries its own labels
-        — the nodes in a merge, the exhibit in an integrity alarm — pass
-        them as `element_*` and they are composed here: the stricter
-        classification, the union of compartments.
-
-        That composition is the same one the access gate performs, and it
-        has to happen somewhere. An element may be classified ABOVE its case
-        (the floor trigger only stops it going below), so labelling a
-        notification with the case's classification alone under-labels every
-        notification about a raised element — and the label is what decides
+        `classification` / `compartments` are the case's. When the notification is about a specific element
+        that carries its own labels (the nodes in a merge, the exhibit in an integrity alarm), pass them as
+        `element_*` and they are composed here: the stricter classification, the union of compartments.
+        That is the composition the access gate performs. An element may be classified above its case (the
+        floor trigger only stops it going below), so labelling a notification with the case's
+        classification alone under-labels every notification about a raised element, and the label decides
         whether the summary may go out by email.
 
-        Suppressed is a normal outcome, not an error: telling somebody what
-        they just did, or telling somebody something they are not cleared to
-        read, are both things this refuses to do. `notify` answers None for
-        it; `enqueue` says which (`Raised`).
+        Suppressed is a normal outcome, not an error: telling somebody what they just did, or telling
+        somebody something they are not cleared to read, are both things this refuses to do. `notify`
+        answers None for it; `enqueue` says which (`Raised`).
 
-        Call it INSIDE the transaction that performs the action. A merge
-        that succeeded and a notification that did not is a case owner who
-        never finds out; a notification that survived a rolled-back merge is
-        worse.
+        Call it inside the transaction that performs the action. A merge that succeeded and a notification
+        that did not is a case owner who never finds out; a notification that survived a rolled-back merge
+        is worse.
 
-        The row is written by `notify.enqueue` (0125), in this transaction,
-        never by an INSERT here (F51, 2026-10-02). The recipient is
-        somebody else, and row-level security shows a notification to its
-        recipient alone, so the caller's own INSERT ... RETURNING would be
-        refused. The function checks suppression 2 against the recipient,
-        applies `open_notice`, and answers the new id, never the row.
+        The row is written by `notify.enqueue` (0125), in this transaction, never by an INSERT here. The
+        recipient is somebody else, and row-level security shows a notification to its recipient alone, so
+        the caller's own INSERT ... RETURNING would be refused. The function checks suppression 2 against
+        the recipient, applies `open_notice`, and answers the new id, never the row.
         """
         spec = KINDS.get(kind)
         if spec is None:
@@ -547,10 +480,9 @@ class NotificationService:
 
     def enqueue_case_owner(self, case_id: UUID, **kw) -> Raised:
         """`notify_case_owner`, saying what happened."""
-        # The owner as a lock fact (F51, 2026-10-02), whoever is asking: a
-        # caller the case row is hidden from (a Lab analyst, an ingest
-        # operator, a screening pass) still tells its owner, and the
-        # function then decides whether the owner may read it.
+        # The owner as a lock fact, whoever is asking: a caller the case row is hidden from (a Lab analyst,
+        # an ingest operator, a screening pass) still tells its owner, and the function then decides whether
+        # the owner may read it.
         row = self._c.execute(
             "SELECT owner_user_id FROM iam.case_facts(%s)", (case_id,)).fetchone()
         if row is None or row[0] is None:
@@ -562,21 +494,17 @@ class NotificationService:
     def inbox(self, recipient_id: UUID, *, unread_only: bool = False,
               limit: int = 50, case_id: UUID | None = None,
               needs_action: bool = False) -> list[Notification]:
-        """Filtered by the caller's CURRENT clearance, compartments AND case
-        assignment.
+        """Filtered by the caller's current clearance, compartments and case assignment.
 
-        A revoked clearance hides old notifications, and so does a revoked
-        or expired assignment. Doing this in SQL rather than in Python means
-        a paginated read cannot return a short page and call it the end of
-        the list.
+        A revoked clearance hides old notifications, and so does a revoked or expired assignment. Doing
+        this in SQL rather than in Python means a paginated read cannot return a short page and call it
+        the end of the list.
 
-        Unacknowledged priority-1 rows come first, then the rest newest
-        first, and `needs_action` keeps what is unread OR still
-        escalating (ux08-triage:urgent-read-vs-ack-invisible, 2026-09-23).
-        Ordered by time alone, an integrity alarm sat between a normal and
-        a low card; and "Unread only" hid an alarm the analyst had merely
-        glanced at, which `escalate_unacknowledged` still escalates an
-        hour later, because reading is not acknowledging (docs/07).
+        Unacknowledged priority-1 rows come first, then the rest newest first, and `needs_action` keeps
+        what is unread or still escalating. Ordered by time alone, an integrity alarm would sit between a
+        normal and a low card; and "Unread only" would hide an alarm the analyst had merely glanced at,
+        which `escalate_unacknowledged` still escalates an hour later, because reading is not
+        acknowledging (docs/07).
         """
         clauses = ["n.recipient_id = %s"]
         params: list = [recipient_id]
@@ -610,12 +538,10 @@ class NotificationService:
         return int(row[0])
 
     def urgent_unacknowledged(self, recipient_id: UUID) -> int:
-        """How many priority-1 notifications this person has not yet
-        ACKNOWLEDGED, read or not: the ones `escalate_unacknowledged` will
-        pass to somebody else. Counted apart from unread, by the same read
-        filter, because a badge of unread alone dropped to zero on a glance
-        at an integrity alarm that was still going to escalate
-        (ux08-triage:urgent-read-vs-ack-invisible, 2026-09-23)."""
+        """How many priority-1 notifications this person has not yet acknowledged, read or not: the ones
+        `escalate_unacknowledged` will pass to somebody else. Counted apart from unread, by the same read
+        filter, because a badge of unread alone would drop to zero on a glance at an integrity alarm that
+        is still going to escalate."""
         row = self._c.execute(
             f"""SELECT count(*) FROM notify.notification n
                  WHERE n.recipient_id = %s AND {_ESCALATING}
@@ -671,49 +597,34 @@ class NotificationService:
     def set_preference(self, user_id: UUID, channel: str, **fields) -> Preference:
         """Change one channel's settings.
 
-        `address` is the dangerous field and it is the one that had no
-        validation at all (F19). Any authenticated user could PUT
-        `{"address": "collector@attacker.example"}` — no permission, no
-        step-up, no format check, no confirmation to either mailbox — and
-        `transports._DUE_SQL` resolves `coalesce(p.address, u.email)`, so
-        every subsequent notification's subject and summary went to a
-        mailbox they chose. Subjects carry the case CODE, which this
-        codebase argues at length is itself intelligence.
+        `address` is the dangerous field. Without validation, any authenticated user could PUT
+        `{"address": "collector@attacker.example"}` (no permission, no step-up, no format check, no
+        confirmation to either mailbox), and `transports._DUE_SQL` resolves `coalesce(p.address, u.email)`,
+        so every subsequent notification's subject and summary would go to a mailbox they chose. Subjects
+        carry the case code, which is itself intelligence.
 
-        The egress gate cannot help: `can_egress` reasons about the
-        classification and the KIND of destination, so an SMTP send to a
-        corporate account and one to a burner are the same decision. The
-        control that normally backstops it is the account email, which an
-        administrator owns — and `preference.address` handed that to the
-        user.
+        The egress gate cannot help: `can_egress` reasons about the classification and the kind of
+        destination, so an SMTP send to a corporate account and one to a burner are the same decision. The
+        control that normally backstops it is the account email, which an administrator owns, and
+        `preference.address` would hand that to the user.
 
-        So: an override is refused unless an operator has declared where
-        mail may go, and every accepted change is audited with both the old
-        and the new value. Fail closed, because the default has to be the
-        one that is safe when nobody has thought about it.
+        So an override is refused unless an operator has declared where mail may go, and every accepted
+        change is audited with both the old and the new value. Fail closed: the default has to be the one
+        that is safe when nobody has thought about it.
         """
         if channel not in _DEFAULTS:
             raise NotificationError(f"unknown channel {channel!r}")
         current = self.preferences(user_id)[channel]
-        # The TRANSITION off->on is what needs a transport, not the word
-        # `enabled` appearing in the payload. Read below `current` for that
-        # reason: until 2026-09-02 this ran above it on `fields.get(
-        # "enabled") is True`, so a client PUTting the whole preference
-        # object back -- which is what the settings pane does when you edit
-        # a quiet window on an already-enabled WEBHOOK -- was refused with
-        # "WEBHOOK cannot be enabled: NOCTORNAL_WEBHOOK_URL is not
-        # configured". Nobody was enabling anything. That is this
-        # codebase's signature defect (a failure reported as the wrong
-        # thing) and it contradicted `_require_transport`'s own docstring,
-        # which already promised that editing an already-enabled channel is
-        # not the moment to discover the URL was unset.
+        # The transition off->on is what needs a transport, not the word `enabled` appearing in the
+        # payload, so this reads `current` first. A client PUTting the whole preference object back (the
+        # settings pane does, when you edit a quiet window on an already-enabled WEBHOOK) must not be
+        # refused with "WEBHOOK cannot be enabled" when nobody is enabling anything, as
+        # `_require_transport`'s docstring promises.
         if fields.get("enabled") is True and not current.enabled:
             _require_transport(channel, self._c)
         if channel == JIRA:
-            # F7 (2026-09-24). On the PAYLOAD, never the merged row:
-            # the console used to save every field of every channel, so a
-            # JIRA row stored earlier with a digest or a window must still
-            # be enableable.
+            # On the payload, never the merged row: the console saves every field of every channel, so a
+            # JIRA row stored earlier with a digest or a window must still be enableable.
             if fields.get("address") is not None:
                 raise NotificationError(
                     "Jira issues go to the project an administrator configured. "
@@ -734,9 +645,8 @@ class NotificationService:
                                 current.address)
         elif current.address is not None \
                 and single_address_domain(current.address) is None:
-            # egress-notify-address-list (2026-10-03): a list stored before
-            # 0148 is kept (its CHECK is NOT VALID) and never delivered to;
-            # rewriting the row would trip the CHECK, so say what to do.
+            # A list stored before 0148 is kept (its CHECK is NOT VALID) and never delivered to; rewriting
+            # the row would trip the CHECK, so say what to do.
             raise NotificationError(
                 "the stored delivery address is not one plain address and is "
                 "no longer used. Set a new address or clear it first.")
@@ -770,11 +680,9 @@ class NotificationService:
             (user_id, channel, merged["enabled"], merged["min_priority"],
              merged["digest"], merged["quiet_from"], merged["quiet_to"],
              merged["timezone"], merged["address"]))
-        # F8 H (2026-09-24): switching an outbound channel on or off
-        # is audited, both ways. One analyst's opt-in widens the audience
-        # of every routed event on their cases (Jira above all), and a
-        # change of audience that left no trace is the gap the address
-        # audit below was written for.
+        # Switching an outbound channel on or off is audited, both ways. One analyst's opt-in widens the
+        # audience of every routed event on their cases (Jira above all), and a change of audience that
+        # left no trace is the gap the address audit below closes.
         if channel in OUTBOUND_CHANNELS and merged["enabled"] != current.enabled:
             self._c.execute(
                 """INSERT INTO audit.event
@@ -792,17 +700,14 @@ class NotificationService:
                        new: str | None, old: str | None) -> None:
         """Decide whether this delivery address may be set, and record it.
 
-        `NOCTORNAL_NOTIFY_ADDRESS_DOMAINS` is a comma-separated list of
-        domains a user may redirect their own notifications to. Unset means
-        NO override: mail goes to the account email, which an administrator
-        controls. That default costs a convenience and closes a
-        self-service exfiltration channel, and of the two the default has
-        to be the safe one.
+        `NOCTORNAL_NOTIFY_ADDRESS_DOMAINS` is a comma-separated list of domains a user may redirect their
+        own notifications to. Unset means no override: mail goes to the account email, which an
+        administrator controls. That default costs a convenience and closes a self-service exfiltration
+        channel, and of the two the default has to be the safe one.
 
-        Clearing the override (setting it back to None) is always allowed —
-        it can only ever move delivery back to the administrator-owned
-        address — but it is still audited, because "when did this stop
-        going to the burner" is the same question in reverse.
+        Clearing the override (setting it back to None) is always allowed, since it can only move delivery
+        back to the administrator-owned address, but it is still audited: "when did this stop going to the
+        burner" is the same question in reverse.
         """
         if new is not None:
             allowed = {d.strip().lower().lstrip("@")
@@ -818,9 +723,8 @@ class NotificationService:
                     "NOCTORNAL_NOTIFY_ADDRESS_DOMAINS). A subject line here "
                     "carries the case code, and a case code is "
                     "intelligence.")
-            # egress-notify-address-list (2026-10-03): one plain address
-            # first, then its domain. The repr is not echoed for a refused
-            # shape: it can carry CR or LF.
+            # One plain address first, then its domain. The repr is not echoed for a refused shape: it can
+            # carry CR or LF.
             domain = single_address_domain(new)
             if domain is None:
                 raise NotificationError(
@@ -832,9 +736,8 @@ class NotificationService:
                     f"{new!r} is not in a domain this deployment permits "
                     f"for notification delivery. Permitted: "
                     f"{', '.join(sorted(allowed))}")
-        # Audited whichever way it went. The absence of this row was the
-        # sharper half of the finding: changing where a case's
-        # notifications are delivered left no trace anywhere in the system.
+        # Audited whichever way it went: changing where a case's notifications are delivered must leave a
+        # trace.
         self._c.execute(
             """INSERT INTO audit.event
                    (actor_id, actor_kind, action, object_type, object_id,
@@ -848,44 +751,24 @@ class NotificationService:
 
     def _plan(self, recipient_id: UUID, case_id: UUID | None, kind: str,
               priority: int) -> list[dict]:
-        """One delivery row per channel, for `notify.enqueue` to write with
-        the notice (F51, 2026-10-02: the rows used to be inserted here,
-        after the notice, and the caller can no longer see the notice they
-        hang off). IN_APP is written already SENT: the notification row IS
-        the in-app delivery, and a PENDING in-app row would be a queue entry
-        for something that has already happened.
+        """One delivery row per channel, for `notify.enqueue` to write with the notice. IN_APP is written
+        already SENT: the notification row is the in-app delivery, and a PENDING in-app row would be a queue
+        entry for something that has already happened.
 
-        Suppression 2 is the function's now: the recipient's clearance,
-        compartments and assignment are checked there, as the definer, and
-        a recipient who may not read the notice gets no row, so none of
-        this plan is written.
-        Both it and `readable_predicate` are needed and neither is
-        redundant: the read filter covers a clearance or an assignment
-        revoked AFTER the row was written; the write check stops the row
-        existing at all when the recipient already could not read it."""
+        Suppression 2 belongs to the function: the recipient's clearance, compartments and assignment are
+        checked there, as the definer, and a recipient who may not read the notice gets no row, so none of
+        this plan is written. Both it and `readable_predicate` are needed and neither is redundant: the read
+        filter covers a clearance or an assignment revoked after the row was written; the write check stops
+        the row existing at all when the recipient already could not read it."""
         prefs = self.preferences(recipient_id)
-        # THE DATABASE'S CLOCK, not this process's.
-        #
-        # `deliver_after` written here is compared in `transports.due()`
-        # against Postgres `now()`. Taking the base time from
-        # `datetime.now()` puts TWO CLOCKS IN ONE COMPARISON, and they do
-        # not have to agree: the API and the database routinely run on
-        # different hosts, and on a developer machine Docker Desktop's VM
-        # drifts against Windows as a matter of course.
-        #
-        # Measured on this machine 2026-07-30: the host was 3.79 seconds
-        # AHEAD of the container. Every freshly queued non-urgent delivery
-        # was therefore ~4 seconds in the future by the database's
-        # reckoning, so a drain that ran immediately found nothing due --
-        # which is what six notification tests do, and why they failed
-        # everywhere while the code, the schema and the environment were
-        # all innocent.
-        #
-        # In production the same skew silently delays every notification by
-        # the skew; with the sign reversed it releases them early, which
-        # matters because the quiet-hours and digest arithmetic below is
-        # built on this value. One clock, and it has to be the one the
-        # reader uses.
+        # The database's clock, not this process's. `deliver_after` written here is compared in
+        # `transports.due()` against Postgres `now()`; taking the base time from `datetime.now()` would put
+        # two clocks in one comparison, and the API and the database routinely run on different hosts (a
+        # developer machine's Docker VM drifts against Windows as a matter of course). A skew ahead makes
+        # every freshly queued non-urgent delivery look future-dated, so an immediate drain finds nothing
+        # due; the same skew in production delays every notification, and with the sign reversed releases
+        # them early, which matters because the quiet-hours and digest arithmetic below is built on this
+        # value. One clock, and it has to be the one the reader uses.
         now = self._c.execute("SELECT now()").fetchone()[0]
         plan: list[dict] = []
         for channel, pref in prefs.items():
@@ -913,19 +796,15 @@ class NotificationService:
 
     def _jira_planned(self, kind: str, case_id: UUID | None,
                       now: datetime) -> dict:
-        """Jira's queue-time rules (F7, 2026-09-24), after the
-        recipient's own two: a case-less notification is never routed
-        (policy countersignatures, officer escalations, screening alerts);
-        nothing goes while no destination is live; a kind nobody routed is
-        never routable (jira.JIRA_TASKS is an allowlist); a case its owner
-        keeps out stays out. Otherwise PENDING at the database's now():
-        quiet hours and the digest do not apply to a work item.
+        """Jira's queue-time rules, after the recipient's own two: a case-less notification is never routed
+        (policy countersignatures, officer escalations, screening alerts); nothing goes while no destination
+        is live; a kind nobody routed is never routable (jira.JIRA_TASKS is an allowlist); a case its owner
+        keeps out stays out. Otherwise PENDING at the database's now(): quiet hours and the digest do not
+        apply to a work item.
 
-        The owner's veto is applied by `notify.enqueue`, as the definer
-        (F51, 2026-10-02): the caller may not be on the case (a Lab
-        analyst's detonation, an ingest operator's selector hit), and row
-        security would show it no veto at all, so the PENDING row carries
-        the row it becomes when the case is kept out."""
+        The owner's veto is applied by `notify.enqueue`, as the definer: the caller may not be on the case
+        (a Lab analyst's detonation, an ingest operator's selector hit), and row security would show it no
+        veto at all, so the PENDING row carries the row it becomes when the case is kept out."""
         from noctornal_api import jira  # jira imports transports, which imports this
 
         if case_id is None:
@@ -964,27 +843,18 @@ def _planned(channel: str, state: str, after: datetime, *,
 def _require_transport(channel: str, conn: psycopg.Connection | None = None) -> None:
     """Refuse to switch on a channel nothing can deliver to.
 
-    N4 (2026-09-02). JIRA has no transport in this build at all, and
-    WEBHOOK has one only once NOCTORNAL_WEBHOOK_URL says where to post.
-    Before this a user could enable either, and `transports.dispatch_due`
-    then reported the impossibility as a retryable transport failure --
-    five attempts, exponential back-off, then FAILED -- for every
-    notification, forever, while the user waited for tickets that were
-    never going to arrive. The delivery ledger filled with a
-    misconfiguration dressed as an outage.
+    WEBHOOK has a transport only once NOCTORNAL_WEBHOOK_URL says where to post. Enabling it without one
+    would make `transports.dispatch_due` report the impossibility as a retryable transport failure (five
+    attempts, exponential back-off, then FAILED) for every notification, forever: a misconfiguration
+    dressed as an outage in the delivery ledger.
 
-    Only the off->on TRANSITION is checked, and `set_preference` is where
-    that is decided -- it compares against the CURRENT row, not against the
-    payload. Turning a channel off is always allowed, and editing the other
-    settings of an already-enabled channel is not the moment to discover
-    the URL was unset. Between N4 and 2026-09-02 the caller tested only
-    `fields["enabled"] is True`, so this promise was made here and not kept
-    there; see the comment at the call site.
+    Only the off->on transition is checked, and `set_preference` is where that is decided: it compares
+    against the current row, not against the payload. Turning a channel off is always allowed, and editing
+    the other settings of an already-enabled channel is not the moment to discover the URL was unset.
 
-    JIRA (F7, 2026-09-24) has a transport now, and needs a live (ACTIVE
-    or PAUSED) destination: enabling it with none would queue deliveries
-    that are suppressed at queue time as DESTINATION_OFF, which is the
-    user being told nothing at the moment they ask.
+    JIRA needs a live (ACTIVE or PAUSED) destination: enabling it with none would queue deliveries that
+    are suppressed at queue time as DESTINATION_OFF, which is the user being told nothing at the moment
+    they ask.
     """
     if channel == JIRA:
         from noctornal_api import jira
@@ -1001,10 +871,8 @@ def _require_transport(channel: str, conn: psycopg.Connection | None = None) -> 
             "set it first.")
 
 
-#: How long a priority-1 notification may sit unacknowledged before the
-#: drain escalates it. Named so the inbox can say WHEN ("escalates at
-#: 14:05 UTC unless acknowledged") from the same number the sweep uses
-#: (ux08-triage:urgent-read-vs-ack-invisible, 2026-09-23).
+#: How long a priority-1 notification may sit unacknowledged before the drain escalates it. Named so the
+#: inbox can say when ("escalates at 14:05 UTC unless acknowledged") from the same number the sweep uses.
 ESCALATE_AFTER = timedelta(hours=1)
 
 #: A row `escalate_unacknowledged` will escalate, or already has: urgent,
@@ -1024,53 +892,41 @@ def escalates_at(n: Notification) -> datetime | None:
 
 def escalate_unacknowledged(conn: psycopg.Connection, *,
                             after: timedelta = ESCALATE_AFTER) -> int:
-    """Escalate every priority-1 notification that has sat unacknowledged
-    for longer than `after`. Returns how many ORIGINALS were escalated --
-    each may produce several rows when it goes to the officers.
+    """Escalate every priority-1 notification that has sat unacknowledged for longer than `after`.
+    Returns how many originals were escalated; each may produce several rows when it goes to the
+    officers.
 
-    N3 (2026-09-02). docs/07 makes acknowledgement "the signal that stops a
-    thing nagging", and until this nothing nagged: an integrity alarm or a
-    break-glass alert its recipient never acknowledged sat in one inbox,
-    which is the one alert that mattered, muted by absence.
+    docs/07 makes acknowledgement "the signal that stops a thing nagging". Without a sweep, an integrity
+    alarm or a break-glass alert its recipient never acknowledged would sit in one inbox: the one alert
+    that mattered, muted by absence.
 
     Where it goes:
 
-    - to the OWNER of the case the notification is about, normally;
-    - to every active SECURITY_OFFICER when the owner IS the unresponsive
-      recipient, when the notification concerns no case, or when the owner
-      could not be told (suppressed: inactive, or no longer cleared for
-      their own case) -- an escalation that lands nowhere is the original
-      problem again one level up. The recipient is excluded from the
-      officers: escalating somebody's silence to themselves is noise.
+    - to the owner of the case the notification is about, normally;
+    - to every active SECURITY_OFFICER when the owner is the unresponsive recipient, when the notification
+      concerns no case, or when the owner could not be told (suppressed: inactive, or no longer cleared for
+      their own case), since an escalation that lands nowhere is the original problem again one level up.
+      The recipient is excluded from the officers: escalating somebody's silence to themselves is noise.
 
-    Idempotent PER SWEEP, and only so long as one sweep runs at a time.
-    The row it writes carries `object_type='notification',
-    object_id=<original>` and the SELECT excludes originals that already
-    have one -- but that is a read followed by a write on an autocommit
-    connection, and `notify.notification` has no unique index to fall back
-    on (`notification_object_idx` is a plain partial btree on `object_id`,
-    migration 0029). Two sweeps overlapping in this window each see "no
-    escalation yet" and both write one, and duplicate ESCALATION rows are
-    URGENT -- the tier that overrides quiet hours and reaches every
-    security officer. What actually guarantees the property is
-    `transports.dispatch_due`, which holds a session advisory lock across
-    the whole drain; corrected here 2026-09-02, when the docstring still
-    claimed the SELECT alone was enough. A caller invoking this function
-    directly (the tests do) is responsible for its own serialisation.
+    Idempotent per sweep, and only so long as one sweep runs at a time. The row it writes carries
+    `object_type='notification', object_id=<original>` and the SELECT excludes originals that already
+    have one, but that is a read followed by a write on an autocommit connection, and `notify.notification`
+    has no unique index to fall back on (`notification_object_idx` is a plain partial btree on
+    `object_id`, migration 0029). Two overlapping sweeps would each see "no escalation yet" and both write
+    one, and duplicate ESCALATION rows are URGENT, the tier that overrides quiet hours and reaches every
+    security officer. What guarantees the property is `transports.dispatch_due`, which holds a session
+    advisory lock across the whole drain. A caller invoking this function directly (the tests do) is
+    responsible for its own serialisation.
 
-    A notification whose escalation could not be written anywhere is tried
-    again next sweep and not counted -- the count is of silences a human
-    was actually told about.
+    A notification whose escalation could not be written anywhere is tried again next sweep and not
+    counted: the count is of silences a human was actually told about.
 
-    ESCALATION rows are never themselves candidates. Otherwise an
-    unacknowledged escalation escalates, and that one escalates, and the
-    outbox fills with a chain about one silence.
+    ESCALATION rows are never themselves candidates, or an unacknowledged escalation would escalate and
+    the outbox would fill with a chain about one silence.
 
-    Bounded per sweep so a backlog cannot fan out unboundedly in one drain;
-    the rest is picked up next time.
-
-    Wording lives in `notify_events` (imported here rather than at module
-    level because `notify_events` imports this module).
+    Bounded per sweep so a backlog cannot fan out unboundedly in one drain; the rest is picked up next
+    time. Wording lives in `notify_events` (imported here rather than at module level because
+    `notify_events` imports this module).
     """
     from noctornal_api import notify_events
 
@@ -1132,13 +988,9 @@ def deliver_after(priority: int, pref: Preference,
                   now: datetime) -> datetime:
     """When this delivery becomes due.
 
-    Quiet hours and digest DEFER; they never drop. A deferred delivery is
-    still a row with a due time, so "why did I not get that email" has an
-    answer other than a shrug.
-
-    Priority 1 ignores both, which is the only thing that makes quiet hours
-    acceptable: the reason it is safe to silence a channel overnight is that
-    something can still get through it.
+    Quiet hours and digest defer; they never drop. A deferred delivery is still a row with a due time, so
+    "why did I not get that email" has an answer other than a shrug. Priority 1 ignores both, which is
+    what makes quiet hours acceptable: something can still get through an overnight-silenced channel.
     """
     if priority <= URGENT:
         return now
@@ -1198,20 +1050,15 @@ def _validate_timezone(name: str) -> None:
         raise NotificationError(f"unknown timezone {name!r}") from exc
 
 
-#: One plain addr-spec and nothing else: a local part of letters, digits and
-#: '_', '+', "'" and '-' joined by single dots, LDH domain labels. No display
-#: name, no group, no list, no comment, no whitespace, and none of the
-#: characters an MTA reads as ROUTING in a local part: '%' (the percent hack,
-#: which Postfix honours by default, would turn 'x%attacker.example@corp.example'
-#: into a mailbox at attacker.example behind an allowed domain), '!' (a bang
-#: path), '|', '/', '`', '$', '{' and '}' (alias and delivery syntax).
-#: egress-notify-address-list (2026-10-03): the allowlist used to read only
-#: the text after the LAST '@', so 'collector@attacker.example,
-#: me@corp.example' passed and smtplib sent one RCPT per address. A
-#: character that could start a second recipient (',', ';', '<', ':') or a
-#: header line (CR, LF) is outside this pattern, so it is refused by shape.
-#: Migration 0148's CHECK on notify.preference.address spells the same
-#: pattern and a test holds the two equal.
+#: One plain addr-spec and nothing else: a local part of letters, digits and '_', '+', "'" and '-' joined
+#: by single dots, LDH domain labels. No display name, no group, no list, no comment, no whitespace, and
+#: none of the characters an MTA reads as routing in a local part: '%' (the percent hack, which Postfix
+#: honours by default, would turn 'x%attacker.example@corp.example' into a mailbox at attacker.example
+#: behind an allowed domain), '!' (a bang path), '|', '/', '`', '$', '{' and '}' (alias and delivery
+#: syntax). A character that could start a second recipient (',', ';', '<', ':') or a header line (CR,
+#: LF) is outside this pattern, so it is refused by shape: smtplib sends one RCPT per address, so a list
+#: must not pass an allowlist that reads only the text after the last '@'. Migration 0148's CHECK on
+#: notify.preference.address spells the same pattern and a test holds the two equal.
 SINGLE_ADDRESS_PATTERN = (
     r"[A-Za-z0-9_+'-]+(\.[A-Za-z0-9_+'-]+)*"
     r"@[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*")
@@ -1235,29 +1082,17 @@ def effective_labels_for_notification(
     element_classification: str | None = None,
     element_compartments: frozenset[str] = frozenset(),
 ) -> tuple[str, frozenset[str]]:
-    """The labels a notification carries: the STRICTER classification and the
-    UNION of compartments, exactly as `deps.effective_labels` computes them
-    for an access decision.
+    """The labels a notification carries: the stricter classification and the union of compartments,
+    exactly as `deps.effective_labels` computes them for an access decision.
 
-    Duplicated deliberately rather than imported: `deps` is the HTTP layer
-    and this runs in services that have no request. The pair is asserted
-    equal by a test, so the two cannot drift.
+    Duplicated deliberately rather than imported: `deps` is the HTTP layer and this runs in services that
+    have no request. The pair is asserted equal by a test, so the two cannot drift.
 
-    Called from `NotificationService.notify`, which is the only place it has
-    ever needed to be called from. Until F19 (2026-07-26) it was exported,
-    tested and called by NOTHING — a correct composition function sitting
-    beside a `notify()` that took the case's labels and used them verbatim.
-    A function with a test and no call site is the shape a defence takes
-    when it was written, reviewed and then never wired in; grep for the
-    call sites of anything security-relevant, not just for its definition.
+    Called from `NotificationService.notify`, which is the only place it needs to be called from.
     """
-    # The case's label is parsed UNCONDITIONALLY, even when there is no
-    # element to compare it against. The first version only parsed inside
-    # the `if`, so `notify()`'s "fail closed and loudly" applied to
-    # notifications about an element and not to the plain ones — an
-    # unparseable classification fell through to the INSERT and surfaced as
-    # a psycopg DataError. A validator that only runs on the harder input
-    # is not a validator.
+    # The case's label is parsed unconditionally, even when there is no element to compare it against, so
+    # an unparseable classification fails closed and loudly for plain notifications too, not only for those
+    # about an element. A validator that only runs on the harder input is not a validator.
     case_level = tlp_from_name(case_classification)
     strictest = case_level
     if element_classification is not None:

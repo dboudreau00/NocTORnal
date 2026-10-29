@@ -1,20 +1,13 @@
-"""Shared fixtures for the egress proxy's suites (S2, 2026-09-24).
-Importable, with no test functions.
+"""Shared fixtures for the egress proxy's suites. Importable, with no test functions.
 
-## The collection framework stand-in
-
-The proxy decides persona connections on the collection framework's
-columns and tables (the collection foundation: collect.collection_authority
-and its targets, collection_run.authority_id, source.collection_account_id
-and egress_profile_id, the persona's machine hold and lock). Where that
-schema is missing, `collection_standin` creates the columns and tables the proxy
-reads, with the foundation's names, CHECKs and the target's base_url
-snapshot, and drops exactly what it created afterwards. Where the schema
-is present it does nothing, and the rows these suites insert satisfy the
-foundation's own constraints (two different people record and confirm, a
-MEMBER_READ authority names its persona and its reference).
-
-## Keys
+The proxy decides persona connections on the collection framework's columns and tables
+(collect.collection_authority and its targets, collection_run.authority_id,
+source.collection_account_id and egress_profile_id, the persona's machine hold and lock). Where that
+schema is missing, `collection_standin` creates the columns and tables the proxy reads, with the
+foundation's names, CHECKs and the target's base_url snapshot, and drops exactly what it created
+afterwards. Where the schema is present it does nothing, and the rows these suites insert satisfy the
+foundation's own constraints (two different people record and confirm, a MEMBER_READ authority names
+its persona and its reference).
 
 `keys()` is one fixed set: client key, fingerprint key and seal key pair.
 """
@@ -287,13 +280,12 @@ def run(conn, source_id, *, status="RUNNING", profile=None, persona=None, author
 def _after_the_route_last_changed(conn, persona, sources) -> None:
     """Wait until the database's clock is past the route's last change.
 
-    The proxy counts an authority only when it was recorded and confirmed
-    after the profile last reached further and after the latest binding of
-    the persona or the source (`egress_authz._floor`). A fixture writes the
-    route and then the authority a few milliseconds apart, which holds on a
-    clock that only moves forward. On a host that steps its clock, a route
-    stamped inside a step is AHEAD of an authority stamped just after it, and
-    the proxy refuses what the test arranged correctly (db_clock.py)."""
+    The proxy counts an authority only when it was recorded and confirmed after the profile last
+    reached further and after the latest binding of the persona or the source
+    (`egress_authz._floor`). A fixture writes the route and then the authority a few milliseconds
+    apart, which holds on a clock that only moves forward; on a host that steps its clock a route
+    stamped inside a step is ahead of the authority stamped just after it (db_clock.py).
+    """
     if not (_table(conn, "collect.egress_binding")
             and _column(conn, "egress_profile", "reach_changed_at")):
         return
@@ -389,20 +381,14 @@ def teardown(conn, prefix: str) -> None:
                      f"'{like}@noctornal.test'")
 
 
-# ---------------------------------------------------------------------------
-# Leaving an operator's egress configuration as it was
-# ---------------------------------------------------------------------------
+# Leaving an operator's egress configuration as it was.
 #
-# Several suites need a database with no live route of a name, or with their
-# own passive default, so they retire whatever holds it. Retirement is
-# terminal to the application, so before this helper those suites retired a
-# developer's own profiles and routes (the demo configuration included) for
-# good (2026-09-25). `preserved` snapshots the live
-# configuration, lets the suite do what it must, then retires what the suite
-# left live and brings the originals back exactly, as the owner, with the
-# terminal triggers lifted for those statements only. The snapshot is also
-# written to a file per database, so a run killed half way is repaired by
-# the next one.
+# Several suites need a database with no live route of a name, or with their own passive default, so
+# they retire whatever holds it. Retirement is terminal to the application, so `preserved` snapshots
+# the live configuration, lets the suite do what it must, then retires what the suite left live and
+# brings the originals back exactly, as the owner, with the terminal triggers lifted for those
+# statements only. The snapshot is also written to a file per database, so a run killed half way is
+# repaired by the next one.
 
 def _set_aside_file(conn) -> Path:
     name = conn.execute("SELECT current_database()").fetchone()[0]

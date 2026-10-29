@@ -2,17 +2,14 @@
 
 Development only. Drives headless Chrome through the `#case=…&tab=…` deep
 link the UI already supports, so each shot is a real render of a real pane
-against real data: not a mock, and not a screenshot of the pane the app
-happened to open on.
+against real data.
 
     .venv\\Scripts\\python scripts\\screenshot_ui.py --email you@example.com
     .venv\\Scripts\\python scripts\\screenshot_ui.py --port 8010 --out shots/
 
-Why headless Chrome and not the in-app browser: a screenshot needs the page
-to composite frames, which a hidden pane does not do. Chrome's
-`--virtual-time-budget` also gives a deterministic answer to "has it
-finished fetching yet", where a fixed sleep gives you a picture of a spinner
-about one run in five.
+Headless Chrome, because a hidden in-app pane composites no frames, and its
+`--virtual-time-budget` says deterministically when fetching has finished,
+where a fixed sleep sometimes catches a spinner.
 
 **The shots contain case material.** They are written to a gitignored
 directory by default and should be treated as the classification of the
@@ -115,16 +112,9 @@ def first_case_id(code: str | None) -> str | None:
 def _refuse_if_committable(out_dir: Path) -> None:
     """Refuse to write case renders somewhere git would commit them.
 
-    `.gitignore` covers the default `screenshots/`, and that was treated as
-    the control until a run with `--out shots` put fifteen renders of a
-    live case in the working tree as untracked files, one `git add -A` away
-    from the history. The ignore rule was doing its job; the assumption
-    that it covered wherever the flag pointed was the bug.
-
-    A screenshot of an AMBER_STRICT case in a repository is the same
-    disclosure as the case file and does not look like one, so this is a
-    refusal rather than a warning. `--out /somewhere/outside` is always
-    available, and outside the repo git has no opinion.
+    `.gitignore` covers the default `screenshots/`, not wherever `--out` points. A screenshot of
+    an AMBER_STRICT case in a repository is the same disclosure as the case file and does not look
+    like one, so this is a refusal rather than a warning. `--out` outside the repo always works.
     """
     try:
         inside = out_dir.is_relative_to(Path(__file__).resolve().parents[1])

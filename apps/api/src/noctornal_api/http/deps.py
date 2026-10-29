@@ -1,28 +1,14 @@
-"""Request dependencies: a per-request DB connection, the authenticated
-session/user, and the five-part access gate as a reusable dependency.
+"""Request dependencies: a per-request DB connection, the authenticated session and user, and
+the five-part access gate as a reusable dependency.
 
-The gate dependency is the single choke point every case-scoped endpoint
-passes through — it resolves the AccessContext from the DB and calls the
-one evaluate() function (session 4), so authorization is never re-decided
-per endpoint (docs/05).
-
-Two rules that adversarial review forced into this file:
-
-1. An element is protected by BOTH its own labels and its case's. The
-   effective classification is the STRICTER of the two and the effective
-   compartments are the UNION, so an uncompartmented exhibit inside a
-   compartmented case is still need-to-know locked. Callers cannot forget
-   this because authorize_object does it for them.
-2. Authorization is decided BEFORE existence is revealed. A caller who
-   fails the gate gets the same 403 whether or not the row exists, so
-   status codes are not an existence oracle.
-
-A third arrived with gap-closed-case-writes (2026-09-23):
-
-3. A CLOSED, ARCHIVED or PURGED case is read-only for CONTENT, and the
-   gate is where that is enforced, once, AFTER the access decision so the
-   409 that names the state tells nobody anything the gate would not.
-   See `CONTENT_WRITE_PERMISSIONS` for how a content write is recognised.
+The gate is the single choke point every case-scoped endpoint passes through: it resolves the
+AccessContext and calls the one evaluate(), so authorization is never re-decided per endpoint
+(docs/05). An element is protected by both its own labels and its case's (the stricter
+classification, the union of compartments), which authorize_object applies for every caller.
+Authorization is decided before existence is revealed, so a caller who fails the gate gets the
+same 403 whether or not the row exists. A CLOSED, ARCHIVED or PURGED case is read-only for
+content, enforced here once, after the access decision, so the 409 that names the state tells
+nobody anything the gate would not (`CONTENT_WRITE_PERMISSIONS`).
 """
 from __future__ import annotations
 
@@ -71,24 +57,15 @@ SESSION_COOKIE = "__Host-session"
 CSRF_COOKIE = "__Host-csrf"
 CSRF_HEADER = "x-csrf-token"
 
-#: The attributes BOTH cookies are set with and deleted with. One
-#: declaration next to the names, because a browser matches a deletion
-#: against the stored cookie's Secure/Path/SameSite and the two halves had
-#: drifted: `routers/auth.py` set the pair with `secure=True,
-#: samesite="strict"` and cleared them with `delete_cookie(name, path="/")`,
-#: whose defaults emit no Secure attribute and `SameSite=lax`. A `__Host-`
-#: cookie without Secure is refused outright, so until 2026-09-09 logout
-#: returned 204 and the browser kept presenting the revoked token on every
-#: request until the BROWSER closed: the pair is set with no Max-Age, which
-#: makes it a session cookie, and a session cookie outlives the tab.
-#: `secure=True` is also what the `__Host-` prefix requires, with `Path=/`
-#: and no Domain.
+#: The attributes both cookies are set with and deleted with, declared once: a browser matches a
+#: deletion against the stored cookie's Secure, Path and SameSite, and a `__Host-` cookie
+#: deleted without Secure is refused, leaving the revoked token in place until the browser
+#: closes. `__Host-` also requires Secure, `Path=/` and no Domain.
 COOKIE_ATTRS: dict = {"path": "/", "secure": True, "samesite": "strict"}
 
 
 def get_conn() -> Iterator[psycopg.Connection]:
-    # The request role in production (S1, 2026-09-25), bound to the
-    # request's user by `current_user`. Autocommit, as before.
+    # The request role in production, bound to the request's user by `current_user`; autocommit.
     conn = connect_request()
     try:
         yield conn
@@ -97,12 +74,10 @@ def get_conn() -> Iterator[psycopg.Connection]:
 
 
 def system_conn(purpose: SystemPurpose):
-    """A dependency yielding a connection that sees every row, for a
-    route whose work must be complete whatever its caller may read (S1,
-    2026-09-25; `db.SystemPurpose`). The route's gate still runs on the
-    request connection first. In development and the suite this IS the
-    request connection, so behaviour and transactions are unchanged; in
-    production it is the system role, closed after the response."""
+    """A dependency yielding a connection that sees every row, for a route whose work must be
+    complete whatever its caller may read (`db.SystemPurpose`). The route's gate still runs on
+    the request connection first. In development and the suite this is the request connection;
+    in production it is the system role, closed after the response."""
     def _dep(conn: psycopg.Connection = Depends(get_conn),
              ) -> Iterator[psycopg.Connection]:
         with system_connection(purpose, reuse=conn) as sconn:
@@ -123,10 +98,9 @@ def _bearer(authorization: str | None) -> str | None:
     return None
 
 
-#: The 401 for a request that presents no session credential at all. One
-#: sentence in one place: `session_token` raises it and
-#: `http/body_ceiling.py` answers an unauthenticated upload with it before
-#: reading a byte (2026-10-07), and the two must agree.
+#: The 401 for a request that presents no session credential at all, in one place:
+#: `session_token` raises it and `http/body_ceiling.py` answers an unauthenticated upload with
+#: it before reading a byte, and the two must agree.
 NO_SESSION_DETAIL = "no session token"
 
 
@@ -142,17 +116,14 @@ def session_token(
     request: Request,
     authorization: str | None = Header(default=None),
 ) -> str:
-    """Extract the opaque token (Authorization: Bearer, else the session
-    cookie). Declared BEFORE the connection dependency so a tokenless
-    request 401s without ever opening a DB connection — an unauthenticated
-    flood costs no connections, and a DB outage still returns 401.
+    """Extract the opaque token (Authorization: Bearer, else the session cookie).
 
-    CSRF (docs/05: double-submit + SameSite): a COOKIE-derived credential
-    on an unsafe method must be accompanied by a header matching the
-    readable CSRF cookie. Without this, a same-site attacker page could
-    POST multipart (a CORS-safelisted content type, so no preflight) and
-    plant an exhibit into WORM storage under the victim's custody. A
-    Bearer token is immune — script cannot set that header cross-origin.
+    Declared before the connection dependency, so a tokenless request 401s without opening a
+    DB connection: an unauthenticated flood costs no connections. A cookie-derived credential
+    on an unsafe method must carry a header matching the readable CSRF cookie (docs/05,
+    double-submit and SameSite); without it a same-site page could POST multipart, which needs
+    no preflight, and plant an exhibit in WORM storage under the victim's custody. A Bearer
+    token is immune, since script cannot set that header cross-origin.
     """
     bearer = _bearer(authorization)
     if bearer:
@@ -178,34 +149,22 @@ def current_user(
     raw: str = Depends(session_token),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> CurrentUser:
-    """Resolve the session token to a live session. The failure reason is
-    deliberately NOT returned: distinguishing 'revoked' from 'not_found'
-    would confirm to a token holder that the string was a real session.
+    """Resolve the session token to a live session.
 
-    Under `NOCTORNAL_SESSION_STRICT_BINDING` (0058) a live session
-    presented from a different address or client than it was minted with
-    is refused too, with the SAME generic 401 -- the holder of a replayed
-    token must not learn that the string was a real session that merely
-    failed a binding check -- and an audit row that names WHICH binding
-    failed, because that is what the security officer needs. Refused, not
-    revoked: an attacker holding the token could otherwise log the victim
-    out on demand. The idle window slides only after the check, so a
-    refused replay does not keep the session alive.
-
-    This is ONE of the two places a session token is validated. The other
-    is the websocket in `routers/live.py`, which applies the same check in
-    the same order through `refuse_unbound_session`. Until 2026-09-02 it
-    did not, and the gap was not cosmetic: a token refused on every HTTP
-    request was still accepted on the live case-event stream, and every
-    reconnect slid the idle window, so the replay kept the victim's
-    session alive indefinitely. Both call sites now share the check, and
-    `test_session_binding_pg.py` asserts it over both.
+    The failure reason is never returned: telling 'revoked' from 'not_found' would confirm to a
+    token holder that the string was a real session. Under `NOCTORNAL_SESSION_STRICT_BINDING`
+    (0058) a session presented from another address or client than it was minted with gets the
+    same generic 401, plus an audit row naming which binding failed; it is refused, not revoked,
+    or a token holder could log the victim out on demand. The idle window slides only after the
+    check, so a refused replay does not keep the session alive. The websocket in
+    `routers/live.py` applies the same check in the same order (`refuse_unbound_session`), and
+    `test_session_binding_pg.py` holds both call sites to it.
     """
     service = SessionService(PgSessionStore(conn))
     result = service.validate(raw, touch=False)
     if not result.ok:
-        # No row for a token that matches nothing, one per real session
-        # per window otherwise, with the source (http_ui-004, 2026-10-03).
+        # No row for a token that matches nothing; otherwise one per real session per window,
+        # with the source.
         from noctornal_api.http.session_rejections import record_rejected_session
         record_rejected_session(conn, request, result)
         raise Problem(401, "Unauthenticated", "invalid or expired session")
@@ -214,36 +173,34 @@ def current_user(
             conn, s, ip=client_ip(request),
             user_agent=request.headers.get("user-agent"), path="http"):
         raise Problem(401, "Unauthenticated", "invalid or expired session")
-    # Bind the connection to this session's user for row-level
-    # security (S1, 2026-09-25) BEFORE sliding the idle window: the request
-    # role may update only the session its connection is bound to (0112).
-    # On an exempt connection (the owner, in development and the suite)
-    # nothing is compared and nothing changes.
+    # Bind the connection to this session's user for row-level security before sliding the
+    # idle window: the request role may update only the session its connection is bound to
+    # (0112). On an exempt connection (the owner, in development and the suite) nothing is
+    # compared and nothing changes.
     refuse_unbindable_session(conn, s, raw)
     touched = service.touch(s)
     if touched is None:
-        # Revoked, expired or idle between the read above and the slide
-        # (authz-session-revoke-bypass, 2026-10-03): the same generic 401,
+        # Revoked, expired or idle between the read above and the slide: the same generic 401,
         # and no second audit row, since the revocation was its own event.
         raise Problem(401, "Unauthenticated", "invalid or expired session")
     s = touched
-    # Who a row-level security refusal is audited against, when one
-    # escapes to the error handler (http/errors.py, S1).
+    # Who a row-level security refusal is audited against, when one escapes to the error
+    # handler (http/errors.py).
     request.state.noctornal_user_id = s.user_id
-    # The same, so a side connection that writes that row can be bound to the
-    # session and keep its actor (0150, 2026-10-03).
+    # The same, so a side connection that writes that row can be bound to the session and keep
+    # its actor (0150).
     from noctornal_api.security.tokens import rls_proof
     request.state.noctornal_rls_proof = rls_proof(raw)
     return CurrentUser(s.user_id, s.id, s.mfa_satisfied_at)
 
 
 def refuse_unbindable_session(conn, session, raw: str) -> None:
-    """Bind `conn` to `session` (S1). A connection that is subject to
-    row security and does not come out bound to the session's own user is
-    refused with the same generic 401 as any bad session: a session minted
-    before 0110 carries no binding, and a mismatch means the proof and the
-    row disagree, which is never the presenter's to know. Shared with the
-    websocket handshake in `routers/live.py`."""
+    """Bind `conn` to `session`, refusing with the generic 401 when that fails.
+
+    A connection subject to row security that does not come out bound to the session's own user
+    is refused like any bad session: a session minted before 0110 carries no binding, and a
+    mismatch means the proof and the row disagree, which is never the presenter's to know.
+    Shared with the websocket handshake in `routers/live.py`."""
     binding = bind_session(conn, raw)
     if binding.exempt or binding.actor == session.user_id:
         return
@@ -258,27 +215,12 @@ def refuse_unbound_session(conn, session, *, ip: str | None,
                            user_agent: str | None, path: str) -> bool:
     """True when strict binding says this presentation must be refused.
 
-    Shared by BOTH session-validation call sites -- `current_user` here and
-    the websocket handshake in `routers/live.py`. It is a function rather
-    than two copies because the two halves of this control were wrong
-    together until 2026-09-02: the HTTP half refused a moved token and the
-    websocket half did not consult the binding at all, so the same stolen
-    credential was rejected on every REST call and accepted on the live
-    stream, which re-runs the five-part gate and therefore showed the
-    attacker exactly what the victim could read.
-
-    The caller must have validated with `touch=False` and must slide the
-    idle window only after this returns False. A refused replay that
-    touched the row would keep the victim's session alive for as long as
-    the attacker kept reconnecting.
-
-    `unbound` in the audit detail separates two different facts that both
-    produce a mismatch: a session minted somewhere else (a replay) from a
-    session minted with no binding at all -- a pre-0058 row, or one issued
-    by `scripts/bootstrap.py session`, which mints from a shell that is
-    not the browser that will present it. The security officer reading the
-    log needs to tell "someone moved this token" from "this session could
-    never have been bound"; `path` tells them which surface it arrived on.
+    Shared by both session-validation call sites (`current_user` here and the websocket
+    handshake in `routers/live.py`), so a stolen token cannot be refused on REST and accepted on
+    the live stream. The caller must have validated with `touch=False` and slide the idle window
+    only after this returns False, or a refused replay would keep the victim's session alive.
+    `unbound` in the audit detail tells a replay from a session minted with no binding at all (a
+    pre-0058 row, or one from `scripts/bootstrap.py session`); `path` names the surface.
     """
     if not strict_binding_enabled():
         return False
@@ -295,25 +237,16 @@ def refuse_unbound_session(conn, session, *, ip: str | None,
 
 def audit_auth_event(conn, action: str, actor_id, case_id, detail: dict,
                      *, ip_hash: bytes | None = None) -> None:
-    """Append to the hash-chained audit log. Authentication and
-    authorization outcomes are auditable events (docs/05).
+    """Append to the hash-chained audit log; authentication and authorization outcomes are
+    auditable events (docs/05).
 
-    Public (it was `_audit` until 2026-09-02) because `routers/live.py`
-    writes the same SESSION_BINDING_REFUSED row from the websocket
-    handshake, and two spellings of one audit action is how an audit
-    query comes back short.
-
-    `ip_hash` names the source (http_ui-004, 2026-10-03): a refused
-    session presentation without one could not be attributed.
-
-    Every row this writes is a REFUSAL (AUTHZ_DENIED, AUTH_SESSION_REJECTED,
-    RLS_BINDING_FAILED, SESSION_BINDING_REFUSED, CASE_SHARE_REFUSED), and it
-    is stored with outcome DENIED, as the sign-in, rate-limit and
-    row-security refusals always were. It was stored with the column's
-    default, SUCCESS, so a reader that filtered the log on outcome found
-    every other refusal and missed these (docs/17, "refusals are recorded as
-    SUCCESS", 2026-10-08). Rows written before then keep SUCCESS: the log is
-    append-only (invariant 6), so find those by `action`.
+    Public because `routers/live.py` writes the same SESSION_BINDING_REFUSED row from the
+    websocket handshake, and two spellings of one action make an audit query come back short.
+    `ip_hash` attributes a refused session presentation to its source. Every row this writes is
+    a refusal (AUTHZ_DENIED, AUTH_SESSION_REJECTED, RLS_BINDING_FAILED, SESSION_BINDING_REFUSED,
+    CASE_SHARE_REFUSED) and is stored with outcome DENIED. Older rows of these actions carry
+    SUCCESS and stay so, since the log is append-only (invariant 6, docs/17): find them by
+    `action`.
     """
     conn.execute(
         """INSERT INTO audit.event
@@ -327,18 +260,14 @@ def audit_auth_event(conn, action: str, actor_id, case_id, detail: dict,
 
 def audit_auth_event_as_system(conn, action: str, actor_id, case_id,
                                detail: dict) -> None:
-    """`audit_auth_event` for a row that names a user this connection is not
-    bound to: a refused session (the binding comes after the checks) or a
-    session that has just been revoked (a sign-out).
+    """`audit_auth_event` for a row that names a user this connection is not bound to: a refused
+    session (the binding comes after the checks) or one just revoked (a sign-out).
 
-    The database attributes a request-role row only to the user the
-    connection is bound to (0150, evidence-ledger-actor-time-forgeable,
-    2026-10-03), and demotes a claim it cannot verify to `unverified_actor_id`
-    in the detail. These are authentication outcomes the server has itself
-    established, so the system role, which is how the product writes for a
-    person it has authenticated, writes them and the row keeps its actor. A
-    process with no system role to hand (the sample origin holds none) writes
-    on `conn` as before, and the row is demoted rather than lost."""
+    The database attributes a request-role row only to the user the connection is bound to
+    (0150) and demotes any other claim to `unverified_actor_id` in the detail. These outcomes
+    the server has established itself, so the system role writes them and the row keeps its
+    actor. A process with no system role (the sample origin) writes on `conn`, and the row is
+    demoted rather than lost."""
     try:
         with system_connection(SystemPurpose.AUTH, reuse=conn) as sconn:
             audit_auth_event(sconn, action, actor_id, case_id, detail)
@@ -348,17 +277,13 @@ def audit_auth_event_as_system(conn, action: str, actor_id, case_id,
 
 
 def note_system_fallback(exc: SystemContextUnavailable, action: str) -> None:
-    """Say so when an authentication row falls back to a write the database
-    cannot attribute (g49v-system-fallback-silent, 2026-10-03).
+    """Say so when an authentication row falls back to a write the database cannot attribute.
 
-    "No system role in this process" is a deployment shape (the sample origin)
-    and stays quiet. A system connection that is configured and WRONG (not
-    exempt from row security, or in production the owner or a superuser) is a
-    misconfiguration, and the row it costs keeps its claim only in
-    `detail.unverified_actor_id`: that is logged at ERROR, with the reason the
-    connection was refused (names the setting, never its value), so an
-    operator finds it before an investigation needs the actor. The row is
-    still written, never lost."""
+    "No system role in this process" is a deployment shape (the sample origin) and stays quiet.
+    A system connection that is configured and wrong (not exempt from row security, or in
+    production the owner or a superuser) is logged at ERROR with the reason, naming the setting
+    and never its value, so an operator finds it before an investigation needs the actor. The
+    row is still written, with its claim in `detail.unverified_actor_id`."""
     if isinstance(exc, SystemContextMisconfigured):
         log.error("%s written without a verified actor: the system "
                   "database connection is misconfigured: %s", action, exc)
@@ -370,16 +295,14 @@ def effective_labels(
     element_classification: str | None = None,
     element_compartments: frozenset[str] = frozenset(),
 ) -> tuple[str, frozenset[str]]:
-    """The labels an access decision must use: the STRICTER classification
-    of case and element, and the UNION of their compartments. Raises 404
-    only for a case that does not exist (callers gate before revealing
-    element existence).
+    """The labels an access decision must use: the stricter classification of case and element,
+    and the union of their compartments. Raises 404 only for a case that does not exist
+    (callers gate before revealing element existence).
 
-    Read through `iam.case_facts` (S1, 2026-09-25), because the gate
-    must decide, and audit, on the case's labels whether or not row-level
-    security lets the caller read the case row: an assigned analyst asking
-    for a case above their clearance gets the gate's 403 and its
-    AUTHZ_DENIED row, never a silent 404."""
+    Read through `iam.case_facts`, because the gate must decide and audit on the case's labels
+    whether or not row-level security lets the caller read the case row: an assigned analyst
+    asking for a case above their clearance gets the gate's 403 and its AUTHZ_DENIED row, never
+    a silent 404."""
     row = conn.execute(
         "SELECT classification, compartments FROM iam.case_facts(%s)",
         (case_id,),
@@ -393,33 +316,19 @@ def effective_labels(
     return strictest.name, case_comp | element_compartments
 
 
-#: The verbs that AUTHOR case content and are never used to read it. A gate
-#: call naming one of these is a content write, so on a case in
-#: `CONTENT_READ_ONLY_STATES` it is refused with a 409 whatever route made
-#: it (gap-closed-case-writes, 2026-09-23).
+#: The verbs that author case content and are never used to read it. A gate call naming one is
+#: a content write, refused with a 409 on a case in `CONTENT_READ_ONLY_STATES` whatever route
+#: made it. Keyed on the verb, not the route, because the gate is the one place every
+#: case-scoped write passes, so a new route is covered without anyone remembering to cover it.
 #:
-#: Keyed on the verb, not the route, because the gate is the one place
-#: every case-scoped write already passes and the verb is the one thing
-#: it is always told. A new route that gates on one of these is covered
-#: without anyone remembering to cover it. Two verbs are deliberately NOT
-#: here although some of their routes write content, because they also
-#: gate reads or governance: `report.generate` (it reads the ACH matrix
-#: and builds reports) and `case.update` (it edits the governance record
-#: and the approval policy). Their content-writing routes, ACH and the
-#: assumptions register, say so with `require(..., content_write=True)`.
-#: Watch-hit triage under `collection.read` stays open on purpose: the
-#: collector keeps raising hits on a closed case's watches, and a queue
-#: nobody may clear nags forever. `test_closed_case_read_only.py`
-#: holds the route table to this: every unsafe case route is either a
-#: content write under this guard or named there as governance, and no
-#: read route gates on a verb in this set.
-#:
-#: `ingest.replay` reaches `authorize_object` only when it replays or
-#: attaches records INTO a case; `sample.submit` only when a sample is
-#: attached to one. `ingest.manage` reaches it nowhere now: parse no longer
-#: takes a case (2026-10-08), and no case role carries the verb. It stays
-#: here for a role that ever does. `comms.minimise` is absent on purpose:
-#: minimisation is performed at closure (docs/16 L4).
+#: Deliberately absent: `report.generate` and `case.update`, which also gate reads or
+#: governance (their content-writing routes, ACH and the assumptions register, pass
+#: `require(..., content_write=True)`); watch-hit triage under `collection.read`, which stays
+#: open because the collector keeps raising hits on a closed case; and `comms.minimise`, which
+#: is performed at closure (docs/16 L4). `ingest.replay` and `sample.submit` reach
+#: `authorize_object` only when they write into a case; no case role carries `ingest.manage`,
+#: which stays here for one that ever does. `test_closed_case_read_only.py` holds the route
+#: table to this set.
 CONTENT_WRITE_PERMISSIONS: frozenset[str] = frozenset({
     "graph.node.create", "graph.node.update", "graph.node.delete",
     "graph.edge.create", "graph.edge.update", "graph.edge.delete",
@@ -431,11 +340,10 @@ CONTENT_WRITE_PERMISSIONS: frozenset[str] = frozenset({
     "curation.manage",
     "sample.submit",
     "ingest.manage", "ingest.replay",
-    # Comms F10c (2026-09-24): asking for and approving a key lookup.
+    # Comms: asking for and approving a key lookup.
     "comms.key.lookup", "comms.key.lookup.approve",
-    # Sending a case selector to a provider (F15.3, 2026-09-24). Not
-    # lookup.authorise: withdrawing a request stays possible on a closed
-    # case, and the routes that send under it say content_write=True.
+    # Sending a case selector to a provider. Not lookup.authorise: withdrawing a request stays
+    # possible on a closed case, and the routes that send under it say content_write=True.
     "lookup.request",
 })
 
@@ -472,23 +380,12 @@ def refuse_if_case_read_only(conn: psycopg.Connection, user: CurrentUser,
                              case_id: UUID, permission_key: str) -> None:
     """409 when `case_id` is in a state whose content is read-only.
 
-    Called by `authorize_object` AFTER the access decision allowed, never
-    before: a caller the gate refuses must get the gate's 404 or 403 and
-    learn nothing about the case's state. Everyone who reaches this may
-    read the case, whose status is on its own record.
-
-    The refusal is audited. An attempt to change a closed case is exactly
-    what a disclosure review asks about, and a refusal nobody recorded is
-    indistinguishable from nobody having tried.
-
-    Not atomic with the write that follows: a case closed between this
-    read and that write lets the one write through. Closing that needs a
-    trigger on every content table, which is a migration and was left for
-    one.
-
-    The status is a lock fact, read through `iam.case_facts` (S1), so
-    a case row hidden by row-level security still refuses a content write
-    rather than letting it through as "not read-only".
+    Called by `authorize_object` after the access decision allowed, never before: a caller the
+    gate refuses gets the gate's 404 or 403 and learns nothing about the case's state. The
+    refusal is audited, because an attempt to change a closed case is what a disclosure review
+    asks about. Not atomic with the write that follows: a case closed in between lets that one
+    write through (closing the gap needs a trigger on every content table). The status is read
+    through `iam.case_facts`, so a case row hidden by row-level security still refuses.
     """
     row = conn.execute("SELECT status FROM iam.case_facts(%s)",
                        (case_id,)).fetchone()
@@ -512,15 +409,10 @@ def authorize_object(
     *,
     case_id: UUID,
     permission_key: str,
-    # `count_use` is passed through to `PgAccessResolver.resolve`, and
-    # `after_case_gate=True` marks a SECOND gate, one a request reaches
-    # only after passing this gate at the case's own labels. A second gate
-    # counts a break-glass use only when the case's gate did not
-    # (`counted_at_case_gate`), so an exhibit opened, a capture screenshot
-    # served or an entity changed on a case above the caller's clearance
-    # is one use on the officer's card, not two
-    # (sec-breakglass-double-count, 2026-09-23). The defaults count, for
-    # the reason `resolve` gives: a forgotten flag over-counts, visibly.
+    # `count_use` is passed through to `PgAccessResolver.resolve`; `after_case_gate=True` marks a
+    # second gate, reached only after this gate passed at the case's own labels, which counts a
+    # break-glass use only when the case's gate did not (`counted_at_case_gate`), so one access
+    # is one use on the officer's card. The defaults count: a forgotten flag over-counts, visibly.
     count_use: bool = True,
     after_case_gate: bool = False,
     classification: str | None = None,
@@ -554,13 +446,9 @@ def authorize_object(
         # their own assignments), and is far more useful to a legitimate user.
         if CHECK_ASSIGNMENT in decision.failed_checks:
             raise Problem(404, "Not found", "case does not exist")
-        # A stale sign-in that is the ONLY thing missing is told so, in the
-        # global gate's words, which the console recognises and answers by
-        # asking for the sign-in. "missing permission X" told a Lead
-        # investigator fifteen minutes into a session that they lacked a
-        # step-up permission they hold (ROADMAP "a stale sign-in reads as
-        # missing permission", 2026-09-24; report export had its own fix).
-        # Only an assigned caller gets here, so it reveals nothing.
+        # A stale sign-in that is the only thing missing is told so, in the global gate's words,
+        # which the console answers by asking for the sign-in rather than reporting a missing
+        # permission the caller holds. Only an assigned caller gets here, so it reveals nothing.
         if tuple(decision.failed_checks) == (CHECK_STEP_UP,):
             raise Problem(403, "Forbidden", "re-authentication required")
         raise Problem(403, "Forbidden",
@@ -636,19 +524,12 @@ def require_step_up(
     user: CurrentUser = Depends(current_user),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> None:
-    """Demand a RECENTLY re-authenticated session, independently of any
-    permission.
+    """Demand a recently re-authenticated session, independently of any permission.
 
-    The five-part gate already enforces step-up for permissions flagged
-    `requires_step_up` in the seed. This is for operations whose danger is
-    not captured by their permission row -- docs/01 requires it explicitly
-    for merges, because a merge rewrites who did what across a whole case
-    and a session someone walked away from must not be enough to perform
-    one.
-
-    Deliberately separate from `require()` so the two can be composed: an
-    endpoint states its permission AND its assurance requirement, and
-    neither is implied by the other.
+    For operations whose danger the permission row does not capture: docs/01 requires it for
+    merges, because a merge rewrites who did what across a whole case. Separate from `require()`
+    so an endpoint states its permission and its assurance requirement, neither implying the
+    other.
     """
     fresh = (
         user.session_mfa_at is not None
@@ -673,12 +554,9 @@ def check_writable_labels(
 ) -> None:
     """Refuse to author an element the caller could not read back.
 
-    The DB trigger enforces the case FLOOR (a child may not be less
-    classified than its case); nothing enforced the CEILING, so an analyst
-    could create a RED node in an AMBER case and immediately lose sight of
-    it — invisible in their own search results, unreviewable by the peers it
-    was written for. Compartments are likewise constrained to ones the
-    caller is read into.
+    The DB trigger enforces the case floor (a child may not be less classified than its case);
+    this enforces the ceiling, so an analyst cannot create content above their own clearance and
+    lose sight of it. Compartments are likewise limited to ones the caller is read into.
     """
     clearance, held = user_ceiling(conn, user.user_id)
     if tlp_from_name(classification) > clearance:
@@ -687,8 +565,6 @@ def check_writable_labels(
                       f"{clearance.name} clearance")
     missing = compartments - held
     if missing:
-        # Agreed with the keys it names, not a bracketed plural (README
-        # screenshot set review, 2026-09-23).
         raise Problem(403, "Forbidden",
                       f"not read into "
                       f"{agree(len(missing), 'compartment', 'compartments')} "
@@ -697,13 +573,12 @@ def check_writable_labels(
 
 def user_ceiling(conn: psycopg.Connection, user_id: UUID,
                  case_id: UUID | None = None) -> tuple[Tlp, frozenset[str]]:
-    """The caller's own clearance and compartments — used to filter search
-    results so an over-classified element is invisible rather than
-    discoverable-then-403.
+    """The caller's own clearance and compartments, used to filter search results so an
+    over-classified element is invisible rather than discoverable and then refused.
 
-    `case_id` is for a READ whose rows all belong to that one case, and
-    only such a read may pass it: a live break-glass grant scoped to that
-    case then raises the ceiling too. Leave it out everywhere else."""
+    `case_id` is for a read whose rows all belong to that one case, and only such a read may
+    pass it: a live break-glass grant scoped to that case then raises the ceiling too. Leave it
+    out everywhere else."""
     row = conn.execute(
         "SELECT tlp_clearance, compartments FROM iam.app_user WHERE id = %s",
         (user_id,),
@@ -712,26 +587,12 @@ def user_ceiling(conn: psycopg.Connection, user_id: UUID,
         raise Problem(401, "Unauthenticated", "unknown user")
     clearance, held = tlp_from_name(row[0]), frozenset(row[1] or [])
 
-    # Without `case_id` this ceiling has no case in hand: it is what the
-    # Lab, collection, ingest, reports and label checks on writes use, and
-    # a case-scoped grant must not apply there, because raising it would
-    # widen the caller's view of every OTHER case for the life of the
-    # grant. Only a global grant (case_id NULL) raises it then.
-    #
-    # With `case_id`, a grant scoped to THAT case raises it as well. Until
-    # 2026-09-23 no caller could say which case it was reading, so a
-    # case-scoped grant opened an exhibit by id and nothing else: the
-    # graph, the entity and exhibit lists and case search still hid
-    # everything above the analyst's own clearance, while the console,
-    # whose default scope is the open case, announced emergency access as
-    # live (ux15 breakglass-grant-raises-nothing, verifier follow-up). The
-    # case-scoped reads now pass their case; this is the change the
-    # comment here used to say should be made on purpose.
-    #
-    # Highest live level first, as in PgAccessResolver.resolve(): ordered by
-    # expiry alone, a later-ending lower grant hid a higher one (2026-09-23).
-    # `case_id = NULL` is never true, so with no case only a global grant
-    # matches, exactly as before.
+    # Without `case_id` (the Lab, collection, ingest, reports, label checks on writes) only a
+    # global grant raises the ceiling: a case-scoped one would widen the caller's view of every
+    # other case for the life of the grant. With `case_id`, a grant scoped to that case raises it
+    # too. Highest live level first, as in PgAccessResolver.resolve(), so a later-ending lower
+    # grant cannot hide a higher one; `case_id = NULL` is never true, so with no case only a
+    # global grant matches.
     g = conn.execute(
         """SELECT granted_classification FROM iam.break_glass
             WHERE user_id = %s AND (case_id IS NULL OR case_id = %s)
@@ -753,36 +614,18 @@ def user_ceiling(conn: psycopg.Connection, user_id: UUID,
 
 def counted_at_case_gate(conn: psycopg.Connection, user: CurrentUser,
                          case_id: UUID) -> bool:
-    """Whether the gate this request has ALREADY passed at the case's own
-    labels recorded a break-glass use: true when the case is classified
-    above the caller's own clearance.
+    """Whether the gate this request already passed at the case's own labels recorded a
+    break-glass use: true when the case is classified above the caller's own clearance.
 
-    A request reaching a second gate (an exhibit's, a node's, a capture
-    screenshot's, an operation's own verb) has passed the case's gate
-    first. On a case above the caller's clearance that first gate was
-    passable only through a live grant, so `PgAccessResolver.resolve`
-    counted it there, and the second gate, whose labels are at least the
-    case's, counted it again: one exhibit opened read as two accesses on
-    the officer's card (sec-breakglass-double-count, 2026-09-23; docs/05).
-    So a second gate is asked with `authorize_object(...,
-    after_case_gate=True)`, which counts only when this answers False. On
-    a case within the caller's clearance the first gate counted nothing,
-    and the second still counts an item whose OWN labels needed the
-    grant, which is the use the officer's card describes.
-
-    One request the second gate then REFUSES (an item above the grant, a
-    compartment the caller is not read into) still carries the case
-    gate's count on a case above clearance. That is a request the grant
-    let past the case's gate, and so one that could tell an item that
-    exists from one that does not, which without the grant it could not.
-
-    Compared in the database, as `routers/deception._gate_the_item` did
-    before this existed, because `core.tlp` is an ordered enum and the
-    two columns are of that type. A case that has gone answers False,
-    which counts rather than hides."""
-    # The case's labels through `iam.case_facts` (S1, 2026-09-25): a
-    # case the caller reaches only through a grant is exactly one row
-    # security would have hidden from a plain read.
+    A second gate (an exhibit's, a node's, a capture screenshot's, an operation's own verb) is
+    asked with `authorize_object(..., after_case_gate=True)` and counts only when this answers
+    False, so one access is one use on the officer's card (docs/05); on a case within clearance
+    the second gate still counts an item whose own labels needed the grant. A request the second
+    gate refuses keeps the case gate's count: the grant let it past, so it could tell an item
+    that exists from one that does not. Compared in the database because `core.tlp` is an
+    ordered enum; a case that has gone answers False, which counts rather than hides."""
+    # The case's labels through `iam.case_facts`: a case the caller reaches only through a grant
+    # is exactly one row security would hide from a plain read.
     row = conn.execute(
         'SELECT c.classification > u.tlp_clearance '
         '  FROM iam.case_facts(%s) c, iam.app_user u '
@@ -791,15 +634,12 @@ def counted_at_case_gate(conn: psycopg.Connection, user: CurrentUser,
     return bool(row and row[0])
 
 
-# The element pre-reads that feed the gate (S1, 2026-09-25). A router
-# that must know an element's case and labels before calling
-# `authorize_object` reads them here, through `iam.element_facts`, so the
-# gate still answers a hidden element with its 403 and its AUTHZ_DENIED row
-# rather than the router answering a silent 404. The fact function covers
-# the kinds under row-level security: node, edge, evidence, assertion.
+# The element pre-reads that feed the gate. A router that must know an element's case and labels
+# before calling `authorize_object` reads them here, through `iam.element_facts`, so the gate
+# still answers a hidden element with its 403 and its AUTHZ_DENIED row rather than the router
+# answering a silent 404. The fact function covers the kinds under row-level security.
 ELEMENT_KINDS = frozenset({"node", "edge", "evidence", "assertion",
-                           # S1, 2026-09-25: the kinds 0117 added whose
-                           # pre-reads a router makes.
+                           # The kinds 0117 added whose pre-reads a router makes.
                            "document", "sample", "conversation"})
 
 
@@ -817,9 +657,8 @@ def element_labels(conn: psycopg.Connection, kind: str, element_id: UUID,
     return row[0], row[1], frozenset(row[2] or [])
 
 
-# Global gates for the deployment-wide approvals (F9, 2026-09-24), beside
-# `require_global` rather than folded into it. The SQL and the two refusals
-# are the same, word for word, so the console reads them the same way.
+# Global gates for the deployment-wide approvals, beside `require_global` rather than folded into
+# it. The SQL and the two refusals are the same, word for word, so the console reads them alike.
 
 def _fresh(user: CurrentUser) -> bool:
     return (user.session_mfa_at is not None
@@ -829,12 +668,11 @@ def _fresh(user: CurrentUser) -> bool:
 
 def holds_global(conn: psycopg.Connection, user_id: UUID,
                  permission_key: str) -> bool:
-    """Whether a global role of an active account carries `permission_key`,
-    asked as a question: no AUTHZ_DENIED row (a listing that draws a control
-    or leaves it out has not been denied anything), and no step-up, which the
-    act itself asks for. `require_global`'s own check without its refusals,
-    for the routes that tell the console whether to offer a verb (2026-10-08;
-    the collection router's `_holds` is the same query)."""
+    """Whether a global role of an active account carries `permission_key`, asked as a question:
+    no AUTHZ_DENIED row (a listing that draws a control or leaves it out has not been denied
+    anything), and no step-up, which the act itself asks for. `require_global`'s check without
+    its refusals, for routes that tell the console whether to offer a verb (the collection
+    router's `_holds` is the same query)."""
     return conn.execute(
         """SELECT EXISTS (
                SELECT 1 FROM iam.user_role ur
@@ -847,17 +685,12 @@ def holds_global(conn: psycopg.Connection, user_id: UUID,
 
 def authorize_global(conn: psycopg.Connection, user: CurrentUser,
                      permission_key: str, *, force_step_up: bool = False) -> None:
-    """`require_global`'s check, callable inside a handler whose permission
-    depends on the row it reads (the global decide route: the signer's
-    permission of the request's operation).
+    """`require_global`'s check, callable inside a handler whose permission depends on the row it
+    reads (the global decide route: the signer's permission of the request's operation).
 
-    `force_step_up` demands a fresh second factor even when the permission
-    row does not, and refuses a stale one in the global gate's words,
-    "re-authentication required", which the console's `withStepUp`
-    recognises and answers by asking for the sign-in. The case routes'
-    `require_step_up` words it differently, and a countersigner told
-    something the console does not recognise was told nothing useful
-    (2026-09-24)."""
+    `force_step_up` demands a fresh second factor even when the permission row does not, and
+    refuses a stale one in the global gate's words, "re-authentication required", which the
+    console's `withStepUp` recognises and answers by asking for the sign-in."""
     row = conn.execute(
         """SELECT p.requires_step_up
              FROM iam.user_role ur

@@ -1,29 +1,10 @@
-"""Four-eyes approval over HTTP: raise a request, decide it, withdraw it,
-and set the per-case policy that makes it mandatory.
+"""Four-eyes approval over HTTP: raise, decide and withdraw requests, and set the per-case policy.
 
-The one thing this router is really for is the check in `decide`: the
-approver must independently hold the operation's own permission and have a
-fresh second factor. A second human drawn from a wider pool than the actors
-is a witness, not a control -- and a second human whose session has been
-sitting unlocked since this morning is not even that.
-
-That check cannot be a `require("...")` dependency, because which
-permission is required depends on which operation the request is for. So it
-calls `authorize_object` inside the handler, which is the same single
-`evaluate()` the dependency would have used (docs/05: authorization is
-decided in one place, never re-implemented).
-
-## Deployment-wide requests (F9, 2026-09-24)
-
-A deployment-wide operation (`Operation.scope == "global"`) has no case to
-be raised in and nobody assigned to it, so it has its own routes under
-`/approvals` (`global_router`): list, decide, withdraw. The case routes
-refuse a global operation and the global routes refuse a case request, each
-with the answer a request that is not there gets. The global decide route
-checks the SIGNER's permission of the request's operation with a forced
-step-up in the global gate's words, and the service refuses an account
-that also holds the requester's permission, because one person holding
-both roles is not two people.
+`decide` checks that the approver holds the operation's own signer permission and has a fresh
+second factor. Which permission depends on the operation, so it calls `authorize_object`, the same
+single `evaluate()` a `require()` dependency uses (docs/05). Deployment-wide operations have their
+own routes under `/approvals`, and case and global routes refuse each other's requests as absent.
+The service refuses a signer who also holds the requester's permission: one person is not two.
 """
 from __future__ import annotations
 
@@ -69,7 +50,7 @@ from noctornal_api.security.access import tlp_from_name
 
 router = APIRouter(prefix="/cases/{case_id}/approvals", tags=["approvals"])
 
-#: The operation whose payload names two entities (2026-10-03).
+#: The operation whose payload names two entities.
 MERGE_OPERATION = "node.merge"
 
 
@@ -85,14 +66,9 @@ def _merge_pair(payload) -> tuple[UUID, UUID] | None:
 
 def _hidden_merge_requests(conn: psycopg.Connection, user: CurrentUser,
                            case_id: UUID, items) -> set[UUID]:
-    """The node.merge requests among `items` ((id, operation, payload)
-    triples) whose two entities the viewer may not both see (http_ui-011,
-    graph-merge-ledger-and-approvals-leak, 2026-10-03). The listing returned
-    their payload (both node ids and the reason) and the justification
-    verbatim to every case reader, while `_merge_subjects` already withheld
-    the entities' labels. A request that does not name two well-formed ids
-    names nothing the viewer can be shown to see, so it counts as hidden:
-    failing closed."""
+    """The node.merge requests among `items` ((id, operation, payload) triples) whose two entities
+    the viewer may not both see; their payload and justification would name them. A request without
+    two well-formed ids counts as hidden, failing closed."""
     pairs = {rid: _merge_pair(payload) for rid, operation, payload in items
              if operation == MERGE_OPERATION}
     if not pairs:
@@ -122,7 +98,7 @@ def _hidden_merge_request_count(conn: psycopg.Connection, user: CurrentUser,
 
 _STATES = frozenset({"PENDING", "APPROVED", "REJECTED", "WITHDRAWN", "CONSUMED"})
 
-#: The operation that turns a case's merge requirement off (F9b).
+#: The operation that turns a case's merge requirement off.
 RELAX = "case.policy.relax"
 
 
@@ -155,16 +131,11 @@ class ApprovalOut(BaseModel):
     #: PENDING but past its expiry. Derived, never stored -- see migration
     #: 0028 on why there is no EXPIRED state and no sweeper.
     is_expired: bool
-    #: N1 (2026-09-02). Populated on the response to the write that
-    #: produced them (POST "" and POST /decide). Since 2026-09-23 a listing
-    #: also carries `approvers_notified`, counted from the notifications
-    #: the request raised (ux08-triage:approval-reach-warning-dropped);
-    #: `requester_notified` is still None there, meaning "not recorded",
-    #: not "failed". On the write: `approvers_notified` 0 is "nobody could
-    #: be told", None is "the notify write failed"; `requester_notified`
-    #: False is "suppressed", None is "failed". `warnings` spells each of
-    #: those out, because a 201 with a silent zero is the defect this
-    #: exists to fix -- a four-eyes request nobody was told about.
+    #: Set on the response to the write (POST "" and POST /decide): `approvers_notified` 0 means
+    #: nobody could be told and None that the notify write failed; `requester_notified` False means
+    #: suppressed and None failed. A listing counts `approvers_notified` from the notifications the
+    #: request raised and leaves `requester_notified` None (not recorded). `warnings` spells each
+    #: case out, so a four-eyes request nobody was told about is never a silent 201.
     approvers_notified: int | None = None
     requester_notified: bool | None = None
     warnings: list[str] = Field(default_factory=list)
@@ -194,8 +165,7 @@ def _request_reach(r: ApprovalRequest) -> dict:
             "the request is recorded but the notification failed; no "
             "approver has been told, so ask one directly")
     elif r.approvers_notified == 0 and r.case_id is None:
-        # F9 (2026-09-24): a deployment-wide request has no case to
-        # be assigned to, so "nobody on this case" would be the wrong fact.
+        # A deployment-wide request has no case, so "nobody on this case" would be the wrong fact.
         op = OPERATIONS.get(r.operation)
         signer = op.signer_permission if op else "the signing permission"
         warnings.append(
@@ -228,12 +198,8 @@ def _merge_subjects(conn: psycopg.Connection, user: CurrentUser,
                     case_id: UUID, rows: list[ApprovalRequest]) -> dict:
     """The two entities of each merge request, by label and type.
 
-    ux08-triage:approval-row-uuids-no-requester (2026-09-23). The card
-    named them through the console's own graph, which holds only what the
-    current projection drew, so a merge of two entities outside it was
-    still signed as two UUIDs. Resolved here instead, for the entities
-    this approver may see; one they may not is None, and the card says so
-    rather than naming it."""
+    Resolved here rather than from the console's graph, which holds only the current projection.
+    An entity this approver may not see is None, and the card says so rather than naming it."""
     wanted: dict[UUID, tuple[str | None, str | None]] = {}
     ids: set[UUID] = set()
     for r in rows:
@@ -265,10 +231,9 @@ def _approvers_reached(conn: psycopg.Connection,
                        rows: list[ApprovalRequest]) -> dict:
     """How many APPROVAL_REQUESTED notifications each request raised.
 
-    The notices are the signers' rows, which row-level security shows to
-    their recipients alone, so the count runs as a withheld count on a
-    system connection (F51, 2026-10-02). The ids are the requests the
-    caller has already read under policy, and only a number comes back."""
+    Row-level security shows each notice to its recipient alone, so this runs as a withheld
+    count on a system connection. The ids are requests the caller has already read under policy,
+    and only a number comes back."""
     from noctornal_api.db import SystemPurpose, system_connection
 
     ids = [r.id for r in rows]
@@ -304,12 +269,10 @@ def list_approvals(
     if state is not None and state not in _STATES:
         raise Problem(400, "Invalid request",
                       f"unknown state {state!r}; one of {', '.join(sorted(_STATES))}")
-    # 2026-10-03: a node.merge request is listed only to a viewer who may
-    # see both of its entities; the rest are said as the case allows, under
-    # `withheld`, counted over every such request in the case (this state
-    # filter included), not just this page. The page is cut after the
-    # filter, from the route's own cap, so requests the viewer cannot see do
-    # not push the ones they can off it.
+    # A node.merge request is listed only to a viewer who may see both its entities; the rest are
+    # reported under `withheld` as the case allows, counted over the whole case (state filter
+    # included), not this page. The page is cut after the filter, so hidden requests do not push
+    # visible ones off it.
     rows = ApprovalService(conn).list_for_case(case_id, state=state, limit=500)
     hidden = _hidden_merge_requests(
         conn, user, case_id, [(r.id, r.operation, r.payload) for r in rows])
@@ -320,10 +283,8 @@ def list_approvals(
         else _hidden_merge_request_count(conn, user, case_id, state),
         noun="requests")
     out = [_out(r).model_dump(mode="json") for r in rows]
-    # Who asked and who decided, by NAME. The card printed the payload's
-    # UUIDs and nothing about either person, so dual control was a blind
-    # click (ux19 raw-ids-instead-of-names, 2026-09-22). The ids stay: they
-    # are the durable record, the names are for the person deciding.
+    # Who asked and who decided, by name: the ids stay as the durable record, the names are for the
+    # person deciding.
     names = _names(conn, rows)
     subjects = _merge_subjects(conn, user, case_id, rows)
     reached = _approvers_reached(conn, rows)
@@ -332,20 +293,15 @@ def list_approvals(
         item["requested_by_name"] = names.get(r.requested_by)
         item["decided_by_name"] = names.get(r.decided_by) if r.decided_by else None
         item["subjects"] = subjects.get(r.id)
-        # F39 (2026-10-02): what stops THIS viewer approving it yet, said
-        # before they try. None for every request the seasoning rule does
-        # not cover and for a viewer nothing stops.
+        # What stops this viewer approving it yet, said before they try. None when the seasoning
+        # rule does not cover the request or nothing stops the viewer.
         item["signer_block"] = svc.signer_block_for(r, user.user_id)
-        # ux08-triage:approval-reach-warning-dropped (2026-09-23). Reach
-        # is not stored on the request, but the notifications it raised
-        # are, so a listing can say "nobody was told" for as long as that
-        # stays true, not only in the reply the requester's browser threw
-        # away.
+        # Reach is not stored on the request, but its notifications are, so a listing can say
+        # "nobody was told" for as long as that stays true, not only in the reply to the write.
         item["approvers_notified"] = reached.get(r.id, 0)
         op = OPERATIONS.get(r.operation)
         item["operation_description"] = op.description if op else None
-    # Case operations only (F9, 2026-09-24): a deployment-wide one is not
-    # raised here, and listing it offered an operation this route refuses.
+    # Case operations only: this route refuses a deployment-wide one, so it is not offered.
     body = {"approvals": out,
             "operations": {k: {"permission": v.permission,
                                "signer_permission": v.signer_permission,
@@ -360,10 +316,9 @@ def list_approvals(
 
 def _relax_payload_problem(conn: psycopg.Connection, case_id: UUID,
                            payload: dict) -> Problem | None:
-    """What refuses a `case.policy.relax` request before it is raised (F9b,
-    2026-09-24): only the one payload shape, only while the switch is on,
-    never under a deployment that requires it, and only for the switch as
-    it stands now."""
+    """What refuses a `case.policy.relax` request before it is raised: only the one payload shape,
+    only while the switch is on, never under a deployment that requires it, and only for the
+    switch as it stands now."""
     epoch = payload.get("epoch") if isinstance(payload, dict) else None
     if (not isinstance(payload, dict)
             or set(payload) != {"setting", "from", "to", "epoch"}
@@ -395,14 +350,10 @@ def _relax_payload_problem(conn: psycopg.Connection, case_id: UUID,
 
 def _merge_request_labels(conn: psycopg.Connection, user: CurrentUser,
                           case_id: UUID, payload: dict) -> dict:
-    """A node.merge request names two entities of this case the requester
-    may merge, or it is not raised (http_ui-011, 2026-10-03). Unchecked, a
-    request named a hidden entity and a random id alike with a 201, and its
-    justification went to every signer whatever they could see. One 404 for
-    an entity that is missing, in another case or above the requester. The
-    notice to the signers is labelled at the stricter of the two entities,
-    as the merge's own notification is, so a signer below either is not
-    sent the justification."""
+    """A node.merge request names two entities of this case the requester may merge, or it is not
+    raised. One 404 for an entity that is missing, in another case or above the requester. The
+    notice to the signers is labelled at the stricter of the two entities, as the merge's own
+    notification is, so a signer below either is not sent the justification."""
     pair = _merge_pair(payload)
     if pair is None:
         raise Problem(400, "Invalid request",
@@ -430,8 +381,8 @@ def _merge_request_labels(conn: psycopg.Connection, user: CurrentUser,
             "element_compartments": compartments}
 
 
-#: Per-operation checks a request's payload must pass before it is raised,
-#: after the requester's own authorisation (F9b, 2026-09-24).
+#: Per-operation checks a request's payload must pass before it is raised, after the requester's
+#: own authorisation.
 _CASE_PAYLOAD_CHECKS = {RELAX: _relax_payload_problem}
 
 _DEPLOYMENT_REQUIRES = (
@@ -447,10 +398,9 @@ def raise_request(
 ) -> ApprovalOut:
     """Ask for a second signature.
 
-    Gated on the REQUESTER holding the operation's own permission, not just
-    case.read: a request from somebody who could never perform the operation
-    is noise in an approver's queue, and an approver who is used to
-    dismissing noise is an approver who stops reading.
+    The requester must hold the operation's own permission, not just `case.read`: a request from
+    somebody who could never perform it is noise, and an approver who is accustomed to noise stops
+    reading.
     """
     operation = OPERATIONS.get(body.operation)
     if operation is None:
@@ -489,19 +439,9 @@ def decide(
 ) -> ApprovalOut:
     """Approve or reject somebody else's request.
 
-    Three gates, and each one is load-bearing:
-
-    1. `case.read` on this case, from the dependency -- the approver has to
-       be on the case at all.
-    2. The OPERATION's signer permission, checked below. An approver who
-       could not perform the action themselves cannot meaningfully judge
-       it, and an approval pool wider than the actor pool quietly weakens
-       the control it is meant to strengthen.
-    3. A fresh second factor. Otherwise the second human is whichever
-       laptop was left unlocked.
-
-    The requester-is-not-the-approver rule is enforced in the service AND by
-    a CHECK constraint (migration 0028); this endpoint just produces the
+    Needs `case.read` on the case, the operation's own signer permission (an approval pool wider
+    than the actor pool weakens the control) and a fresh second factor. The service and a CHECK
+    constraint (migration 0028) refuse a requester deciding their own request; this route gives the
     readable error.
     """
     svc = ApprovalService(conn)
@@ -509,12 +449,8 @@ def decide(
     # Authorization before existence: an unauthorised caller gets the same
     # 404 whether or not the request is real (deps.py rule 2).
     if (record is None or record.case_id != case_id
-            # Before the signer permission is asked (graph-merge-approval-
-            # hidden, 2026-10-03): a caller who lacks it was
-            # told 403 "missing permission" for a merge request naming
-            # entities above them and 404 for a random id, which said the
-            # request exists. The listing's 404, as for no request, whoever
-            # asks.
+            # Before the signer permission check, so a merge request naming entities above the
+            # caller gets the listing's 404, not a 403 that says the request exists.
             or not _merge_request_visible(conn, user, case_id, record)):
         raise Problem(404, "Not found", "no such approval request in this case")
     operation = OPERATIONS.get(record.operation)
@@ -523,13 +459,8 @@ def decide(
         # catalogue. Refuse rather than fall back to a weaker permission.
         raise Problem(409, "Conflict",
                       f"operation {record.operation!r} is no longer registered")
-    # After `case.read` from the dependency, so a break-glass use counts
-    # once (sec-breakglass-double-count, 2026-09-23), here and in
+    # After `case.read` from the dependency, so a break-glass use counts once, here and in
     # `raise_request`.
-    # (2026-10-03: a signer who may not see both entities of a merge was
-    # shown them as None and signed anyway, and this response handed back the
-    # payload and the justification: the visibility check above is the
-    # listing's 404.)
     authorize_object(conn, user, case_id=case_id,
                      permission_key=operation.signer_permission,
                      after_case_gate=True)
@@ -547,18 +478,15 @@ def withdraw(
     user: CurrentUser = Depends(require("case.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> ApprovalOut:
-    """The requester changing their mind. Not a decision: a withdrawn
-    request never had one, and the record says so.
+    """The requester changing their mind. Not a decision: a withdrawn request never had one.
 
-    Bound to the path's case (2026-09-24): `case.read` on
-    case A no longer withdraws a request raised in case B, which its
-    requester may have lost access to. The same 404 as `decide`."""
+    Bound to the path's case, so `case.read` on one case cannot withdraw a request raised in
+    another, which the requester may have lost access to. The same 404 as `decide`."""
     svc = ApprovalService(conn)
     record = svc.get(request_id)
     if (record is None or record.case_id != case_id
-            # 2026-10-03: the payload comes back in the response, so a
-            # merge request whose entities the caller can no longer both
-            # see is the listing's 404.
+            # The payload comes back in the response, so a merge request whose entities the
+            # caller cannot both see gets the listing's 404.
             or not _merge_request_visible(conn, user, case_id, record)):
         raise Problem(404, "Not found", "no such approval request in this case")
     try:
@@ -569,7 +497,7 @@ def withdraw(
 
 
 # ---------------------------------------------------------------------------
-# Deployment-wide approvals (F9, dual control, 2026-09-24)
+# Deployment-wide approvals
 # ---------------------------------------------------------------------------
 
 global_router = APIRouter(prefix="/approvals", tags=["approvals"])
@@ -670,12 +598,10 @@ def decide_global(
 ) -> ApprovalOut:
     """Countersign or refuse a deployment-wide request.
 
-    The gate runs first, so a caller holding neither side is refused
-    whether or not the id exists. Then 404 unless it is a deployment-wide
-    request; then the SIGNER's permission of its operation with a forced
-    step-up, refused in the global gate's words ("re-authentication
-    required") so the console asks for the sign-in
-    (2026-09-24). No `require_step_up` dependency: its words differ."""
+    The gate runs first, so a caller holding neither side is refused whether or not the id
+    exists. Then 404 unless the request is deployment-wide, then the signer permission of its
+    operation with a forced step-up, refused as "re-authentication required" so the console asks
+    for the sign-in (not `require_step_up`, whose words differ)."""
     svc = ApprovalService(conn)
     record = svc.get(request_id)
     if record is None or record.case_id is not None:
@@ -699,9 +625,9 @@ def withdraw_global(
     user: CurrentUser = Depends(require_global_any(*GLOBAL_GATE_PERMISSIONS)),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> ApprovalOut:
-    """The requester taking back their own deployment-wide request. One
-    answer, 404, for a request that is not there, not deployment-wide, not
-    theirs or no longer pending, so this route tells nobody which."""
+    """The requester taking back their own deployment-wide request. One answer, 404, for a request
+    that is not there, not deployment-wide, not theirs or not pending, so this route tells nobody
+    which."""
     svc = ApprovalService(conn)
     record = svc.get(request_id)
     if (record is None or record.case_id is not None
@@ -723,26 +649,24 @@ class PolicyBody(BaseModel):
     dual_control_merge: bool | None = None
     #: docs/14 U2. NONE | PRESENCE | COUNT -- see migration 0030.
     withheld_disclosure: str | None = None
-    #: F9b (2026-09-24): the approved `case.policy.relax` request that turns
-    #: the merge requirement off. Ignored in every other direction.
+    #: The approved `case.policy.relax` request that turns the merge requirement off. Ignored in
+    #: every other direction.
     approval_request_id: UUID | None = None
 
 
 class PolicyOut(BaseModel):
     dual_control_merge: bool
     withheld_disclosure: str
-    #: F9b (2026-09-24). The deployment's mode for merges, whether this
-    #: case needs a second signature on them once that is applied, the
-    #: switch's epoch (what a relax request is raised against), and how many
+    #: The deployment's mode for merges, whether this case needs a second signature on them once
+    #: that is applied, the switch's epoch (what a relax request is raised against), and how many
     #: other people on the case could approve turning it off.
     dual_control_merge_mode: str = "PER_CASE"
     dual_control_merge_effective: bool = False
     dual_control_merge_epoch: int = 0
     relax_signers: int = 0
-    #: F39 (2026-10-02). The window a second person must have held
-    #: `case.update` on the case for, in days (0: the rule is off), and,
-    #: while nobody counted in `relax_signers` yet qualifies, the instant the
-    #: first colleague does. None when there is no such colleague.
+    #: How many days a second person must have held `case.update` on the case (0: the rule is off),
+    #: and, while nobody counted in `relax_signers` qualifies yet, when the first colleague will.
+    #: None when there is no such colleague.
     relax_seasoning_days: int = 0
     relax_next_eligible: datetime | None = None
 
@@ -755,18 +679,13 @@ policy_router = APIRouter(prefix="/cases/{case_id}/policy", tags=["approvals"])
 
 def _relax_signers(conn: psycopg.Connection, case_id: UUID,
                    user_id: UUID, *, days: int) -> tuple[int, datetime | None]:
-    """The colleagues who could approve turning the switch off now, and
-    when the first of the others will be able to.
+    """How many colleagues could approve turning the switch off now, and when the next one can.
 
-    Active accounts other than the caller, assigned to the case under a
-    role carrying the relax operation's signer permission, whose clearance
-    and compartments dominate the case: the people who could read the
-    request and decide it. Since F39 (2026-10-02) only those whose
-    assignment is `days` days old count (the database's clock, the same
-    comparison `assignment_block` makes); with `days` 0 everyone does. The
-    second figure is the soonest a colleague who does not count yet will:
-    None when somebody counts already, or when nobody else holds the
-    permission."""
+    Active accounts other than the caller, assigned to the case under a role carrying the relax
+    operation's signer permission, whose clearance and compartments dominate the case. Only those
+    assigned `days` days ago or more count, on the database's clock as in `assignment_block`; with
+    `days` 0 everyone does. The second figure is None when somebody counts already or nobody else
+    holds the permission."""
     row = conn.execute(
         """SELECT count(DISTINCT u.id) FILTER (WHERE seasoned),
                   min(eligible_from) FILTER (WHERE NOT seasoned)
@@ -831,29 +750,13 @@ def set_policy(
 ) -> PolicyOut:
     """Turn dual control on or off for this case's merges.
 
-    Step-up gated even though `case.update` is not a step-up permission,
-    because turning a control OFF is exactly the action an attacker with a
-    borrowed session would want, and the composability of `require_step_up`
-    exists for cases where the danger is not captured by the permission row.
-
-    Turning it OFF takes a second person (F9b, 2026-09-24): an approved
-    `case.policy.relax` request raised against the switch as it stands,
-    consumed here in the same transaction as the change. The database
-    refuses the change without one (migration case_merge_relax_two_people).
-    Since F39 (2026-10-02) that second person must have held `case.update`
-    on the case for the deployment's window (seven days unless declared),
-    which the decide route checks when they approve and this route checks
-    again, at the time they approved, before the approval is spent.
-    Turning it ON stays one signature: a tightening that needs a second
-    person is one nobody makes. Under a deployment that requires a second
-    signature on every merge, a case cannot turn it off at all.
-
-    Every setting and its CASE_POLICY_CHANGED row land in one transaction,
-    so a change is never left without its record, and the consume is the
-    transaction's first write (approvals.py, the out-of-band rule).
-
-    Audited both ways. "When did this case stop requiring two signatures"
-    is a question somebody will eventually need answered.
+    Step-up gated, because turning a control off is what an attacker with a borrowed session wants.
+    Turning it off also takes an approved `case.policy.relax` request raised against the switch as
+    it stands, from a colleague who had held `case.update` on the case for the deployment's window
+    (seven days unless declared) when they signed; the database refuses the change without one.
+    Turning it on takes one signature, and a deployment that requires two on every merge cannot be
+    relaxed per case. The consume is the transaction's first write (approvals.py, the out-of-band
+    rule), and every setting commits with its CASE_POLICY_CHANGED row.
     """
     from psycopg.types.json import Json
 
@@ -896,9 +799,8 @@ def set_policy(
         if approval is None or approval.case_id != case_id:
             raise Problem(404, "Not found",
                           "no such approval request in this case")
-        # F39 (2026-10-02): was the second person seasoned when they
-        # signed. Before the transaction, so a refusal recorded out of band
-        # is not rolled back with it (approvals.py, the out-of-band rule).
+        # Was the second person seasoned when they signed? Before the transaction, so a refusal
+        # recorded out of band is not rolled back with it (approvals.py, the out-of-band rule).
         try:
             svc.refuse_unseasoned_spend(approval, actor_id=user.user_id)
         except ApprovalError as exc:

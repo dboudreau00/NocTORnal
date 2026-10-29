@@ -1,162 +1,46 @@
 """Re-compute the `core.evidence_custody` hash chain and report where it breaks.
 
-## Why this exists
+Migration 0024 hash-chains the custody ledger: each row's `row_hash` covers its predecessor's hash
+and every payload column, under an advisory lock, so a record like this can be admitted on the
+strength of its own integrity mechanism (US FRE 902(13)-(14), Canada Evidence Act ss. 31.1-31.8).
+This is the verifier, ported from `audit_verify.py`.
 
-Migration 0024 hash-chains the custody ledger: every row's `row_hash`
-covers its predecessor's hash and every payload column, under an advisory
-lock, with a UTC-fixed timestamp rendering. Its docstring invokes
-US FRE 902(13)-(14) and the Canada Evidence Act ss. 31.1-31.8 — the
-provisions under which a record like this is admitted on the strength of
-its own integrity mechanism.
+The chain is GLOBAL: `core.custody_chain_hash()` picks its predecessor with `ORDER BY id DESC LIMIT
+1` over the whole table, so a row's predecessor is almost always another exhibit's. `evidence_id`
+therefore narrows the REPORT, never the lookups (the predecessor set, the fork census and the
+genesis count are whole-table), or every row of one exhibit would be reported as an orphan. A scoped
+`intact` speaks only for the rows reported, and the endpoint says so in its caveat.
 
-**Nothing ever checked it.** As of 2026-09-02 the tree had no function, no
-endpoint, no CI step and only one test that touched the hashes at all —
-`test_custody_is_hash_chained`, which asserts that the WRITER links two
-adjacent rows. That is a test of the trigger, not of the ledger: a row
-edited in place with the trigger stood down, a row deleted from the
-middle, a deleted first row, or a forged second genesis all pass it. The
-audit chain went through exactly this in July 2026 (see `audit_verify.py`)
-and got a verifier; the custody chain, whose whole purpose is to be
-produced to a court, did not. This module is that verifier, ported from
-`audit_verify.py` with the differences below.
+The recompute is in SQL, not Python, so it agrees with the writer on jsonb's canonical text,
+`concat_ws` NULL semantics, microsecond rendering and `true`/`false`: a verifier that disagrees
+reports tampering on an intact chain. `_HASH_EXPR` is duplicated from 0024 and must stay in step
+with it; `test_custody_verify_pg.py` writes real rows through the trigger and asserts the chain
+verifies.
 
-## THE CHAIN IS GLOBAL — one linked list across every exhibit
+`id` order is chain order only from 0149. Before it, `nextval()` ran before the trigger took the
+lock, so the row with the LOWER id could chain off the HIGHER one. The link is therefore verified as
+a linked list (`prev_hash` to a real `row_hash`), and `id` is used for reporting, ordering and the
+fork boundary. `core.custody_chain_ordered_after()` is the largest id that existed when 0149 ran: a
+fork whose claimants are all above it cannot come from honest traffic and is a `FORK` break; one
+with a claimant at or below it is legacy, listed and not counted as tampering (see
+`audit_verify.ChainReport.intact`). After the boundary a dead-end row, whose deletion would orphan
+nothing, cannot arise.
 
-`core.custody_chain_hash()` picks its predecessor with
-`ORDER BY id DESC LIMIT 1` over the WHOLE table. There is no per-exhibit
-chain: the rows of one exhibit are interleaved with every other exhibit's,
-and a given row's predecessor is almost always some other exhibit's row.
-Three consequences drive the design of `verify_custody_chain`:
+Checks: CONTENT (`row_hash` is not what the row's columns hash to: edited in place); LINK
+(`prev_hash` names no row: a predecessor removed); FORK; GENESIS / NO_GENESIS (exactly one row
+claims to be first; more is what a truncation leaves, none means the first row is gone, and no
+application code writes `prev_hash`).
 
-- **`evidence_id` narrows the REPORT, never the lookups.** The predecessor
-  set (`hashes`), the fork census (`claims`) and the genesis count are
-  always computed over the whole table. A LINK lookup restricted to one
-  exhibit would report every one of its rows as an orphan — a false
-  accusation on every scoped run, which is the one thing a tamper-evidence
-  tool cannot afford.
-- **A scoped `intact` is a statement about the rows REPORTED, not about
-  the exhibit's history being complete.** Delete a row from exhibit X and
-  the orphan that reveals it is whichever row came next in the global
-  chain — usually some other exhibit's. So the scoped view of X can stay
-  intact while the global run reports the deletion. The endpoint labels a
-  scoped answer as scoped and says this in its caveat.
-- **The anchor is a property of the chain, not of an exhibit.** There is
-  exactly one genesis for the whole ledger, and it is reported at report
-  level on every run, scoped or not.
-
-## Why the recompute happens in SQL and not in Python
-
-For the same reasons as the audit verifier: `detail::text` is jsonb's own
-canonical rendering (key order, whitespace, numbers), `concat_ws(chr(31),
-...)` has specific NULL semantics, `to_char(... 'US')` renders
-microseconds a particular way, and `hash_verified::text` is Postgres's
-`true`/`false`, not Python's. A verifier that disagrees with the writer
-reports tampering on an intact chain, and the first few false alarms are
-what teach people to ignore it.
-
-**`_HASH_EXPR` is duplicated from 0024 and must stay in step with it.**
-`test_custody_verify_pg.py` guards the coupling: it writes real custody
-rows through the trigger and asserts the chain verifies, so an edit to the
-trigger that this file does not match turns the suite red rather than
-silently reporting corruption.
-
-## `id` ORDER WAS NOT CHAIN ORDER until 0149
-
-`core.evidence_custody.id` is a `bigserial`. Until 0149 it was drawn from
-`nextval()` when the row was constructed, BEFORE the BEFORE-INSERT trigger
-took the advisory lock. Two concurrent writers could therefore be handed ids
-10 and 11 and acquire the lock in the opposite order, and the row holding the
-LOWER id then chained off the row holding the HIGHER id. The linked list was
-sound; the numbering did not follow it. `audit_verify.py` shipped an
-adjacency check on `seq` once and accused 68 honest rows on the development
-database. So the link is verified here as what it is, a linked list, by
-following `prev_hash` to a real `row_hash`, and `id` is used for reporting,
-ordering the output and the fork boundary.
-
-Since 0149 the trigger takes the lock and THEN draws the id and reads the
-tail, so id order is chain order. `core.custody_chain_ordered_after()` is the
-largest id that existed when 0149 ran. A fork whose claimants are all above
-it cannot come from honest traffic and is reported as a `FORK` break; one
-with a claimant at or below it is legacy, and only listed. A dead-end row is
-one whose removal orphans nothing, so with the table owner's rights it could
-be deleted while the ledger still read intact; after the boundary a dead end
-cannot arise.
-
-## The checks are separate on purpose
-
-- **CONTENT** — `row_hash` is not what the row's own columns hash to,
-  using the `prev_hash` it stores. A row *edited in place*.
-- **LINK** — `prev_hash` names a `row_hash` no row has. A predecessor
-  *removed*.
-- **FORK**: two or more rows claim the same predecessor. A fork with a
-  claimant at or below the 0149 boundary is legacy: reported separately
-  and NOT counted as tampering, for the reasons
-  `audit_verify.ChainReport.intact` gives at length (an append-only table
-  cannot be cleaned of it, and folding it into `intact` recreates the
-  cry-wolf failure). A fork whose claimants are all above the boundary is
-  a break: since 0149 honest traffic cannot make one.
-- **GENESIS / NO_GENESIS** — how many rows claim to be first. Exactly one
-  is an anchored chain; more than one is the shape a truncation leaves
-  (delete the first k rows, re-anchor row k+1, and every relative check
-  still passes); none, on a non-empty table, means the first row is gone.
-  Both are tampering: 0024 writes a NULL predecessor only into an empty
-  table, under the lock, and no application code writes `prev_hash`.
-
-## What this cannot see
-
-**A TAIL DELETION — the CHEAPEST delete there is, not an exotic one.**
-Every check below is RELATIVE: a row is accused because some other row
-disagrees with it. Nothing names the newest row as its predecessor, so
-removing the last k rows of the ledger orphans nothing at all. Every
-survivor still links to a real predecessor, there is still exactly one
-genesis, and there are no forks — so this module answers `intact=True`,
-`breaks=[]`, `forks=0`, `genesis_count=1`, and the fields that move
-is `checked`. Measured on 2026-09-02 against the development ledger: 119
-rows checked and intact; delete the newest two with the append-only
-trigger stood down; 117 rows checked and still intact. Unlike re-chaining
-it costs ONE DELETE and no hashing whatsoever — and the rows at the tail
-are the ones an export or a destruction writes last.
-
-**A pure renumbering.** `id` is not one of the hashed columns: see
-`_HASH_EXPR`, which covers `prev_hash`, `evidence_id`, `action`,
-`actor_id`, `occurred_at`, `detail` and `hash_verified` and nothing else.
-Swapping two rows' ids therefore leaves every hash valid and changes only
-the order this module reports them in. Verified on 2026-09-02 by doing
-it: `intact` stayed True.
-
-**A re-chaining attack** — edit row k, then recompute every `row_hash`
-from k to the tail — is self-consistent and invisible to any verifier
-that reads only the table.
-
-All three want the same missing thing: an EXTERNAL ANCHOR, recorded
-somewhere the ledger's owner cannot reach and compared on the next run.
-`CustodyReport.tail_id` and `tail_row_hash` are the values to record, the
-newest row's id and hash, which necessarily change whenever the tail does.
-**This module does not persist them and nothing else does**: an operator
-or a job stores them out of band and hands them back as a
-`CustodyAnchor`, which turns a removed or rewritten anchored row into an
-`ANCHOR_*` break (2026-10-03). Until somebody does, a tail deletion goes
-undetected, and every report says so.
-
-## Exactly what IS caught, by position
-
-Of the three positions a row can be deleted from: the MIDDLE is caught
-(LINK, raised on its orphaned successor), the FIRST is caught
-(NO_GENESIS), and the LAST is not caught at all. An edit in place is
-caught (CONTENT), and a removed or duplicated anchor is caught
-(NO_GENESIS / GENESIS).
-
-That is deliberately narrower than what 0024 claims for itself. Its
-docstring (0024:15-17) says each row commits to the previous "so a
-deleted or reordered row is detectable on replay even if the append-only
-trigger was disabled out of band". Both halves of that are false as
-stated — a tail-deleted row is not detectable, and a reordering is not —
-and this module does not inherit the claim. What it does instead is
-cheaper and true: it catches the tampering that leaves the ledger
-disagreeing with ITSELF. An earlier version of this section closed by
-saying this module caught "every case the docstring on 0024 was
-previously claiming to catch"; that sentence was WITHDRAWN on 2026-09-02
-because a tail delete is such a case and is not caught.
+What it cannot see: every check is RELATIVE, so a TAIL DELETION orphans nothing and reads
+`intact=True` with only `checked` moving. It costs one DELETE and no hashing, and the tail is what
+an export or a destruction writes last. A pure renumbering is invisible too (`id` is not hashed),
+and so is a re-chaining attack (edit row k, recompute every hash to the tail). All three want an
+EXTERNAL ANCHOR: `CustodyReport.tail_id` and `tail_row_hash` are the values to record out of band
+and hand back as a `CustodyAnchor`, which turns a removed or rewritten anchored row into an
+`ANCHOR_*` break. This module does not persist them, and until somebody does a tail deletion goes
+undetected and every report says so. 0024's own docstring claims a deleted or reordered row is
+detectable on replay; that does not hold for a tail deletion or a reordering, and this module does
+not inherit the claim.
 """
 from __future__ import annotations
 
@@ -166,11 +50,9 @@ from uuid import UUID
 
 import psycopg
 
-#: The canonical hash input, character-for-character from
-#: `core.custody_chain_hash()` in 0024, with `NEW.` replaced by the row
-#: alias `c` and the trigger's `prev` variable by the STORED `prev_hash` --
-#: because that is what the trigger hashed. The link check is what catches
-#: a wrong stored value.
+#: The canonical hash input, character-for-character from `core.custody_chain_hash()` in 0024, with
+#: `NEW.` replaced by the row alias `c` and the trigger's `prev` variable by the STORED `prev_hash`,
+#: because that is what the trigger hashed. The link check is what catches a wrong stored value.
 _HASH_EXPR = """
 public.digest(
   convert_to(concat_ws(chr(31),
@@ -190,8 +72,8 @@ public.digest(
 class CustodyBreak:
     """One custody row that does not verify."""
     id: int
-    #: None only for NO_GENESIS, which is a finding about a row that is
-    #: NOT THERE and therefore has no exhibit to name.
+    #: None only for NO_GENESIS, which is a finding about a row that is NOT THERE and so has no
+    #: exhibit to name.
     evidence_id: UUID | None
     occurred_at: datetime | None
     action: str
@@ -246,28 +128,19 @@ class CustodyReport:
     #: The exhibit the report was narrowed to, or None for the whole chain.
     #: Echoed so a caller cannot mistake a scoped answer for a global one.
     evidence_id: UUID | None = None
-    #: Hex `row_hash` of the newest row in the WHOLE ledger (`ORDER BY id
-    #: DESC LIMIT 1` -- the same row the 0024 trigger would chain the next
-    #: insert onto), or None on an empty ledger. Whole-ledger even on a
-    #: scoped run, like `genesis_count`: the chain has one tail, and an
-    #: exhibit's newest row is almost never it.
+    #: Hex `row_hash` of the newest row in the WHOLE ledger (`ORDER BY id DESC LIMIT 1`, the row the
+    #: 0024 trigger would chain the next insert onto), or None on an empty ledger. Whole-ledger even
+    #: on a scoped run, like `genesis_count`: the chain has one tail, and an exhibit's newest row is
+    #: almost never it.
     #:
-    #: A tail-to-tail EQUALITY comparison is not the defence it looks
-    #: like: this hash changes on every honest append, so run-to-run
-    #: equality mismatches on any live ledger and teaches an operator to
-    #: ignore it. Two checks do work under the one-DELETE-no-rehash
-    #: threat model: `last_id` and `checked` are monotone on an
-    #: append-only ledger, so either DECREASING against a previously
-    #: recorded value is a truncation signal that cannot fire honestly;
-    #: and a recorded hash should be checked for continued EXISTENCE in
-    #: the ledger rather than for equality with the tail, which has no
-    #: endpoint today. This is a partial defence against the tail
-    #: deletion the module
-    #: docstring describes, and it only works if somebody records it OUT OF
-    #: BAND and compares it on the next run. Added 2026-09-02; nothing in
-    #: this tree persists it yet, so a caller that merely reads it past is
-    #: no better protected than before. The anchor check below is what makes
-    #: a recorded value useful.
+    #: Tail-to-tail equality is not the defence it looks like: this hash changes on every honest
+    #: append, so run-to-run equality mismatches on any live ledger. Two checks work against a tail
+    #: deletion: `last_id` and `checked` are monotone on an append-only ledger, so either DECREASING
+    #: against a recorded value is a truncation signal that cannot fire honestly; and a recorded
+    #: hash should be checked for continued EXISTENCE in the ledger rather than for equality with
+    #: the tail. Both work only if somebody records the value OUT OF BAND and compares it on the
+    #: next run; nothing in this tree persists it yet. The anchor check below is what makes a
+    #: recorded value useful.
     tail_row_hash: str | None = None
     #: The id of that newest row, and the rows in the whole ledger, so a
     #: caller can record the pair and watch the count only ever grow.
@@ -283,41 +156,29 @@ class CustodyReport:
     def intact(self) -> bool:
         """No row examined disagrees with its predecessor.
 
-        NOT "nothing was removed". Every relative check is blind to a
-        deletion at the END of the ledger -- see "What this cannot see" in
-        the module docstring -- so `intact` is a statement about the rows
-        that ARE here and never about rows that are not. Compare
-        `tail_row_hash` against a value recorded out of band for that.
+        NOT "nothing was removed". Every relative check is blind to a deletion at the END of the
+        ledger (see "What it cannot see" in the module docstring), so `intact` is a statement about
+        the rows that ARE here and never about rows that are not. Compare `tail_row_hash` against a
+        value recorded out of band for that.
 
         A fork is a break only above the 0149 boundary, for the reasons
-        `audit_verify.ChainReport.intact` records; older ones are surfaced
-        with their own count.
+        `audit_verify.ChainReport.intact` records; older ones are surfaced with their own count.
 
-        An EMPTY result USUALLY returns True, and the caller is expected to
-        read `checked` too: an exhibit with no custody rows, or a fresh
-        database, has an intact (empty) chain and is evidence of nothing.
-        "Usually", because GENESIS and NO_GENESIS are WHOLE-LEDGER findings
-        injected into every report, scoped or not. So a scoped run can come
-        back not-intact on the strength of rows OUTSIDE its scope, and so
-        can an empty one. Confirmed on 2026-09-02: with a second genesis
-        forged on another exhibit, a scoped run over a clean exhibit
-        returned `intact=False` with two GENESIS breaks, neither of them
-        belonging to the exhibit asked about. That is intended -- the
-        anchor is a property of the chain, and an officer producing one
-        exhibit still needs to be told the ledger it sits in was
-        re-anchored -- but a caller must read `breaks[].evidence_id` rather
-        than assume a scoped finding is about the scope. Until 2026-09-02
-        this docstring said an empty result returns True full stop, which
-        the GENESIS injection above had already made untrue.
+        An EMPTY result USUALLY returns True, and the caller is expected to read `checked` too: an
+        exhibit with no custody rows, or a fresh database, has an intact (empty) chain and is
+        evidence of nothing. "Usually", because GENESIS and NO_GENESIS are WHOLE-LEDGER findings
+        injected into every report, scoped or not. So a scoped run, an empty one included, can come
+        back not-intact on the strength of rows OUTSIDE its scope: a second genesis forged on
+        another exhibit gives a clean exhibit two GENESIS breaks. That is intended, since an officer
+        producing one exhibit still needs to be told the ledger it sits in was re-anchored, but a
+        caller must read `breaks[].evidence_id` rather than assume a scoped finding is about the
+        scope.
 
-        When `evidence_id` is set, the LINK/CONTENT half is a statement
-        about the rows REPORTED: a deletion inside this exhibit's history
-        is revealed by whichever row followed it in the GLOBAL chain, which
-        is usually another exhibit's, so an unscoped run sees more. It does
-        not see everything -- if the removed rows were the LEDGER's newest,
-        the unscoped run is blind to them too, which is why this docstring
-        no longer ends by telling the caller to "run without `evidence_id`
-        for that".
+        When `evidence_id` is set, the LINK/CONTENT half is a statement about the rows REPORTED: a
+        deletion inside this exhibit's history is revealed by whichever row followed it in the
+        GLOBAL chain, which is usually another exhibit's, so an unscoped run sees more. It does not
+        see everything: if the removed rows were the LEDGER's newest, the unscoped run is blind to
+        them too.
         """
         return not self.breaks
 
@@ -330,34 +191,26 @@ def verify_custody_chain(
 ) -> CustodyReport:
     """Recompute the custody chain and return every row that does not verify.
 
-    `evidence_id` narrows which rows are REPORTED (a per-exhibit view for
-    an officer producing one exhibit's custody). Every check stays exact
-    for the rows it reports: the predecessor set, the fork census and the
-    genesis count are computed over the whole table, so a scoped run can
-    never produce a false orphan -- see the module docstring for why a
-    scoped run's `intact` is nonetheless not a statement about the
-    exhibit's history being complete.
+    `evidence_id` narrows which rows are REPORTED (a per-exhibit view for an officer producing one
+    exhibit's custody). The predecessor set, the fork census and the genesis count are computed over
+    the whole table, so a scoped run can never produce a false orphan (the module docstring says why
+    a scoped `intact` is still not a statement about the exhibit's history being complete).
 
-    Ordering is by `id`, never by `occurred_at`: `occurred_at` is
-    server-pinned by the trigger, but a verifier must not let a clock
-    adjustment reorder what it reports.
+    Ordering is by `id`, never by `occurred_at`: `occurred_at` is server-pinned by the trigger, but
+    a verifier must not let a clock adjustment reorder what it reports.
 
-    NO result from this function is a completeness proof, scoped or not:
-    the checks are relative, and rows deleted from the END of the ledger
-    leave nothing behind to disagree with. `tail_row_hash` is returned so
-    that the one defence which does work, recording the tail out of band and
-    comparing it next time, is possible: hand the recorded `(id, row_hash)`
-    back as `anchor` and a row that was removed or rewritten since is an
-    `ANCHOR_*` break. This function does not persist it.
+    NO result from this function is a completeness proof, scoped or not: the checks are relative,
+    and rows deleted from the END of the ledger leave nothing behind to disagree with.
+    `tail_row_hash` is returned so the one defence that works is possible, recording the tail out of
+    band and comparing it next time: hand the recorded `(id, row_hash)` back as `anchor` and a row
+    removed or rewritten since is an `ANCHOR_*` break. This function does not persist it.
     """
     where = "WHERE c.evidence_id = %(evidence_id)s" if evidence_id is not None else ""
 
-    # The link is verified as a LINKED LIST, never by id adjacency -- see
-    # the module docstring. `hashes` is every row_hash IN THE TABLE;
-    # `claims` counts how many rows name each predecessor, table-wide.
-    # LEFT JOINs rather than correlated subqueries, for the same reason
-    # audit_verify gives: a per-row NOT EXISTS did not finish on the
-    # development audit table.
+    # The link is verified as a LINKED LIST, never by id adjacency (see the module docstring).
+    # `hashes` is every row_hash IN THE TABLE; `claims` counts how many rows name each predecessor,
+    # table-wide. LEFT JOINs rather than correlated subqueries, as in audit_verify: a per-row NOT
+    # EXISTS did not finish on the development audit table.
     sql = f"""
     WITH scoped AS (
         SELECT c.id, c.evidence_id, c.action, c.actor_id, c.occurred_at,
@@ -424,35 +277,23 @@ def verify_custody_chain(
     breaks: list[CustodyBreak] = []
     forks: list[CustodyBreak] = []
 
-    # ── the anchor ────────────────────────────────────────────────────
-    #
-    # Every check above is RELATIVE. A row inserted with `prev_hash NULL`
-    # is an unlinked island that passes all of them -- LINK exempts it,
-    # FORK filters it out, and CONTENT actively blesses it because its hash
-    # input is the literal 'GENESIS'. Two rows claiming to be first is the
-    # shape of a truncation; zero rows claiming to be first, on a table
-    # that has rows, means the first row is gone and every survivor still
-    # agrees with its predecessor.
-    #
-    # Queried over the WHOLE table, never the scope, and reported at
-    # REPORT level: the true genesis is almost never one of the exhibit's
-    # own rows, so a scoped anchor check would answer "no genesis" on
-    # every scoped run.
+    # The anchor. Every check above is RELATIVE. A row inserted with `prev_hash NULL` is an unlinked
+    # island that passes all of them: LINK exempts it, FORK filters it out, and CONTENT blesses it
+    # because its hash input is the literal 'GENESIS'. Two rows claiming to be first is the shape of
+    # a truncation; zero, on a table that has rows, means the first row is gone and every survivor
+    # still agrees with its predecessor. Queried over the WHOLE table, never the scope, and reported
+    # at REPORT level: the true genesis is almost never one of the exhibit's own rows, so a scoped
+    # check would answer "no genesis" on every scoped run.
     genesis = conn.execute(
         "SELECT id, evidence_id, action, actor_id, occurred_at "
         "FROM core.evidence_custody WHERE prev_hash IS NULL ORDER BY id").fetchall()
     total = conn.execute("SELECT count(*) FROM core.evidence_custody").fetchone()[0]
 
-    # ── the tail, which is the anchor this module CANNOT check itself ──
-    #
-    # `ORDER BY id DESC LIMIT 1` is exactly how `core.custody_chain_hash()`
-    # picks a predecessor, so this is the chain's tail as the WRITER sees
-    # it. Whole-ledger, never scoped, for the same reason `genesis_count`
-    # is: there is one chain and one tail. Returned so an operator can
-    # record it out of band and compare it on the next run -- the only
-    # thing that reveals a tail deletion, which every check above is blind
-    # to. Added 2026-09-02 alongside the docstring that admits the blind
-    # spot; before that the report offered no way to detect one at all.
+    # The tail, which is the anchor this module CANNOT check itself. `ORDER BY id DESC LIMIT 1` is
+    # how `core.custody_chain_hash()` picks a predecessor, so this is the chain's tail as the WRITER
+    # sees it. Whole-ledger, never scoped, like `genesis_count`: there is one chain and one tail.
+    # Returned so an operator can record it out of band and compare it on the next run, the only
+    # thing that reveals a tail deletion, which every check above is blind to.
     tail = conn.execute(
         "SELECT encode(row_hash, 'hex'), id FROM core.evidence_custody "
         "ORDER BY id DESC LIMIT 1").fetchone()

@@ -1,11 +1,9 @@
-"""Shared fixtures for the beta review's graph-visibility fixes (2026-10-03).
+"""Shared fixtures for the graph-visibility tests.
 
-Every test of this unit runs through the real route as the REQUEST ROLE
-(`NOCTORNAL_TEST_ASSUME_ROLE`, as `test_rls_http_pg` does) and seeds as the
-owner, so what a reader is told is what production tells them. Accounts are
-`g42t-`; no other suite's teardown pattern matches them.
-
-Gated on NOCTORNAL_APP_DB_ROLE, as every row security test is.
+Every test of this unit runs through the real route as the request role
+(`NOCTORNAL_TEST_ASSUME_ROLE`, as `test_rls_http_pg` does) and seeds as the owner, so what a reader is
+told is what production tells them. Accounts are `g42t-`; no other suite's teardown pattern matches
+them. Gated on NOCTORNAL_APP_DB_ROLE, as every row security test is.
 """
 from __future__ import annotations
 

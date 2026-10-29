@@ -58,7 +58,7 @@ def test_invariant_9_tox():
     assert by_key["TOX_PK"].is_strong
     assert by_key["TOX_PK"].normaliser == "tox_pubkey"
     assert not by_key["TOX_ID_FULL"].is_strong
-    assert "TOX_ID" not in by_key  # collapsed pre-Phase-0 (decision 15)
+    assert "TOX_ID" not in by_key  # TOX_ID_FULL is the one key for the 76-hex form (decision 15)
 
 
 def test_recycled_display_identifiers_are_weak():

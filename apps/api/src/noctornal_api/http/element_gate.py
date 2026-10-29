@@ -1,30 +1,13 @@
-"""One answer for a hidden element and a missing one, and a withheld count
-said only as the case allows (beta review fixes, 2026-10-03).
+"""One answer for a hidden element and a missing one, and a withheld count said only as the
+case allows.
 
-Three findings of the 2026-10-03 adversarial review meet here.
-
-- http_ui-016. The element routes (add a claim, correct or retire an
-  entity or a tie, review a tie, retract or date a claim, tag an entity,
-  add it to a working set) answered an element above the caller's labels
-  with the gate's 403 "missing permission X on this case" and an unknown
-  id with 404, so a caller holding a leaked id could confirm that it named
-  something in the case they were not cleared for. `authorize_element`
-  keeps the gate's decision and its AUTHZ_DENIED row (the denial is still
-  recorded) and answers it with the missing element's own 404, as
-  `routers/ingest._authorise_record` already does for records.
-- graph-merge-no-element-label-gate, http_ui-001, graph-edge-endpoints-
-  not-gated and http_ui-008. Merge, unmerge, a new tie's endpoints and a
-  comms binding's identity never resolved the node they named, so a node
-  above the caller, or in another case, could be written through by id.
-  `gate_element` is the whole check for a route that names an element in
-  its body: same case, the gate at the element's own labels, one 404.
-- rls-9, rls-1, graph-coparticipation-ignores-withheld-none and
-  http_ui-011. Several routes reported what they withheld from the reader
-  whatever the case's `withheld_disclosure` setting (migration 0030) said.
-  `withheld_notice` is the graph's own rule (`projections.Withheld`) for
-  any count: NONE says nothing, PRESENCE says whether, COUNT says how many.
-
-The gate itself is not forked: every decision here is
+`authorize_element` keeps the gate's decision and its AUTHZ_DENIED row but answers a refusal
+caused by the element's labels with the element's own 404, so a leaked id cannot confirm that
+it names something the caller is not cleared for (as `routers/ingest._authorise_record` does
+for records). `gate_element` is the whole check for a route that names an element in its
+body: same case, the gate at the element's own labels, one 404. `withheld_notice` applies the
+graph's rule (`projections.Withheld`, migration 0030) to any count: NONE says nothing,
+PRESENCE says whether, COUNT says how many. The gate is not forked: every decision here is
 `deps.authorize_object`'s.
 """
 from __future__ import annotations
@@ -52,17 +35,14 @@ def authorize_element(
     permission_key: str, classification: str, compartments: frozenset[str],
     missing_detail: str, case_gated: bool = True,
 ) -> None:
-    """The gate at an element's own labels, after the case's, with a label
-    refusal answered as the element's absence (http_ui-016, 2026-10-03).
+    """The gate at an element's own labels, after the case's, with a label refusal answered as
+    the element's absence.
 
-    `case_gated` says the route's own `require(permission_key)` has already
-    decided this verb at the case's labels. When it has not (a second verb
-    the route did not name), the case-level decision is asked first, so a
-    caller who lacks the verb outright still gets the gate's 403 whether or
-    not the element exists, and only a refusal that the element's labels
-    cause is turned into the 404. Only a 403 is turned: a stale sign-in
-    cannot reach here (the case gate asked the same verb), and a read-only
-    case's 409 tells a caller nothing the case gate did not."""
+    `case_gated` says the route's own `require(permission_key)` has already decided this verb at
+    the case's labels. When it has not, the case-level decision is asked first, so a caller who
+    lacks the verb outright still gets the gate's 403 whether or not the element exists. Only a
+    403 caused by the element's labels is turned into the 404: a stale sign-in cannot reach
+    here, and a read-only case's 409 tells a caller nothing the case gate did not."""
     if not case_gated:
         authorize_object(conn, user, case_id=case_id,
                          permission_key=permission_key, after_case_gate=True,
@@ -110,12 +90,10 @@ BASIS_SELECTOR_REFUSAL = "basis_selector_id does not name a selector of this cas
 
 def check_basis_selector(conn: psycopg.Connection, user: CurrentUser, *,
                          case_id: UUID, selector_id: UUID | None) -> None:
-    """A merge's basis selector is a row of this case the merger may read
-    (graph-merge-basis-selector, 2026-10-03). The id went
-    straight into a foreign key, so a random one was a 500 'unexpected
-    failure', another case's row was accepted and recorded on this case's
-    merge, and a row above the merger was cited (and so confirmed to exist)
-    by whoever held its id. One 400 for all three."""
+    """A merge's basis selector must be a row of this case the caller may read.
+
+    One 400 for an unknown id, another case's row and a row above the caller, so the id never
+    reaches the foreign key as a 500 and a row above the caller is never confirmed to exist."""
     if selector_id is None:
         return
     clearance, held = user_ceiling(conn, user.user_id, case_id=case_id)
@@ -126,10 +104,9 @@ def check_basis_selector(conn: psycopg.Connection, user: CurrentUser, *,
 
 
 def disclosure_mode(conn: psycopg.Connection, case_id: UUID) -> str:
-    """The case's `withheld_disclosure`, read as a lock fact
-    (`iam.case_facts`, S1). A case that has gone discloses nothing, as the
-    graph's rule does: failing closed costs a sentence, failing open costs
-    a disclosure."""
+    """The case's `withheld_disclosure`, read as a lock fact (`iam.case_facts`). A case that has
+    gone discloses nothing, as the graph's rule does: failing closed costs a sentence, failing
+    open costs a disclosure."""
     row = conn.execute(
         "SELECT withheld_disclosure FROM iam.case_facts(%s)",
         (case_id,)).fetchone()

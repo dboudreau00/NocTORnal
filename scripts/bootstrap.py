@@ -1,18 +1,14 @@
-"""First-run bootstrap — provisions the first analyst so a human can log in.
+"""First-run bootstrap: provisions the first analyst so a human can sign in.
 
-A freshly migrated NocTORnal database has an ontology, roles and
-permissions but not one account, and every API path is behind the
-five-part gate. There is deliberately no self-service registration and no
-seeded default administrator: a shipped default credential is the single
-most common way a platform holding case material is opened by someone who
-should not have it. So the first account is created out of band, here, by
-whoever controls the environment.
+A freshly migrated database has an ontology, roles and permissions but no account, and every
+API path is behind the five-part gate. There is deliberately no self-service registration and no
+seeded default administrator, because a shipped default credential is the commonest way a
+platform holding case material is opened by someone who should not have it. The first account
+is created out of band, here, by whoever controls the environment.
 
-This script talks to the same services the API uses (PgUserStore,
-CaseService, GraphWriteService, SelectorStore) rather than writing its own
-SQL for the same work — a second write path is a second set of invariants
-to forget. It reads DATABASE_URL and NOCTORNAL_TOTP_KEK from the
-environment and invents neither.
+It uses the services the API uses (PgUserStore, CaseService, GraphWriteService, SelectorStore)
+rather than SQL of its own, since a second write path is a second set of invariants to forget,
+and it reads DATABASE_URL and NOCTORNAL_TOTP_KEK from the environment and invents neither.
 
 Usage:
     python scripts/bootstrap.py create-user --email a@b.test --name "A B"
@@ -47,11 +43,10 @@ for _src in (_REPO / "apps" / "api" / "src", _REPO / "packages" / "ontology" / "
 
 
 def connect():
-    """Every script connects as the system role (S1, 2026-09-25). A
-    script serves no request and binds no user, so on the request role it
-    would see nothing under row-level security; `db.connect_system` refuses
-    rather than hand it a connection that silently sees part of the data.
-    Named `connect` so the tests that replace it still find it."""
+    """Every script connects as the system role. A script serves no request and binds no user,
+    so on the request role it would see nothing under row-level security; `db.connect_system`
+    refuses rather than hand it a connection that silently sees part of the data. Named
+    `connect` so the tests that replace it still find it."""
     return connect_system(SystemPurpose.SCRIPT)
 
 def _venv_python(windows: bool | None = None) -> str:
@@ -59,7 +54,7 @@ def _venv_python(windows: bool | None = None) -> str:
     repository root. Commands this script suggests use it because a bare
     `python` exits 127 on a stock Ubuntu, and `python3` there is the system
     interpreter, which has none of the dependencies and whose pip PEP 668
-    refuses (Alpha 6 pre-release check, 2026-09-23)."""
+    refuses."""
     if windows is None:
         windows = os.name == "nt"
     return r".venv\Scripts\python" if windows else ".venv/bin/python"
@@ -86,16 +81,10 @@ try:
     from noctornal_api.selectors import SelectorError, SelectorStore
     from noctornal_api.stores import PgUserStore
 except ImportError as exc:
-    # The usual cause is an interpreter other than the project's: the
-    # installers put every dependency in .venv at the repository root. The
-    # hint never named .venv and said a bare `pip install`, which on a
-    # current Debian or Ubuntu system Python PEP 668 refuses (Alpha 6
-    # pre-release check, 2026-09-23). db/requirements.txt is gone from it
-    # because apps/api declares alembic, SQLAlchemy and psycopg itself.
-    # It carries -c constraints.txt because every dependency there is a >=
-    # floor, and without the pins pip takes the newest release of each: a
-    # stack nobody tested, arrived at by following our own advice (c3,
-    # 2026-09-24).
+    # The usual cause is an interpreter other than the project's: the installers put every
+    # dependency in .venv at the repository root, and PEP 668 refuses a bare `pip install` into
+    # a current Debian or Ubuntu system Python. The hint carries -c constraints.txt because every
+    # dependency is a >= floor, and unpinned pip takes the newest of each, a stack nobody tested.
     _py = _venv_python()
     _pkgs = (r"packages\ontology -e apps\api" if os.name == "nt"
              else "packages/ontology -e apps/api")
@@ -123,19 +112,15 @@ def _fail(message: str) -> NoReturn:
     raise SystemExit(1)
 
 
-# `.env.local` loading lives in scripts/_env.py -- see R22 there for why
-# it is a shared module rather than a function copied per script. Called
-# by its real name, not via a local alias: apps/api/tests/
-# test_script_invariants.py verifies that every DB-touching script here
-# actually CALLS it, and an alias makes that property unreadable.
+# `.env.local` loading lives in scripts/_env.py, shared by every script. It is called by its real
+# name, not an alias: a test checks that every script touching the database calls it.
 
 
 def _utf8_output() -> None:
-    # The ASCII QR is drawn with cp437 block characters, and the prose here
-    # uses dashes a legacy Windows console cannot encode in cp1252 — which
-    # would turn a UnicodeEncodeError into the error message the operator
-    # never gets to read. Both streams, because the guidance that matters
-    # most (missing key, missing schema) goes to stderr.
+    # The QR is drawn with cp437 block characters a legacy Windows console cannot encode in
+    # cp1252, and the UnicodeEncodeError would replace the message the operator needed. Both
+    # streams, because the guidance that matters most (missing key, missing schema) goes to
+    # stderr.
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8")
@@ -163,10 +148,9 @@ def _require_kek() -> None:
     """
     if os.environ.get(KEK_ENV):
         return
-    # R9: when an installation already exists, its key is in `.env.local`
-    # and generating a NEW one here poisons every account this command
-    # touches. Say so FIRST; only offer generation when there is genuinely
-    # nothing to copy.
+    # An existing installation keeps its key in `.env.local`, and a new one generated here would
+    # seal every account this command touches under a key the API does not hold. Say so first;
+    # offer generation only when there is nothing to copy.
     existing = env_local_path()
     if existing.exists():
         _fail(
@@ -220,9 +204,6 @@ def _check_roles_exist(conn: psycopg.Connection, roles: list[str]) -> None:
         _fail("iam.role is empty, so run `alembic upgrade head` before bootstrapping")
     unknown = [r for r in roles if r not in known]
     if unknown:
-        # The operator's first words from the product agree with their
-        # counts, here and below, with no bracketed plurals (README
-        # screenshot set review, 2026-09-23).
         _fail(
             f"unknown {'role' if len(unknown) == 1 else 'roles'}: "
             f"{', '.join(unknown)}\n"
@@ -250,16 +231,15 @@ def _print_qr(uri: str) -> None:
         import qrcode
     except ImportError:
         if is_production():
-            # The production image is not a virtual environment: there is no .venv to install into
-            # (README step 5 runs this in a container; 2026-10-12).
+            # The production image is not a virtual environment: there is no .venv to install
+            # into (README step 5 runs this in a container).
             print("  No QR code: the optional `qrcode` package is not in this image.")
             print("  Enter the URI or the base32 secret into your authenticator by hand.")
             print("  Either works.")
             return
-        # The project's interpreter and the pins, as the import hint above
-        # gives them: a bare `pip` is the system one PEP 668 refuses, and
-        # an unpinned install takes whatever release is newest (c3,
-        # 2026-09-24).
+        # The project's interpreter and the pins, as the import hint above gives them: a bare
+        # `pip` is the system one PEP 668 refuses, and an unpinned install takes the newest
+        # release.
         print("  No QR code: the optional `qrcode` package is not installed.")
         print("  For one, run this from the repository root:")
         print(f"    {_venv_python()} -m pip install -c constraints.txt qrcode")
@@ -303,17 +283,13 @@ def _audit_created(
 def _issued_to_someone_else(conn: psycopg.Connection) -> bool:
     """Whether the account about to be made is for another person.
 
-    The first account on an empty database is the operator's own: the
-    installer makes it, and they generated its password a minute earlier.
-    Any later one is someone else's, as the installers' own advice has it
-    (a Security Officer, `create-user ... --roles SECURITY_OFFICER`), and
-    an administrator-issued password must be replaced at its first sign-in,
-    exactly as one from Admin is. Left unflagged, the operator kept a
-    password that opened the officer's sessions under the officer's id, the
-    account that reviews their break-glass (final review c8, verifier,
-    2026-09-24). `bootstrap.py session` can still sign the operator in as
-    anyone, but that is audited as the shell, not as the officer's sign-in.
-    Read in the transaction that makes the account.
+    The first account on an empty database is the operator's own. Any later one is someone
+    else's (a Security Officer, as the installers advise), so its administrator-issued password
+    must be replaced at the first sign-in, as one issued from Admin is; otherwise the operator
+    would keep a password that opens the officer's sessions under the officer's id, on the
+    account that reviews their break-glass. `bootstrap.py session` can still sign the operator
+    in as anyone, but that is audited as the shell. Read in the transaction that makes the
+    account.
     """
     return bool(conn.execute(
         "SELECT EXISTS (SELECT 1 FROM iam.app_user)").fetchone()[0])
@@ -402,10 +378,8 @@ def cmd_create_user(args: argparse.Namespace) -> None:
     print("  If your authenticator shows something else, the enrolment did not")
     print("  take. Fix it now rather than at the login screen.")
     print()
-    # The installers pass --no-next (Beta 1 clean machine, 2026-10-07): inside
-    # step 6 this block told a person to sign in to an API step 8 had not
-    # started, and to load OP-SHOWCASE-26 just before step 7 offered
-    # Latticework. Their closing card says both, once the API is up.
+    # The installers pass --no-next: during their step 6 the API is not running yet, and their
+    # closing card says what comes next once it is.
     if not getattr(args, "no_next", False):
         _print_next(args.email, roles)
 
@@ -425,24 +399,17 @@ def _production_console_url() -> str:
 
 def _print_next(email: str, roles: list[str], *,
                 windows: bool | None = None) -> None:
-    """What to do after `create-user`, in the words install.sh and
-    launch.ps1 use.
-
-    It printed `python scripts/bootstrap.py demo-case`, which exits 127 on
-    a stock Ubuntu, and an API login for someone about to use the console.
-    On Linux the installer printed it just above its own, correct block
-    (Alpha 6 pre-release check, 2026-09-23). Now: the console, this
-    platform's interpreter and the README's showcase recipe. The recipe is
-    offered only to an account holding CASE_OWNER, because it makes that
-    account the showcase case's owner, and a second person given
-    SECURITY_OFFICER is not who that is for.
+    """What to do after `create-user`, in the words install.sh and launch.ps1 use: the
+    console, this platform's interpreter and the README's showcase recipe. The recipe is
+    offered only to an account holding CASE_OWNER, because it makes that account the showcase
+    case's owner.
     """
     print(RULE)
     print("Next")
     print(RULE)
     if is_production():
-        # README step 5 runs create-user in the production stack's container (2026-10-12): the console is
-        # Caddy's hostname, 127.0.0.1:8000 is not published, and there is no .venv to run a recipe from.
+        # README step 5 runs create-user in the production stack's container: the console is
+        # Caddy's hostname, 127.0.0.1:8000 is not published, and there is no .venv for a recipe.
         print(f"  Sign in to the console at {_production_console_url()} with this")
         print("  address, the password and a code from your authenticator.")
         print(RULE)
@@ -582,11 +549,10 @@ def cmd_demo_case(args: argparse.Namespace) -> None:
                 ),
             )
 
-            # is_inferred stays false throughout: an ANALYST_INFERENCE basis
-            # still means a human asserted the edge. is_inferred is for
-            # machine-proposed edges (invariants 3 and 4), which render dashed
-            # and sit out of the metrics — mislabelling analyst work as
-            # inferred quietly removes it from every centrality number.
+            # is_inferred stays false throughout: an ANALYST_INFERENCE basis still means a human
+            # asserted the edge. is_inferred marks machine-proposed edges (invariants 3 and 4),
+            # which render dashed and sit out of the metrics, so mislabelling analyst work would
+            # remove it from every centrality number.
             edges = [
                 ("MEMBER_OF", lynx, halcyon, dict(
                     attrs={"role": "access broker"},
@@ -742,12 +708,11 @@ def cmd_recovery_codes(args: argparse.Namespace) -> None:
 
 # --- demo-network -----------------------------------------------------------
 
-# Three crews, deliberately shaped so the Phase 3 metrics have something to
-# find. `demo-case` is a 7-node star: every edge touches one actor, there is
-# not a single triangle in it, and on that shape betweenness, Burt's
-# constraint, Leiden and structural balance are all degenerate. A star cannot
-# tell a correct implementation from a broken one, and it cannot show an
-# analyst what the panel is for.
+# Three crews, deliberately shaped so the network metrics have something to find. `demo-case` is
+# a 7-node star: every edge touches one actor and there is not a single triangle, so
+# betweenness, Burt's constraint, Leiden and structural balance are all degenerate on it, and a
+# star can neither tell a correct implementation from a broken one nor show an analyst what the
+# panel is for.
 #
 #   crew A (halcyon)   crew B (meridian)   crew C (bitwright)
 #     4 actors, dense    4 actors, dense     4 actors, dense
@@ -757,11 +722,10 @@ def cmd_recovery_codes(args: argparse.Namespace) -> None:
 #                                KPP-Neg over "arrest the top 3 by centrality"
 #   B <====== oriel ======> C    the SOLE bridge: one actor holds C on
 #
-# Signs give one balanced triad, one unbalanced triad (docs/03's own example:
-# two vouches and an accusation closing the triangle) and one "enemy of my
-# enemy" triad. Ties carry valid_from dates spread over three years so trust
-# decay has something to bite on -- docs/14 U3 notes nothing else in the
-# product sets those intervals yet.
+# Signs give one balanced triad, one unbalanced triad (docs/03's own example: two vouches and an
+# accusation closing the triangle) and one "enemy of my enemy" triad. Ties carry valid_from dates
+# spread over three years so trust decay has something to bite on (docs/14 U3: nothing else in
+# the product sets those intervals yet).
 _CREWS = {
     "halcyon": ["hal_vector", "hal_prism", "hal_quarry", "hal_dune"],
     "meridian": ["mer_ledger", "mer_kite", "mer_florin", "mer_ash"],
@@ -807,13 +771,10 @@ def cmd_demo_network(args: argparse.Namespace) -> None:
                     "before any operational use."
                 ),
                 authority_ref="DEMO/2026/0002",
-                # AMBER unless asked. The README's screenshots are of a
-                # case published on GitHub, and a public image marked
-                # TLP:AMBER contradicts its own marking, so the recipe
-                # there asks for CLEAR (2026-09-23). Every node and tie
-                # below takes the same label: graph writes default to
-                # AMBER, and a CLEAR case full of AMBER entities would
-                # still be AMBER material on the screen.
+                # AMBER unless asked: the README's screenshots are public, and a public image
+                # marked TLP:AMBER contradicts its own marking, so the recipe there asks for
+                # CLEAR. Every node and tie below takes the same label, because graph writes
+                # default to AMBER and a CLEAR case of AMBER entities is still AMBER on screen.
                 classification=args.classification,
                 retention_until=today + timedelta(days=730),
                 review_due=today + timedelta(days=180),
@@ -1010,15 +971,12 @@ def cmd_unlock(args: argparse.Namespace) -> None:
 def cmd_reset_password(args: argparse.Namespace) -> None:
     """Issue a one-time password that must be replaced at the next sign-in.
 
-    gap-password-reset (2026-09-23). An administrator resets a colleague's
-    password from Admin; this is the same reset for the account nobody can
-    do that for, typically the last administrator. It calls
-    `IamAdminService.reset_password`, the service the Admin route calls,
-    rather than writing the hash itself, so the two paths cannot disagree
-    about what a reset does: generated password, must-change flag, every
-    live session revoked, lockout cleared, an audit row (actor SYSTEM, via
-    bootstrap.py). The authenticator is not touched; `reenrol-totp
-    --new-secret` is its own decision.
+    Admin's reset, for the account nobody can reset from Admin (typically the last
+    administrator). It calls `IamAdminService.reset_password`, as the Admin route does, so the
+    two paths cannot disagree about what a reset does: a generated password, the must-change
+    flag, every live session revoked, lockout cleared, an audit row (actor SYSTEM, via
+    bootstrap.py). The authenticator is not touched; `reenrol-totp --new-secret` is its own
+    decision.
     """
     _require_database_url()
     from noctornal_api.iam_admin import AdminError, IamAdminService
@@ -1106,16 +1064,13 @@ def cmd_reenrol_totp(args: argparse.Namespace) -> None:
 
 
 def cmd_totp_code(args: argparse.Namespace) -> None:
-    """Print a currently-valid code for an enrolled user.
+    """Print a currently valid code for an enrolled user.
 
-    This exists to unstick local development when an authenticator entry is
-    wrong, and to diagnose drift. It does NOT weaken the deployment: running
-    it requires both the database and NOCTORNAL_TOTP_KEK, and anyone holding
-    those can already mint a session directly — the second factor protects
-    against a stolen password, not against the operator of the machine.
-
-    It has no place on a shared or production host. Fix the authenticator
-    (`reenrol-totp`) rather than relying on this.
+    For unsticking local development when an authenticator entry is wrong, and for diagnosing
+    drift. It does not weaken the deployment: it needs the database and NOCTORNAL_TOTP_KEK, and
+    anyone holding those can already mint a session directly; the second factor protects
+    against a stolen password, not against the operator of the machine. It has no place on a
+    shared or production host: fix the authenticator (`reenrol-totp`) instead.
     """
     _require_database_url()
     _require_kek()
@@ -1190,15 +1145,10 @@ def cmd_totp_diagnose(args: argparse.Namespace) -> None:
           f"({step}s each), about {step * 3}s wide.")
     print()
 
-    # Search progressively wider. A code that matches only a long way out is
-    # not "drift" in the usual sense — it means the two clocks disagree about
-    # what day it is, which an unsynchronised host clock will do.
-    #
-    # A single 6-digit code has only 10^6 values, so across a multi-year
-    # search collisions are CERTAIN and the nearest match is quite likely
-    # coincidental. Supplying the next code as well (--next-code) requires
-    # both to line up at the same offset, which makes a false positive
-    # ~10^-12 and turns the reported figure into something trustworthy.
+    # Search progressively wider. A match only a long way out means the two clocks disagree
+    # about the day, as an unsynchronised host clock will. A 6-digit code has 10^6 values, so
+    # over a multi-year search collisions are certain and the nearest match may be coincidence;
+    # --next-code requires both codes to line up at one offset, a false positive of about 10^-12.
     nxt = args.next_code.strip().replace(" ", "") if args.next_code else None
     bands = [("2 hours", 2 * 60 * 60), ("2 days", 2 * 86400),
              ("60 days", 60 * 86400), ("2 years", 730 * 86400)]
@@ -1263,33 +1213,20 @@ def cmd_totp_diagnose(args: argparse.Namespace) -> None:
 def cmd_session(args: argparse.Namespace) -> None:
     """Mint a session and print a URL that opens the UI already signed in.
 
-    TOTP compares two clocks. When the host's clock does not match the one
-    in the analyst's pocket — an offline or sandboxed machine that has never
-    reached a time server — no code can ever match, and the second factor
-    stops being a security control and becomes a locked door with no key.
-    This issues the session directly.
+    TOTP compares two clocks, and on a host that has never reached a time server no code can
+    match, so the second factor becomes a locked door with no key. This issues the session
+    directly. It is a development affordance, not a bypass: it needs the database and
+    NOCTORNAL_TOTP_KEK, and anyone holding those could write the row by hand. The session is an
+    ordinary one (12 hour absolute and 30 minute idle expiry, the same revocation). On a real
+    deployment the fix is a recovery code (`security/recovery.py`, docs/05).
 
-    It is a development affordance, not a bypass: it requires the database
-    and NOCTORNAL_TOTP_KEK, and anyone holding those could write this row by
-    hand. The session it creates is an ordinary one — same 12 hour absolute
-    and 30 minute idle expiry, same revocation — so nothing downstream is
-    weakened. The proper fix on a real deployment is a recovery code
-    (`security/recovery.py`, docs/05), which signs a person in without the
-    authenticator.
-
-    It is UNBOUND, and that is deliberate. 0058 records the address and
-    User-Agent a session was minted from, and `SessionService.create` takes
-    both; this command passes neither because it cannot. It runs in a shell
-    on behalf of a browser it has never met, and inventing an address here
-    would put a fact on record that nobody established — the opposite of
-    what 0058 is for. The consequence is real and is printed below rather
-    than discovered: with NOCTORNAL_SESSION_STRICT_BINDING=1 on the server,
-    this session is refused on its FIRST request, with the same generic 401
-    as an expired one. That refusal is audited as SESSION_BINDING_REFUSED
-    with `unbound: true`, which is how a security officer tells "this
-    session could never have been bound" from "someone moved this token" —
-    added on 2026-09-02, because before it the recovery path for a machine
-    whose clock TOTP cannot live with died with an error about nothing.
+    It is unbound on purpose. A session records the address and User-Agent it was minted from
+    (0058, `SessionService.create`), and this shell has neither for the browser it serves:
+    inventing them would record a fact nobody established. With
+    NOCTORNAL_SESSION_STRICT_BINDING=1 on the server the session is therefore refused on its
+    first request with the generic 401, as printed below, and audited as
+    SESSION_BINDING_REFUSED with `unbound: true`, so a security officer can tell "never bound"
+    from "someone moved this token".
     """
     _require_database_url()
     from uuid import uuid4
@@ -1500,8 +1437,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     _utf8_output()
-    # R9: before anything reads the environment. Every documented "run this
-    # in a second terminal" command failed in a fresh shell without it.
+    # Before anything reads the environment, so a command run in a fresh shell finds the
+    # installation's settings.
     load_env_local()
     args = _build_parser().parse_args(argv)
     try:

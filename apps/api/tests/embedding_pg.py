@@ -1,10 +1,8 @@
-"""Shared fixtures for the embeddings Postgres suites (F6.1 to F6.4,
-2026-09-24). Importable, no tests.
+"""Shared fixtures for the embeddings Postgres suites. Importable, no tests.
 
-Every suite passes its own prefix: accounts are `<prefix>...@noctornal.test`,
-sources, documents and cases carry it, and `cleanup` removes exactly what a
-suite made. `reset` empties the similarity state (every space, vector row
-and queue entry): spaces are deployment-wide (one ACTIVE per role), so each
+Every suite passes its own prefix: accounts are `<prefix>...@noctornal.test`, sources, documents and
+cases carry it, and `cleanup` removes exactly what a suite made. `reset` empties the similarity state
+(every space, vector row and queue entry): spaces are deployment-wide (one ACTIVE per role), so each
 test starts from none and leaves none behind for the next suite.
 """
 from __future__ import annotations

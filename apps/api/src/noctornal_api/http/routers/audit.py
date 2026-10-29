@@ -1,31 +1,10 @@
 """The audit trail over HTTP: read it, and verify it has not been edited.
 
-`audit.read` was seeded in 0017 and granted to SECURITY_OFFICER in 0021,
-and until 2026-07-26 it had **zero call sites**. Nothing in the product
-read `audit.event` — `scripts/bootstrap.py` told the operator to run raw
-SQL — and nothing ever recomputed the hash chain, so docs/09's Phase 0
-exit criterion ("every action appears in a *verifiable* audit chain") was
-unmet by the only word in it that carries weight.
-
-## Global, not per-case, and why that is the safe direction here
-
-Every other read router in this tree is `/cases/{case_id}/...` and gated
-by case assignment. This one is not, because the audit trail's purpose is
-oversight of the people who hold cases, and an oversight surface that only
-shows you what you already have access to is not oversight.
-
-The compensating control is that `audit.read` is granted to
-SECURITY_OFFICER **and to nobody else** (0021: "the admin configures, the
-officer audits, and neither reads case data by default"). SYS_ADMIN does
-not hold it. So this endpoint widens no analyst's view of case content.
-
-**What it can still leak, and what is done about it.** `audit.event.detail`
-is free-form jsonb written by every service in the tree, and some of it
-names case material. So `detail` is NOT returned by the listing endpoint —
-only the structural columns are. An officer establishing *that* an action
-happened does not need its payload, and returning it would hand the one
-role with global reach a keyhole onto every case. `/verify` returns no
-`detail` either.
+Global rather than per-case: the trail oversees the people who hold cases, and a view limited to
+the cases one already holds is not oversight. The compensating control is that only
+SECURITY_OFFICER holds `audit.read` (0021), so no analyst's view of case content widens.
+`audit.event.detail` is free-form and can name case material, so neither the listing nor `/verify`
+returns it, only the structural columns.
 """
 from __future__ import annotations
 
@@ -43,11 +22,9 @@ from noctornal_api.http.limits import rate_limit
 
 router = APIRouter(prefix="/audit", tags=["audit"])
 
-#: The sentence that sits beside every green tick on the audit log (2026-10-03).
-#: Until then it was said only of a windowed run, while the qualification that
-#: matters most is true of every run: each check compares a row with its
-#: neighbours, so rows removed from the end, or rewritten and re-chained, leave
-#: nothing behind to disagree. The custody answer has said so since 2026-09-02.
+#: The caveat beside every green tick on the audit log, windowed or not: each check compares a row
+#: with its neighbours, so rows removed from the end, or rewritten and re-chained, leave nothing
+#: behind to disagree.
 _AUDIT_CAVEAT = (
     "What NO run can tell you is whether rows were removed from the END of the "
     "log, or edited and re-chained with fresh hashes. Every check compares a "
@@ -134,29 +111,18 @@ def verify(
         description="the tail_row_hash recorded with anchor_seq"),
     user: CurrentUser = Depends(require_global("audit.read")),
     conn: psycopg.Connection = Depends(get_conn),
-    # A verifier that sees part of a chain reports breaks that are not
-    # there; it walks every row on a system connection (S1, 2026-09-25).
+    # A check that sees only part of the chain reports breaks that are not there, so it walks every
+    # row on a system connection.
     chain: psycopg.Connection = Depends(system_conn(SystemPurpose.AUDIT_VERIFY)),
 ) -> dict:
     """Recompute the hash chain and report every row that does not verify.
 
-    Metered under `analytics.suite` rather than a read limit: a full-chain
-    verification is an O(n) SHA-256 over every audit row ever written, and
-    it is not something anyone needs to run in a loop.
-
-    The response distinguishes LINK (a predecessor removed) from CONTENT
-    (a row edited in place), because they point an investigator in
-    different directions. A FORK is a break when every row that shares the
-    predecessor was written after migration 0149, which draws the sequence
-    number inside the chain lock; older forks are an artefact of the
-    previous order and are counted apart, because counting them as breaks
-    made this answer BROKEN on untampered history.
-
-    EVERY answer carries a caveat, and the one that matters is that the
-    checks are relative: rows removed from the end, or edited and
-    re-chained, leave `intact` true. `tail_seq` and `tail_row_hash` are the
-    values to record out of band, and passing them back as `anchor_seq` and
-    `anchor_hash` makes a removed or rewritten anchored row a break.
+    Metered under `analytics.suite`, as a full run hashes every audit row. LINK (a predecessor
+    removed) and CONTENT (a row edited in place) are reported apart. A FORK is a break when every
+    row sharing the predecessor postdates migration 0149, which numbers rows inside the chain lock;
+    older forks are counted apart. The checks are relative: pass a recorded `tail_seq` and
+    `tail_row_hash` back as `anchor_seq` and `anchor_hash` to make a removed or rewritten anchored
+    row a break.
     """
     pair = _hex_pair(anchor_seq, anchor_hash, ("anchor_seq", "anchor_hash"))
     report = verify_chain(
@@ -177,9 +143,8 @@ def verify(
         "tail_seq": report.tail_seq,
         "tail_row_hash": report.tail_row_hash,
         "rows_in_log": report.total_rows,
-        # A caveat on EVERY run, as the custody answer has carried since
-        # 2026-09-02. The windowed sentence is added when it applies, and
-        # describes the actual blind spot of a window: rows OUTSIDE it.
+        # A caveat on every run; the windowed sentence is added when it applies and names a
+        # window's own blind spot, the rows outside it.
         "caveat": (_WINDOWED_CAVEAT if limit is not None else "") + _AUDIT_CAVEAT,
         "anchor": None if report.anchor is None else {
             "status": report.anchor.status,
@@ -248,35 +213,16 @@ def verify_custody(
         description="the tail_row_hash recorded with anchor_id"),
     user: CurrentUser = Depends(require_global("audit.read")),
     conn: psycopg.Connection = Depends(get_conn),
-    # A verifier that sees part of a chain reports breaks that are not
-    # there; it walks every row on a system connection (S1, 2026-09-25).
+    # A check that sees only part of the chain reports breaks that are not there, so it walks every
+    # row on a system connection.
     chain: psycopg.Connection = Depends(system_conn(SystemPurpose.AUDIT_VERIFY)),
 ) -> dict:
-    """Recompute the custody hash chain and report every row that does not
-    verify.
+    """Recompute the custody hash chain and report every row that does not verify.
 
-    Same gate, metering and shape as `/verify`, for the other tamper-evident
-    ledger in the system: `core.evidence_custody` was hash-chained in 0024
-    with a docstring invoking FRE 902(13)-(14), and until 2026-09-02 nothing
-    recomputed it — the same "written and never verified" gap `/verify`
-    closed for `audit.event`, on the record that is actually produced to a
-    court.
-
-    The custody ledger is ONE chain across every exhibit (the trigger's
-    predecessor is the newest row in the whole table), so `evidence_id`
-    narrows what is REPORTED, not what is checked: an exhibit's rows chain
-    off other exhibits' rows, and a link check confined to one exhibit
-    would call every one of its rows an orphan. The scoped answer says it
-    is scoped, and EVERY answer carries a caveat — see the `caveat` key
-    below for why an unscoped run needs one just as badly.
-
-    Consumed by the analyst console: `btn-custody-verify` in
-    `static/index.html`, wired by `wireCustodyVerify()` in `static/app.js`
-    and rendered by `custodyVerdict()`, which prints `scoped`, `caveat`,
-    `genesis_count` and `genesis_note` rather than folding them into the
-    verdict chip. Named here because an endpoint with no reachable caller
-    is a feature nobody can run, and the only way to keep that honest is
-    for each half to say where the other one is.
+    Same gate, metering and shape as `/verify`. The ledger is one chain across every exhibit, so
+    `evidence_id` narrows what is reported, not what is checked: a link check confined to one
+    exhibit would call each of its rows an orphan. Called by the console's `btn-custody-verify`
+    (`wireCustodyVerify()` and `custodyVerdict()` in `static/app.js`).
     """
     pair = _hex_pair(anchor_id, anchor_hash, ("anchor_id", "anchor_hash"))
     report = verify_custody_chain(
@@ -292,12 +238,9 @@ def verify_custody(
         # no custody rows -- can never be read as a pass.
         "scoped": evidence_id is not None,
         "evidence_id": str(evidence_id) if evidence_id else None,
-        # The hash and id of the newest row in the WHOLE ledger, scoped run
-        # or not. Returned because they are the ONLY thing that reveals the
-        # blind spot the caveat below describes: recorded out of band and
-        # passed back as `anchor_id` and `anchor_hash`, a removed or
-        # rewritten anchored row is a break. Neither this service nor the CI
-        # step persists them: an operator has to.
+        # The newest row in the whole ledger, scoped run or not: recorded out of band and passed
+        # back as `anchor_id` and `anchor_hash`, they make a removed or rewritten anchored row a
+        # break. Nothing here or in CI persists them; an operator has to.
         "tail_row_hash": report.tail_row_hash,
         "tail_id": report.tail_id,
         "rows_in_ledger": report.total_rows,
@@ -309,16 +252,9 @@ def verify_custody(
             "rows_since": report.anchor.rows_since,
             "note": _anchor_note(report.anchor.status, unit="id", what="ledger"),
         },
-        # A caveat on EVERY run, not only the scoped ones. Until 2026-09-02
-        # an unscoped run returned `"caveat": null`, which reads as "nothing
-        # qualifies this answer" -- and the qualification that matters most
-        # is true of every run: the checks are all RELATIVE, so removing the
-        # newest custody rows leaves `intact: true` and no trace. An officer
-        # producing an exhibit under FRE 902(13)-(14) is entitled to that
-        # sentence beside the green tick, not after an incident. The scoped
-        # half also lost its promise that running without `evidence_id`
-        # would reveal a deletion: it does not, when the removed rows were
-        # the ledger's own tail.
+        # A caveat on every run, scoped or not: the checks are relative, so removing the newest
+        # custody rows leaves `intact: true` and no trace, and a null caveat would read as an
+        # unqualified pass.
         "caveat": (
             ("Scoped to one exhibit: LINK, FORK and CONTENT are each exact "
              "for the rows reported, because the predecessor lookup covers "
@@ -342,9 +278,8 @@ def verify_custody(
         ),
         "forks": len(report.forks),
         "fork_boundary_id": report.fork_boundary,
-        # The ids, not just the count. `fork_note` tells the officer a fork
-        # is worth investigating; until 2026-09-02 the response handed her
-        # nothing to investigate WITH, which is how a note stops being read.
+        # The ids, not just the count: `fork_note` says a fork is worth investigating, and these
+        # are what to investigate with.
         "fork_ids": [b.id for b in report.forks],
         "fork_note": (
             _FRESH_FORKS if fresh else _LEGACY_FORKS) if report.forks else None,
@@ -368,9 +303,8 @@ def verify_custody(
             {
                 "id": b.id,
                 "evidence_id": str(b.evidence_id) if b.evidence_id else None,
-                # NO_GENESIS describes a row that is NOT THERE, so it has no
-                # timestamp; an unconditional .isoformat() would 500 the
-                # endpoint on exactly the finding it exists to report.
+                # NO_GENESIS describes a row that is not there, so it has no timestamp; an
+                # unconditional .isoformat() would 500 on exactly the break it exists to report.
                 "occurred_at": (b.occurred_at.isoformat()
                                 if b.occurred_at else None),
                 "action": b.action,

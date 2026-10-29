@@ -1,5 +1,4 @@
-"""Send the queued detonations to the configured sandbox, once (F14,
-2026-09-24).
+"""Send the queued detonations to the configured sandbox, once.
 
     python scripts/sandbox_dispatch.py
 
@@ -12,29 +11,21 @@ paced to CAPE's own limit, each re-checked in the transaction that records
 the send, and the tasks already sent are polled and their reports recorded
 as machine SANDBOX analyses. Nothing is ever resent.
 
-The worker holds the sample store's credentials, the key ring and the
-sandbox token, and for one sample at a time its plaintext, ciphertext and
-archive in memory, so the API's whole production check runs before anything
-else (`config.refuse_unsafe_job_environment`, asked for `whole_environment`).
-
-Run it in a loop of its own, never the notification loop: the production
-compose file runs it in the lab-cron service beside
-scripts/sample_screen.py. A pass keeps to NOCTORNAL_SANDBOX_PASS_BUDGET_S
-(240 seconds by default), except that its first send may take that send's
-own deadline, so a large sample is never starved.
-
-Cron, every five minutes, from the install directory:
+The worker holds the sample store's credentials, the key ring and the sandbox token, and for one
+sample at a time its plaintext, ciphertext and archive in memory, so the API's whole production
+check runs before anything else (`config.refuse_unsafe_job_environment`, `whole_environment`). It
+runs in the lab-cron service, never the notification loop. A pass keeps to
+NOCTORNAL_SANDBOX_PASS_BUDGET_S (240 seconds by default), except that its first send may take that
+send's own deadline, so a large sample is never starved. Cron, every five minutes, from the
+install directory:
 
     */5 * * * *  cd /opt/noctornal && apps/api/.venv/bin/python \\
                  scripts/sandbox_dispatch.py >> /var/log/noctornal/sandbox_dispatch.log 2>&1
 
-Prints the counters on one line. Exits 0 when no sandbox is configured (the
-deployment's state, not a failure), and 1 when a setting is unusable, when
-the preflight refused (nothing was sent), or when a send failed, was not
-sent or lost its answer. Under NOCTORNAL_ENV=production an environment this
-worker will not run on exits 2 (the code every job gives that refusal,
-`config.JOB_REFUSAL_EXIT`), one line per problem on stderr led by
-`sandbox_dispatch: refusing to run:`, naming variables and never a value.
+Prints the counters on one line. Exits 0 when no sandbox is configured (the deployment's state,
+not a failure); 1 when a setting is unusable, the preflight refused (nothing was sent), or a send
+failed, was not sent or lost its answer; 2 (`config.JOB_REFUSAL_EXIT`) when the production
+environment is refused.
 """
 from __future__ import annotations
 
@@ -53,8 +44,8 @@ load_env_local()
 
 
 def main(argv: list[str] | None = None) -> int:
-    # It takes no options, and says so: `argv` was never read, so `--help`
-    # sent the queued detonations (2026-10-07).
+    # It takes no options, and says so: without a parser `--help` would send the queued
+    # detonations.
     argparse.ArgumentParser(
         description="Send the queued detonations to the configured sandbox, "
                     "once, and record the reports of those already sent."

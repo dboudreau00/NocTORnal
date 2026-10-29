@@ -1,21 +1,12 @@
-"""YARA rule sets over HTTP (F12, 2026-09-24).
+"""YARA rule sets over HTTP, mounted at `/samples/yara` before the samples router so no path here
+is read as a sample id.
 
-Mounted at `/samples/yara`, included in the app BEFORE the samples router
-so no path here is ever read as a sample id.
-
-Every route that names a set or a version first checks that the caller
-may see its set (`_ruleset_visible_or_404`): a set above the caller's
-labels answers exactly as one that does not exist. The officer's pending
-list is filtered by the officer's own ceiling, the /samples/preserved
-precedent.
-
-Two permissions that no role may hold together (iam.separated_duty):
-`sample.yara.manage` (the lab: create sets, upload and adopt versions,
-queue rescans) and `sample.yara.activate` (the Security Officer: activate
-or deactivate a version somebody else sponsored, clearing its licence).
-Both require a fresh sign-in, which `require_global` enforces from the
-permission rows. Reading rule text needs `sample.analyse` and sight of
-the set; the listing needs `sample.read` and never carries source.
+Every route naming a set or version first checks the caller may see the set
+(`_ruleset_visible_or_404`), so one above their labels answers as a missing one. Two permissions
+no role may hold together (iam.separated_duty), both needing a fresh sign-in: `sample.yara.manage`
+(the lab: sets, versions, rescans) and `sample.yara.activate` (the Security Officer: activate or
+deactivate a version somebody else sponsored, clearing its licence). Rule text needs
+`sample.analyse`; the listing needs `sample.read` and never carries source.
 """
 from __future__ import annotations
 
@@ -157,10 +148,8 @@ async def add_version(
     _ruleset_visible_or_404(conn, user, ruleset_id=ruleset_id)
     data = await file.read()
     try:
-        # Off the event loop: parsing a hostile zip is bounded, but it is
-        # still CPU work in the API process, and this route is async for
-        # the upload (on 2026-09-24 a bundle that got past the old
-        # preflight held the loop 30 s).
+        # Off the event loop: parsing a hostile zip is bounded but still CPU work in the API
+        # process, and this route is async for the upload.
         bundle = await run_in_threadpool(yara_rules.parse_bundle,
                                          file.filename, data)
     except yara_rules.BundleError as exc:
@@ -211,8 +200,7 @@ def get_version(
     """A version's metadata and this host's build report. No source."""
     found = _ruleset_visible_or_404(conn, user, version_id=version_id)
     found = {k: v for k, v in found.items() if k != "files"}
-    # This version alone, not the whole listing (until 2026-09-24 this
-    # view rebuilt every set's listing per request).
+    # This version alone, not every set's listing.
     v = yara_rules.RulesetService(conn).version_out(
         version_id, yara_rules.build_key())
     if v is None:

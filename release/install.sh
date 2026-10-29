@@ -42,21 +42,17 @@
 #
 set -euo pipefail
 
-# --help prints the comment block above and stops at its end. It was a
-# fixed line range, `sed -n '2,20p'`, which ran one line past the block and
-# printed `set -euo pipefail` as the last line of the usage text (Alpha 6
-# pre-release check, 2026-09-23). Reading to the first non-comment line
-# cannot drift when the header is edited.
+# --help prints the comment block above and stops at its end: reading to the first non-comment
+# line cannot drift when the header is edited, as a fixed line range would.
 usage() {
   awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
 }
 
 PORT=8000
 SKIP_LAUNCH=0
-# The optional extras (2026-09-24): installed only when asked for by
-# name, and then a failure is loud. "telegram" is Telethon, "yara" is
-# yara-x; neither is needed to run the API, and each one's absence is a
-# gap the readiness register shows.
+# The optional extras: installed only when asked for by name, and then a failure is loud.
+# "telegram" is Telethon, "yara" is yara-x; neither is needed to run the API, and each one's
+# absence is a gap the readiness register shows.
 WITH_TELEGRAM=0
 WITH_YARA=0
 PRODUCTION_STEP=0
@@ -182,19 +178,15 @@ describe_os() {
 
 RELEASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Whether this host already holds the production stack's database volume, asked
-# of Docker. Prints exists, new or unknown. Compose labels every volume it
-# makes with the key the compose file gives it (com.docker.compose.volume), so
-# the volume is found by that label and not by the name `<project>_<key>` spelt
-# out here, which was right for the project name the README starts it under and
-# wrong for any other given with `-p` (docs/17 "the volume name"). The key is
-# the one postgres mounts in infra/production/compose.yml, and a test holds the
-# two together. The documented name is asked as well, for a volume made by hand
-# under it, which Compose adopts without labels. "new" needs an engine that
-# answered and listed nothing; no docker, an engine that does not answer or a
-# refusal is "unknown", and the helper then asks the operator to choose the
-# owner's password instead of generating one for a database initdb may already
-# have fixed for good.
+# Whether this host already holds the production stack's database volume, asked of Docker.
+# Prints exists, new or unknown. Compose labels each volume with its compose key
+# (com.docker.compose.volume), so the volume is found by that label whatever project name `-p`
+# gave it; the key is the one postgres mounts in infra/production/compose.yml, and a test holds
+# the two together. The documented name is asked as well, for a volume made by hand under it,
+# which Compose adopts without labels. "new" needs an engine that answered and listed nothing;
+# no docker, an engine that does not answer or a refusal is "unknown", and the helper then asks
+# the operator to choose the owner's password instead of generating one for a database initdb
+# may already have fixed for good.
 production_database_state() {
   local listed
   command -v docker >/dev/null 2>&1 || { echo unknown; return 0; }
@@ -207,22 +199,18 @@ production_database_state() {
 }
 
 # ---------------------------------------------------------------------------
-# --production-secrets (docs/17 F52 and the limiter's Redis ACL, 2026-10-02)
+# --production-secrets
 #
-# A different job from everything below: it touches the production
-# deployment's secrets files and nothing else, so it runs before the
-# Windows refusal (which is about a virtual environment this does not
-# build) and exits. The work is scripts/production_secrets.py, the one
-# implementation install.ps1 calls too, run on the host's own python3: a
-# production host need not have this repository's virtual environment, and
-# the helper imports the standard library alone. It prints names, never a
+# A separate job: it touches the production deployment's secrets files and nothing else, so it
+# runs before the Windows refusal (which is about a virtual environment this does not build) and
+# exits. The work is scripts/production_secrets.py, the one implementation install.ps1 calls
+# too, run on the host's own python3: a production host need not have this repository's virtual
+# environment, and the helper imports the standard library alone. It prints names, never a
 # value, and backs up every file before it changes it.
 #
-# Whether the database volume exists decides one thing: an owner password
-# may be generated only for a volume initdb has not run on, because initdb
-# fixes it for good. Docker is asked, and only "no such volume" from an
-# engine that answers counts; anything else passes nothing, and the helper
-# asks the operator to choose the password instead of guessing.
+# An owner password may be generated only for a volume initdb has not run on, because initdb
+# fixes it for good. Docker is asked, and only "no such volume" from an engine that answers
+# counts; anything else passes nothing, and the helper asks the operator to choose the password.
 # ---------------------------------------------------------------------------
 if [[ $PRODUCTION_STEP -eq 1 ]]; then
   ROOT_DIR="$(dirname "$RELEASE_DIR")"
@@ -268,19 +256,9 @@ standard library only. Debian/Ubuntu:  sudo apt update && sudo apt install pytho
 fi
 
 # ---------------------------------------------------------------------------
-# Refuse to run on Windows.
-#
-# Git Bash, MSYS2 and Cygwin all provide a working bash on Windows, so this
-# script RUNS there — and then does damage, because a Windows virtualenv
-# puts its interpreter in Scripts/ rather than bin/. The "is there already a
-# venv?" check below therefore says no, and the script recreates an
-# environment over a working one.
-#
-# Found by doing exactly that during development. It only failed safe
-# because the API happened to be running and held python.exe open; with the
-# API stopped it would have replaced a working environment with a broken
-# one, and the error message names a venvlauncher copy rather than anything
-# a user could act on.
+# Refuse to run on Windows. Git Bash, MSYS2 and Cygwin provide a working bash there, but a
+# Windows virtualenv keeps its interpreter in Scripts/ rather than bin/, so the "is there already
+# a venv?" check below would say no and rebuild an environment over a working one.
 # ---------------------------------------------------------------------------
 case "$(uname -s 2>/dev/null || echo unknown)" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT)
@@ -296,11 +274,9 @@ esac
 
 printf '\n  NocTORnal - Beta Install\n'
 printf '  %s─────────────────────────%s\n' "$C_DIM" "$C_OFF"
-# Five, L1 to L5, as the root README's table has them, and a heading that
-# exists there. The banner said four and pointed at a "LEGAL STATUS"
-# section only release/README.md has. It names the README at the project
-# root in full because release/README.md is the one beside this script
-# and has no such heading (Alpha 6 pre-release check, 2026-09-23).
+# Five items, L1 to L5, as the root README's table has them, under a heading that exists there.
+# The banner names the README at the project root in full: release/README.md sits beside this
+# script and has no such heading.
 printf '  %sBeta software. Not audited. Five legal decisions (L1 to L5)%s\n' "$C_YELLOW" "$C_OFF"
 printf '  %sgate any use against real material: see "Five blocking items"%s\n' "$C_YELLOW" "$C_OFF"
 printf '  %sin the README.md at the project root. Installing is fine;%s\n' "$C_YELLOW" "$C_OFF"
@@ -312,19 +288,12 @@ printf '  changes nothing. If a step fails it says what to do, and running this\
 printf '  again is safe.\n'
 
 # ---------------------------------------------------------------------------
-# Locate the application. The release directory may sit inside the source
-# tree or beside it; resolve rather than assume, so a moved folder gives a
-# clear message instead of a confusing failure four steps later.
+# Locate the application, so a moved folder gives a clear message instead of a confusing failure
+# four steps later.
 # ---------------------------------------------------------------------------
 
-# THE PROJECT ROOT IS THE PARENT OF THIS DIRECTORY. Nothing else.
-#
-# This used to probe four candidates, the last a HARDCODED sibling folder
-# name (release finding R1) that resolved on exactly one machine and
-# produced "the application source could not be found" everywhere else.
-# The package is self-contained now: release/ lives inside the project
-# tree, so its parent IS the project. One rule, no search, no dependence
-# on what any adjacent directory is called or whether it exists.
+# The project root is the parent of this directory and nothing else: release/ sits inside the
+# project tree, so there is no search and no dependence on what a neighbouring folder is called.
 REPO_ROOT=""
 candidate="$(dirname "$RELEASE_DIR")"
 if [[ -f "$candidate/alembic.ini" ]]; then
@@ -370,29 +339,19 @@ for name in python3.13 python3.12 python3 python; do
   fi
   detail "found Python $ver at $(command -v "$name"), which is too old"
 done
-# `apt update` first, in this message and the venv one below: on a fresh
-# cloud image the package lists are empty and `apt install python3.12-venv`
-# answers "has no installation candidate" (Alpha 6 pre-release check,
-# 2026-09-23, on the clean VM).
+# `apt update` first, in this message and the venv one below: on a fresh cloud image the package
+# lists are empty and `apt install python3.12-venv` answers "has no installation candidate".
 [[ -n "$PYTHON" ]] || stop_with "Python 3.12 or newer was not found." \
   "Install Python 3.12 or newer, then run this installer again.
 Debian/Ubuntu:  sudo apt update && sudo apt install python3.12 python3.12-venv
 Fedora:         sudo dnf install python3.12
 macOS:          brew install python@3.12"
 
-# `venv` is a separate package on Debian-family systems and its absence
-# only shows up at the create step, with a message that does not name the
-# package. Check it here instead.
-#
-# ASK FOR ensurepip, NOT venv. `import venv` succeeds on a stock Ubuntu
-# 24.04 that cannot build an environment at all, because `venv/` ships in
-# python3-minimal while python3.12-venv carries `ensurepip` and the pip
-# wheel it installs. So this guard passed, said nothing, and the install
-# died two steps later inside `python -m venv` with a message in Python's
-# voice rather than this script's. Measured on a clean VM, 2026-09-17:
-# `import venv` exit 0, `import ensurepip` exit 1, `python3.12 -m venv`
-# non-zero. `venv` is still checked, because a stripped build could lack
-# either.
+# `venv` is a separate package on Debian-family systems, and its absence otherwise shows only at
+# the create step, in a message that does not name the package. ensurepip is asked for as well:
+# on a stock Ubuntu 24.04 `import venv` succeeds (venv/ ships in python3-minimal) while
+# `python -m venv` fails, because python3.12-venv carries ensurepip and the pip wheel. A
+# stripped build could lack either.
 missing_venv=""
 "$PYTHON" -c 'import venv'      >/dev/null 2>&1 || missing_venv="venv"
 "$PYTHON" -c 'import ensurepip' >/dev/null 2>&1 || missing_venv="${missing_venv:+$missing_venv and }ensurepip"
@@ -440,13 +399,9 @@ COMPOSE_VERSION="$(docker compose version --short 2>/dev/null </dev/null || true
 good "Docker:  ${DOCKER_VERSION:-version unknown}, engine running, Compose ${COMPOSE_VERSION:-v2} present"
 
 # ---------------------------------------------------------------------------
-# 1c. The port. A re-run while the API is already up says so here, before
-# anything is built, in this script's voice. It used to run every step and
-# then end in uvicorn's "[Errno 98] ... address already in use" and exit 3,
-# while INSTALL.md quoted a message only launch.ps1 printed (Alpha 6
-# pre-release check, 2026-09-23). bash's /dev/tcp connects without any extra
-# tool; a refused connection means the port is free. --skip-launch starts no
-# API, so a busy port is only reported then.
+# 1c. The port. A re-run while the API is already up says so here, before anything is built, in
+# this script's voice. bash's /dev/tcp connects without any extra tool; a refused connection
+# means the port is free. --skip-launch starts no API, so a busy port is only reported then.
 # ---------------------------------------------------------------------------
 
 PORT_BUSY=0
@@ -486,9 +441,6 @@ fi
 printf '\n'
 detail 'All good. Next it will:'
 detail '  build a private Python environment in the .venv folder'
-# On a re-run or an update the file is already there, and "write .env.local
-# with fresh random keys" read as if the keys just copied in were about to be
-# replaced (Beta 1 clean machine, 2026-10-07). Step 3 never replaces them.
 if [[ -f "$REPO_ROOT/.env.local" ]]; then
   detail '  keep your .env.local as it is (its keys are never replaced)'
 else
@@ -508,17 +460,9 @@ step 'Building the Python environment'
 if [[ -x "$VENV_PY" && -x "$VENV/bin/pip" ]]; then
   good '.venv already exists'
 elif [[ -x "$VENV_PY" ]]; then
-  # An interpreter but no pip: `python -m venv` got far enough to link the
-  # binaries and then failed at ensurepip. This is not someone's
-  # environment, it is the wreckage of an interrupted run of THIS script,
-  # and it is safe to remove.
-  #
-  # It used to be indistinguishable from a good one, because the test
-  # above was `-x "$VENV_PY"` alone and a half-built venv has bin/python.
-  # The second run therefore reported '.venv already exists', went on to
-  # install dependencies, and died with 'No module named pip' -- a message
-  # FURTHER from the cause than the first run's, and one that never
-  # mentioned the real fix again however many times it was re-run.
+  # An interpreter but no pip: `python -m venv` linked the binaries and then failed at
+  # ensurepip. That is the wreckage of an interrupted run of this script, safe to remove; kept,
+  # every later run would end in 'No module named pip'.
   note 'a previous run left a half-built .venv (no pip); rebuilding it'
   rm -rf "$VENV"
   detail 'creating .venv (this takes a moment)'
@@ -551,12 +495,9 @@ Nothing was left behind, so that is all that is needed."; }
 fi
 
 detail 'installing dependencies (a few minutes the first time)'
-# Every install below is held to constraints.txt, the exact versions the
-# release's suite passed on (sec-pin-dependencies, 2026-09-23). Without it
-# each `>=` in the pyproject files resolved to whatever was newest that day,
-# and the clean VM of the Alpha 6 check ran a newer stack than the one
-# tested. Checked for here, so a missing file is named as that and not as
-# "dependency installation failed" with pip's error scrolled past.
+# Every install below is held to constraints.txt, the exact versions the release's suite passed
+# on; without it each `>=` in the pyproject files resolves to whatever is newest that day.
+# Checked here, so a missing file is named as that and not as a failed dependency install.
 CONSTRAINTS="$REPO_ROOT/constraints.txt"
 [[ -f "$CONSTRAINTS" ]] || stop_with "constraints.txt is missing from $REPO_ROOT." \
   "Unpack the release again, or check out the whole repository, then run this
@@ -597,17 +538,15 @@ fi
 # ---------------------------------------------------------------------------
 # 4. Secrets
 # ---------------------------------------------------------------------------
-# Nothing in this system has a default secret. A missing value produces a
-# deliberate refusal, never an insecure fallback -- so these are generated
-# once, here, and left alone on every subsequent run.
+# Nothing in this system has a default secret: a missing value is refused, never filled with an
+# insecure fallback. So these are generated once, here, and left alone on every later run.
 
 step 'Creating your secret keys'
 ENV_LOCAL="$REPO_ROOT/.env.local"
 if [[ -f "$ENV_LOCAL" ]]; then
   good '.env.local already exists - left untouched'
-  # A collector process (2026-10-02): a file written before the persona
-  # key existed gains it, appended, with the inline mode this install runs
-  # in. Nothing already in the file is changed.
+  # A file written before the persona key existed gains it, appended, with the inline mode this
+  # install runs in. Nothing already in the file is changed.
   if ! grep -q '^NOCTORNAL_PERSONA_KEK=' "$ENV_LOCAL"; then
     PKEK="$("$VENV_PY" -c 'import base64, os; print(base64.b64encode(os.urandom(32)).decode())')"
     [[ -n "$PKEK" ]] || stop_with 'Could not generate the persona key.' \
@@ -621,19 +560,10 @@ The Python in the virtual environment produced nothing.'
     good 'added the persona key to .env.local'
   fi
 else
-  # CHECKED before anything is written. `set -euo pipefail` already stops
-  # the script if the interpreter EXITS non-zero, which covers most of it
-  # -- but not an interpreter that exits 0 and prints nothing, and not one
-  # that prints a warning to stdout ahead of the value. Either way the
-  # file would be written with an empty or malformed key while the
-  # installer announced fresh random keys.
-  #
-  # And the failure LATCHES: every later run takes the `-f "$ENV_LOCAL"`
-  # branch and reports "left untouched", so a half-failed first install is
-  # permanent and is reported as a success twice. Refusing before the write
-  # leaves no file, so re-running is the fix. install.ps1 carries the same
-  # checks, where they matter more -- `& cmd` there does not stop the
-  # script at all.
+  # Checked before anything is written. `set -e` stops on an interpreter that exits non-zero,
+  # but not on one that exits 0 and prints nothing, or prints a warning ahead of the value, and
+  # a file written with a bad key would stay: every later run takes the "left untouched" branch.
+  # Refusing before the write leaves no file, so a re-run is the fix.
   KEK="$("$VENV_PY" -c 'import base64, os; print(base64.b64encode(os.urandom(32)).decode())')"
   PEPPER="$("$VENV_PY" -c 'import secrets; print(secrets.token_urlsafe(32))')"
   # Length, not just presence: envelope.py requires exactly 32 bytes and
@@ -648,8 +578,8 @@ else
 The Python in the virtual environment did not produce a usable key.
 Run \"$VENV_PY -c 'import base64, os'\" to see the real error."
   fi
-  # The persona key (A collector process, 2026-10-02), checked as the TOTP
-  # key is: the persona ring refuses anything but 32 bytes at run time.
+  # The persona key, checked as the TOTP key is: the persona ring refuses anything but 32 bytes
+  # at run time.
   PKEK="$("$VENV_PY" -c 'import base64, os; print(base64.b64encode(os.urandom(32)).decode())')"
   PKEK_BYTES="$(printf '%s' "$PKEK" | "$VENV_PY" -c \
     'import base64,sys; print(len(base64.b64decode(sys.stdin.read().strip())))' \
@@ -664,24 +594,14 @@ The Python in the virtual environment did not produce a usable key."
 "Run this installer again. Nothing was written, so that is safe.
 The Python in the virtual environment produced nothing."
   fi
-  # R9: the SERVICE CONFIG is persisted too, not just the secrets. These
-  # used to be exported into this script's own shell and lost when it
-  # exited, so every documented "second terminal" command failed for a
-  # fresh recipient. bootstrap.py reads this file now.
-  #
-  # R11: the SMTP values make the advertised Mailpit demo actually work --
-  # the default port in transports.py is 587 and Mailpit listens on 1025.
-  #
-  # 127.0.0.1, not localhost, in every address below. The dev stack
-  # publishes its ports on 127.0.0.1 only, so nothing answers on ::1, and a
-  # client that resolves localhost to ::1 first (the Windows default order)
-  # waits about two seconds for each refused attempt before trying IPv4
-  # (Alpha 6 pre-release check, 2026-09-23). The header names everything
-  # the two secrets protect, from security/sealed.py's SEALED_COLUMNS and
-  # ingest.py's HMAC; it named only authenticators and ingest keys.
-  # Private from the first byte (infra-9, 2026-10-03): the file is created
-  # under umask 077, so the key store is never world-readable between this
-  # write and the chmod below, which stays as the belt.
+  # The service configuration is written too, not just the secrets: every script reads this
+  # file (scripts/_env.py), so the documented second-terminal commands work in a fresh shell.
+  # The SMTP values point the Mailpit demo at port 1025 (transports.py defaults to 587). Every
+  # address is 127.0.0.1, not localhost: the dev stack publishes on 127.0.0.1 only, and a client
+  # that tries ::1 first (the Windows default) waits about two seconds for each refusal. The
+  # header names everything each key protects (security/sealed.py's SEALED_COLUMNS and
+  # ingest.py's HMAC). The file is created under umask 077, so the key store is never readable
+  # by others before the chmod below, which stays as the belt.
   PREVIOUS_UMASK="$(umask)"
   umask 077
   cat > "$ENV_LOCAL" <<EOF
@@ -761,29 +681,20 @@ EOF
   note 'again. Its header lists what each secret protects.'
 fi
 
-# Read .env.local as DATA, never run it (infra-9, 2026-10-03). This line was
-# `set -a; . "$ENV_LOCAL"; set +a`, which EXECUTES the file: a .env.local
-# that was handed over, restored from a backup or edited by hand ran as this
-# user, and a value with a `$`, an `&`, a `;` or a space was mangled or run.
-# launch.sh, scripts/_env.py and launch.ps1 already parse the same file line
-# by line for that reason. The file's value wins over the environment here,
-# as sourcing made it win: this installer migrates and seeds whatever the
-# file names, and an exported DATABASE_URL pointing somewhere else must not
-# receive them. The tests extract this function and run it
-# (apps/api/tests/test_g48_install_env_data.py).
+# Read .env.local as data, never run it: sourcing executes the file, so a handed-over, restored
+# or hand-edited one would run as this user, and a value with a `$`, `&`, `;` or space would be
+# mangled or run. The file's value wins over the environment: this installer migrates and seeds
+# whatever the file names, and an exported DATABASE_URL pointing elsewhere must not receive
+# them. The tests extract this function and run it.
 #
-# A name that changes how programs start is left out (2026-10-03). Reading the file as data
-# stops it running as shell syntax, but
-# the loop still exported any identifier in it, and the file's value wins over
-# the environment here: `PYTHONPATH=./evil` (with a sitecustomize.py),
-# `PATH=./evilbin`, `LD_PRELOAD=./evil.so` or `BASH_ENV=./evil.sh` ran code as
-# the installing user in the next python or shell the installer starts. So did
-# the tools it starts (2026-10-07): `DOCKER_CONFIG` held a
-# fake `cli-plugins/docker-compose` that `docker compose` ran as root, hence
-# `DOCKER_`, `COMPOSE_`, `GIT_`, `PIP_`, `NODE_` and `PSModulePath` as well. Not an
-# allow-list on purpose: a new setting would silently stop loading. The same
-# list is in scripts/_env.py, scripts/launch.sh, scripts/launch.ps1 and
-# scripts/open-ui.ps1, and a test holds them to each other.
+# A name that changes how programs start is left out, since the file's value would win:
+# `PYTHONPATH=./evil` (with a sitecustomize.py), `PATH=./evilbin`, `LD_PRELOAD=./evil.so` or
+# `BASH_ENV=./evil.sh` would run code as the installing user in the next python or shell, and a
+# `DOCKER_CONFIG` holding a fake `cli-plugins/docker-compose` would have `docker compose` run it
+# as root; hence `DOCKER_`, `COMPOSE_`, `GIT_`, `PIP_`, `NODE_` and `PSModulePath` as well. Not
+# an allow-list on purpose: a new setting would silently stop loading. The same list is in
+# scripts/_env.py, scripts/launch.sh, scripts/launch.ps1 and scripts/open-ui.ps1, and a test
+# holds them to each other.
 load_env_local_as_data() {
   local file="$1" line name value upper first=1
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -818,10 +729,8 @@ load_env_local_as_data() {
 }
 load_env_local_as_data "$ENV_LOCAL"
 
-# The same 127.0.0.1 addresses as the file above, for a .env.local that
-# lacks a line. An existing .env.local is never rewritten, so one written
-# before Alpha 6 keeps localhost until its owner edits it (Alpha 6
-# pre-release check, 2026-09-23).
+# The same 127.0.0.1 addresses as the file above, for a .env.local that lacks a line. An
+# existing .env.local is never rewritten, so an older one keeps the addresses it holds.
 export DATABASE_URL="${DATABASE_URL:-postgresql+psycopg://noctornal:dev_only_change_me@127.0.0.1:5432/noctornal}"
 export REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}"
 export MINIO_ENDPOINT="${MINIO_ENDPOINT:-127.0.0.1:9000}"
@@ -855,29 +764,13 @@ that holds the ports:
     docker compose -f infra/docker-compose.yml down"
 
 detail 'waiting for Postgres to report healthy'
-# R17 (2026-07-26): the loop had no failure branch. Sixty exhausted probes
-# simply fell through to the migrations, which then died with a raw psycopg
-# traceback that reads as a broken install. `docker compose up -d` used to
-# block on the postgres healthcheck via openfga-migrate's service_healthy
-# condition, which MASKED this — and R13 removes OpenFGA, so the branch has
-# to go in with that change rather than after it.
-# `< /dev/null` IS LOAD-BEARING. `docker compose exec` forwards the
-# parent's stdin to the container even with -T, which disables the TTY and
-# not the attach, so sixty iterations of this loop drained whatever the
-# installer was given. The account prompt below then read EOF, and under
-# `set -e` the script ended there: no account, no API, exit 1, and the
-# last thing printed was "Email: " with nothing after it. Every
-# non-interactive install hit it (piped input, cron, CI, cloud-init,
-# Ansible, ssh without a TTY); nobody typing at a terminal ever did,
-# because a pty does not reach EOF, which is why this stood for so long.
-# Measured on a clean VM, 2026-09-17: one `exec -T` left `read` with
-# nothing, while `compose up -d` left it intact.
-# `-h 127.0.0.1` IS LOAD-BEARING TOO (2026-09-30). On a fresh volume the
-# image runs a TEMPORARY server for its init scripts, reachable only over
-# the Unix socket, then stops it and starts the real one. A probe without
-# -h answers on that socket, so the installer migrated in the gap and died
-# with "the database system is starting up". Over TCP only the real
-# server answers, as the compose healthcheck does.
+# Sixty probes, then a clear failure rather than a raw psycopg traceback from the migrations.
+# `< /dev/null` matters: `docker compose exec` forwards the parent's stdin even with -T (which
+# drops the TTY, not the attach), so the loop would drain the installer's input, and in every
+# non-interactive install the account prompt below would read EOF and end the script under
+# `set -e`. `-h 127.0.0.1` matters too: on a fresh volume the image runs a temporary server for
+# its init scripts on the Unix socket only, and a socket probe would let the migrations start
+# in the gap and fail with "the database system is starting up".
 PG_READY=0
 for _ in $(seq 1 60); do
   if docker compose -f "$REPO_ROOT/infra/docker-compose.yml" \
@@ -916,11 +809,9 @@ step 'Setting up the database'
 good "at $( cd "$REPO_ROOT" && "$VENV/bin/alembic" current 2>/dev/null | tail -1 )"
 
 # ---------------------------------------------------------------------------
-# Step 6: the first account. The password and the QR code are printed once by
-# bootstrap.py, so when a person is at the keyboard the installer WAITS here
-# until they say they have saved them: nothing printed later can push them off
-# the screen. (install.ps1 used to hand off to launch.ps1, whose server log did
-# exactly that: release finding R8.)
+# Step 6: the first account. bootstrap.py prints the password and the QR code once, so when a
+# person is at the keyboard the installer waits here until they say they have saved them, and
+# nothing printed later can push them off the screen.
 # ---------------------------------------------------------------------------
 
 step 'Creating your account'
@@ -937,25 +828,16 @@ PY
 ADMIN_EMAIL=""; ADMIN_NAME=""
 ACCOUNT_CREATED=0
 if [[ "$USERS" == "0" ]]; then
-  # R4 (2026-07-26): this called `bootstrap.py init`, which does not
-  # exist -- argparse exits 2 and `set -e` then killed the install at the
-  # account step, on every clean machine. The real command is
-  # `create-user`, which is flag-driven and GENERATES the password rather
-  # than asking for one, so the prompt below matches what happens.
+  # `bootstrap.py create-user` is flag-driven and generates the password rather than asking for
+  # one, so the prompt below asks only for an address and a name.
   note 'No account exists yet. Creating one.'
   detail 'Enter your email address (you sign in with it) and a display name.'
   detail 'A strong password is made for you and shown once, with a QR code'
   detail 'for an authenticator app (any TOTP app on your phone will do).'
   printf '\n'
-  # `|| true` is not decoration either. `read` returns non-zero at EOF,
-  # and `set -e` acts on that BEFORE the emptiness test below, so the
-  # branch written to handle "they gave nothing" was unreachable: the
-  # script simply stopped, mid-sentence, with no message at all. Anything
-  # that is not a terminal reaches EOF here.
-  #
-  # A person at the keyboard gets three tries at an address that is not one.
-  # Standard input that is not a terminal is read once, as it always was:
-  # the harness feeds an email, then a name, and nothing else.
+  # `|| true` matters: `read` returns non-zero at EOF, and `set -e` would end the script there,
+  # silently, before the emptiness test below. A person at the keyboard gets three tries at an
+  # address; input that is not a terminal is read once (an email, then a name).
   for _attempt in 1 2 3; do
     printf '    Email: '
     read -r ADMIN_EMAIL || true
@@ -1011,11 +893,9 @@ DEMO_CODE_NAME="OP-LATTICEWORK-26"
 DEMO_DECISION="$(decide_demo "$DEMO_MODE" "$INTERACTIVE" "$ACCOUNT_CREATED")"
 DEMO_LOADED=0
 DEMO_OWNER="$ADMIN_EMAIL"
-# Already there from an earlier run: said so, and neither loaded again nor
-# offered "later" on the card. A re-run with --demo printed bootstrap's "case
-# code 'OP-LATTICEWORK-26' is already in use", then the card's command to load
-# it, which fails the same way (Beta 1 clean machine, 2026-10-07). An answer
-# that cannot be read changes nothing.
+# A demo case already there from an earlier run is reported, and neither loaded again (its case
+# code is taken) nor offered for later on the closing card. An answer that cannot be read
+# changes nothing.
 DEMO_PRESENT="$( cd "$REPO_ROOT" && "$VENV_PY" - "$DEMO_CODE_NAME" 2>/dev/null <<'PY'
 import os
 import sys
@@ -1073,14 +953,9 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 8: start the API, and say what to do next.
-#
-# The port was checked in step 1, so a re-run while the API is already up said
-# what was wrong before anything was built. The Security Officer count is
-# read, not assumed, so a re-run on a stack that has one says nothing about
-# it; a count that cannot be read prints the advice anyway, because it costs
-# less than a blocked collection nobody can explain (Alpha 6 pre-release
-# check, 2026-09-23).
+# Step 8: start the API, and say what to do next. The Security Officer count is read, not
+# assumed, so a re-run on a stack that has one says nothing about it; a count that cannot be
+# read prints the advice anyway, which costs less than a blocked collection nobody can explain.
 # ---------------------------------------------------------------------------
 
 step 'Starting the API'
@@ -1154,11 +1029,9 @@ if [[ "$OFFICERS" == "0" || -z "$OFFICERS" ]]; then
   warn 'Nobody holds the Security Officer role yet, so collection runs and break-glass'
   warn 'are refused. That does not matter for the demo. To fix it, give the role to a'
   warn 'second person, not to your own account (release/INSTALL.md, "After installing"):'
-  # security.officer@, not officer@: officer@example.org is the account
-  # seed_readme_showcase.py creates, so after the README recipe this
-  # command exited 1 with "already exists", and run first it would have
-  # made the seeder adopt the real officer (Alpha 6 pre-release check,
-  # 2026-09-23).
+  # security.officer@, not officer@: seed_readme_showcase.py creates officer@example.org, so
+  # after the README recipe that address already exists, and before it the seeder would adopt
+  # the real officer.
   printf '      .venv/bin/python scripts/bootstrap.py create-user --email security.officer@example.org --name "Officer Name" --roles SECURITY_OFFICER\n'
 fi
 printf '\n'

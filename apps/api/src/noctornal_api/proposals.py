@@ -1,42 +1,19 @@
 """Proposals: machines propose, analysts dispose (invariant 3, docs/01).
 
-The third of the three ideas everything follows from, and until now the
-only one with no enforcement anywhere. `collect.proposal` has existed since
-Phase 0 and nothing has ever written it, because nothing extracts yet — so
-the invariant was true by accident rather than by construction.
+docs/02 marks where the pipeline stops: proposal rows wait for human review, and only an accepted
+proposal becomes a node, edge or assertion. The stop is load-bearing, because auto-ingestion
+produces a network that looks impressive and means nothing (it is mostly forum boilerplate, quoted
+text and signature blocks).
 
-docs/02 draws the pipeline and marks where it stops:
+`ProposalStore.propose()` is the ONLY thing an extractor may call. It writes to `collect.proposal`
+and cannot reach `core.node` or `core.edge`: it holds no `GraphWriteService` and takes no actor,
+because a machine is not an actor who can be accountable for a graph element.
 
-    extractors -> extraction rows (selectors with offsets)
-      -> watch matcher -> watch_hit -> notification
-      -> proposal generator -> proposal rows          <- STOPS HERE
-      -> ------- human review -------
-      -> accepted proposal -> node / edge / assertion
-
-And says why the stop is load-bearing:
-
-    Auto-ingestion into the graph produces a network that looks impressive
-    and means nothing, because it is mostly forum boilerplate, quoted text
-    and signature blocks.
-
-This module is the "STOPS HERE" line, expressed as code. Two halves:
-
-**`ProposalStore.propose()`** is the ONLY thing an extractor may call. It
-writes to `collect.proposal` and physically cannot reach `core.node` or
-`core.edge` — it holds no `GraphWriteService` and takes no actor, because
-a machine is not an actor who can be accountable for a graph element.
-
-**`ProposalReview.accept()`** is the only path from a proposal into the
-graph, and it requires a human `reviewed_by`. It applies the proposal
-through `GraphWriteService`, so the element and its assertion commit
-together exactly as a hand-built one does (invariant 1) — an accepted
-proposal is not a privileged back door into the graph, it is an analyst
-making a claim with a machine's suggestion as its basis.
-
-The assertion an accepted proposal creates carries basis
-`AUTOMATED_INFERENCE` with the proposer's rationale, so the graph never
-forgets that a machine suggested it. docs/03: "A bare 0.87 similarity
-score is not [useful], and will be either over-trusted or ignored."
+`ProposalReview.accept()` is the only path from a proposal into the graph, and it requires a human
+`reviewed_by`. It applies the proposal through `GraphWriteService`, so the element and its assertion
+commit together exactly as a hand-built one does (invariant 1). The assertion carries basis
+`AUTOMATED_INFERENCE` with the proposer's rationale, so the graph never forgets that a machine
+suggested it (docs/03).
 """
 from __future__ import annotations
 
@@ -105,27 +82,17 @@ def accepted_classification(payload: dict | None, requested: str | None,
                             floor: str | None = None) -> str:
     """The label an accepted NODE or EDGE proposal is written at.
 
-    One expression, used by `ProposalReview.accept` to write the element
-    AND by the accept route to check it against the reviewer's clearance
-    first. They were two copies of nothing: the route checked no label at
-    all, so a reviewer could accept at a classification above their own
-    and author an element they could then neither see nor correct (final
-    review C12, 2026-09-23). Keeping the rule here means the label that is
-    checked is the label that is written.
+    One expression, used by `ProposalReview.accept` to write the element AND by the accept route to
+    check it against the reviewer's clearance first, so the label that is checked is the label that
+    is written.
 
-    The default is the label of what the proposal came from, never below
-    the case's floor (ux08-triage:accept-downgrades-classification and the
-    owner's gap-capture-classification decision, 2026-09-23). An analyst
-    who captured a RED thread and pressed Accept got AMBER selectors: the
-    capture's classification was stored on the document and never reached
-    the proposal, and this fell back to AMBER. `source` is the strictest
-    label of the captured document or contact block behind the proposal
+    The default is the label of what the proposal came from, never below the case's floor. `source`
+    is the strictest label of the captured document or contact block behind the proposal
     (`ProposalStore.source_labels`), `floor` is the case's own.
 
-    A reviewer may RAISE the label and may not lower it below that
-    default. Accepting a RED capture's selector at GREEN is a handling
-    downgrade, and one made by a keystroke in a queue is exactly the kind
-    nobody would notice, so it is refused rather than written.
+    A reviewer may RAISE the label and may not lower it below that default. Accepting a RED
+    capture's selector at GREEN is a handling downgrade, and one made by a keystroke in a queue is
+    exactly the kind nobody would notice, so it is refused rather than written.
     """
     declared = strictest((payload or {}).get("classification"), source)
     base = strictest(declared or DEFAULT_CLASSIFICATION, floor)
@@ -152,14 +119,12 @@ def case_compartments(conn: psycopg.Connection,
 
 def element_compartments(labels: SourceLabels,
                          case_compartments) -> list[str]:
-    """The compartments an accepted NODE or EDGE carries: its material's,
-    beyond its case's own (L1, 2026-09-24).
+    """The compartments an accepted NODE or EDGE carries: its material's, beyond its case's own.
 
-    One expression, used by `ProposalReview.accept` to write the element
-    and by the accept route to hold the reviewer to it first, as
-    `accepted_classification` is for the label. The case's own keys are
-    not copied: every read of an element passes its case's gate, and the
-    other elements of a compartmented case carry none of them."""
+    One expression, used by `ProposalReview.accept` to write the element and by the accept route to
+    hold the reviewer to it first, as `accepted_classification` is for the label. The case's own
+    keys are not copied: every read of an element passes its case's gate, and the other elements of
+    a compartmented case carry none of them."""
     return sorted(labels.compartments - frozenset(case_compartments or ()))
 
 
@@ -175,32 +140,19 @@ def attribute_label_problem(payload: dict | None, labels: SourceLabels,
                             entity_classification: str | None,
                             entity_compartments=(), *,
                             case_compartments=()) -> str | None:
-    """Why an ATTRIBUTE claim may not be attached to this entity, or None
-    when it may.
+    """Why an ATTRIBUTE claim may not be attached to this entity, or None when it may.
 
-    Final review c1 (2026-09-24). An ATTRIBUTE accept writes an assertion
-    onto an entity that already exists, and `core.assertion` has no labels
-    of its own: whoever may read the entity reads the claim, its value and
-    its rationale, which quotes where the material was found. The
-    gap-capture fix raised NODE and EDGE to what they came from and left
-    this kind at the entity's label, so a RED contact block in STEALER-2026
-    naming a CLEAR publisher put its Tox ID and forum URL in front of every
-    CLEAR reader of that publisher, while the queue hid the same proposal
-    from them and the card wore TLP:RED. An accepted element is never
-    labelled below what it was found in (owner's rule), and a claim cannot
-    raise the entity it lands on, so it is refused instead. One rule, read
-    by the accept route, the service and the card, as
+    An ATTRIBUTE accept writes an assertion onto an entity that already exists, and `core.assertion`
+    has no labels of its own: whoever may read the entity reads the claim, its value and its
+    rationale, which quotes where the material was found. An accepted element is never labelled
+    below what it was found in, and a claim cannot raise the entity it lands on, so such a claim is
+    refused. One rule, read by the accept route, the service and the card, as
     `accepted_classification` is for NODE and EDGE.
 
-    `case_compartments` are the compartments of the case the ENTITY is in
-    (L1, 2026-09-24). Every read of an entity passes its case's gate, so
-    whoever reads the entity already holds its case's keys
-    (security/access.py), and an entity's effective compartments are its
-    own and its case's. Once a capture into a compartmented case carries
-    the case's keys, comparing with the entity's own alone would refuse
-    every claim cited to that case's material onto that case's own
-    entities. The service refuses an entity outside the proposal's case,
-    so this cannot reach one elsewhere.
+    `case_compartments` are the compartments of the case the ENTITY is in. Every read of an entity
+    passes its case's gate, so whoever reads the entity already holds its case's keys
+    (security/access.py), and an entity's effective compartments are its own and its case's. The
+    service refuses an entity outside the proposal's case, so this cannot reach one elsewhere.
     """
     need = strictest((payload or {}).get("classification"), labels.source)
     held = (frozenset(entity_compartments or ())
@@ -237,17 +189,15 @@ class ProposalRow:
     applied_node_id: UUID | None
     applied_edge_id: UUID | None
     created_at: datetime
-    #: The assertion an accept wrote. Not a column: set only on the row
-    #: `ProposalReview.accept` returns, so the console can offer an Undo
-    #: for an ATTRIBUTE claim, which creates no element to retire
-    #: (ux08-triage:triage-keys-fire-on-browser-chords, 2026-09-23).
+    #: The assertion an accept wrote. Not a column: set only on the row `ProposalReview.accept`
+    #: returns, so the console can offer an Undo for an ATTRIBUTE claim, which creates no element to
+    #: retire.
     applied_assertion_id: UUID | None = None
-    #: The lookup answer this proposal was raised from (F15.3, 2026-09-24;
-    #: migration 0100). None for every other source.
+    #: The lookup answer this proposal was raised from (migration 0100). None for every other
+    #: source.
     lookup_result_id: UUID | None = None
-    #: Not a column: set only on the row an accept returns, when the
-    #: accepted selector is already held by another entity in the index (a
-    #: merge lead; graph-selector-index-drift, 2026-10-03).
+    #: Not a column: set only on the row an accept returns, when the accepted selector is already
+    #: held by another entity in the index (a merge lead).
     selector_owner_id: UUID | None = None
 
 
@@ -258,7 +208,7 @@ def _row(r) -> ProposalRow:
         state=r[7], document_id=r[8], reviewed_by=r[9], reviewed_at=r[10],
         review_note=r[11], applied_node_id=r[12], applied_edge_id=r[13],
         created_at=r[14],
-        lookup_result_id=r[15] if len(r) > 15 else None,  # F15.3
+        lookup_result_id=r[15] if len(r) > 15 else None,
     )
 
 
@@ -273,30 +223,22 @@ _SELECT = """SELECT id, case_id, kind, payload, origin, score, rationale,
 #: `test_triage_inbox_pg.py` holds the two equal.
 CHANGE_CHANNEL = "noctornal_change"
 
-#: The labels of what a proposal came from, joined once for every read
-#: that must filter or show them (ux08-triage:accept-downgrades-
-#: classification, 2026-09-23). Three sources, the strictest wins, as
-#: SQL's GREATEST ignores the absent ones:
+#: The labels of what a proposal came from, joined once for every read that must filter or show
+#: them. Three sources, the strictest wins, as SQL's GREATEST ignores the absent ones:
 #:
-#: - the payload's own `classification`, which a capture writes since
-#:   this fix and a hand-built proposal may carry;
-#: - the captured document's (`collect.document.classification`), which
-#:   covers every capture raised before the payload carried it, and its
-#:   compartments since L1 (2026-09-24, `_SOURCE_COMPARTMENTS`);
-#: - the contact block's, with its compartments, for an ATTRIBUTE claim
-#:   parsed from one (`comms.contact_block_entry.proposal_id`).
+#: - the payload's own `classification`, which a capture writes and a hand-built proposal may carry;
+#: - the captured document's (`collect.document.classification`) and its compartments
+#:   (`_SOURCE_COMPARTMENTS`);
+#: - the contact block's, with its compartments, for an ATTRIBUTE claim parsed from one
+#:   (`comms.contact_block_entry.proposal_id`).
 #:
-#: The queue read `collect.proposal` alone, so a RED capture's rationale,
-#: which quotes 45 characters either side of each match, was shown to any
-#: reader of the case whatever their clearance.
+#: A queue reading `collect.proposal` alone would show a RED capture's rationale, which quotes 45
+#: characters either side of each match, to any reader of the case whatever their clearance.
 #:
-#: The document's and the contact block's labels come from
-#: `iam.element_facts` (S1, 2026-09-25), not joins to `collect.document`
-#: and `comms.contact_block`: under row-level security a LEFT JOIN to a
-#: row the reader may not see reads as no row at all, and the
-#: strictest-of below would then LOWER the proposal to what is left. The
-#: lookup answer's label comes from `iam.lookup_result_facts` for the same
-#: reason, since the answer went under policy (F51, 2026-10-02).
+#: The document's and the contact block's labels come from `iam.element_facts`, not joins to
+#: `collect.document` and `comms.contact_block`: under row-level security a LEFT JOIN to a row the
+#: reader may not see reads as no row at all, and the strictest-of would then LOWER the proposal to
+#: what is left. The lookup answer's label comes from `iam.lookup_result_facts` for the same reason.
 _SOURCE_FROM = """
     FROM collect.proposal p
     JOIN core."case" c ON c.id = p.case_id
@@ -312,16 +254,14 @@ _PAYLOAD_CLS = f"""CASE WHEN p.payload->>'classification' IN
 #: The label a READER must dominate: everything the proposal's text could
 #: carry, and the case it sits in.
 _READ_LABEL = (f"greatest({_PAYLOAD_CLS}, d.classification, b.classification, "
-               f"lr.classification, c.classification)")  # lr: F15.3
+               f"lr.classification, c.classification)")
 
-#: The compartments of what a proposal came from: its captured document's
-#: and its contact block's (L1, 2026-09-24). A capture into a compartmented
-#: case now carries the case's keys, and a proposal's rationale quotes the
-#: document, so a reader must hold them to see the proposal at all. One
-#: expression for every read and for `source_labels`, so the queue, the
-#: counts, the source view and the accept default cannot disagree about
-#: them. A later source leg (F15.3) extends THIS expression
-#: and `_SOURCE_FROM`, never a second join.
+#: The compartments of what a proposal came from: its captured document's and its contact block's. A
+#: capture into a compartmented case carries the case's keys, and a proposal's rationale quotes the
+#: document, so a reader must hold them to see the proposal at all. One expression for every read
+#: and for `source_labels`, so the queue, the counts, the source view and the accept default cannot
+#: disagree about them. A later source leg extends THIS expression and `_SOURCE_FROM`, never a
+#: second join.
 _SOURCE_COMPARTMENTS = ("(coalesce(d.compartments, '{}'::text[]) "
                         "|| coalesce(b.compartments, '{}'::text[]))")
 
@@ -344,25 +284,18 @@ class SourceLabels:
 def announce(conn: psycopg.Connection, case_id: UUID, proposal_id: UUID) -> None:
     """Tell the live channel this case's triage queue changed.
 
-    ux08-triage:stale-badges-and-list (2026-09-23). The Triage badge is
-    the one signal that work is waiting, and nothing moved it until the
-    case was reopened: migration 0045 put change triggers on node, edge
-    and notification and none on `collect.proposal`, and a schema change
-    is not this fix's to make. So the two classes that write the queue
-    announce it themselves. Like the triggers, the event carries no
-    content, only "case X, kind proposal"; the console refetches through
-    the gated route. Inside a transaction Postgres folds identical
-    notifications into one, which is why a capture raises its proposals
-    in one.
+    The Triage badge is the one signal that work is waiting, so the two classes that write the queue
+    announce it themselves (the change triggers cover node, edge and notification, not
+    `collect.proposal`). Like the triggers, the event carries no content, only "case X, kind
+    proposal"; the console refetches through the gated route. Inside a transaction Postgres folds
+    identical notifications into one, which is why a capture raises its proposals in one.
 
-    The hint names the labels of the proposal that changed (2026-10-07, as 0146 does for a
-    node or an edge): its read label and
-    the compartments of what it came from, the same expressions the queue
-    filters on. The live channel drops the hint for a reader who could not
-    read that proposal, so a case reader is not woken when a proposal above
-    their labels is queued: a timing channel, though a content-free one.
-    The labels are for that decision and never reach a client. One
-    statement, so a capture still pays one round trip per proposal.
+    The hint names the labels of the proposal that changed, as 0146 does for a node or an edge: its
+    read label and the compartments of what it came from, the same expressions the queue filters on.
+    The live channel drops the hint for a reader who could not read that proposal, so a case reader
+    is not woken when a proposal above their labels is queued (a timing channel, though a
+    content-free one). The labels are for that decision and never reach a client. One statement, so
+    a capture pays one round trip per proposal.
     """
     conn.execute(
         "SELECT pg_notify(%(channel)s, json_build_object("
@@ -392,7 +325,7 @@ class ProposalStore:
         rationale: str,
         score: float | None = None,
         document_id: UUID | None = None,
-        lookup_result_id: UUID | None = None,  # F15.3
+        lookup_result_id: UUID | None = None,
     ) -> UUID:
         """Record a machine's suggestion. Never touches the graph.
 
@@ -432,14 +365,13 @@ class ProposalStore:
               limit: int = 100, clearance: str | None = None,
               compartments: frozenset[str] = frozenset(),
               ) -> list[ProposalRow]:
-        """The triage queue. Ordered by score DESC so the most confident
-        suggestions surface first — but score is a hint about ordering, not
-        about truth, and nothing here is applied without a person.
+        """The triage queue. Ordered by score DESC so the most confident suggestions surface first,
+        but score is a hint about ordering, not about truth, and nothing here is applied without a
+        person.
 
-        With `clearance`, only the proposals whose source labels the reader
-        dominates (`_READABLE`, ux08-triage:accept-downgrades-
-        classification, 2026-09-23). Filtered in SQL, so a page is never
-        short and the LIMIT counts what the reader actually gets."""
+        With `clearance`, only the proposals whose source labels the reader dominates (`_READABLE`).
+        Filtered in SQL, so a page is never short and the LIMIT counts what the reader actually
+        gets."""
         where, params = self._scope(case_id, clearance, compartments)
         params.update(state=state, limit=limit)
         rows = self._c.execute(
@@ -471,7 +403,7 @@ class ProposalStore:
         floor: what an accept writes by default and the least it may."""
         row = self._c.execute(
             "SELECT greatest(d.classification, b.classification, "
-            "lr.classification), "  # F15.3
+            "lr.classification), "
             "c.classification, " + _SOURCE_COMPARTMENTS
             + _SOURCE_FROM + " WHERE p.id = %(id)s", {"id": proposal_id},
         ).fetchone()
@@ -487,7 +419,7 @@ class ProposalStore:
             return {}
         rows = self._c.execute(
             "SELECT p.id, greatest(d.classification, b.classification, "
-            "lr.classification), "  # F15.3
+            "lr.classification), "
             "c.classification, " + _SOURCE_COMPARTMENTS
             + _SOURCE_FROM + " WHERE p.id = ANY(%(ids)s)", {"ids": list(ids)},
         ).fetchall()
@@ -505,9 +437,8 @@ class ProposalStore:
         return bool(row and row[0])
 
     def lookup_origins(self, ids: list[UUID]) -> dict[UUID, dict]:
-        """For proposals raised from a lookup answer (F15.3, 2026-09-24):
-        which answer, from which provider, fetched when. One read for a
-        page of cards."""
+        """For proposals raised from a lookup answer: which answer, from which provider, fetched
+        when. One read for a page of cards."""
         if not ids:
             return {}
         rows = self._c.execute(
@@ -523,18 +454,12 @@ class ProposalStore:
                         compartments: frozenset[str]) -> dict[str, int]:
         """How many readable PROPOSED claims name each entity.
 
-        ux08-triage:graph-says-unreviewed-triage-says-nothing (2026-09-23).
-        The sociogram ringed a node for every incident edge whose
-        `review` column was PROPOSED, and nothing ever writes that column
-        (it defaults to PROPOSED, and an edge accepted here is created
-        PROPOSED too), so every tie in the demo estate was "unreviewed"
-        while this queue said nothing was waiting. The ring now means what
-        its legend says: a proposal about this entity is waiting in this
-        queue. An ATTRIBUTE names its entity, an EDGE names two; a NODE
-        proposal names none, because the entity does not exist yet.
+        The sociogram rings an entity when a proposal about it is waiting in this queue. An
+        ATTRIBUTE names its entity, an EDGE names two; a NODE proposal names none, because the
+        entity does not exist yet.
 
-        Only entities the reader may see are counted, so the map names no
-        id the projection would have hidden."""
+        Only entities the reader may see are counted, so the map names no id the projection would
+        have hidden."""
         where, params = self._scope(case_id, clearance, compartments)
         rows = self._c.execute(
             "SELECT x.node_id, count(*) FROM ("
@@ -555,12 +480,10 @@ class ProposalStore:
 
     def node_refs(self, case_id: UUID, ids: set[str], *, clearance: str,
                   compartments: frozenset[str]) -> dict[str, dict]:
-        """Label and type of the entities a page of proposals names, for
-        the ones this reader may see (ux08-triage:attribute-proposal-no-
-        label-no-value, 2026-09-23). An ATTRIBUTE card read "(no label)"
-        and never said which entity would gain which identifier, and an
-        EDGE card would have shown two UUIDs. An entity the reader may not
-        see is simply absent, and the card says so rather than naming it."""
+        """Label and type of the entities a page of proposals names, for the ones this reader may
+        see. An ATTRIBUTE card says which entity would gain which identifier, and an EDGE card names
+        its two ends. An entity the reader may not see is simply absent, and the card says so rather
+        than naming it."""
         wanted = []
         for raw in ids:
             try:
@@ -580,13 +503,10 @@ class ProposalStore:
     def documents(self, ids: set[UUID], *,
                   compartments: frozenset[str] = frozenset()
                   ) -> dict[str, dict]:
-        """Title and labels of the captured documents a page names, for the
-        ones whose compartments the reader holds (L1, 2026-09-24). The
-        queue only lists proposals whose source the reader may read, so
-        this is a second lock on the same door, not the first: a bare read
-        by id was how the source view reached a document before. The
-        default is the EMPTY set, which fails closed: a caller that does
-        not say what it holds sees no compartmented document."""
+        """Title and labels of the captured documents a page names, for the ones whose compartments
+        the reader holds. The queue only lists proposals whose source the reader may read, so this
+        is a second lock on the same door, not the first. The default is the EMPTY set, which fails
+        closed: a caller that does not say what it holds sees no compartmented document."""
         if not ids:
             return {}
         rows = self._c.execute(
@@ -605,21 +525,15 @@ class ProposalStore:
                         compartments: frozenset[str]) -> dict[str, int]:
         """PROPOSED proposals this person would see in each case's queue.
 
-        ux08-triage:no-work-waiting-at-sign-in (2026-09-23): the case list
-        said nothing about what needed the analyst, so the first question
-        after sign-in was answered by opening every case in turn. Counted
-        over the cases the person holds a live assignment on whose role
-        carries `case.read`, whose own labels they dominate, by the same
-        per-proposal filter the queue uses. The ceiling is the case-less
-        one: a case-scoped break-glass grant raises a read of that case
-        only, and this read spans them all.
+        Counted over the cases the person holds a live assignment on whose role carries `case.read`,
+        whose own labels they dominate, by the same per-proposal filter the queue uses. The ceiling
+        is the case-less one: a case-scoped break-glass grant raises a read of that case only, and
+        this read spans them all.
 
-        A read-only case (CLOSED, ARCHIVED, PURGED) counts nothing (2026-09-24). Accept,
-        reject and defer are content writes
-        and all refuse there, proposals never expire, and an ARCHIVED case
-        cannot be reopened, so a case closed with work in its queue said
-        "2 proposals to triage" on the case list for good, as a nag nobody
-        was allowed to clear. The queue itself still lists them."""
+        A read-only case (CLOSED, ARCHIVED, PURGED) counts nothing: accept, reject and defer are
+        content writes and all refuse there, proposals never expire, and an ARCHIVED case cannot be
+        reopened, so the count would be a nag nobody was allowed to clear. The queue itself still
+        lists them."""
         rows = self._c.execute(
             "SELECT p.case_id, count(*)" + _SOURCE_FROM
             + " WHERE p.state = 'PROPOSED' AND " + _READABLE
@@ -670,14 +584,12 @@ class ProposalStore:
 
 
 def _refuse_credential_label(payload: dict) -> None:
-    """Refuse to write a link that carries a password, token or key as an
-    entity's label (graph-url-selector-keeps-credentials, 2026-10-03).
+    """Refuse to write a link that carries a password, token or key as an entity's label.
 
-    A capture since that date proposes the link without them; a proposal
-    raised before still carries them in its label, and accepting it would
-    put a victim's credential on the graph, in search and in reports. The
-    reviewer is told to reject it; capturing the text again raises the link
-    without the credential."""
+    A capture proposes the link without them; a proposal raised earlier may still carry them in its
+    label, and accepting it would put a victim's credential on the graph, in search and in reports.
+    The reviewer is told to reject it; capturing the text again raises the link without the
+    credential."""
     attrs = payload.get("attrs") or {}
     if carries_credential(attrs.get("selector_type"), payload.get("label")):
         raise ProposalError(
@@ -687,17 +599,13 @@ def _refuse_credential_label(payload: dict) -> None:
 
 
 def _without_credentials(payload: dict) -> dict:
-    """The payload with a URL's password or token taken out of the copies of
-    the selector's value an accept would write onto the entity
-    (`attrs.raw_value`, and `attrs.value` of a lookup's).
+    """The payload with a URL's password or token taken out of the copies of the selector's value an
+    accept would write onto the entity (`attrs.raw_value`, and `attrs.value` of a lookup's).
 
-    A lab or sandbox extraction copied the value as the analysis recorded
-    it, and a proposal raised before 2026-10-03 may hold one, so the accept
-    redacts rather than refuses: the label of such a proposal is clean, a
-    refused one could not be raised again (a proposal in any state stops a
-    second one for the same label), and the reviewer would have nothing to
-    do but reject the finding (graph-url-selector-keeps-credentials,
-    2026-10-03, verify round)."""
+    A lab or sandbox extraction copies the value as the analysis recorded it, so the accept redacts
+    rather than refuses: the label of such a proposal is clean, a refused one could not be raised
+    again (a proposal in any state stops a second one for the same label), and the reviewer would
+    have nothing to do but reject the finding."""
     attrs = payload.get("attrs")
     if not isinstance(attrs, dict):
         return payload
@@ -723,12 +631,10 @@ class ProposalReview:
                classification: str | None = None) -> ProposalRow:
         """Apply a proposal to the graph, as the reviewing analyst.
 
-        The element is created through `GraphWriteService`, so its assertion
-        is written in the same transaction (invariant 1) and the accepted
-        proposal is not a privileged path around the model. The assertion's
-        basis is AUTOMATED_INFERENCE carrying the proposer's rationale: the
-        graph should never forget that a machine suggested this, and docs/03
-        wants inference distinguishable from observation forever.
+        The element is created through `GraphWriteService`, so its assertion is written in the same
+        transaction (invariant 1) and the accepted proposal is not a privileged path around the
+        model. The assertion's basis is AUTOMATED_INFERENCE carrying the proposer's rationale:
+        docs/03 wants inference distinguishable from observation forever.
         """
         row = self.get_for_update(proposal_id)
         if row.state != STATE_PROPOSED:
@@ -738,18 +644,12 @@ class ProposalReview:
                 f"proposal is {row.state}, not {STATE_PROPOSED}; it has already "
                 "been dispositioned")
 
-        # When the material was seen: the post's own date, or failing that
-        # when it was captured (2026-09-24). First and
-        # last seen are derived from `observed_at` on an entity's live
-        # claims (projections.seen_sql), and this claim never set it, so
-        # every entity accepted from Triage read "no claim dates an
-        # observation" with a blank First seen, and a newer capture's
-        # selector attached to a known actor never moved its last seen,
-        # although the document it cites holds both dates.
+        # When the material was seen: the post's own date, or failing that when it was captured.
+        # First and last seen are derived from `observed_at` on an entity's live claims
+        # (projections.seen_sql), so this claim must set it from the document it cites.
         observed_at = self._observed_at(row.document_id)
-        # F15.3 (2026-09-24): a claim raised from a lookup answer cites
-        # the provider's anchor source and the stored answer, and is dated
-        # by when the answer was fetched.
+        # A claim raised from a lookup answer cites the provider's anchor source and the stored
+        # answer, and is dated by when the answer was fetched.
         lookup_source, lookup_result = None, row.lookup_result_id
         if lookup_result is not None:
             found = self._c.execute(
@@ -768,45 +668,32 @@ class ProposalReview:
             rationale=f"[{row.origin}] {row.rationale}",
             document_id=row.document_id,
             observed_at=observed_at,
-            source_id=lookup_source, lookup_result_id=lookup_result,  # F15.3
+            source_id=lookup_source, lookup_result_id=lookup_result,
         )
         payload = _without_credentials(row.payload or {})
         node_id = edge_id = assertion_id = selector_owner = None
-        # The accept default and its floor: what the proposal came from,
-        # never below the case (gap-capture-classification, 2026-09-23).
+        # The accept default and its floor: what the proposal came from, never below the case.
         labels = ProposalStore(self._c).source_labels(proposal_id)
         written_at = None
         if row.kind in (KIND_NODE, KIND_EDGE):
             written_at = accepted_classification(
                 payload, classification, source=labels.source,
                 floor=labels.floor)
-        #: The compartments an accepted element carries (L1, 2026-09-24):
-        #: those of its material beyond the case's own. Every read of an
-        #: element passes its case's gate, and elements elsewhere in a
-        #: compartmented case carry none of the case's keys, so copying
-        #: them would only make one case's elements disagree. A key the
-        #: material carries that the case does not (a contact block filed
-        #: under a stricter compartment) is the element's own lock. Empty
-        #: for ATTRIBUTE, which writes a claim, not an element.
+        #: The compartments an accepted element carries: those of its material beyond the case's
+        #: own. Every read of an element passes its case's gate, and elements elsewhere in a
+        #: compartmented case carry none of the case's keys, so copying them would only make one
+        #: case's elements disagree. A key the material carries that the case does not (a contact
+        #: block filed under a stricter compartment) is the element's own lock. Empty for ATTRIBUTE,
+        #: which writes a claim, not an element.
         extra: list[str] = []
         try:
             with self._c.transaction():
-                # CR10 (2026-07-26): take the row lock INSIDE the writing
-                # transaction, and re-check the state under it.
-                #
-                # `get_for_update` is a plain SELECT despite its name, on
-                # an autocommit connection — so it took no lock at all. The
-                # graph write then ran BEFORE the state-guarded UPDATE, and
-                # that UPDATE's rowcount was never checked. Under READ
-                # COMMITTED two concurrent accepts each passed the
-                # pre-check, each created an element, and the loser's
-                # `WHERE state = 'PROPOSED'` matched zero rows, raised
-                # nothing, and committed anyway.
-                #
-                # Result: two nodes from one suggestion, the second
-                # unreferenced by `applied_node_id` — an orphan inflating
-                # the actor count with no record of where it came from,
-                # which is invariant 3 undone by a race.
+                # Take the row lock INSIDE the writing transaction, and re-check the state under it.
+                # `get_for_update` is a plain SELECT on an autocommit connection, so it takes no
+                # lock by itself. Without the lock two concurrent accepts under READ COMMITTED would
+                # each pass the pre-check and each create an element, leaving an orphan that nothing
+                # points at through `applied_node_id` and inflating the actor count: invariant 3
+                # undone by a race.
                 locked = self._c.execute(
                     "SELECT state FROM collect.proposal WHERE id = %s "
                     "FOR UPDATE", (proposal_id,)).fetchone()
@@ -850,11 +737,9 @@ class ProposalReview:
                         # never silently becomes an asserted tie.
                         is_inferred=True,
                         inference_method=row.origin,
-                        # Accepting IS the disposal (ux05 review-state-
-                        # never-leaves-proposed, 2026-09-23): the claim
-                        # keeps the machine's basis, so without this the
-                        # tie would be born PROPOSED and ringed as awaiting
-                        # the review this click has just given it.
+                        # Accepting IS the disposal: the claim keeps the machine's basis, so without
+                        # this the tie would be born PROPOSED and ringed as awaiting the review this
+                        # click has just given it.
                         review="ACCEPTED",
                     )
                 elif row.kind == KIND_ATTRIBUTE:
@@ -862,19 +747,15 @@ class ProposalReview:
                     # element, not a new element -- claim_path/claim_value is
                     # exactly what the assertion model has for this.
                     target = UUID(str(payload["node_id"]))
-                    # The entity's labels, held for the write: the claim
-                    # is read at them, so they must dominate what it was
-                    # found in (final review c1, 2026-09-24). Checked
-                    # here as well as on the route because the service
-                    # has other callers.
+                    # The entity's labels, held for the write: the claim is read at them, so they
+                    # must dominate what it was found in. Checked here as well as on the route
+                    # because the service has other callers.
                     #
-                    # With its case's compartments, and in the proposal's
-                    # case (L1, 2026-09-24): an entity's effective
-                    # compartments include its case's, which is only safe
-                    # to count once the entity is known to be in the case
-                    # whose readers the proposal was raised for. The route
-                    # has refused a foreign entity since C12; the service
-                    # did not, and it is the one every caller shares.
+                    # With its case's compartments, and in the proposal's case: an entity's
+                    # effective compartments include its case's, which is only safe to count once
+                    # the entity is known to be in the case whose readers the proposal was raised
+                    # for. The service is the one every caller shares, so it refuses a foreign
+                    # entity itself.
                     entity = self._c.execute(
                         """SELECT n.classification, n.compartments,
                                   n.case_id, ec.compartments
@@ -908,7 +789,7 @@ class ProposalReview:
                             observed_at=observed_at,
                             claim_path=payload["claim_path"],
                             claim_value=payload["claim_value"],
-                            source_id=lookup_source,  # F15.3
+                            source_id=lookup_source,
                             lookup_result_id=lookup_result,
                         ),
                     )
@@ -925,11 +806,9 @@ class ProposalReview:
                     (reviewed_by, datetime.now(timezone.utc), note,
                      node_id, edge_id, proposal_id),
                 )
-                # CR10: the rowcount is the last line of defence. With the
-                # FOR UPDATE above this should be unreachable — so if it
-                # ever fires, the lock is not doing what this code thinks,
-                # and rolling back is far better than committing an
-                # element nothing points at.
+                # The rowcount is the last line of defence. With the FOR UPDATE above this should be
+                # unreachable, so if it ever fires the lock is not doing what this code thinks, and
+                # rolling back is far better than committing an element nothing points at.
                 if applied.rowcount != 1:
                     raise ProposalError(
                         "the proposal changed state while it was being "
@@ -955,18 +834,14 @@ class ProposalReview:
                                   payload: dict) -> None:
         """Refuse a selector that was read out of a password in a link.
 
-        A capture before 2026-10-03 read the userinfo of an `ftp://`,
-        `mysql://` or `smtp://` link as an e-mail address (only http and
-        https links were URL selectors), and proposed `Secret123@host`.
-        Such a proposal is clean on its face: nothing in its label says it
-        was a password. The document it cites does, so the span the
-        proposal was found at is checked against the document's own text,
-        and one inside a link's userinfo is refused with the same words as
-        a credentialled label (graph-url-selector-keeps-credentials,
-        2026-10-03, verify round). A URL selector is not checked, its
-        label is the form without the userinfo; a proposal that cites no
-        document, a purged one, or one this reader cannot read has no text
-        to check against."""
+        Older captures read the userinfo of an `ftp://`, `mysql://` or `smtp://` link as an e-mail
+        address (only http and https links were URL selectors), and proposed `Secret123@host`. Such
+        a proposal is clean on its face: nothing in its label says it was a password. The document
+        it cites does, so the span the proposal was found at is checked against the document's own
+        text, and one inside a link's userinfo is refused with the same words as a credentialled
+        label. A URL selector is not checked, its label is the form without the userinfo; a proposal
+        that cites no document, a purged one, or one this reader cannot read has no text to check
+        against."""
         attrs = payload.get("attrs") or {}
         start, end = attrs.get("char_start"), attrs.get("char_end")
         if (document_id is None or is_url_type(attrs.get("selector_type"))
@@ -986,17 +861,11 @@ class ProposalReview:
 
     def _index_selector(self, case_id: UUID, node_id: UUID, payload: dict,
                         observed_at: datetime | None) -> UUID | None:
-        """Record an accepted selector in the index against its new entity,
-        in the accept's transaction, and return another entity already
-        holding it (a merge lead), or None.
+        """Record an accepted selector in the index against its new entity, in the accept's
+        transaction, and return another entity already holding it (a merge lead), or None.
 
-        graph-selector-index-drift (2026-10-03). An accepted NODE proposal
-        named its selector type and nothing indexed it: core.selector stayed
-        empty, selector search found nothing, a second capture of the same
-        value in another form was proposed again, and a strong duplicate was
-        never surfaced. The index keeps its first owner, so a value another
-        entity already holds is reported, never taken (invariant 3: no
-        automatic merge). A value the ontology now refuses as that type is
+        The index keeps its first owner, so a value another entity already holds is reported, never
+        taken (invariant 3: no automatic merge). A value the ontology refuses as that type is
         refused here too, with its reason, as `create_node` refuses it."""
         attrs = payload.get("attrs") or {}
         selector_type = attrs.get("selector_type")

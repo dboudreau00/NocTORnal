@@ -1,9 +1,8 @@
 """ACH scoring, against hand-computed values.
 
-The test that matters is `test_the_ranking_is_by_inconsistency_not_support`.
-Every naive ACH implementation gets that backwards, and getting it backwards
-turns the method into confirmation bias with a scoreboard -- which is the
-exact failure docs/13 says ACH exists to correct.
+The test that matters is `test_the_ranking_is_by_inconsistency_not_support`. A naive ACH implementation
+gets that backwards, which turns the method into confirmation bias with a scoreboard: the failure
+docs/13 says ACH exists to correct.
 
 Pure: no database, no clock. The HTTP leg is in `test_ach_pg.py`.
 """
@@ -29,9 +28,8 @@ HYPOTHESES = [(H1, "The broker is the developer"),
               (H3, "The broker is a law-enforcement persona")]
 
 
-#: The "settles nothing" warning in either number. The warning agrees with
-#: its count now (README screenshot set review, 2026-09-23), so a check
-#: that it is absent must look for both forms or pass on a singular.
+#: The "settles nothing" warning in either number. The warning agrees with its count, so a check that
+#: it is absent must look for both forms or pass on a singular.
 _SETTLES_NOTHING = re.compile(r"\bsettles? nothing\b")
 
 
@@ -44,13 +42,10 @@ def _item(label, stances, reliability="A", credibility="1"):
 # --- the inversion ------------------------------------------------------
 
 def test_the_ranking_is_by_inconsistency_not_support():
-    """Heuer's central move, and the one every naive implementation gets
-    backwards.
+    """Heuer's central move: rank by inconsistency, not by support.
 
-    H1 has the most support AND some evidence against it. H2 has less
-    support and nothing against it. Ranking by support crowns H1 -- which
-    is exactly what a team eight months into one theory would want to see.
-    ACH crowns H2, because the only question that eliminates anything is
+    H1 has the most support and some evidence against it. H2 has less support and nothing against it.
+    Ranking by support crowns H1; ACH crowns H2, because the only question that eliminates anything is
     what a theory fails to explain.
     """
     evidence = [
@@ -136,10 +131,9 @@ def test_a_row_assessed_against_one_hypothesis_is_not_diagnostic_yet():
 # --- the Admiralty weighting -------------------------------------------
 
 def test_a_badly_graded_source_is_discounted_not_deleted():
-    """A "strongly inconsistent" from an F6 source must not sink a
-    hypothesis the way one from an A1 source does, or ACH becomes a way to
-    launder a hunch into a matrix cell. But it must still count, because a
-    zero would silently delete the fact that somebody offered it."""
+    """A "strongly inconsistent" from an F6 source must not sink a hypothesis the way one from an A1
+    source does, or ACH launders a hunch into a matrix cell. It must still count, because a zero would
+    silently delete the fact that somebody offered it."""
     assert source_weight("A", "1") == 1.0
     assert 0 < source_weight("F", "6") < 0.1
     assert source_weight("A", "1") > source_weight("C", "3") > source_weight("F", "6")
@@ -218,24 +212,13 @@ def test_a_complete_matrix_has_nothing_to_test_next():
     assert m.refute_first is None
 
 
-# --- an untested hypothesis has not survived; it has not competed -------
-#
-# docs/17 F20. Three compounding defects, all in the one number the module
-# exists to produce, all found by reading the code hostilely rather than by
-# any test — and the situation they fire in is precisely the one docs/13
-# cites as the reason to build ACH at all.
-
 def test_an_untested_hypothesis_does_not_win():
-    """A hypothesis assessed against NOTHING scores inconsistency 0.0,
-    which is the lowest value the scale can produce, so it sorted first and
-    `least_inconsistent` named it. The guard asked whether ANY hypothesis
-    had been assessed, never whether the winner had.
+    """A hypothesis assessed against nothing scores inconsistency 0.0, the lowest the scale can
+    produce, so it must not sort first and be named by `least_inconsistent`.
 
-    A team eight months into one theory has assessed everything against
-    that theory and nothing against the alternative. The matrix then
-    reported the alternative as surviving, on the strength of never having
-    been examined: confirmation bias with a scoreboard, in the tool built
-    to correct it.
+    A team deep into one theory has assessed everything against it and nothing against the
+    alternative. Reporting the alternative as surviving because it was never examined is confirmation
+    bias with a scoreboard, in the tool built to correct it.
     """
     worked = [_item(f"item {i}", {H1: STRONGLY_INCONSISTENT if i % 3 == 0
                                   else CONSISTENT})
@@ -284,11 +267,9 @@ def test_a_genuinely_undiagnostic_row_still_says_so():
 
 
 def test_a_stance_against_a_superseded_hypothesis_does_not_fill_a_gap():
-    """`refute_first` counted `len(item.stances)` against
-    `len(hypotheses)`. `reports.py` filters the hypothesis list on status
-    and does NOT filter the cells, so an item carrying a stance against a
-    SUPERSEDED hypothesis looked complete while a real gap remained — and
-    the cheapest next test went unnamed."""
+    """`refute_first` compares the item's stances with the live hypotheses. `reports.py` filters the
+    hypothesis list on status but not the cells, so a stance against a SUPERSEDED hypothesis must not
+    make an item look complete while a real gap remains."""
     superseded = uuid4()
     item = _item("looks complete, is not",
                  {H1: STRONGLY_CONSISTENT, superseded: INCONSISTENT})
@@ -297,18 +278,13 @@ def test_a_stance_against_a_superseded_hypothesis_does_not_fill_a_gap():
 
 
 def test_a_row_scored_against_only_some_hypotheses_is_unknown_not_undiagnostic():
-    """README screenshot review, 2026-09-23. The demo matrix scored one
-    item against two of its three hypotheses, the same way both times, and
-    left the third blank. `is_incomplete` was a fixed `assessed_against < 2`,
-    so with two cells filled the row counted as finished: the pane dimmed it
-    as "not diagnostic" and the warning above it said the item says "the
-    same thing about every hypothesis and settle[s] nothing", while the
-    unassessed cell sat in the same row and `refute_first` named that very
-    item as the cheapest next test. The pane contradicted itself.
+    """A row scored against only some hypotheses is unknown, not undiagnostic.
 
-    Agreement across the hypotheses it HAS been scored against says nothing
-    about the one it has not: scored against H3 it could separate H3 from
-    the other two. Until then its diagnosticity is unknown, not zero."""
+    Agreement across the hypotheses it has been scored against says nothing about the one it has not:
+    scored against H3 it could separate H3 from the other two. Until then its diagnosticity is
+    unknown, not zero, so the pane must not dim it as "not diagnostic" while `refute_first` names it
+    as the cheapest next test.
+    """
     evidence = [
         _item("same builder", {H1: STRONGLY_CONSISTENT, H2: CONSISTENT,
                                H3: INCONSISTENT}),
@@ -381,10 +357,8 @@ def test_the_response_round_trips_ids_as_strings():
 
 
 def test_a_warning_agrees_with_the_count_it_states():
-    """README screenshot set review, 2026-09-23: the ACH capture was headed
-    "1 of 3 items are unfinished". Every count the warnings state takes
-    its noun, verb and pronoun from the number, and a count that is the
-    whole matrix is said as such."""
+    """Every count the warnings state takes its noun, verb and pronoun from the number, and a count
+    that is the whole matrix is said as such."""
     def warning(m, word):
         found = [w for w in m.warnings if word in w]
         assert len(found) == 1, m.warnings
@@ -432,8 +406,6 @@ def test_a_warning_agrees_with_the_count_it_states():
             m.warnings)
 
 
-# --- usability review, 2026-09-23 (ux11-ach) --------------------------------
-
 def test_a_row_that_says_the_same_thing_everywhere_moves_no_score():
     """half-scored-row-called-undiagnostic. The warning and the method said
     such a row is "excluded from the ranking" while every row was summed:
@@ -448,7 +420,7 @@ def test_a_row_that_says_the_same_thing_everywhere_moves_no_score():
     for hid in (H1, H2, H3):
         assert with_flat[hid].inconsistency == without[hid].inconsistency, hid
         assert with_flat[hid].support == without[hid].support, hid
-        # It WAS looked at, and that is recorded.
+        # It was looked at, and that is recorded.
         assert with_flat[hid].assessed == without[hid].assessed + 1
     m = score(HYPOTHESES, [sharp, flat])
     assert any("left out of every score" in w for w in m.warnings), m.warnings
@@ -491,10 +463,8 @@ def test_a_retired_hypothesis_is_scored_for_the_record_and_never_ranked():
 
 
 def test_with_every_hypothesis_ruled_out_the_rows_stay_in_the_matrix():
-    """Release review c18 (2026-09-24). With no live hypothesis `score`
-    returned an EMPTY evidence list while the retired cards counted the
-    stances, so GET /ach sent evidence 0 beside cells 2 and "against 0.72,
-    assessed 1", and the pane said nothing had been scored."""
+    """With no live hypothesis `score` still returns the evidence rows, so `evidence` agrees with the
+    cells and the pane does not say nothing was scored."""
     from noctornal_api.ach import as_response
     h1, h2, h3 = uuid4(), uuid4(), uuid4()
     against = _item("rv_delta posts from the reseller's panel",
@@ -514,8 +484,8 @@ def test_with_every_hypothesis_ruled_out_the_rows_stay_in_the_matrix():
 
 
 def test_the_method_and_each_row_say_how_the_weighting_works():
-    """grading-weight-unexplained. A single C3 "strongly inconsistent" read
-    0.98 beside a -2..+2 scale, and nothing said why."""
+    """A single C3 "strongly inconsistent" reads 0.98 beside a -2..+2 scale, so the method and each
+    row say how the grading weight works."""
     from noctornal_api.ach import as_response
     c3 = _item("C3 row", {H1: STRONGLY_INCONSISTENT, H2: STRONGLY_CONSISTENT},
                reliability="C", credibility="3")

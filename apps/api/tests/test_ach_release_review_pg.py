@@ -1,16 +1,14 @@
-"""GET /ach after the Alpha 6 release review (2026-09-24).
+"""GET /ach with every hypothesis ruled out, and with withheld material.
 
-- c18: with every hypothesis ruled out and "Include rejected" ticked, the
-  response sent evidence 0 beside cells 2, and the pane said nothing had
-  been scored. The rows are sent now, so `evidence` and `cells` agree.
-- x-ach-withheld (owner backlog): `ach_cells` drops a stance on material
-  above the reader without a word, so a blank cell and a withheld one
-  looked alike. The response now says so, under the case's withheld-
-  disclosure setting as the graph does: no key under NONE, whether under
-  PRESENCE, how many items of evidence under COUNT. Never which.
+- With every hypothesis ruled out and "Include rejected" ticked, the rows are sent, so `evidence` and
+  `cells` agree and the pane does not say nothing was scored.
+- `ach_cells` drops a stance on material above the reader without a word, so a blank cell and a
+  withheld one look alike. The response says so under the case's withheld-disclosure setting, as the
+  graph does: no key under NONE, whether under PRESENCE, how many items of evidence under COUNT.
+  Never which.
 
-The console half is in test_ui_analysis_ach_release_review.py. Env-gated on
-DATABASE_URL. The email prefix is `achrr-` and must stay unique.
+The console half is in test_ui_analysis_ach_release_review.py. Env-gated on DATABASE_URL. The email
+prefix is `achrr-` and must stay unique.
 """
 from __future__ import annotations
 

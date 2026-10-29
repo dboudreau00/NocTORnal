@@ -1,93 +1,35 @@
-/* NocTORnal analyst console — Phase 2 sociogram.
+/* NocTORnal analyst console.
  *
- * No framework, no build step, no CDN — the app shell is served under a strict
- * `default-src 'self'` CSP, so everything lives in these three files and there
- * is no inline script or style anywhere. Nothing is ever written to
- * `element.style` either: hue and state travel as classes, and everything that
- * needs pixel control (the sociogram, the timeline density strip) is drawn on a
- * <canvas>.
+ * No framework, build step or CDN: the shell is served under a strict `default-src 'self'` CSP,
+ * so there is no inline script or style and nothing is written to `element.style`. Hue and state
+ * travel as classes; what needs pixel control (the sociogram, the timeline strip) is a <canvas>.
  *
- * SESSION HANDLING (2026-09-09; the previous design is recorded below).
- * The console runs on the API's cookie session: `POST /auth/login` sets
- * `__Host-session` (HttpOnly, Secure, SameSite=Strict) and a readable
- * `__Host-csrf`, every request goes out with `credentials: 'same-origin'`,
- * and every unsafe method copies the CSRF cookie into the `x-csrf-token`
- * header -- the double-submit `deps.session_token` demands. What that
- * buys, stated exactly: after a RELOAD the session is cookie-only, so
- * script on this origin can act as the analyst while the tab lives and
- * holds no token it could replay from anywhere else. Since 2026-09-10
- * that is true from the first request as well, not only after a reload:
- * `POST /auth/login` answers 204 with the pair and NO BODY, so a form
- * sign-in leaves nothing for `state.token` to hold. The two paths that
- * forced a readable token had to be closed first, and were: the live
- * websocket authenticates from `__Host-session` itself
- * (`routers/live.py` `_handshake` prefers the cookie over the first
- * frame it used to insist on), and the Lab download crosses to the
- * sample origin on a one-shot ticket minted here under the cookie
- * session instead of carrying the session token there as a Bearer.
- * Those two were the whole reason a token had to be readable from
- * script; what is still allowed to put one in memory is below, and a
- * form sign-in is not it.
+ * Sessions ride the API's cookie pair: `__Host-session` (HttpOnly, Secure, SameSite=Strict) and
+ * a readable `__Host-csrf` that every unsafe method copies into `x-csrf-token`, the
+ * double-submit `deps.session_token` demands. `POST /auth/login` answers 204 with no body, so
+ * script here holds no token it could replay elsewhere; the live socket authenticates from the
+ * cookie (`routers/live.py`) and the Lab download crosses to the sample origin on a one-shot
+ * ticket. Sign-out deletes both cookies with the attributes they were set with (a `__Host-`
+ * deletion without Secure is ignored); when the server refuses, `doLogout` keeps the app up
+ * rather than show a sign-in that a reload would undo. A session restored without its readable
+ * half is not shown (`startApp`): it could read but never write, nor sign out.
  *
- * Sign-out asks the server to revoke the session and delete both cookies
- * (with the attributes they were set with -- a `__Host-` deletion without
- * Secure is ignored by the browser, and that was the second half of this
- * defect). When the server refuses -- the double-submit rejecting the
- * POST because the readable half is gone, a rate limit, an unreachable
- * API -- the console keeps the app up and says so (`doLogout`): it never
- * shows the sign-in form for a session the server still holds, because a
- * reload would restore that session. A session the cookie restores
- * WITHOUT its readable half is not shown at all (`startApp`): it could
- * read and never write, and could not even sign out.
+ * The one token ever held in memory (`state.token`, never storage) is the `#token=` hand-off
+ * from `scripts/bootstrap.py session` (see `adoptSessionFromFragment`). Where the browser refuses
+ * the Secure pair it is the tab's session: `authHeaders` falls back to it, and the socket's
+ * first frame carries it. It is never logged, never put in a URL by this page, and never
+ * rendered.
  *
- * Until 2026-09-09 the bearer token from the login body was held in
- * sessionStorage and sent as an Authorization header, while the server had
- * set the cookie pair on every login for nobody. sessionStorage is readable
- * by any script on the origin, and the header comment here said a browser
- * deployment "should instead" use the cookie -- a claim the code did not
- * back, which is the shape of defect the Alpha 4 review kept finding.
- *
- * ONE thing still puts a token in memory (`state.token`, never
- * storage), and it is not a sign-in: the `#token=` hand-off, which must
- * present the NEW token rather than the cookie the tab already holds.
- * Where the browser accepts the pair, the exchange below is that token's
- * last use in this page. Where it does not -- plain HTTP from a
- * non-localhost address, where `Secure` cookies are refused outright --
- * the handed-over token IS the session for the life of the tab:
- * `authHeaders` falls back to it, and the socket's hello -- its
- * first frame -- carries it, which is the only thing that keeps such a
- * console live. A FORM sign-in on that host produces no credential at all,
- * and `doLogin` says exactly that instead of opening an app that could
- * not read anything (docs/17 F22). The token field is in the socket's
- * protocol for the same caller: `scripts/bootstrap.py session` mints in
- * a shell, for a browser it has never met, and a shell has no cookie jar.
- *
- * That script hands its token over in the URL fragment;
- * `adoptSessionFromFragment` exchanges it once for the cookie pair
- * through `POST /auth/cookie` -- and only when this browser holds no
- * usable session already, because a link must never replace the session
- * the browser has (the server refuses a different account with 409
- * regardless), and only after the person has been asked: the page names
- * the account the link carries (`GET /auth/me` on the handed-over token,
- * which signs nothing in) and signs in only on a yes, because a link made
- * by anybody holding any session would otherwise sign a signed-out colleague
- * in as its author (http_ui-017, 2026-10-03). The token is never logged,
- * never put in a URL by this page, and never rendered.
- *
- * SHAPE OF THE GRAPH LAYER (docs/03). Nothing is measured against "the graph";
- * everything is measured against a PROJECTION — a named, parameterised view.
- * The projection's parameters are on screen next to the canvas at all times,
- * because a metric without its parameters is not reproducible and therefore
- * not evidence.
+ * Every metric is measured against a projection, a named and parameterised view, whose
+ * parameters stay on screen beside the canvas: without them a metric is not reproducible, and
+ * so not evidence (docs/03).
  */
 'use strict';
 
 const API = '/api/v1';
-/* The readable half of the cookie pair and the header it is copied into.
-   Both names are `deps.py`'s (CSRF_COOKIE, CSRF_HEADER) and
-   `test_ui_invariants` holds the two files to each other. The session
-   cookie's name is deliberately NOT here: it is HttpOnly, and a script
-   that names it is a script trying to read it. */
+/* The readable half of the cookie pair and the header it is copied into: `deps.py`'s
+   CSRF_COOKIE and CSRF_HEADER, held to each other by `test_ui_invariants`. The session cookie's
+   name is deliberately absent: it is HttpOnly, and a script that names it is trying to read it. */
 const CSRF_COOKIE = '__Host-csrf';
 const CSRF_HEADER = 'x-csrf-token';
 /* Where the previous build kept the bearer token. Named only so boot()
@@ -121,12 +63,10 @@ const CREDIBILITY = {
 const CONFIDENCE = ['LOW', 'MODERATE', 'HIGH'];
 const CONF_RANK = { LOW: 0, MODERATE: 1, HIGH: 2 };
 
-/* The four metrics /graph/metrics actually returns. Betweenness, Burt's
-   constraint and effective size are global, computed by the Analysis
-   pane's run and not by this endpoint, so they join the control only while
-   a run is on that pane, captioned with it (syncAnalysisSizeOptions,
-   ux10-analytics:results-dont-reach-the-graph, 2026-09-23). Offering them
-   without a run would be inventing the number. */
+/* The four metrics /graph/metrics returns. Betweenness, Burt's constraint and effective size are
+   global, computed by the Analysis pane's run, so they join the control only while a run is on
+   that pane, captioned with it (syncAnalysisSizeOptions); offered without one, the number would
+   be invented. */
 const SIZE_METRICS = [
   ['degree', 'Degree'],
   ['weighted_degree', 'Weighted degree'],
@@ -134,10 +74,8 @@ const SIZE_METRICS = [
   ['clustering', 'Clustering'],
 ];
 const METRIC_LABEL = new Map(SIZE_METRICS);
-/* What each metric measures, said once in the select's hover text and the
-   legend rather than inside every option. The long option labels sized
-   the Node size select to about 300px and helped push the projection bar
-   onto four rows (ux03 control-bar-squeezes-canvas, 2026-09-23). */
+/* What each metric measures, said once in the select's hover text and the legend rather than in
+   every option, which would widen the Node size select and wrap the projection bar. */
 const METRIC_GLOSS = new Map([
   ['degree', 'how many others it is tied to: activity, visibility'],
   ['weighted_degree', 'the total strength of its ties'],
@@ -160,26 +98,17 @@ const HUE_BY_TYPE = {
 const HUE_BY_CATEGORY = { ACTOR: 'actor-group', ARTEFACT: 'artefact-infra',
                           CONTEXT: 'context' };
 
-/* Node OUTLINE, a second channel for type beside hue (2026-09-23).
- *
- * Hue alone was the whole type encoding, and it does not survive every
- * eye or every pairing. A victim company took the Group orange, so an
- * orange cluster off a persona read as a crew, when "attacked by" and
- * "member of" are opposite claims (ux04 victims-painted-as-groups). Under
- * deuteranopia the Persona blue and the Assessed person purple sat 7.9
- * apart, and Malware and Context 5.0 (ux04 persona-person-hue-cvd), and
- * the difference between a persona and a person is the attribution claim
- * itself. So:
+/* Node outline, a second channel for type beside hue, which does not survive every eye or every
+ * pairing (a victim sharing the Group hue reads as a crew; Persona and Person nearly merge under
+ * deuteranopia):
  *
  *   square   a victim: a target, not an actor, whatever hue it shares
- *   diamond  context (events, incidents, places): a thing that happened,
- *            not an entity
+ *   diamond  context (events, incidents, places): a thing that happened, not an entity
  *   double   an assessed person: a second ring inside the type ring
  *   disc     everything else
  *
- * Shape by TYPE, like hue, and nothing else: confidence stays opacity,
- * evidence stays hollow-or-filled, and every shape can be hollow.
- * test_theme_contract holds every hue pair that collapses under a common
+ * Shape is by type only: confidence stays opacity, evidence stays hollow or filled, and every
+ * shape can be hollow. test_theme_contract holds every hue pair that collapses under a common
  * colour-vision deficiency to differing shapes. */
 const SHAPE_BY_TYPE = { VICTIM: 'square', PERSON: 'double' };
 const SHAPE_BY_HUE = { context: 'diamond' };
@@ -189,21 +118,10 @@ function nodeShapeOf(nodeType) {
   return SHAPE_BY_HUE[hueClass(nodeType).slice(4)] || 'disc';
 }
 
-/* Sociogram page size. 800 is the DEFAULT, not the ceiling.
- *
- * docs/09 Phase 2's exit criterion is "a 2,000-node case renders at 60fps",
- * and a 2026-07-26 audit found the console could not put a 2,000-node case
- * on the canvas at all: it asked for 800 and printed "TRUNCATED", while
- * `routers/graphview.py` defaults to 2000 and accepts up to 5000. The
- * client was the only constraint, and the criterion was unmeetable through
- * the UI.
- *
- * Raised by the analyst rather than by default, because the cost is real:
- * layout is a hand-written Barnes-Hut FA2 in a worker, and 5,000 nodes is
- * a different experience from 800 on a laptop. Defaulting to 2000 would
- * have made the common case worse to satisfy a benchmark. The steps are
- * offered where the truncation is reported, so the choice appears exactly
- * when it is relevant.
+/* Sociogram page size: 800 is the default, not the ceiling (`routers/graphview.py` accepts up to
+ * 5000). The analyst raises it, because the cost is real: layout is a Barnes-Hut FA2 in a
+ * worker, and 5,000 nodes on a laptop is a different experience from 800. The steps are offered
+ * where the truncation is reported.
  */
 const NODE_PAGE = 800;
 const NODE_PAGE_STEPS = [800, 2000, 5000];   // 5000 is the server's own cap
@@ -249,37 +167,30 @@ const state = {
   gedges: [],                // projection edges
   nodeConf: new Map(),       // node id -> best confidence of its ties
   nodeTies: new Map(),       // node id -> tie count in the projection
-  /* node id -> proposals about it waiting in the triage queue: from the
-     queue's own `pending_by_node` (ux08-triage:graph-says-unreviewed-
-     triage-says-nothing, 2026-09-23). */
+  /* node id -> proposals about it waiting in triage, from the queue's own `pending_by_node`. */
   nodeProposed: new Map(),
-  /* node id -> incident ties whose review is still PROPOSED, counted by
-     indexProjection (gap-tie-review, 2026-09-23). The same ring as
-     nodeProposed, cleared under the tie's Review rather than in Triage. */
+  /* node id -> incident ties whose review is still PROPOSED, counted by indexProjection. The
+     same ring as nodeProposed, cleared under the tie's Review rather than in Triage. */
   nodeUnreviewed: new Map(),
   graphSeq: 0,
 
-  /* triage (Phase 4): machine suggestions awaiting a human. */
+  /* triage: machine suggestions awaiting a human. */
   triage: [],
   triageCounts: {},
   triageIndex: 0,
-  /* The proposal the keys act on. The index alone was a position, and a
-     live reload re-sorts the queue under it (final review c14). */
+  /* The proposal the keys act on, by id: a live reload re-sorts the queue under the index. */
   triageId: null,
-  /* Why this case takes no capture (its compartments), from the queue
-     read; '' when it takes one, null until read (final review c15). */
+  /* Why this case takes no capture (its compartments), from the queue read; '' when it takes
+     one, null until read. */
   captureRefused: null,
-  /* What a capture here is stored under at the least, {classification,
-     compartments}, from the queue read; null until read (L1, 2026-09-24). */
+  /* What a capture here is stored under at the least, {classification, compartments}, from the
+     queue read; null until read. */
   captureLabels: null,
   triageAcceptAt: {},        // proposal id -> label chosen on its card
   triageSources: {},         // proposal id -> its opened capture window
-  /* An approval request a notification's Open was for, focused once the
-     Dual control list draws (ux08-triage:open-approvals-wrong-case). */
+  /* An approval request a notification's Open was for, focused once the Dual control list draws. */
   approvalTarget: null,
-  /* case id -> {triage, signatures} for this person, from
-     /notifications/waiting; null until read (ux08-triage:
-     no-work-waiting-at-sign-in, 2026-09-23). */
+  /* case id -> {triage, signatures} for this person (/notifications/waiting), null until read. */
   waiting: null,
   inboxUrgent: 0,            // urgent notifications not yet acknowledged
 
@@ -290,14 +201,12 @@ const state = {
      unevidenced case SHOULD look unfinished until it is evidenced. */
   showProvenance: true,
 
-  /* analysis (Phase 3): global structural metrics, computed on demand
-     because they are a batch operation, not a live one. Held per case AND
-     per projection -- changing either invalidates them. */
+  /* analysis: global structural metrics, computed on demand because they are a batch operation,
+     not a live one. Held per case and per projection: changing either invalidates them. */
   analytics: null,
   analyticsKpp: null,
-  /* The query the results on screen were computed under, and whether the
-     graph still hashes as it did then (2026-09-23): see
-     analyticsAfterGraphRefresh. */
+  /* The query the results on screen were computed under, and whether the graph still hashes as
+     it did then: see analyticsAfterGraphRefresh. */
   analyticsQuery: '',
   analyticsAt: null,
   analyticsCurrency: null,
@@ -325,10 +234,8 @@ const state = {
   rankTotal: 0,
   metricsNote: '',
   metricsWarned: false,
-  /* Why the metrics are not on screen, when they are not: null, or
-     {why, retryIn} (seconds, 0 for no retry) after a refused call. Read by
-     the canvas status line (ux03 metrics-rate-limit-degrades-view,
-     2026-09-23). */
+  /* Why the metrics are not on screen: null, or {why, retryIn} (seconds, 0 for no retry) after a
+     refused call. Read by the canvas status line. */
   metricsDown: null,
   metricsRetry: 0,           // the pending retry's timer id
   /* Metrics already fetched this case, keyed by the projection AND a
@@ -353,9 +260,8 @@ const state = {
   canvasObserver: null,      // retained: an anonymous one can be collected
   needFit: true,
   layout: new Map(),         // node id -> {x, y, is_pinned}
-  /* Hand placements not yet saved: entity ids moved or pinned since the
-     layout was last loaded or saved (ux03 pin-layout-work-lost,
-     2026-09-23). Drives the dot on Save layout and the leave guards. */
+  /* Hand placements not yet saved: entity ids moved or pinned since the layout was last loaded or
+     saved. Drives the dot on Save layout and the leave guards. */
   layoutDirty: new Set(),
   /* Unsaved placements riding over a re-read of the same case
      (leaveLayout), until loadLayout puts them back. */
@@ -380,12 +286,9 @@ const state = {
   paletteIndex: 0,
   paletteReturn: null,
 
-  /* ACH (Phase 6). `ach` is the last matrix the server returned. The
-     matrix names its evidence rows by label only; the basis and the
-     Admiralty grading behind each assertion arrive through the
-     inspector's and the scorer's `/assertions` reads, and are remembered
-     here by assertion id so the stance chooser can show what a cell rests
-     on (2026-09-09). */
+  /* ACH. `ach` is the last matrix the server returned; it names evidence rows by label only, so
+     the basis and grading behind each assertion, from the `/assertions` reads, are kept here by
+     assertion id for the stance chooser to show what a cell rests on. */
   ach: null,
   assertionMeta: new Map(),  // assertion id -> {basis, reliability, ...}
   achPick: [],               // live assertions of the selected element
@@ -420,23 +323,12 @@ function splitLead(text, limit) {
   return m ? { lead: m[1], rest: t.slice(m[0].length) } : { lead: t, rest: '' };
 }
 
-/** Make an identifier click-to-copy.
+/** Make an identifier click-to-copy: a <button>, because it is an action and must be keyboard
+ *  reachable.
  *
- *  Copying a selector, a hash or a TLS key to paste it into the next tool
- *  is the single most repeated action in this console, and the alternative
- *  is a triple-click that reliably catches a trailing space or the
- *  neighbouring chip.
- *
- *  `copyValue` exists because the DISPLAYED and USEFUL forms differ in the
- *  one place it matters most: a defanged URL reads `hxxps://evil[.]com`
- *  and that is what belongs in a report, so that is what is copied. An
- *  analyst who wants the live form has the capture detail, where the
- *  original is shown. Copying a re-fanged URL to the clipboard would put a
- *  working link one careless paste away from a browser — the same hazard
- *  the defanging exists to prevent.
- *
- *  Deliberately a <button>: it is an action, it must be keyboard
- *  reachable, and a <span> with a click handler is neither.
+ *  `copyValue`, when given, is copied instead of the node's text. A defanged URL is copied
+ *  defanged: a re-fanged one on the clipboard is a working link one careless paste away from a
+ *  browser, the hazard the defanging exists to prevent.
  */
 function copyable(node, copyValue, label) {
   const value = copyValue === undefined || copyValue === null
@@ -466,25 +358,18 @@ function debounce(fn, ms) {
 }
 function show(node, on) { node.hidden = !on; }
 
-/* Unicode characters that change what a string LOOKS like without changing
- * what it IS. Rendering them faithfully is how "harmless<RLO>fdp.exe"
- * appears on screen as "harmlessexe.pdf".
+/* Unicode characters that change what a string looks like without changing what it is:
+ * rendered faithfully, "harmless<RLO>fdp.exe" shows as "harmlessexe.pdf". Bidi overrides
+ * (U+202A to U+202E, U+2066 to U+2069, U+200E, U+200F, U+061C), the zero-width family (U+200B to
+ * U+200D, U+FEFF) and the C0/C1 controls.
  *
- * Bidi overrides (202A–202E, 2066–2069, 200E/200F, 061C), the zero-width
- * family (200B–200D, FEFF) and the C0/C1 controls.
+ * Not confusables: a Latin letter against its Cyrillic look-alike needs a script-mixing check,
+ * and in this domain's Russian-language venues a rule that flagged Cyrillic would fire on almost
+ * every handle.
  *
- * NOT confusables. Latin "a" versus Cyrillic "а" is a different problem
- * needing a script-mixing check rather than a substitution, and this
- * domain's primary venues are Russian-language — a rule that flagged
- * Cyrillic would fire on almost every handle in the case file and be
- * turned off within a day.
- *
- * Written as \u escapes, deliberately. A character class of LITERAL
- * invisible characters is unreadable in review and is silently mangled by
- * anything that normalises, trims or re-encodes — which would remove a
- * defence with no diff anybody would notice. That happened once while this
- * very line was being written. The escapes are also the only form a test
- * can assert on.
+ * Written as escape sequences on purpose: literal invisible characters are unreadable and are
+ * silently mangled by anything that normalises or re-encodes, which would remove the defence
+ * with no visible diff. The escapes are also the only form a test can assert on.
  */
 const _DECEPTIVE = new RegExp(
   '['
@@ -498,15 +383,10 @@ const _DECEPTIVE = new RegExp(
   + '\\u007F-\\u009F'                         // DEL and C1 controls
   + ']', 'g');
 
-/** Make deceptive characters visible instead of effective.
- *
- *  `dir="ltr"` and `unicode-bidi: isolate` set the BASE direction and do
- *  not touch an explicit override character — which is the trap: the CSS
- *  looks like the defence and is not one. This substitution is, because
- *  the character is gone by the time it reaches the DOM.
- *
- *  Used on every string an attacker chose: filenames, handles, source
- *  notes, dead-letter fragments.
+/** Make deceptive characters visible instead of effective, on every string an attacker chose
+ *  (filenames, handles, source notes, dead-letter fragments). `dir="ltr"` and
+ *  `unicode-bidi: isolate` set the base direction but leave an explicit override in force; this
+ *  substitution removes the character before it reaches the DOM.
  */
 function visibleText(s) {
   if (s === null || s === undefined) return '';
@@ -515,12 +395,9 @@ function visibleText(s) {
     + '›');
 }
 
-/** Replace a record's `label` with its safe rendering, keeping the
- *  original as `label_raw`.
- *
- *  Applied once where graph data lands rather than at each render site,
- *  because there are two dozen of those and the defence is only worth
- *  anything if it holds at all of them.
+/** Replace a record's `label` with its safe rendering, keeping the original as `label_raw`.
+ *  Applied where graph data lands, not at each of the two dozen render sites, so the defence
+ *  holds at all of them.
  */
 function withSafeLabel(row) {
   if (!row || typeof row.label !== 'string') return row;
@@ -532,17 +409,9 @@ function withSafeLabel(row) {
 /** Every key that carries a human-chosen name in an analytics response. */
 const _LABEL_KEYS = new Set(['label', 'source_label', 'target_label']);
 
-/** `withSafeLabel` for a NESTED payload.
- *
- *  The analytics suite buries names several levels down — `removal_set[]`,
- *  `top_betweenness_set[]`, `cut_vertices[]`, `bridges[]`,
- *  `triads[].nodes[]`, `dyads[]` — and the flat helper above cannot reach
- *  any of them, so the pane drew eight sets of raw labels while the graph
- *  and search paths were de-fanged.
- *
- *  Applied at the boundary rather than at each draw, for the reason the
- *  console has already learned twice: there are two dozen sites that render
- *  a node label and one of them will always be the one somebody forgot.
+/** `withSafeLabel` for a nested payload: the analytics suite carries names several levels down
+ *  (`removal_set[]`, `cut_vertices[]`, `triads[].nodes[]` and others), out of the flat helper's
+ *  reach. Applied at the boundary rather than at each draw, so no render site is forgotten.
  */
 function safeLabelsDeep(value) {
   if (Array.isArray(value)) return value.map(safeLabelsDeep);
@@ -587,12 +456,8 @@ function typeName(key) {
   const meta = state.nodeTypeMeta.get(key);
   return meta ? meta.display_name : key;
 }
-/** A relationship type's display name from the ontology, as typeName is
- *  an entity type's (ux19-copy raw-enums-and-polish, 2026-09-23): the tie
- *  inspector's heading and the canvas's tie labels printed the raw key
- *  "COMMUNICATES_WITH" although /ontology serves "Communicates with". The
- *  key stands in only when the ontology has not loaded or does not know
- *  it. */
+/** A relationship type's display name from the ontology, as typeName is an entity type's. The
+ *  raw key stands in only when the ontology has not loaded or does not know it. */
 function edgeTypeName(key) {
   const types = state.ontology && state.ontology.edge_types;
   const meta = types ? types.find((t) => t.key === key) : null;
@@ -603,19 +468,10 @@ function tlpChip(value) {
 }
 /* ── dates: one zone, said out loud ────────────────────────────────────
  *
- * Every time on screen is UTC and carries the word "UTC", and every
- * day-precision value is a calendar date with no clock at all.
- *
- * ux05-inspector:dates-shift-a-day and ux19-copy:dates-shift-and-mixed-
- * zones (2026-09-22). The entry forms store a picked day as midnight UTC
- * (`intervalFrom`) because the graph records world time to the day. This
- * file then drew it with `toLocaleString()`, so an analyst in Halifax who
- * entered "valid from 14 December" read back "12/13/2025, 8:00:00 PM": the
- * wrong day, with an invented evening time, on a value that is evidence.
- * Twenty other sites sliced the raw ISO string instead, which is UTC with
- * no label, so the same seed run read 12:18 in the inspector and 15:18 in
- * the Lab. One zone for everything, named on every value, and no browser
- * locale anywhere (the locale also decided M/D against D/M).
+ * Every time on screen is UTC and carries the word "UTC", and every day-precision value is a
+ * calendar date with no clock. The entry forms store a picked day as midnight UTC
+ * (`intervalFrom`), so local-zone formatting would show the wrong day on a value that is
+ * evidence. No browser locale anywhere, which would also decide M/D against D/M.
  */
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -624,15 +480,13 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
  *  column reads as a rendering fault as often as it reads as "none". */
 const NO_TIME = 'not recorded';
 
-/** What any other missing value in a fact or a cell reads as, for the
- *  same reason. The console printed a lone dash for these, and the
- *  owner's copy rule allows no dashes in anything a reader sees (README
- *  screenshot review, 2026-09-23). */
+/** What any other missing value in a fact or a cell reads as, for the same reason: the copy
+ *  rule allows no dashes in anything a reader sees. */
 const NO_VALUE = 'not recorded';
 
 function pad2(n) { return String(n).padStart(2, '0'); }
 
-/** An instant, in UTC, labelled: "2026-09-17 15:18 UTC". */
+/** An instant, in UTC, labelled: "YYYY-MM-DD HH:MM UTC". */
 function fmtTime(iso, withSeconds) {
   if (!iso) return NO_TIME;
   const d = new Date(iso);
@@ -645,10 +499,9 @@ function fmtTime(iso, withSeconds) {
 
 /** A calendar day: "14 Dec 2025".
  *
- *  A bare "YYYY-MM-DD" is formatted from its own digits and never goes
- *  through `Date`: `new Date('2025-12-14')` is midnight UTC, and any
- *  local-zone formatting of it west of Greenwich is the 13th. An instant
- *  (or epoch milliseconds, which the timeline passes) gives its UTC day. */
+ *  A bare "YYYY-MM-DD" is formatted from its own digits and never goes through `Date`, which
+ *  reads it as midnight UTC, so any local-zone formatting west of Greenwich gives the day
+ *  before. An instant (or epoch milliseconds, which the timeline passes) gives its UTC day. */
 function fmtDate(value) {
   if (value === null || value === undefined || value === '') return NO_TIME;
   const bare = typeof value === 'string'
@@ -664,18 +517,13 @@ function fmtDate(value) {
     + d.getUTCFullYear();
 }
 
-/** A stored value that may be day-precision: a day when it sits on a UTC
- *  day boundary, an instant otherwise.
+/** A stored value that may be day-precision: a day when it sits on a UTC day boundary, an
+ *  instant otherwise.
  *
- *  `intervalFrom` writes `valid_from` as 00:00:00Z and an inclusive
- *  `valid_to` as 23:59:59Z, and seeded `observed_at` values are midnight
- *  UTC. Printing "00:00 UTC" on those would be the false precision the
- *  form's own comment refuses. A real observation that happens to fall at
- *  exactly midnight loses only a clock time nobody could tell from a day,
- *  and never the day itself: the "Observed at" field is labelled and read
- *  as UTC (`observedAtUtc`), so a typed 00:00 is 00:00Z on the day typed.
- *  Read in the browser's zone, 17:00 in Los Angeles was 00:00Z the next
- *  day and came back as that day (verifier, fix round, 2026-09-22). */
+ *  `intervalFrom` writes `valid_from` as 00:00:00Z and an inclusive `valid_to` as 23:59:59Z,
+ *  and seeded `observed_at` values are midnight UTC, so "00:00 UTC" there would be false
+ *  precision. An observation at exactly midnight loses only its clock time, never its day: the
+ *  "Observed at" field is read as UTC (`observedAtUtc`), so a typed 00:00 is 00:00Z that day. */
 function fmtWhen(iso) {
   if (!iso) return NO_TIME;
   const d = new Date(iso);
@@ -686,11 +534,8 @@ function fmtWhen(iso) {
   return boundary ? fmtDate(iso) : fmtTime(iso);
 }
 
-/** A validity interval as one phrase, both ends shown.
- *
- *  ux05-inspector:dates-shift-a-day: the edge line printed `valid_from`
- *  alone, so a tie ended with `valid_to` (which the Retire dialog tells
- *  analysts to use) still read as open. */
+/** A validity interval as one phrase, both ends shown, so a tie ended with `valid_to` (as the
+ *  Retire dialog advises) never reads as open. */
 function fmtInterval(from, to) {
   if (!from && !to) return 'no validity interval recorded';
   if (from && to) return 'valid ' + fmtWhen(from) + ' to ' + fmtWhen(to);
@@ -701,10 +546,8 @@ function fmtInterval(from, to) {
 /** The density timeline's axis labels. Kept as a name because the graph
  *  region calls it; it is now the same UTC day as everything else. */
 function fmtDay(ms) { return fmtDate(ms); }
-/* The placeholders below say what is missing rather than printing a
-   dash: a size or a hash the record does not carry, an account or an
-   element with no id, a number that did not arrive as one (README
-   screenshot review, 2026-09-23). */
+/* The placeholders below say what is missing rather than printing a dash: a size or a hash the
+   record does not carry, an account or element with no id, a number that did not arrive as one. */
 function fmtBytes(n) {
   if (!Number.isFinite(n)) return 'size ' + NO_VALUE;
   const u = ['B', 'KiB', 'MiB', 'GiB'];
@@ -727,30 +570,15 @@ function ordinal(n) {
 
 /* ── banners: every failure surfaces here, never only in the console ──── */
 
-/* ux17-failure:banners-block-appbar (2026-09-23). The stack sat at the top
- * of the window, over All cases, the signed-in identity and Log out, and
- * nothing ever took a banner away: a burst of failures was a wall of
- * identical "Service Unavailable" cards that hid sign-out until each was
- * closed by hand, none saying which pane had failed. So: the stack starts
- * under the app bar (app.css); a banner identical to one already up is
- * counted on it rather than stacked; `info` and `warn` banners go by
- * themselves after BANNER_EXPIRE_MS (held while pointed at or focused, so
- * nobody loses one mid-read); a failure stays until dismissed; and `fail`
- * names what failed and offers Retry where a retry is honest.
+/* The banner stack starts under the app bar (app.css). A banner identical to one already up is
+ * counted on it rather than stacked; `info` and `warn` banners go by themselves after
+ * BANNER_EXPIRE_MS (held while pointed at or focused); a failure stays until dismissed; and
+ * `fail` names what failed and offers Retry where a retry is honest.
  *
- * `opts.sticky` keeps an info or warn banner up until it is dismissed or
- * its owner takes it down. It is for a banner that is still true when the
- * analyst comes back, or that names a step still to take: "Session ended"
- * raised while they were away from the desk, "Signed in again: the change
- * you made ... was not saved", and the two tie-grading banners that say
- * what to retract next. Expiring those took the warning away before it was
- * read (verifier, ux17-failure:banners-block-appbar, 2026-09-23).
- * Returns the card raised or counted, which a caller keeps instead of
- * guessing it is the stack's last child.
- *
- * `opts` may also be a number, or carry `expireMs`: advice with a time on
- * it ("retry in 6s") goes once that time has passed, whatever its kind
- * (ux18-a11y:banners-cover-appbar, 2026-09-23). */
+ * `opts.sticky` keeps an info or warn banner up until it is dismissed or its owner takes it
+ * down: for a banner still true when the analyst comes back, or one that names a step still to
+ * take. `opts` may also be a number, or carry `expireMs`: advice with a time on it ("retry in
+ * 6s") goes once that time has passed, whatever its kind. Returns the card raised or counted. */
 const BANNER_EXPIRE_MS = 8000;
 
 function banner(title, detail, kind, opts) {
@@ -846,22 +674,11 @@ function armBannerExpiry(b) {
 
 /* ── a read that failed is not an empty list ───────────────────────────
  *
- * ux17-failure:failure-renders-as-empty-claim (2026-09-22). On a 503 the
- * triage queue said "Nothing awaiting review.", the inbox "Nothing
- * waiting.", the tombstone register "Nothing has been destroyed." and the
- * source list "Every source has been polled." Each of those is a claim
- * about the data, made at the one moment the console knew nothing about
- * it, and the banner that said otherwise was dismissable while the pane
- * kept asserting. The approvals pane already said it right ("They are not
- * known to be absent"); this is that sentence as one shared control, so a
- * failure looks the same in every pane and always offers a retry.
- *
- * The notice is a SIBLING placed just before the pane's empty element,
- * never text written into it. Several empties keep their markup default
- * ("Nothing awaiting review.") and are only ever shown or hidden; writing
- * the failure into one would leave "could not load" standing after the
- * next successful, genuinely empty read. `renderList` clears the notice on
- * every successful render, so panes built on it need no extra call. */
+ * An empty line ("Nothing awaiting review.") is a claim about the data, and after a failed read
+ * the console knows nothing, so a failure gets one shared notice in every pane, with a retry.
+ * The notice is a sibling placed just before the pane's empty element, never text written into
+ * it: written in, "could not load" would stand after the next genuinely empty read.
+ * `renderList` clears the notice on every successful render. */
 
 /** Why a read failed, in a few words an analyst can act on. */
 function failureReason(err) {
@@ -876,10 +693,8 @@ function failureReason(err) {
   return err && err.message ? err.message : String(err);
 }
 
-/** The sentence the notice says. Built so that the grammatical number of
- *  `what` never matters: "Your notifications was refused" is what a verb
- *  agreeing with a singular subject made of a plural one (verifier, fix
- *  round of 2026-09-22). A refusal names the access, not the list. */
+/** The sentence the notice says, built so the grammatical number of `what` never matters. A
+ *  refusal names the access, not the list. */
 function loadFailureText(what, err) {
   const refused = err instanceof ApiError && err.status === 403;
   const lead = refused
@@ -926,20 +741,11 @@ function clearLoadFailure(emptyId) {
 
 /* ── an empty-state line says what it says only after an answer ────────
  *
- * ux17-failure:loading-shows-empty-claims (2026-09-23). The empty lines
- * shipped visible, so with the source-health read held for six seconds
- * the Sources tab said "Every source is healthy." while one was failing:
- * loading and empty looked the same, and the only cue was a 2px bar. They
- * ship `hidden` now, a loader calls `listPending` before it fetches, and
- * the claim appears only when `renderList` draws a successful answer.
- *
- * ux17-failure:sticky-error-text-in-empty-slot (2026-09-23). A refusal
- * written INTO the line was never taken back: one failed deception read
- * on NIGHTJAR left "Reading deception captures needs evidence.read" under
- * KESTREL's "0 captures", which read as a permission problem the analyst
- * did not have. The line's own text is kept in `data-default` the first
- * time it is touched and put back on every answer, and a refusal is
- * marked `.refused` so it is styled as one and not as an empty list. */
+ * The empty lines ship `hidden`; a loader calls `listPending` before it fetches, and the claim
+ * appears only when `renderList` draws a successful answer, so loading never reads as empty.
+ * The line's own text is kept in `data-default` the first time it is touched and put back on
+ * every answer, so a refusal written into it never outlives the read, and a refusal is marked
+ * `.refused` so it is styled as one and not as an empty list. */
 const LIST_PENDING_TEXT = 'Loading…';
 
 /** The line's resting text, as the markup wrote it. Stashed on first use,
@@ -987,12 +793,9 @@ function listRefused(emptyId, text) {
   show(empty, true);
 }
 
-/** The words for a read the server turned down. A 403, or the 404 a case
- *  route gives a caller it hides the case from, is about access and takes
- *  the `permission` sentence. A 400 is the server's own reason about the
- *  request, and the permission sentence told an analyst who held
- *  comms.read that "Co-participation needs comms.read" (verifier,
- *  ux17-failure:sticky-error-text-in-empty-slot, 2026-09-23). */
+/** The words for a read the server turned down. A 403, or the 404 a case route gives a caller
+ *  it hides the case from, is about access and takes the `permission` sentence; a 400 is the
+ *  server's own reason about the request, not a permission problem. */
 function refusedWords(err, permission) {
   const access = err instanceof ApiError
     && (err.status === 403 || err.status === 404);
@@ -1019,8 +822,8 @@ async function problemOf(res) {
     return {
       title: body.title || ('HTTP ' + res.status),
       detail: body.detail || '',
-      /* The problem `type`, for a refusal the console must act on rather
-         than print: sign-in's password-change-required (2026-09-23). */
+      /* The problem `type`, for a refusal the console must act on rather than print, such as
+         sign-in's password-change-required. */
       type: body.type || '',
     };
   } catch (_e) {
@@ -1030,15 +833,9 @@ async function problemOf(res) {
 
 /* ── the request indicator ─────────────────────────────────────────────
  *
- * One place, driven by an in-flight counter in `api()`, so every fetch in
- * the app is covered without a single per-pane change. A pane that fetches
- * and shows nothing is indistinguishable from a pane that is broken, and
- * several here fetch four sections independently.
- *
- * Delayed by 180ms before it appears. Most requests against a local
- * Postgres finish in under 30ms, and a bar that flashes on every one is
- * noise that trains people to ignore it — which is exactly what you do not
- * want on the request that takes four seconds.
+ * Driven by an in-flight counter in `api()`, so every fetch is covered with no per-pane change.
+ * It appears only after 180ms: most local requests finish in under 30ms, and a bar that flashes
+ * on every one trains people to ignore it on the request that takes four seconds.
  */
 let _inflight = 0;
 let _busyTimer = null;
@@ -1068,25 +865,17 @@ function csrfCookie() {
   return null;
 }
 
-/* A lapsed session is not signed in, although the app stays on screen
-   behind the sign-in sheet (expiry-drops-context, 2026-09-22): the
-   palette, the shortcuts and the live reconnect all ask this, and none of
-   them should act for a session the server has ended. */
+/* A lapsed session is not signed in, though the app stays on screen behind the sign-in sheet:
+   the palette, the shortcuts and the live reconnect ask this, and none may act for a session
+   the server has ended. */
 function signedIn() { return !!state.userId && !SESSION.lapsed; }
 
-/** Which credential a request carries, decided in ONE place for `api()`.
- *  The report download used to fetch a blob outside it and does not since
- *  2026-09-22: the file now comes back inside the egress decision's JSON.
- *  The sample download did too once and is not any more either: it
- *  crosses to another origin on a ticket minted through `api()`, and
- *  nothing this function returns would survive that preflight.
+/** Which credential a request carries, decided in one place for `api()`.
  *
- *  Cookie session first: the browser attaches `__Host-session` itself,
- *  and an unsafe method copies the CSRF cookie into the header the server
- *  demands. The in-memory bearer is used only when no CSRF cookie exists
- *  (the browser refused the Secure pair) or when a caller forces it -- the
- *  one forced case is the `#token=` exchange, which must present the NEW
- *  token and not whatever cookie session the tab already had. */
+ *  Cookie session first: the browser attaches `__Host-session` itself, and an unsafe method
+ *  copies the CSRF cookie into the header the server demands. The in-memory bearer is used only
+ *  when no CSRF cookie exists (the browser refused the Secure pair) or when a caller forces it:
+ *  the `#token=` exchange, which must present the new token, not the tab's cookie session. */
 function authHeaders(method, forceBearer) {
   const headers = {};
   if (forceBearer) {
@@ -1119,8 +908,7 @@ async function api(path, options) {
   try {
     return await _fetch(path, o, headers, body);
   } catch (err) {
-    /* Which request, so `fail` can say what failed and whether a reload
-       would ask again (ux17-failure:banners-block-appbar, 2026-09-23). */
+    /* Which request, so `fail` can say what failed and whether a reload would ask again. */
     if (err instanceof ApiError && !err.path) {
       err.path = path;
       err.method = String(o.method || 'GET').toUpperCase();
@@ -1134,15 +922,11 @@ async function api(path, options) {
   }
 }
 
-/** The routes whose 401 judges the credential IN THE REQUEST -- a wrong
- *  password, a stale hand-off token -- and says nothing about the session
- *  this tab already holds. `_fetch` ends the session on every other 401.
- *  Until 2026-09-09 only login was here, so a stale `#token=` opened in a
- *  tab with a live cookie pair sent the exchange's 401 through
- *  `endSession`, which deleted the readable CSRF cookie browser-wide and
- *  could not touch the HttpOnly half: every tab was left able to read and
- *  unable to write or sign out. `test_ui_invariants` holds this set to the
- *  routes `routers/auth.py` defines. */
+/** The routes whose 401 judges the credential in the request (a wrong password, a stale
+ *  hand-off token) and says nothing about the session this tab holds. `_fetch` ends the session
+ *  on every other 401; ending it here would delete the readable CSRF cookie browser-wide and
+ *  leave every tab able to read but not write or sign out. `test_ui_invariants` holds this set
+ *  to the routes `routers/auth.py` defines. */
 const _CREDENTIAL_CHECKS = new Set(['/auth/login', '/auth/cookie']);
 
 async function _fetch(path, o, headers, body) {
@@ -1159,41 +943,29 @@ async function _fetch(path, o, headers, body) {
     throw new ApiError(0, 'Cannot reach the API',
       'The request did not complete. Check the API service and your network.');
   }
-  /* An answer that is not a 401 (or a rate-limit refusal, which is
-     answered before the session is read) means the server accepted the
-     session and slid its idle window, so the idle warning restarts. From
-     the moment the request left rather than when it came back: the
-     server's clock started no later than that. */
+  /* Any answer but a 401 or a 429 (answered before the session is read) means the server slid
+     the session's idle window, so the idle warning restarts, timed from when the request left. */
   if (res.status !== 401 && res.status !== 429) noteSessionActivity(sentAt);
   if (!res.ok) {
     const p = await problemOf(res);
     const err = new ApiError(res.status, p.title, p.detail);
     err.type = p.type || '';
-    /* The read-only gate (gap-closed-case-writes, 2026-09-23). The error
-       itself still goes to the caller, whose form or banner shows the
-       server's sentence; this only brings the workspace's read-only mode
-       up to date when the case was closed somewhere else. */
+    /* The read-only gate. The error still goes to the caller, whose form or banner shows the
+       server's sentence; this only updates the workspace's read-only mode when the case was
+       closed somewhere else. */
     if (res.status === 409 && p.title === CASE_READ_ONLY_TITLE) {
       caseTurnedReadOnly();
     }
-    /* When to come back, as the refusal said it, so a caller can wait it
-       out instead of guessing (the sociogram's metrics retry, ux03
-       metrics-rate-limit-degrades-view), and read from the limiter's own
-       words when the header is missing: a sign-in refusal and a rate
-       limit banner both need the number (2026-09-23). */
+    /* When to come back, as the refusal said it, so a caller (the metrics retry, say) can wait
+       it out instead of guessing; read from the limiter's own words when the header is missing. */
     const retryAfter = retryAfterSeconds(res.headers.get('Retry-After'), p.detail);
     if (retryAfter !== null) err.retryAfter = retryAfter;
-    /* A request that forces its own bearer (the `#token=` hand-off) judges
-       that bearer, as the credential checks do, and says nothing about the
-       session this tab holds (http_ui-017, 2026-10-03). */
+    /* A request that forces its own bearer (the `#token=` hand-off) judges that bearer, as the
+       credential checks do, and says nothing about the session this tab holds. */
     if (res.status === 401 && !_CREDENTIAL_CHECKS.has(path) && !o.bearer) {
       if (state.userId && !state.booting && path !== '/auth/logout') {
-        /* Mid-session (expiry-drops-context, 2026-09-22). This used to
-           end the session outright: the app was unmounted, the case
-           forgotten, and the banner never said the Save that triggered
-           it had not happened. The app now stays mounted under an
-           in-place sign-in, and the error says what did not happen, so
-           the form that raised it can show that next to itself. */
+        /* Mid-session: the app stays mounted under an in-place sign-in, and the error says what
+           did not happen, so the form that raised it can show that next to itself. */
         const unsafe = !/^(GET|HEAD|OPTIONS)$/i.test(o.method || 'GET');
         sessionLapsed({ cause: 'server', unsafe, detail: p.detail });
         err.title = unsafe ? 'Not saved: your session had ended'
@@ -1202,9 +974,7 @@ async function _fetch(path, o, headers, body) {
           ? 'Nothing was saved. Sign in again in the dialog, then repeat this.'
           : 'Sign in again in the dialog, then open this again.';
       } else {
-        /* The sentence, not the server's terse reason ("no session
-           token"), which replaced it whenever there was one (ux19-copy
-           developer-speak-in-copy, 2026-09-23). */
+        /* The sentence, not the server's terse reason ("no session token"). */
         endSession('Session ended', 'Your session has ended. Sign in again '
           + 'to continue.');
       }
@@ -1217,16 +987,13 @@ async function _fetch(path, o, headers, body) {
   return ct.includes('json') ? res.json() : res.text();
 }
 
-/** Case-scoped path helper — every Phase 2 endpoint hangs off the case. */
+/** A path under the open case. */
 function cpath(suffix) { return '/cases/' + state.caseId + suffix; }
 
-/* What a request was FOR, by its path: the banner's prefix, and the pane
- * whose reload re-issues it. "Service Unavailable" alone, four times over,
- * did not say which pane on screen to distrust (ux17-failure:
- * banners-block-appbar, 2026-09-23). The tab is named only where
- * `selectTab` reloads that pane's reads, so a Retry that reloads it
- * genuinely asks again; elsewhere there is no Retry rather than one that
- * does nothing. First match wins, so the specific paths come first. */
+/* What a request was for, by its path: the banner's prefix, and the pane whose reload re-issues
+ * it. The tab is named only where `selectTab` reloads that pane's reads, so a Retry genuinely
+ * asks again; elsewhere there is no Retry rather than one that does nothing. First match wins,
+ * so the specific paths come first. */
 const REQUEST_LABELS = [
   [/^\/cases\/[^/]+\/proposals/, 'Triage queue', 'triage'],
   [/^\/cases\/[^/]+\/approvals/, 'Approvals', 'triage'],
@@ -1277,19 +1044,16 @@ function retryAfterSeconds(header, detail) {
   return m ? Number(m[1]) : null;
 }
 
-/** Report any unexpected failure in the banner stack, prefixed with what
- *  failed. `what` names it when the caller knows better than the path;
- *  `retry` is offered as Retry. A failed READ of the pane on screen is
- *  offered Retry by reloading that pane; a write never is: repeating it is
- *  the analyst's decision, made in the form that sent it. */
+/** Report an unexpected failure in the banner stack, prefixed with what failed (`what`, when the
+ *  caller knows better than the path); `retry` is offered as Retry. A failed read of the pane on
+ *  screen is offered a reload of it; a write never is, as repeating it is the analyst's decision. */
 function fail(err, what, retry) {
   if (err && err.handled) return;
   const named = requestLabel(err);
   const label = what || (named ? named[0] : '');
   const lead = (t) => (label ? label + ': ' + t : t);
-  /* A rate limit is advice with a time on it, not a failure: a warning
-     that goes once the time it names has passed (ux18-a11y:banners-
-     cover-appbar, 2026-09-23). */
+  /* A rate limit is advice with a time on it, not a failure: a warning that goes once that time
+     has passed. */
   if (err instanceof ApiError && err.status === 429) {
     const wait = Number.isFinite(err.retryAfter) ? err.retryAfter : 10;
     banner(lead(err.title), err.detail, 'warn', (wait + 1) * 1000);
@@ -1323,18 +1087,13 @@ function inlineProblem(errBox, err) {
 
 /* ── session ──────────────────────────────────────────────────────────── */
 
-/** Drop to the sign-in form. Reached from a 401 on any request that is
- *  not a credential check (`_CREDENTIAL_CHECKS`), from a sign-out the
- *  server accepted, and from `startApp` refusing a half session. The
- *  banner is suppressed while booting -- a stale session on first load
- *  is expected, not news -- unless `evenWhileBooting` says the analyst
- *  must hear it, which the half-session refusal does: without the banner
- *  the sign-in form would appear for a session the browser still holds,
- *  with no word on why.
+/** Drop to the sign-in form: after a 401 on any request that is not a credential check, a
+ *  sign-out the server accepted, or `startApp` refusing a half session. The banner is suppressed
+ *  while booting (a stale session on first load is expected) unless `evenWhileBooting` says the
+ *  analyst must hear why, as for a half session the browser still holds.
  *
- *  An ending the analyst did not ask for (a title says so; a sign-out
- *  passes none) remembers where they were, for `startApp` to reopen if
- *  the same account signs back in (expiry-drops-context, 2026-09-22). */
+ *  An ending the analyst did not ask for (it has a title; a sign-out passes none) remembers
+ *  where they were, for `startApp` to reopen if the same account signs back in. */
 function endSession(title, detail, evenWhileBooting) {
   if (title) rememberResume();
   state.token = null;
@@ -1355,27 +1114,22 @@ function endSession(title, detail, evenWhileBooting) {
      gone — which reads as an attack in the audit log. */
   disconnectLive();
   forgetHeldLive();            // the next analyst inherits no held refetch
-  /* Nor this analyst's work counts: the case list's "Waiting for you"
-     column and the inbox badges are one person's (ux08-triage:
-     no-work-waiting-at-sign-in, 2026-09-23). */
+  /* Nor this analyst's work counts: the case list's "Waiting for you" column and the inbox
+     badges are one person's. */
   state.waiting = null;
   state.inboxUnread = 0;
   state.inboxUrgent = 0;
   stopSessionClock();
-  /* The case chrome goes with the case: whoever signs in next on this tab
-     lands on the list, where Case…, Share… and Status… stood offering to
-     act on nothing (ux01-firstrun:dead-case-buttons-after-return,
-     2026-09-23). */
+  /* The case chrome goes with the case: whoever signs in next lands on the list, where Case,
+     Share and Status would offer to act on nothing. */
   hideCaseChrome();
   state.clearance = null;
   renderHeaderRole();
   show($('view-app'), false);
   show($('view-login'), true);
-  /* The form as well as its view (final review C19, 2026-09-23). First
-     run hides the form under its card, and a 401 between the card's own
-     sign-in and the console landed here with the form still hidden: an
-     empty page, the caret in a field nobody could see. A first-run card
-     still on screen keeps its place; its secrets are its own to keep. */
+  /* The form as well as its view: first run hides the form under its card, and a 401 after the
+     card's own sign-in would leave an empty page. A first-run card still on screen keeps its
+     place; its secrets are its own to keep. */
   if ($('setup-form').hidden && $('setup-done').hidden && $('setup-codes').hidden) {
     show($('login-form'), true);
   }
@@ -1390,25 +1144,16 @@ function endSession(title, detail, evenWhileBooting) {
   ($('login-email').value ? $('login-password') : $('login-email')).focus();
 }
 
-/** True when this tab holds a session it cannot drive: the HttpOnly
- *  cookie authenticates reads, but with no readable `__Host-csrf` and no
- *  in-memory token `authHeaders()` has no credential to put on an unsafe
- *  method, so every write is 403 and the server cannot even be asked to
- *  sign out. Reached by any path that deletes the readable half while the
- *  server keeps the session -- until 2026-09-09, a stale `#token=` link
- *  opened in a signed-in tab. Named because two callers must agree on
- *  what "usable" means: `startApp` refuses to show the app on it, and
- *  `adoptSessionFromFragment` treats it as a session the hand-off may
- *  repair rather than one it must keep. */
+/** True when this tab holds a session it cannot drive: the HttpOnly cookie authenticates reads,
+ *  but with no readable `__Host-csrf` and no in-memory token `authHeaders()` has nothing to put
+ *  on an unsafe method, so every write is 403 and the server cannot be asked to sign out. Two
+ *  callers must agree on it: `startApp` refuses to show the app, and `adoptSessionFromFragment`
+ *  treats it as a session the hand-off may repair rather than one it must keep. */
 function halfSession() { return !csrfCookie() && !state.token; }
 
-/* Said to the analyst, who has no shell on the server: the way on is to
-   sign in, and the operator's recovery link is the runbook's business,
-   not this banner's (ux01-firstrun:shell-only-recovery-copy, 2026-09-23). */
+/* Said to the analyst, who has no shell on the server: the way on is to sign in, and the
+   operator's recovery link is the runbook's business, not this banner's. */
 const HALF_SESSION_TITLE = 'Signed-in session cannot be used';
-/* In an analyst's words (ux19-copy developer-speak-in-copy, 2026-09-23):
-   this said "its readable CSRF half" and offered "a bootstrap.py session
-   link", a shell command on the server. */
 const HALF_SESSION_DETAIL =
   'This browser kept only part of your sign-in, which is not enough to '
   + 'save anything or to sign out. Sign in again to replace it. If this '
@@ -1431,25 +1176,12 @@ async function doLogin(event) {
     });
     $('login-password').value = '';
     $('login-totp').value = '';
-    /* Nothing comes back and nothing is kept from it. `POST /auth/login`
-       has answered 204 with the cookie pair and no body since
-       2026-09-10, and `_fetch` returns null for a 204 -- so the
-       `state.token = out.token` that stood here threw a TypeError on
-       every form sign-in, which `catch` below reported as an unexpected
-       error while the server had in fact signed the analyst in and set
-       their cookies. Deleted rather than guarded: there is no token in
-       that response to guard for.
-
-       Which makes the pair the only thing a form sign-in produces, and
-       that is checked BEFORE the app starts. A browser that refused the
-       Secure cookies leaves this tab holding nothing at all, and
-       `startApp`'s /auth/me would 401 straight into `endSession` --
-       "Session ended", a sentence about an expiry, for a session created
-       a second ago that the browser will simply not keep. */
+    /* `POST /auth/login` answers 204 with the cookie pair and no body, so the pair is all a form
+       sign-in produces, and it is checked before the app starts: a browser that refused the
+       Secure cookies holds nothing, and `startApp` would report it as an expired session. */
     if (!csrfCookie()) {
-      /* The operator's remedies (HTTPS, or a shell-minted session link)
-         are in the runbook; the analyst is told what happened and who to
-         ask (ux01-firstrun:shell-only-recovery-copy, 2026-09-23). */
+      /* The operator's remedies (HTTPS, or a shell-minted session link) are in the runbook; the
+         analyst is told what happened and who to ask. */
       banner('Session cookie refused by the browser',
         'Your password and code were accepted, but this browser refused '
         + 'to keep the sign-in, because the console is reached over plain '
@@ -1473,14 +1205,11 @@ async function doLogin(event) {
 
 /* --- a new password after an administrator's reset ---------------------
  *
- * gap-password-reset (2026-09-23). An administrator-issued password opens no
- * session: `POST /auth/login` answers 403 with this problem type, and only
- * after the password AND the code were right. The console then asks for a
- * new password and a FRESH code (the one just sent was spent, which is the
- * replay protection working) and sends the same sign-in again with
- * `new_password`, which stores it and signs in. The one-time password is
- * held in this page's memory for that one request, never written to a
- * field, storage or the URL, and forgotten on success or Cancel.
+ * An administrator-issued password opens no session: `POST /auth/login` answers 403 with this
+ * problem type, only once the password and the code were right. The console asks for a new
+ * password and a fresh code (the one just sent is spent) and sends the sign-in again with
+ * `new_password`. The one-time password is held in page memory for that one request, never
+ * written to a field, storage or the URL, and forgotten on success or Cancel.
  */
 const PASSWORD_CHANGE_TYPE = 'urn:noctornal:problem:password-change-required';
 const PWCHANGE = { email: '', password: '' };
@@ -1583,14 +1312,10 @@ function initPasswordChange() {
 
 /** A refused sign-in, said so the analyst can act on it.
  *
- *  ux01-firstrun:lockout-reads-as-typo (2026-09-23). A locked account, a
- *  drifted clock and a typo all answer 401 "invalid credentials", on
- *  purpose, and that stays one answer; the policy line under the button
- *  says what it cannot. The code is cleared, because a 30-second code
- *  resubmitted is a second failure spent on the lockout for nothing. A
- *  429 named the limiter's internal key ("rate limit 'auth.login_failed'
- *  exceeded; retry in 212s"); it now says what it means and when to come
- *  back. */
+ *  A locked account, a drifted clock and a typo all answer 401 on purpose, and stay one answer;
+ *  the policy line under the button says what it cannot. The code is cleared, because a
+ *  resubmitted 30-second code is a second failure spent on the lockout. A 429 says what it means
+ *  and when to come back, not the limiter's internal key. */
 function signInRefused(errBox, err) {
   $('login-totp').value = '';
   if (err instanceof ApiError && err.status === 401) {
@@ -1616,20 +1341,11 @@ async function doLogout() {
   try {
     await api('/auth/logout', { method: 'POST' });
   } catch (err) {
-    /* A 401 means the server holds no session to revoke (an administrator
-       revoked it, the account was deactivated, or it idled out on the
-       server before this tab's clock said so), and `_fetch` has already
-       ended this one. The analyst asked to leave either way, so the page
-       goes as it does for a sign-out the server accepted: returning here
-       left the case in the page behind the sign-in form (verifier of
-       ux01-firstrun:logout-leaves-case-in-page, 2026-09-23). Anything
-       else -- the double-submit refusing the POST (403) because the
-       readable half is gone, a rate limit, an unreachable API -- means the
-       server STILL HOLDS the session. Until 2026-09-09 this swallowed
-       every failure and showed the sign-in form anyway: a sign-out
-       reported that had not happened, and a reload restored the session.
-       The case `_fetch`'s ending remembered is forgotten: a sign-out
-       returns to the case list, whichever way the server answered it. */
+    /* A 401 means the server holds no session to revoke (revoked, deactivated, or idled out
+       first) and `_fetch` has ended this one, so the page goes as for an accepted sign-out, and
+       the case `_fetch` remembered is forgotten. Anything else (a 403 because the readable half
+       is gone, a rate limit, an unreachable API) means the server still holds the session, so
+       the sign-in form is not shown: a reload would restore the session. */
     if (err && err.handled) { forgetResume(); discardPage(); return; }
     banner('Sign-out refused',
       (err instanceof ApiError ? (err.detail || err.title) : String(err))
@@ -1642,18 +1358,12 @@ async function doLogout() {
   discardPage();
 }
 
-/** Throw the page away once whoever was using it has left: reload it with
- *  no fragment. `endSession` hides the app but keeps it: the case, its 146
- *  entities and the header's case and name stayed in memory and in the
- *  hidden DOM of the sign-in screen, one devtools panel away for whoever
- *  sat down next on a shared workstation
- *  (ux01-firstrun:logout-leaves-case-in-page, 2026-09-23). Called when the
- *  analyst has asked to leave: Log out, and "Sign in as someone else" on a
- *  lapsed sheet. An expiry does not come here, because keeping the
- *  analyst's work behind the in-place sign-in is the point of it. What
- *  the same analyst needs to come back to survives the reload: the case
- *  and pane are in this tab's `sessionStorage` (`rememberResume`), and
- *  are reopened only for that account (`applyResume`). */
+/** Throw the page away once whoever was using it has left: reload it with no fragment.
+ *  `endSession` only hides the app, which leaves the case in memory and the hidden DOM, one
+ *  devtools panel away for whoever sits down next. Called for Log out and "Sign in as someone
+ *  else"; an expiry keeps the work behind the in-place sign-in instead. The case and pane
+ *  survive in this tab's `sessionStorage` (`rememberResume`), reopened only for that account
+ *  (`applyResume`). */
 function discardPage() {
   location.replace(location.pathname);
 }
@@ -1662,50 +1372,36 @@ async function startApp() {
   watchPresence();             // once per page: the live channel's idle hold
   const me = await api('/auth/me');
   if (halfSession()) {
-    /* The cookie alone answered that read, and the cookie alone is what
-       this tab has: see `halfSession`. Showing the app here would render
-       every pane and refuse every save with "missing or invalid CSRF
-       token", and sign-out with the same. Ended with the banner forced
-       through the boot suppression, because the sign-in form for a
-       session the browser visibly still holds needs its reason. */
+    /* Only the cookie answered that read (see `halfSession`): the app would refuse every save
+       and the sign-out. The banner is forced through the boot suppression, because a sign-in
+       form for a session the browser still holds needs its reason. */
     endSession(HALF_SESSION_TITLE, HALF_SESSION_DETAIL, true);
     const err = new ApiError(0, HALF_SESSION_TITLE, HALF_SESSION_DETAIL);
     err.handled = true;
     throw err;
   }
   state.userId = me.user_id;
-  /* `display_name`, not `user_id`. /auth/me carried the id and the
-     recovery-code count and nothing else until 2026-09-02, so the app
-     bar showed a UUID to every signed-in analyst. The id stays as the
-     tooltip because it is what a support request needs. */
+  /* The display name in the bar; the id stays in the tooltip because a support request needs it. */
   $('hdr-user').textContent = me.display_name || me.user_id;
   $('hdr-user').title = me.email
     ? me.email + ' \u00b7 ' + me.user_id : me.user_id;
-  /* Session bookkeeping (2026-09-22): the account the Account sheet and
-     the in-place sign-in are about, the clock the idle warning counts
-     against, and the case to reopen when this is the same analyst coming
-     back from an expiry. A "Session ended" banner is about the session
-     that just got replaced, so it goes. */
+  /* Session bookkeeping: the account the Account sheet and the in-place sign-in are about, the
+     clock the idle warning counts against, and the case to reopen when the same analyst comes
+     back from an expiry. A "Session ended" banner is about the previous session, so it goes. */
   adoptSessionFacts(me);
-  /* What this person may open, for the app bar beside their role on the
-     case (ux02-cases:header-says-analyst-no-permission-cues, 2026-09-23). */
+  /* What this person may open, for the app bar beside their role on the case. */
   state.clearance = me.tlp_clearance || null;
   renderHeaderRole();
   applyResume(me.user_id);
   clearSessionBanners();
-  /* Whoever signed in, no one-time secret shown to the session before
-     theirs is on the screen they get. `endSession` clears them too, but
-     the in-place sign-in comes straight here, without it, when the
-     account differs (final review C4, 2026-09-23). Nor a live change
-     held for it (C20): this session starts on the case list and loads
-     whatever it opens in full. */
+  /* No one-time secret shown to the previous session, and no live change held for it, survives
+     onto the screen of whoever signed in: the in-place sign-in comes here without `endSession`
+     when the account differs. This session starts on the case list and loads what it opens. */
   clearSessionSecrets();
   forgetHeldLive();
   show($('view-login'), false);
-  /* The sign-in view back to its own default, for the next time it
-     shows. First run hides the form under its card (`probeFirstRun`) and
-     the card's sign-in comes straight here, so the first sign-out after
-     a first run showed an empty page (final review C19, 2026-09-23). */
+  /* The sign-in view back to its default for the next time it shows: first run hides the form
+     under its card (`probeFirstRun`), and the card's sign-in comes straight here. */
   show($('login-form'), true);
   show($('view-app'), true);
   await showCaseList();
@@ -1714,21 +1410,13 @@ async function startApp() {
 
 /* ── case-switch resets ───────────────────────────────────────────────── */
 
-/* Every pane that shows case-scoped data registers a reset here, in its
- * OWN region of this file, and both ways of leaving a case run them all.
+/* Every pane that shows case-scoped data registers a reset here, in its own region of this
+ * file, and both ways of leaving a case run them all, so no pane shows the previous case's
+ * results under the new case's header.
  *
- * The review of 2026-09-22 found six panes (search, report, collected,
- * the deception detail, and any pane whose read failed after a switch)
- * still showing the previous case's results under the new case's header
- * and TLP chip. Each had the same cause: openCase reset the state it knew
- * about and nothing else. A registry turns "remember to add your pane to
- * openCase" into a line each pane owns next to the code it resets.
- *
- * `state.caseSeq` also increments on every switch. An async read takes a
- * token before it awaits and drops its result when `caseChanged(token)`
- * says so. Comparing `state.caseId` alone (the older guard at
- * loadCaseTags) misses A -> B -> A: the stale reply from the first visit
- * to A lands on the second, because the id matches again. */
+ * `state.caseSeq` increments on every switch. An async read takes a token before it awaits and
+ * drops its result when `caseChanged(token)` says so: comparing `state.caseId` alone misses
+ * A -> B -> A, where the stale reply from the first visit lands on the second. */
 const CASE_SWITCH_RESETS = [];
 
 function onCaseSwitch(fn) { CASE_SWITCH_RESETS.push(fn); }
@@ -1746,19 +1434,11 @@ function caseToken() { return state.caseSeq || 0; }
 
 function caseChanged(token) { return token !== (state.caseSeq || 0); }
 
-/* The case file itself: entities, relationships, exhibits, the ACH matrix
- * and the timeline drawn from them.
- *
- * ux17-failure:stale-previous-case-data (2026-09-22). openCase reset the
- * projection and never these, so one failed read during a case open left
- * NIGHTJAR's 146 entities, its exhibits and its hypotheses on screen under
- * KESTREL's code and a TLP:GREEN chip, and the new-edge pickers offered
- * NIGHTJAR's entities for a write into KESTREL. Emptied here, BEFORE the
- * fetches, so a failure leaves nothing rather than the previous case; the
- * loaders then say "could not be loaded" instead of drawing an empty list.
- * The DOM is cleared rather than re-rendered from the empty state because
- * a render would print "0 of 0 entities", which is a claim about a case
- * nobody has read yet. */
+/* The case file itself: entities, relationships, exhibits, the ACH matrix and the timeline
+ * drawn from them. Emptied before the fetches, so a failed read leaves nothing rather than the
+ * previous case (whose entities the new-edge pickers would offer for a write here). The DOM is
+ * cleared rather than re-rendered, because a render would print "0 of 0 entities", a claim
+ * about a case nobody has read yet. */
 onCaseSwitch(() => {
   state.nodes = [];
   state.edges = [];
@@ -1779,13 +1459,9 @@ onCaseSwitch(() => {
   show($('ev-empty'), false);
   clearLoadFailure('ev-empty');
 
-  /* And what was chosen or typed for the case being left (final review
-     C18, 2026-09-23). A file picked and titled on NIGHTJAR stayed in the
-     form, and Lodge after a switch wrote it into KESTREL as a WORM exhibit
-     with a custody record, filed at KESTREL's own classification because
-     buildPickers resets #ev-class. Nothing can withdraw that write, so the
-     form goes with the case, the way the comms reset clears a paste.
-     Setting a file input's value to '' is the one way to empty it. */
+  /* And what was chosen or typed for the case being left: a file left in the form would be
+     lodged into the next case as a WORM exhibit, a write nothing can withdraw. Setting a file
+     input's value to '' is the one way to empty it. */
   $('ev-file').value = '';
   $('ev-title').value = '';
   setMsg($('ev-result'), '');
@@ -1808,17 +1484,15 @@ onCaseSwitch(() => {
   $('ach-method-box').hidden = true;
   show($('ach-empty'), false);
   clearLoadFailure('ach-empty');
-  /* A hypothesis or an assumption worded for one case is a claim about
-     that case; added after a switch it lands in the other's matrix and
-     register (C18). */
+  /* A hypothesis or an assumption worded for one case is a claim about that case; added after a
+     switch it would land in the other's matrix and register. */
   $('ach-statement').value = '';
   setMsg($('ach-msg'), '');
   $('asm-statement').value = '';
   $('asm-basis').value = '';
   setMsg($('asm-msg'), '');
 
-  /* The density strip: NIGHTJAR's "638 elements over 949 days" stood next
-     to KESTREL's projection in the ux17 captures. */
+  /* The density strip's note and dates belong to the case being left. */
   $('tl-note').textContent = '';
   $('tl-min').textContent = '';
   $('tl-max').textContent = '';
@@ -1827,16 +1501,10 @@ onCaseSwitch(() => {
 
 /* ── the case's lifecycle state, inside the workspace ───────────────────
  *
- * ux02-cases:case-status-invisible-in-workspace (2026-09-22). The status
- * was shown on the case list and nowhere else, so an analyst who arrived
- * by the palette, a deep link or habit could not tell a CLOSED case from
- * an ACTIVE one: the canvas still said "add an entity to begin" and the
- * Add entity form was offered with no notice. Material added after
- * closed_at matters for disclosure. The console says it, every time, in
- * the chrome that every pane shares; since gap-closed-case-writes
- * (2026-09-23) the server also refuses content writes on a CLOSED,
- * ARCHIVED or PURGED case, and `applyCaseReadOnly` below turns the
- * content controls off, so the strip describes what is enforced. */
+ * Said every time, in the chrome every pane shares, however the analyst arrived: material added
+ * after closed_at matters for disclosure. The server refuses content writes on a CLOSED,
+ * ARCHIVED or PURGED case and `applyCaseReadOnly` turns the content controls off, so the strip
+ * describes what is enforced. */
 const CASE_STATE_TEXT = {
   DRAFT: 'This case is a DRAFT. Move it to ACTIVE before working it.',
   DORMANT: 'This case is DORMANT. Reactivate it before adding material.',
@@ -1853,16 +1521,12 @@ const CASE_STATES_SHUT = new Set(['CLOSED', 'ARCHIVED', 'PURGED']);
 
 /* ── a read-only case: one class and one helper ─────────────────────────
  *
- * gap-closed-case-writes (2026-09-23). The server refuses every content
- * write on a read-only case with a 409 titled CASE_READ_ONLY_TITLE, at the
- * one gate those writes pass. The console's half is this, and only this:
- * `case-read-only` on the workspace, and the controls below made inert
- * (and dimmed by `.case-ro-off`) while it is set. It is two lists rather
- * than a check in every pane because a check in every pane is how one
- * gets missed. Only controls that do nothing BUT write content are
- * listed: a filter, a search or a read in the same pane stays live. If
- * someone closes the case in another tab, the server's 409 reaches
- * `_fetch`, which re-reads the case and turns all of this on. */
+ * The server refuses every content write on a read-only case with a 409 titled
+ * CASE_READ_ONLY_TITLE, at the one gate those writes pass. The console's half is
+ * `case-read-only` on the workspace and the controls below made inert (and dimmed by
+ * `.case-ro-off`): two lists rather than a check in every pane, where one gets missed. Only
+ * controls that do nothing but write content are listed; a filter, a search or a read stays
+ * live. A case closed in another tab reaches `_fetch` as that 409, which turns all this on. */
 const CASE_READ_ONLY_TITLE = 'Case is read-only';
 
 /** The content controls in the markup, by id. */
@@ -1874,23 +1538,18 @@ const CASE_CONTENT_CONTROLS = [
   'capture-box',                                              // triage
   'ev-form',                                                  // evidence
   'comms-bind-form', 'comms-block-form', 'comms-pgp-form',    // comms
-  'comms-pgpkey-form', 'comms-pgpkey-wkd-form',   // comms F10b, F10c
+  'comms-pgpkey-form', 'comms-pgpkey-wkd-form',   // comms: PGP keys
   'dcp-cap-new', 'dcp-eml-new', 'dcp-call-new',               // deception
   'ach-score-card', 'ach-add-card', 'asm-create',             // analysis
   'col-watch-box',                                            // feeds: a watch
 ];
 
-/** The content controls a pane builds at render time, by the class its
- *  builder gives them. They are not in the page when the case opens, so
- *  `caseContentWatch` marks each one as it is drawn. The first pass listed
- *  only the markup's controls, and on a CLOSED case the tag, exhibit-link,
- *  retract, reverse, proposal, stance and assumption controls all stayed
- *  live under a strip saying they were off (gap-closed-case-writes,
- *  verifier, 2026-09-23). `case-write` is for a control whose class it
- *  shares with a governance one or a read: a merge approval's Approve,
- *  Reject and Execute merge carry it, and Withdraw beside them does not;
- *  a Feeds record's triage and category verbs carry it and its Open and
- *  Rescore do not; ACH's Score it now carries it (2026-09-24). */
+/** The content controls a pane builds at render time, by the class its builder gives them.
+ *  They are not in the page when the case opens, so `caseContentWatch` marks each one as it is
+ *  drawn. `case-write` marks a control that shares its class with a governance control or a
+ *  read: a merge approval's Approve, Reject and Execute merge carry it and Withdraw does not; a
+ *  Feeds record's triage and category verbs carry it and Open and Rescore do not; so does ACH's
+ *  Score it now. */
 const CASE_CONTENT_RENDERED = [
   '.tag-x', '.insp-linker',                 // inspector: tags, exhibit links
   '.assert-actions', '#merge-history button', // retract a claim, reverse a merge
@@ -1914,10 +1573,8 @@ function caseReadOnly(rec) {
     : CASE_STATES_SHUT.has(r.status);
 }
 
-/** True when the control `id` is one of CASE_CONTENT_CONTROLS and the case
- *  is read-only. For the command palette, which offers the same controls
- *  by keystroke and offered "Save layout" and "Go to Add entity" on a
- *  closed case (verifier, 2026-09-23). */
+/** True when the control `id` is one of CASE_CONTENT_CONTROLS and the case is read-only. For the
+ *  command palette, which offers the same controls by keystroke. */
 function caseControlOff(id) {
   return CASE_CONTENT_CONTROLS.includes(id) && caseReadOnly();
 }
@@ -1971,9 +1628,8 @@ async function caseTurnedReadOnly() {
     if (state.caseId !== id) return;
     state.caseRec = rec;
     renderCaseState(rec);
-    /* 2026-09-24: the Triage and Feeds badges
-       count no work on a read-only case, and they are repainted here too,
-       or a case closed in another tab kept its count until the next load. */
+    /* The Triage and Feeds badges count no work on a read-only case, so they are repainted here
+       too, or a case closed in another tab keeps its count until the next load. */
     repaintWorkBadges();
   } catch (_e) { /* the 409's own message has already said enough */ }
 }
@@ -1982,10 +1638,8 @@ function renderCaseState(rec) {
   const chip = $('hdr-state');
   const strip = $('case-state-strip');
   applyCaseReadOnly(rec);
-  /* The canvas's empty state is the other place that invited new work. It
-     reads the case state itself now (renderGraphEmpty), because it also
-     has to say whether the case or the projection is what is empty (ux03
-     empty-case-says-widen, 2026-09-23). */
+  /* The canvas's empty state also invites new work, so it reads the case state itself
+     (renderGraphEmpty) and says whether the case or the projection is what is empty. */
   renderGraphEmpty();
   if (!rec) {
     show(chip, false);
@@ -2028,10 +1682,7 @@ async function showCaseList() {
   state.caseId = null;
   state.caseRec = null;
   stopGraph();
-  /* No case is open, so nothing is live about one. The socket stayed
-     subscribed to the case just left and the dot still said "Changes to
-     this case ... arrive without a refresh" beside "No case selected"
-     (ux02-cases:case-actions-linger-on-case-list, 2026-09-23). */
+  /* No case is open, so nothing is live about one: the socket leaves the case just left. */
   disconnectLive();
   hideCaseChrome();
   show($('view-workspace'), false);
@@ -2052,9 +1703,7 @@ async function showCaseList() {
     const wanted = state.deepLinkCase;
     state.deepLinkCase = null;
     if (wanted && state.cases.some((c) => c.id === wanted)) openCase(wanted);
-    /* `#tab=admin` with no case opens Administration from the list: it is
-       deployment-wide, and the deep link was honoured only inside a case
-       (ux16 admin-unreachable-without-a-case, 2026-09-22). */
+    /* `#tab=admin` with no case opens Administration from the list: it is deployment-wide. */
     else if (!wanted && state.deepLinkTab === 'admin') {
       state.deepLinkTab = null;
       showAdmin();
@@ -2062,14 +1711,9 @@ async function showCaseList() {
   } catch (err) { fail(err); }
 }
 
-/* ux02-cases:case-list-lacks-triage-fields (2026-09-23). The list was
- * code, title, a plain-text status and the TLP, in creation order with no
- * date to explain it, so an owner looking for what is overdue for review,
- * or an analyst looking for their active work among closed and dormant
- * cases, had nothing to go on. Now: the status as a chip (quiet for a case
- * not open for work), the reader's own role, the review date in the alert
- * colour once it has passed, the creation date, open-for-work first, a
- * filter, and the whole row opens the case. */
+/* The case list: the status as a chip, the reader's own role, the review date in the alert
+ * colour once it has passed, the creation date, open-for-work cases first, a filter, and the
+ * whole row opens the case. */
 
 /** The order the list is sorted in: the cases open for work first. */
 const CASE_STATUS_RANK = { ACTIVE: 0, DRAFT: 1, DORMANT: 2, CLOSED: 3,
@@ -2135,9 +1779,7 @@ function renderCases() {
       fmtDate(c.review_due) + (late ? ', overdue' : ''));
     tr.appendChild(tdReview);
     tr.appendChild(el('td', 'num', fmtDate(c.created_at)));
-    /* What needs this person here, filled by paintCaseWaiting from
-       /notifications/waiting (ux08-triage:no-work-waiting-at-sign-in,
-       2026-09-23). */
+    /* What needs this person here, filled by paintCaseWaiting from /notifications/waiting. */
     const tdWait = el('td', 'case-waiting absent', 'not counted');
     tdWait.dataset.caseId = c.id;
     tr.appendChild(tdWait);
@@ -2173,11 +1815,8 @@ async function createCase(event) {
     setMsg(errBox, 'A lawful basis is required. A case cannot exist without one.');
     return;
   }
-  /* Every required field is checked here, by the name on its label
-     (ux19-copy developer-speak-in-copy, 2026-09-23). Only the lawful
-     basis was, so a blank date reached the server and came back as
-     "body.retention_until: Input should be a valid date or datetime,
-     input is too short". */
+  /* Every required field is checked here, by the name on its label, rather than reaching the
+     server and coming back as a validation path. */
   const missing = [['case-code', 'Code'], ['case-title', 'Title'],
     ['case-retention', 'Retention until'], ['case-review', 'Review due']]
     .filter(([id]) => !$(id).value.trim()).map(([, label]) => label);
@@ -2249,11 +1888,8 @@ function listWords(items, conj) {
 
 async function openCase(caseId) {
   runCaseSwitchResets();
-  /* An open that a newer switch has overtaken must stop, not finish. Left
-     running, a slow open of case A could write A's code and TLP into the
-     header after case B had drawn, which is the shape of
-     case-switch-carries-previous-case-results (2026-09-22) arriving by a
-     race instead of by omission. */
+  /* An open that a newer switch has overtaken must stop, not finish: a slow open of case A could
+     write A's code and TLP into the header after case B had drawn. */
   const token = caseToken();
   /* Nor does the previous case's header stand while this one loads: until
      the record arrives the bar names what is being opened, with no TLP
@@ -2261,9 +1897,8 @@ async function openCase(caseId) {
      on screen. */
   const listed = (state.cases || []).find((c) => c.id === caseId);
   const openingCode = listed ? listed.code : 'case';
-  /* The address says which case this is, so a reload comes back to it and
-     Back returns to the list (ux02-cases:reload-and-back-lose-the-case,
-     2026-09-23). A new entry only when the case changes. */
+  /* The address says which case this is, so a reload comes back to it and Back returns to the
+     list. A new entry only when the case changes. */
   writeLocation(caseId,
                 state.caseId === caseId ? state.tab : (state.deepLinkTab || null),
                 state.caseId !== caseId);
@@ -2303,11 +1938,9 @@ async function openCase(caseId) {
   state.triageId = null;
   stopWorkerLayout();
   applyMetrics(null);
-  /* Every pane chosen from here on is the analyst's, not this open's: the
-     workspace is on screen well before the case has loaded (on a large case
-     that is seconds), its rail is live, and the Graph this open ends on is a
-     default for an open nobody touched. The choices are counted by
-     `selectTab`, and nothing this function awaits calls it. */
+  /* A pane chosen from here on is the analyst's: the rail is live seconds before a large case
+     has loaded, and the Graph this open ends on is only a default. `selectTab` counts the
+     choices, and nothing this function awaits calls it. */
   const choicesAtOpen = _tabChoices;
   try {
     const [rec, ontology] = await Promise.all([
@@ -2327,17 +1960,14 @@ async function openCase(caseId) {
     show($('btn-cases'), true);
     showCaseChrome(rec);
     renderHeaderRole();
-    loadLookupProviders();   // F15.3, the inspector's Look up
+    loadLookupProviders();   // the inspector's Look up
     document.title = caseTitle();
     show($('hdr-asof'), true);
     show($('view-cases'), false);
     show($('view-workspace'), true);
     buildPickers();
-    /* The tag vocabulary, once per case rather than per selection. Not
-       awaited: the inspector's tag chips come from the node's own tags and
-       render without it; only the "apply an existing tag" picker depends
-       on this, and blocking the whole case open on a curation read would
-       be the wrong trade. */
+    /* The tag vocabulary, once per case. Not awaited: only the "apply an existing tag" picker
+       needs it, and the case open should not wait on a curation read. */
     loadCaseTags();
     renderInspector();
     /* Presets and the saved layout must land before the first projection
@@ -2359,22 +1989,17 @@ async function openCase(caseId) {
     if (caseChanged(token)) return;
     await refreshInboxBadge();
     if (caseChanged(token)) return;
-    /* Not awaited: an analyst without `sample.read` will 403 on it, and
-       neither the wait nor the failure should delay a workspace that is
-       otherwise ready. The badge counts THIS case's waiting samples since
-       2026-09-22 (ux13-lab:lab-not-case-scoped) and drops a reply that
-       lands after a later case switch. */
+    /* Not awaited: an analyst without `sample.read` gets a 403, and neither the wait nor the
+       failure should delay the workspace. The badge counts this case's waiting samples and drops
+       a reply that lands after a later case switch. */
     refreshSampleBadge();
-    /* The Feeds badge the same way, and for the same reason: counted on
-       open, never awaited (ux12-feeds:feeds-badge-never-set). */
+    /* The Feeds badge the same way, and for the same reason: counted on open, never awaited. */
     refreshFeedsBadge();
     /* After the first full load, so an event arriving mid-boot cannot
        race the initial fetch and redraw a half-built workspace. */
     connectLive();
-    /* The default pane, unless the analyst has already picked one while the
-       case was loading: a click on Evidence at the third second used to be
-       undone by the Graph this ended on. Their pick also outranks a deep
-       link's, which was written before they clicked. */
+    /* The default pane, unless the analyst picked one while the case was loading; their pick
+       also outranks a deep link's, which was written before they clicked. */
     const picked = _tabChoices !== choicesAtOpen;
     if (!picked) selectTab('graph');
     // After the graph, so a deep-linked pane lands on a workspace that is
@@ -2386,9 +2011,7 @@ async function openCase(caseId) {
        leaving "Opening…" there as if it were still on its way. */
     if (!state.caseRec) {
       $('hdr-case').textContent = 'Could not open ' + openingCode;
-      /* Nor may the previous case's buttons stand, offering to act on a
-         record that was never read (ux01-firstrun:dead-case-buttons-
-         after-return, 2026-09-23). */
+      /* Nor may the previous case's buttons stand, offering to act on a record never read. */
       hideCaseChrome();
     }
     fail(err);
@@ -2403,8 +2026,8 @@ let _tabChoices = 0;
 function selectTab(name) {
   _tabChoices += 1;
   state.tab = name;
-  /* The pane goes into the address as well, in place: a reload lands on
-     it, and a pane change is not a Back step (ux02-cases, 2026-09-23). */
+  /* The pane goes into the address as well, in place: a reload lands on it, and a pane change
+     is not a Back step. */
   if (state.caseId) writeLocation(state.caseId, name, false);
   for (const tab of document.querySelectorAll('.tab')) {
     const on = tab.dataset.tab === name;
@@ -2417,17 +2040,14 @@ function selectTab(name) {
      the way in or the trend draws into nothing and reads as "no data". */
   if (name === 'analytics') { resizeHistory(); loadLatestAnalysis(); }
   if (name === 'triage') { loadTriage(); loadApprovals(); }
-  /* The register page again, as triage and the inbox are: what each
-     exhibit backs is the server's answer at read time, and a link, a claim
-     or a retraction made on another tab left every card saying what it
-     said at case open (c13, 2026-09-24; reloadRegisterIfShown). */
+  /* The register page again, as triage and the inbox are: what each exhibit backs is the
+     server's answer at read time, and a link, claim or retraction may have come from another
+     tab (see reloadRegisterIfShown). */
   if (name === 'evidence' && state.caseId) loadEvidence({ pageOnly: true });
   if (name === 'admin') enterAdminPane();
-  /* One-time credentials leave with the pane (ux16-admin
-     one-time-creds-card-unanchored, 2026-09-23): a live password left on
-     the Admin pane followed the administrator nowhere and waited there. */
+  /* One-time credentials leave with the pane, so a live password does not wait on the Admin pane. */
   else clearAdminCreds();
-  /* And an issued ingest key with the Feeds pane (r2 u25, 2026-09-24). */
+  /* And an issued ingest key with the Feeds pane. */
   if (name !== 'feeds') clearKeySecret();
   /* Platforms are reference data: fetched once, on first use, so the
      workspace does not pay for a tab nobody opened. */
@@ -2437,8 +2057,8 @@ function selectTab(name) {
        It is a projection over every conversation in the case and belongs
        behind a button for the same reason the report does. */
     loadUnverified();
-    /* The vendor keys, the lookups and whether lookups are on (F10b,
-       F10c); the recorded checks stay behind their button. */
+    /* The vendor keys, the lookups and whether lookups are on; the recorded checks stay behind
+       their button. */
     loadPgpKeys();
     loadKeyDirectory();
     loadKeyLookups();
@@ -2458,7 +2078,7 @@ function selectTab(name) {
        cached "declared" after somebody unset the variable would be the
        worst possible stale value. */
     loadSamplePolicy();
-    loadSignoffs();   // F14, the requests waiting for your sign-off
+    loadSignoffs();   // the requests waiting for your sign-off
     selectSamplesSub(currentSub('pane-samples'));
   }
   if (name === 'deception' && selectDeceptionSub) {
@@ -2479,11 +2099,8 @@ function initTabs() {
     tab.addEventListener('click', () => selectTab(tab.dataset.tab));
     tab.addEventListener('keydown', (e) => {
       let next = null;
-      /* Only the tabs that can take focus: on a read-only case
-         `applyCaseReadOnly` makes the Entity and Link tabs inert, and an
-         arrow landing on one would open its pane while focus stayed put,
-         so the next press opened it again (gap-closed-case-writes,
-         2026-09-23). */
+      /* Only the tabs that can take focus: on a read-only case the Entity and Link tabs are
+         inert, and an arrow landing on one would open its pane while focus stayed put. */
       const live = tabs.filter((t) => !t.inert);
       const i = live.indexOf(tab);
       /* The rail is a vertical tablist, so Up/Down are the primary keys —
@@ -2503,15 +2120,13 @@ function initTabs() {
 /** The case's entity page: the newest this many, which is the server's
  *  own cap on `/nodes`. The entity list says when a case holds more. */
 const ENTITY_PAGE = 1000;
-/** The case's tie page, likewise. The count line says when a case holds
- *  more ties than this (the 2026-09-23 verifier on entity-list-no-find). */
+/** The case's tie page, likewise. The count line says when a case holds more ties than this. */
 const EDGE_PAGE = 1000;
 
 /* ── whole-case lists (entity table, pickers, timeline span) ───────────
- * These stay UNPROJECTED on purpose. The sociogram shows a projection; the
- * entity list is the case file, and an analyst looking for something must not
- * have it hidden by a filter chosen for the graph. They also give the timeline
- * a span that does not shrink as `as_of` moves. */
+ * Unprojected on purpose: the entity list is the case file, and nothing in it may be hidden by
+ * a filter chosen for the graph. They also give the timeline a span that does not shrink as
+ * `as_of` moves. */
 
 /** The whole-case lists come a page at a time; a full page is a floor.
  *  The entity page, by its other name: one number, not two to keep in
@@ -2525,23 +2140,17 @@ async function loadCaseGraph() {
       api(cpath('/nodes?limit=' + ENTITY_PAGE)),
       api(cpath('/edges?limit=' + EDGE_PAGE + '&include_inferred=true')),
     ]);
-    /* A reply for a case the analyst has since left is dropped, never
-       drawn under the new header (ux17-failure, 2026-09-22). */
+    /* A reply for a case the analyst has since left is dropped, never drawn under the new header. */
     if (caseChanged(token)) return;
     clearLoadFailure('ent-empty');
-    /* Sanitised HERE, at the boundary, not at the twenty-five places a
-       label is drawn. An IDENTITY node's label IS a forum handle — the
-       analyst pastes it — so it is attacker-chosen, and a bidi override in
-       one would silently flip how that actor reads in the sociogram, the
-       entity table, the palette, the inspector and every analytics
-       summary. One of those sites will always be the one somebody forgets.
-       `label_raw` keeps the original for any path that needs the true
-       bytes; nothing currently does. */
+    /* Sanitised here, at the boundary, not at the places a label is drawn: an IDENTITY node's
+       label is a forum handle, attacker-chosen, and a bidi override in it would flip how that
+       actor reads everywhere. `label_raw` keeps the original bytes. */
     state.nodes = nodes.map(withSafeLabel);
     state.edges = edges;
     buildEntityFilter();
     renderEntities();
-    /* A full page may not be the whole case (ux06-entry:entity-list-no-find). */
+    /* A full page may not be the whole case. */
     refreshEntityTotal();
     buildEdgePickers();
     computeTimeSpan();
@@ -2559,9 +2168,8 @@ async function loadCaseGraph() {
   }
 }
 
-/** Reload everything a write could have changed. The register too, when it
- *  is on screen: a retraction or a claim changes what an exhibit backs
- *  (c13, 2026-09-24). */
+/** Reload everything a write could have changed. The register too, when it is on screen: a
+ *  retraction or a claim changes what an exhibit backs. */
 async function reloadAll() {
   await loadCaseGraph();
   await refreshSociogram();
@@ -2571,9 +2179,8 @@ async function reloadAll() {
 /* ── projection: the only thing a metric is ever computed against ─────── */
 
 async function loadPresets() {
-  /* Token-guarded like loadLayout below (2026-09-23):
-     openCase checks the case only after both land, and by then an older
-     case's reply has already written the shared state. */
+  /* Token-guarded like loadLayout below: openCase checks the case only after both land, and by
+     then an older case's reply would already have written the shared state. */
   const token = caseToken();
   try {
     const out = await api(cpath('/graph/presets'));
@@ -2595,9 +2202,7 @@ async function loadPresets() {
   }
 }
 
-/* The confidence floor's options, short: the select sat at the width of
-   "MODERATE and above" in a bar that has to fit on one row (ux03
-   control-bar-squeezes-canvas, 2026-09-23). */
+/* The confidence floor's options, short, because the projection bar has to fit on one row. */
 const MIN_CONF_OPTIONS = [
   ['LOW', 'LOW and up'],
   ['MODERATE', 'MODERATE and up'],
@@ -2621,14 +2226,12 @@ function projQuery() {
   return q;
 }
 
-/** One fetch path for the sociogram. Sequence-guarded, because a scrubber drag
- *  can start three of these before the first returns and the newest must win.
+/** One fetch path for the sociogram. Sequence-guarded, because a scrubber drag can start three
+ *  of these before the first returns and the newest must win.
  *
- *  `{ metrics: false }` fetches the picture and not the metered metrics.
- *  A scrubber drag asks for that at every pause and for the metrics once,
- *  when the thumb is let go: a short scrub used to spend the analyst's
- *  whole metrics budget, disable Node size and take the evidence headline
- *  with it (ux03 metrics-rate-limit-degrades-view, 2026-09-23). */
+ *  `{ metrics: false }` fetches the picture and not the metered metrics: a scrubber drag asks
+ *  for that at every pause and for the metrics once, when the thumb is let go, so a short scrub
+ *  cannot spend the analyst's whole metrics budget. */
 async function refreshSociogram(options) {
   const o = options || {};
   if (!state.caseId) return;
@@ -2640,10 +2243,8 @@ async function refreshSociogram(options) {
   try {
     g = await api(cpath('/graph?' + gq.toString()));
   } catch (err) {
-    /* Only the newest request may raise a banner: an older one, including
-       one for the case the analyst has left (the canvas reset below takes
-       a number too), failing inside the next case is noise about nothing
-       on screen (final review C16, 2026-09-23). */
+    /* Only the newest request may raise a banner: an older one, including one for a case the
+       analyst has left, would be noise about nothing on screen. */
     if (seq === state.graphSeq) fail(err);
     return;
   }
@@ -2668,8 +2269,7 @@ async function refreshSociogram(options) {
 
   renderProjectionBar();
   renderInspector();
-  /* The Analysis pane's results against the graph that just landed
-     (ux10-analytics:analysis-survives-graph-changes, 2026-09-23). */
+  /* The Analysis pane's results, checked against the graph that just landed. */
   analyticsAfterGraphRefresh();
 }
 
@@ -2683,22 +2283,18 @@ function indexProjection() {
       const rank = CONF_RANK[e.confidence];
       if (rank !== undefined &&
           (cur === undefined || rank > CONF_RANK[cur])) conf.set(id, e.confidence);
-      /* Invariant 3: machines propose, analysts dispose. A PROPOSED review
-         on an incident tie is the analyst's cue that something is waiting
-         (gap-tie-review). */
+      /* Invariant 3: machines propose, analysts dispose. A PROPOSED review on an incident tie
+         is the analyst's cue that something is waiting. */
       if (e.review === 'PROPOSED') unreviewed.set(id, (unreviewed.get(id) || 0) + 1);
     }
   }
   state.nodeConf = conf;
   state.nodeTies = ties;
   state.nodeUnreviewed = unreviewed;
-  /* The ring has two sources, each cleared where it is decided. A
-     proposal waiting in Triage: `loadTriage` sets `state.nodeProposed`
-     from the queue's `pending_by_node`, one source for the ring and the
-     pane (ux08-triage:graph-says-unreviewed-triage-says-nothing). A tie
-     still PROPOSED: counted above. It rang every hub while nothing wrote
-     `edge.review`; a tie is now born ACCEPTED unless a machine founded it,
-     and its Review moves it (gap-tie-review, 2026-09-23). */
+  /* The ring has two sources, each cleared where it is decided: a proposal waiting in Triage
+     (`loadTriage` sets `state.nodeProposed` from the queue's `pending_by_node`), and a tie still
+     PROPOSED, counted above. A tie is born ACCEPTED unless a machine founded it, and its Review
+     moves it. */
 }
 
 /** A short, stable fingerprint of the subgraph on screen: FNV-1a over every
@@ -2715,11 +2311,8 @@ function subgraphKey() {
   };
   // Projection ROWS (the API's), not sim nodes: the flag lives on the row.
   for (const row of state.gnodes) mix(row.id + (row.has_evidence ? '+' : '-') + ';');
-  /* A tie's has_evidence too. The cached answer carries evidence_coverage,
-     which the coverage chip cross-checks, and with the tie's flag left out
-     an exhibit linked to a relationship was served the answer from before
-     the link: the chip's title then reported a metrics count of 0 against
-     the canvas's 1, a disagreement that did not exist (2026-09-24). */
+  /* A tie's has_evidence too: the cached answer carries evidence_coverage, which the coverage
+     chip cross-checks, so linking an exhibit to a relationship must change the fingerprint. */
   for (const e of state.gedges) {
     mix(e.id + ',' + e.src_node_id + ',' + e.dst_node_id + ',' + e.weight + ','
         + e.sign + ',' + e.confidence + ',' + (e.is_inferred ? 1 : 0)
@@ -2771,10 +2364,8 @@ async function refreshMetrics(seq, q) {
   const key = metricsKey(q);
   const hit = key && state.metricsCache.get(key);
   if (hit) { applyMetrics(hit); metricsUp(); return; }
-  /* A role the case record says lacks analytics.run is not asked: the
-     server refuses it every time, and every refusal is a permanent
-     AUTHZ_DENIED row, a hum from each case open by a reader or a liaison
-     (2026-10-07; the reason `refreshFeedsBadge` stops asking). */
+  /* A role the case record says lacks analytics.run is not asked: the server refuses it every
+     time, and every refusal is a permanent AUTHZ_DENIED row (as in `refreshFeedsBadge`). */
   if (!caseCan(state.caseRec, 'analytics.run')) {
     applyMetrics(null);
     $('sel-metric').disabled = true;
@@ -2875,10 +2466,9 @@ function computeRanks(list) {
  *  one graph's metrics with another graph's parameters. Blank them and say
  *  why (docs/03: the projection parameters travel with the result). */
 function invalidateAnalytics() {
-  /* A run or a stored-run read still in flight was started under the old
-     projection, so it is retired even when nothing is on screen yet: it
-     returned early here, and the reply drew the old projection's numbers
-     under the new one (final review C3, 2026-09-23). */
+  /* A run or a stored-run read still in flight was started under the old projection, so it is
+     retired even when nothing is on screen yet; otherwise its reply would draw the old
+     projection's numbers under the new one. */
   if (!state.analytics && !state.analyticsRunning) {
     state.analyticsGen = (state.analyticsGen || 0) + 1;
     return;
@@ -2917,30 +2507,19 @@ function setSizeMetric(key) {
   draw();
 }
 
-/** E2. How much of what is on screen rests on an exhibit. This is a
- *  headline number, not a detail: the difference between a graph of
- *  evidence and a graph of opinions is exactly this ratio, and the first
- *  real session of using this tool scored zero without anyone noticing.
+/** How much of what is on screen rests on an exhibit: a headline number, because this ratio is
+ *  the difference between a graph of evidence and a graph of opinions.
  *
- *  Counted HERE, from the has_evidence flag every element of the /graph
- *  reply carries (`coverageLine`), and no longer taken from
- *  /graph/metrics. That call is metered, and when the budget ran out the
- *  red "0% evidenced" line vanished at the very moment the analyst was
- *  exploring (ux03 metrics-rate-limit-degrades-view, 2026-09-23). The
- *  rule behind the flag is the server's (`evidenced_sql`); the metrics
- *  answer is only a cross-check in the chip's title. */
+ *  Counted here from the has_evidence flag every element of the /graph reply carries
+ *  (`coverageLine`), not from the metered /graph/metrics, so it never vanishes when the budget
+ *  runs out. The rule behind the flag is the server's (`evidenced_sql`); the metrics answer is
+ *  only a cross-check in the chip's title. */
 function renderEvidenceCoverage() {
   const box = $('evidence-coverage');
   if (!box) return;
-  /* What the canvas draws. An ego or a set focus draws part of the
-     projection, and the chip went on counting all of it under a title
-     that says it counts the canvas: Meridian crew's ego focus, 19 entities
-     and 85 ties, read "0 of 592 elements" (2026-09-24). An analyst
-     judging whether one suspect's neighbourhood is evidenced read the
-     whole case's share as that neighbourhood's. The focus is counted
-     from the rows setRendered keeps on each sim node and link (their
-     .ref carries has_evidence), and the title gives the whole
-     projection's figure beside it. A path focus draws the whole
+  /* What the canvas draws. An ego or a set focus draws part of the projection, so it is counted
+     from the rows setRendered keeps on each sim node and link (their .ref carries has_evidence),
+     and the title gives the whole projection's figure beside it. A path focus draws the whole
      projection, so it is counted as the projection. */
   const gnodes = state.gnodes || [], gedges = state.gedges || [];
   const g = state.graph;
@@ -2972,21 +2551,12 @@ function backedCount(nodes, edges) {
 
 /** The coverage figure, counted from the canvas: {text, cls, title}.
  *
- *  ux07-evidence:coverage-vanishes-with-metrics (2026-09-23). This read
- *  `state.metrics.evidence_coverage` alone, and the metrics call is
- *  optional and rate-limited: an account without analytics.run never saw
- *  the figure, and anyone else lost it whenever the shared budget ran
- *  out, with nothing to say it was missing while the hollow marks still
- *  drew. Every node and edge in the projection carries `has_evidence`
- *  (the one rule in projections.evidenced_sql), so the figure is counted
- *  from those, and the metrics answer, when there is one for the same
- *  elements, is only a cross-check. When the flags are missing it says
- *  the figure is unavailable rather than leaving a gap.
- *
- *  `whole` ({backed, elements}) is given while the canvas draws a focus:
- *  the figure is then the focus's, says so, and the title adds the whole
- *  projection's (2026-09-24). The metrics cross-check is left out
- *  then, because the metrics are computed over the whole projection. */
+ *  Every node and edge in the projection carries `has_evidence` (the one rule in
+ *  projections.evidenced_sql), so the figure is counted from those; the metrics answer, when
+ *  there is one for the same elements, is only a cross-check. Missing flags read as "figure
+ *  unavailable", not a gap. `whole` ({backed, elements}) is given while the canvas draws a
+ *  focus: the figure is then the focus's and says so, the title adds the whole projection's,
+ *  and the metrics cross-check is left out, since the metrics cover the whole projection. */
 function coverageLine(nodes, edges, fromMetrics, truncated, whole) {
   const elements = nodes.length + edges.length;
   const base = 'cs-chip';        // a chip in the canvas status line
@@ -3045,10 +2615,7 @@ function renderProjectionBar() {
     || state.sizeMetric) + ', ' + gloss + '. The area of a node is in '
     + 'proportion to it.';
 
-  /* The metric note that sat under Node size is gone: it restated the
-     chosen metric the select already shows and the legend shows a third
-     time (ux03 control-bar-squeezes-canvas, 2026-09-23). When the sizes
-     are NOT the chosen metric, the canvas status line says so
+  /* When the sizes are not the chosen metric, the canvas status line says so
      (renderCanvasStatus), where it costs the canvas no height. */
   renderEvidenceCoverage();
   const sizeBox = $('legend-size');
@@ -3068,14 +2635,9 @@ function renderProjectionBar() {
   renderAsOfHeader();
 }
 
-/** The view (the projection) in the words of its own controls, one way
- *  everywhere (ux19-copy developer-speak-in-copy, 2026-09-23). The readout
- *  wrote it as request parameters ("preset=all · edge_types=every social
- *  tie · include_inferred=true"), the inspector as another string of them
- *  and the Analysis pane a third way, and the readout is the line that
- *  must be reproducible for disclosure. `p` is a projection as the server
- *  describes it (`state.projMeta`, an analysis run's `projection`) or the
- *  console's own `state.proj`. */
+/** The view (the projection) in the words of its own controls, said one way everywhere. `p` is
+ *  a projection as the server describes it (`state.projMeta`, an analysis run's `projection`)
+ *  or the console's own `state.proj`. */
 function viewWords(p) {
   const key = p.preset || state.proj.preset;
   const preset = (state.presets || []).find((x) => x.key === key);
@@ -3105,14 +2667,8 @@ function viewParameters(p) {
     + (Array.isArray(p.edge_types) ? ' edge_types=' + p.edge_types.join(',') : '');
 }
 
-/** The projection, in words, under the canvas. It used to restate the
- *  controls in their API spelling (preset=all · edge_types=every social
- *  tie · include_inferred=true ...), so analysts learned to skip it, and it
- *  was where the TRUNCATED and INCOMPLETE warnings were written: at the
- *  foot of the pane, in 11px mono, far from the picture they qualify (ux03
- *  readout-buries-warnings, 2026-09-23). The warnings sit on the canvas
- *  now (renderCanvasStatus) and this line says what is drawn; its title
- *  gives the view itself in viewWords' words, with its parameters. */
+/** The projection, in words, under the canvas: what is drawn, with the view in viewWords' words
+ *  and its parameters in the title. The warnings sit on the canvas (renderCanvasStatus). */
 function renderReadout() {
   const box = $('proj-readout');
   clear(box);
@@ -3130,9 +2686,8 @@ function renderReadout() {
     + ' and ' + countOf(drawnTies, 'tie', 'ties'));
   const inferred = p.include_inferred === undefined
     ? state.proj.include_inferred : p.include_inferred;
-  /* "Counted in the metrics" only while there are metrics to count them
-     in: an empty case, a refused call or a timeline drag has none, and the
-     line said it anyway (fix round, 2026-09-23). */
+  /* "Counted in the metrics" only while there are metrics to count them in: an empty case, a
+     refused call or a timeline drag has none. */
   parts.push(inferred
     ? 'inferred ties included'
       + (state.metrics && drawnNodes ? ', and counted in the metrics' : '')
@@ -3142,18 +2697,15 @@ function renderReadout() {
     parts.push('density ' + num(state.metrics.density, 2));
   }
   const line = el('span', null, parts.join(' · '));
-  /* The view in the words every other place uses (ux19-copy
-     developer-speak-in-copy), and the parameters a disclosure or a
-     re-run quotes exactly. */
+  /* The view in the words every other place uses, and the parameters a disclosure or a re-run
+     quotes exactly. */
   line.title = viewWords(p) + '. ' + viewParameters(p)
     + '. The metrics are computed over this view and nothing else.';
   box.appendChild(line);
 }
 
-/** What changes how the picture may be read, ON the picture: how much of
- *  it is evidenced, a truncated page, material above the reader's
- *  clearance, metrics that did not load. They were appended to the readout
- *  at the bottom of the pane (ux03 readout-buries-warnings, 2026-09-23). */
+/** What changes how the picture may be read, on the picture: how much of it is evidenced, a
+ *  truncated page, material above the reader's clearance, metrics that did not load. */
 function renderCanvasStatus() {
   const box = $('graph-warnings');
   if (!box) return;
@@ -3168,14 +2720,9 @@ function renderCanvasStatus() {
     const c = chip('TRUNCATED at ' + state.nodeLimit + ' entities: a partial picture',
       'cs-warn', 'The projection has more entities than this page holds. Narrow '
         + 'it, or raise the ceiling, before reading structure off it.');
-    /* The way OUT of the truncation, offered where the truncation is
-       reported. Until 2026-07-26 this notice was a dead end: the console
-       was hard-capped at 800 while the API served up to 5,000, so an
-       analyst told to "narrow the projection" had no alternative even when
-       the whole case would have fitted.
-       The warning stays regardless: raising the ceiling and still hitting
-       it is exactly when somebody most needs to know the picture is
-       partial. */
+    /* The way out of the truncation, offered where it is reported. The warning stays
+       regardless: raising the ceiling and still hitting it is when somebody most needs to know
+       the picture is partial. */
     const next = NODE_PAGE_STEPS.find(function (n) { return n > state.nodeLimit; });
     if (next) {
       const more = el('button', 'btn ghost small cs-btn', 'show up to ' + next);
@@ -3190,13 +2737,10 @@ function renderCanvasStatus() {
       c.appendChild(more);
     }
   }
-  /* docs/14 U2. Without this an analyst cannot tell a sparse network from a
-     censored one, and reads structure off a picture they believe is
-     complete: a broker who looks peripheral because the two ties that make
-     them central are above their clearance is a wrong answer delivered
-     confidently. Never says WHICH classification, WHICH compartment, or
-     WHERE: the count is per case, because "a hidden tie next to this
-     person" would localise the withheld material. */
+  /* Without this an analyst cannot tell a sparse network from a censored one and reads
+     structure off a picture they believe is complete (docs/14). It never says which
+     classification, compartment or where: the count is per case, because "a hidden tie next to
+     this person" would localise the withheld material. */
   const w = state.withheld;
   if (w && w.incomplete) {
     const detail = (w.nodes === undefined)
@@ -3251,8 +2795,8 @@ function renderFocusFlag() {
   }
   btn.textContent = 'Full projection';
   if (state.focus.kind === 'set') {
-    /* Shown from the Analysis pane (2026-09-23), and says when that run
-       has left the pane or gone stale (setFocusSource). */
+    /* Shown from the Analysis pane, saying when that run has left the pane or gone stale
+       (setFocusSource). */
     text.textContent = 'FOCUS · ' + state.focus.label + ', '
       + setFocusSource(state.focus);
     flag.title = state.focus.note;
@@ -3265,9 +2809,8 @@ function renderFocusFlag() {
     flag.title = 'Only this neighbourhood is on screen. The metrics panel still ' +
       'reports numbers for the whole projection, not for this subgraph.';
   } else {
-    /* Three states, not two. `null` is "the recompute failed, so nobody
-       knows" — distinct from `false`, which is a real finding about the
-       graph. Collapsing them is how a failure becomes an assertion. */
+    /* Three states, not two: `null` is "the recompute failed, so nobody knows", distinct from
+       `false`, a real finding about the graph. Collapsing them turns a failure into an assertion. */
     const verdict = state.focus.connected === null
       ? ' · CONNECTIVITY UNKNOWN: the recompute failed'
       : state.focus.connected
@@ -3376,8 +2919,7 @@ function exitFocus() {
  *  history, not throw them back to the whole graph. */
 async function reapplyFocus(seq, q) {
   if (!state.focus) { setRendered(state.gnodes, state.gedges); return; }
-  /* An Analysis set is ids, not a server query: re-cut the new projection
-     by them (2026-09-23). */
+  /* An Analysis set is ids, not a server query: re-cut the new projection by them. */
   if (state.focus.kind === 'set') { applySetFocus({ keepView: true }); return; }
   const present = new Set(state.gnodes.map((n) => n.id));
   if (state.focus.kind === 'ego') {
@@ -3421,24 +2963,10 @@ async function reapplyFocus(seq, q) {
     state.pathIds = out.connected ? (out.path || []) : [];
   } catch (err) {
     if (seq !== state.graphSeq) return;
-    /* This swallowed the error and cleared only the highlight, leaving
-       `state.focus.connected` and `.hops` holding the verdict from the
-       PREVIOUS projection — which `renderFocusFlag` then kept printing
-       against the new one. So after a failed recompute the flag went on
-       asserting "· 3 hops" for a projection where nothing had computed a
-       path, and the canvas showed no path at all: two contradictory
-       claims, neither of them labelled.
-
-       The inverse is worse. If the earlier answer was NOT CONNECTED and
-       the new projection would have connected them, the flag kept saying
-       NOT CONNECTED — a false negative on the one question the control
-       exists to answer.
-
-       Connectivity is now explicitly UNKNOWN, which is a third state and
-       the honest one. The focus itself is KEPT (unlike the ego branch,
-       which drops it): the two endpoints are still in the projection, the
-       analyst chose them, and throwing that away on a transient 500 costs
-       them the selection for no reason. */
+    /* Connectivity becomes unknown, a third state: keeping the previous projection's verdict
+       would print "3 hops" or NOT CONNECTED for a path nothing computed. The focus itself is
+       kept (unlike the ego branch): the endpoints are still in the projection, and a transient
+       500 should not cost the analyst the selection. */
     state.focus.connected = null;
     state.focus.hops = null;
     state.pathIds = null;
@@ -3448,13 +2976,9 @@ async function reapplyFocus(seq, q) {
 }
 
 /* ── timeline scrubber: the signature element (docs/06) ─────────────────
- * Drag it and the graph plays through history. `as_of` is WORLD time — "the
- * thing existed then" — not record time, which is why an edge can vanish from
- * the picture without anything having been deleted.
- *
- * The span is computed from the UNPROJECTED case lists so it cannot shrink as
- * the scrubber moves; a control whose own range depends on its value is
- * unusable. */
+ * Drag it and the graph plays through history. `as_of` is world time ("the thing existed
+ * then"), not record time, so an edge can leave the picture without anything being deleted.
+ * The span comes from the unprojected case lists so it cannot shrink as the scrubber moves. */
 
 const tlCanvas = $('tl-density');
 const tlCtx = tlCanvas.getContext('2d');
@@ -3468,14 +2992,9 @@ function pushTime(out, value) {
 
 /** The strip's span and its density marks.
  *
- *  Density is WORLD time only. An entity with no valid-from and no
- *  first-seen used to count as arriving at its created_at, which is when
- *  somebody typed it in: every seeded entity landed in the last bucket, a
- *  146-high bar that flattened every real month to 2px under a heading
- *  that says "world time", and a bulk import in a real case would read as
- *  a burst of activity on the import date (ux04 density-strip-flattened,
- *  2026-09-23). Undated elements are counted and said, not drawn.
- *  created_at still stretches the SPAN, so the right-hand end is now. */
+ *  Density is world time only: an element with no valid-from and no first-seen is counted and
+ *  said, not drawn at its created_at, or a bulk import would read as a burst of activity on the
+ *  import date. created_at still stretches the span, so the right-hand end is now. */
 function computeTimeSpan() {
   const bounds = [];
   const arrivals = [];
@@ -3522,9 +3041,8 @@ function renderScrubber(syncValue) {
   range.disabled = !usable;
 
   if (!usable) {
-    /* Blank, as they are before a case opens, rather than a dash at each
-       end: the note between them says there is no axis to label (README
-       screenshot review, 2026-09-23). */
+    /* Blank, as before a case opens, rather than a dash at each end: the note between them says
+       there is no axis to label. */
     $('tl-min').textContent = '';
     $('tl-max').textContent = '';
     $('tl-current').textContent = 'as-of: now';
@@ -3568,10 +3086,8 @@ function posFromAsOf() {
   return Math.round(clamp((t - span.min) / (span.max - span.min), 0, 1) * 1000);
 }
 
-/** While the thumb moves: the picture follows at every pause, the metered
- *  metrics do not (ux03 metrics-rate-limit-degrades-view, 2026-09-23). A
- *  200 ms debounce fired the metrics call on every pause of a drag, and a
- *  short scrub spent the analyst's whole budget. */
+/** While the thumb moves: the picture follows at every pause, the metered metrics do not, so a
+ *  short scrub cannot spend the analyst's whole budget. */
 function onScrubInput() {
   if (!scrubUsable()) return;
   const span = state.timeSpan;
@@ -3614,10 +3130,8 @@ function resizeDensity() {
   drawDensity();
 }
 
-/** A bar's height for `count` against the busiest bucket. Square root, not
- *  linear: linearly, one bucket of 146 put 109 of NIGHTJAR's 110 other
- *  buckets on the 2px floor, and a month of 14 read the same as a month
- *  of 1 (ux04 density-strip-flattened, 2026-09-23). */
+/** A bar's height for `count` against the busiest bucket. Square root, not linear: linearly one
+ *  tall bucket flattens the others to the 2px floor, and a month of 14 reads as a month of 1. */
 function densityBarHeight(count, peak, room) {
   if (!count || !peak) return 0;
   return Math.max(2, Math.sqrt(count / peak) * room);
@@ -3671,11 +3185,8 @@ function drawDensity() {
   tlCtx.lineTo(w, h - 0.5);
   tlCtx.stroke();
 
-  /* A 1px line under a caret. The 2px playhead sat at the right edge on
-     top of the last bucket, which after a bulk import was the one tall
-     bar: the mark that says "now" hid the thing drawn at now (ux04
-     density-strip-flattened, 2026-09-23). A bar is bw - 1 wide, so a 1px
-     line leaves it readable on both sides. */
+  /* A 1px line under a caret, so the mark that says "now" does not hide the bar drawn at now: a
+     bar is bw - 1 wide, and a 1px line leaves it readable on both sides. */
   const x = Math.round(clamp((posFromAsOf() / 1000) * w, PLAYHEAD_CARET,
                              w - PLAYHEAD_CARET)) - 0.5;
   const colour = state.proj.as_of ? PAINT.alert : PAINT.accent;
@@ -3695,26 +3206,23 @@ function drawDensity() {
 }
 
 /* ── sociogram ─────────────────────────────────────────────────────────
- * A spring/repulsion layout on <canvas>, in WORLD coordinates with a separate
- * view transform, so pan/zoom and the saved layout are independent of the
- * viewport size. Saved positions are world coordinates: reopening the case in a
- * different window size puts the picture back where the analyst left it.
+ * A spring/repulsion layout on <canvas> in world coordinates with a separate view transform, so
+ * pan, zoom and the saved layout do not depend on the window size.
  *
- * THE ENCODING RULES (docs/06). These do not bend:
+ * The encoding rules (docs/06), which do not bend:
  *   node size    chosen centrality metric (the select says which)
  *   node colour  node type: the body, and a type ring inset inside the disc
- *   node opacity confidence and nothing else. The body takes the theme's
- *                --canvas-node-body-* step, ring and core take --conf-*,
- *                at every radius. No tie in the projection = the LOW step.
- *   node shape   body + core = evidenced; hollow (--void inside the ring,
- *                no core) = rests on no exhibit (E2)
- *   state rings  OUTSIDE the node and 3px clear of it: proposal waiting in
- *                Triage, selected, pinned, path anchor, ego centre
- *                (STATE_RINGS)
+ *   node opacity confidence and nothing else: the body takes the theme's
+ *                --canvas-node-body-* step, ring and core take --conf-*, at every
+ *                radius. No tie in the projection = the LOW step.
+ *   node shape   body + core = evidenced; hollow (--void inside the ring, no core)
+ *                = rests on no exhibit
+ *   state rings  outside the node, 3px clear: proposal waiting in Triage, selected,
+ *                pinned, path anchor, ego centre (STATE_RINGS)
  *   edge colour  sign: green positive, red negative, grey neutral
- *   edge width   weight, LOG-scaled over the projection's own range
- *   edge style   solid = asserted, DASHED = inferred. Never negotiable.
- *   edge bead    a hollow bead at the midpoint = rests on no exhibit (E2)
+ *   edge width   weight, log-scaled over the projection's own range
+ *   edge style   solid = asserted, dashed = inferred (invariant 4)
+ *   edge bead    a hollow bead at the midpoint = rests on no exhibit
  *   parallel     two ties on one pair bow apart, so each can be seen and hit
  */
 
@@ -3730,11 +3238,9 @@ const PAINT = {};
    See buildGround. */
 const GROUND = { canvas: null };
 
-/* Painters below read PAINT directly and carry NO literal fallback. A
-   token that does not resolve must be a visible, reported fault -- not a
-   silent reversion to whichever palette happened to be hard-coded at the
-   call site. `cssVar` returns '' for an undefined custom property, so an
-   empty string here is the whole signal. */
+/* Painters below read PAINT directly with no literal fallback: a token that does not resolve
+   must be a visible, reported fault. `cssVar` returns '' for an undefined custom property, so
+   an empty string is the whole signal. */
 function paintIsComplete() {
   const missing = [];
   for (const [k, v] of Object.entries(PAINT)) {
@@ -3776,33 +3282,23 @@ function loadPaint() {
   PAINT.dim = cssVar('--text-tertiary');
   PAINT.bright = cssVar('--text-primary');
   PAINT.monoFont = '10px ' + (cssVar('--mono') || 'monospace');
-  /* Sociogram labels. 11px, the bottom of docs/06's type scale: the
-     restyle drew them at 10px, which is on no scale at all
-     (cr02 docs-describe-old-canvas, 2026-09-22). Mono because a handle
-     is an identifier and analysts compare them character by character. */
+  /* Sociogram labels: 11px, the bottom of docs/06's type scale, and mono because a handle is an
+     identifier analysts compare character by character. */
   PAINT.labelFont = '11px ' + (cssVar('--mono') || 'monospace');
   PAINT.signFont = '600 13px ' + (cssVar('--mono') || 'monospace');
   /* Label strength is a theme number for the same reason the confidence
      steps are: test_theme_contract composites it and holds it to 4.5:1. */
   PAINT.labelAlpha = parseFloat(cssVar('--canvas-label-alpha'));
-  /* Confidence is opacity (docs/06), and the three steps are theme
-     tokens, so the canvas reads the same numbers the DOM's `.conf-*`
-     rules apply. The sociogram carried its own 1 / 0.72 / 0.45 until
-     2026-09-11: the theme had raised --conf-low to 0.58 for contrast
-     and the canvas never noticed, so the inspector said one opacity
-     and the edge was drawn at another. */
+  /* Confidence is opacity (docs/06), and the three steps are theme tokens, so the canvas reads
+     the same numbers the DOM's `.conf-*` rules apply. */
   PAINT.conf = {
     HIGH: parseFloat(cssVar('--conf-high')),
     MODERATE: parseFloat(cssVar('--conf-moderate')),
     LOW: parseFloat(cssVar('--conf-low')),
   };
-  /* The node BODY's alpha, one per confidence step, also from the theme.
-     The restyle multiplied confAlpha by a 0.40 literal here and switched
-     that off below a 5px radius, so a node's apparent certainty moved
-     with its size and with the zoom (cr01 ring-threshold-borrows-
-     opacity-channel, cr02 node-opacity-follows-size-not-confidence,
-     2026-09-22). These are steps in their own right, not a multiplier,
-     and theme.css holds HIGH against LOW to 2:1 for every node hue. */
+  /* The node body's alpha, one per confidence step, also from the theme: steps in their own
+     right, not a multiplier, so apparent certainty never moves with size or zoom. theme.css
+     holds HIGH against LOW to 2:1 for every node hue. */
   PAINT.body = {
     HIGH: parseFloat(cssVar('--canvas-node-body-high')),
     MODERATE: parseFloat(cssVar('--canvas-node-body-moderate')),
@@ -3845,10 +3341,8 @@ function setRendered(nodes, edges, options) {
   const index = new Map(simNodes.map((n) => [n.id, n]));
   const links = [];
   const pairs = new Map();
-  /* The OBSERVED weight range, not 0..max(1, heaviest). The seeded
-     weights are 0..1 ratios, so a floor of 1 left the bottom half of the
-     width ramp unreachable and put the whole flagship case inside one
-     pixel (cr01 edge-width-range-under-a-pixel, 2026-09-22). */
+  /* The observed weight range, not 0..max(1, heaviest): weights may be 0..1 ratios, and a floor
+     of 1 would squeeze every width into one pixel. */
   let minWeight = Infinity, maxWeight = -Infinity;
   for (const e of edges) {
     const a = index.get(e.src_node_id), b = index.get(e.dst_node_id);
@@ -3869,12 +3363,9 @@ function setRendered(nodes, edges, options) {
       pairs.get(k).push(link);
     }
   }
-  /* Parallel ties. The model records disagreement as separate edges
-     ("two analysts, two claims, both recorded"), and drawn as straight
-     lines between the same two centres only the last one painted could be
-     seen and only the first one listed could be clicked: a red dispute
-     opened as a green vouch (ux05 parallel-ties-unreachable, 2026-09-22).
-     Each tie on a pair now gets its own bow, centred on the chord. */
+  /* Parallel ties: the model records disagreement as separate edges, and as straight lines
+     between the same centres only one could be seen or clicked. Each tie on a pair gets its own
+     bow, centred on the chord. */
   for (const group of pairs.values()) {
     if (group.length < 2) continue;
     group.forEach((l, i) => { l.bend = i - (group.length - 1) / 2; l.pair = group; });
@@ -3887,11 +3378,9 @@ function setRendered(nodes, edges, options) {
   const loose = simNodes.filter((n) => n.deg === 0)
     .sort((x, y) => String(x.ref.node_type).localeCompare(String(y.ref.node_type))
       || String(x.ref.label || '').localeCompare(String(y.ref.label || '')));
-  /* `revealed` is carried over, not reset. It records which selection the
-     view has already been brought to, and a new graph object is not a new
-     selection: resetting it made every re-render (a scrubber step, a
-     projection change, a path highlight) pan the view back to an entity
-     the analyst had deliberately panned away from. */
+  /* `revealed` is carried over, not reset: it records which selection the view was brought to,
+     and a re-render is not a new selection, so it must not pan back to an entity the analyst
+     panned away from. */
   state.graph = { nodes: simNodes, links: links, index: index,
                   minWeight: minWeight, maxWeight: maxWeight,
                   live: simNodes.filter((n) => n.deg > 0), loose: loose,
@@ -3902,14 +3391,10 @@ function setRendered(nodes, edges, options) {
   shelveIsolates(state.graph);
   renderGraphEmpty();
   syncCanvasControls();
-  /* keepView means "the analyst is still looking at the same thing": a
-     path highlight or an ego refresh must not move the viewport.
-     Otherwise a view that is still the FIT stays the fit. A projection
-     change that strips ties moves entities onto the shelf, and with the
-     old one-shot fit 'HIGH only' on OP-NIGHTJAR-26 left 70 of 146 of them
-     off the canvas (ux03 minconf-isolates-full-opacity, 2026-09-22). Once
-     the analyst pans or zooms (takeView), the view is theirs and no
-     render re-fits it; the canvas note counts what is outside instead. */
+  /* keepView means "the analyst is still looking at the same thing": a path highlight or an ego
+     refresh must not move the viewport. Otherwise a view that is still the fit stays the fit, so
+     entities a projection change moves onto the shelf stay in view. Once the analyst pans or
+     zooms (takeView), no render re-fits; the canvas note counts what is outside instead. */
   if (o.keepView) state.needFit = false;
   else if (state.viewFitted) state.needFit = true;
   resizeGraph();
@@ -3921,15 +3406,9 @@ function stopGraph() {
   state.graph = null;
 }
 
-/** What an empty canvas says, and the one thing that would fill it.
- *
- *  It said "Nothing in this projection. Widen it, or add an entity to
- *  begin." in every case: on OP-WHEATEAR-26, which has no entities at all,
- *  that sent the analyst to widen a projection already at its widest, and
- *  it never said where adding an entity lives (ux03 empty-case-says-widen,
- *  2026-09-23). An entity is in the projection whatever its ties, so only
- *  the as-of position, live provenance or clearance can empty the picture
- *  of a case that has entities, and each is named with its own way out. */
+/** What an empty canvas says, and the one thing that would fill it. An entity is in the
+ *  projection whatever its ties, so only the as-of position, live provenance or clearance can
+ *  empty the picture of a case that has entities, and each is named with its own way out. */
 function renderGraphEmpty() {
   const box = $('graph-empty');
   if (!box) return;
@@ -3940,13 +3419,10 @@ function renderGraphEmpty() {
   const text = $('graph-empty-text'), act = $('graph-empty-act');
   const status = state.caseRec ? state.caseRec.status : '';
   const inCase = state.nodes.length;
-  /* The entity list is clearance-filtered like the picture, so an empty
-     list is not an empty case. When every entity is above the reader's
-     clearance this said "This case has no entities yet" under an
-     INCOMPLETE chip saying the opposite (fix round, 2026-09-23). The
-     server's disclosure decides what may be said: withheld (count or
-     presence), nothing withheld, or, where the case discloses nothing at
-     all (no `withheld` key), a sentence that is true either way. */
+  /* The entity list is clearance-filtered like the picture, so an empty list is not an empty
+     case. The server's disclosure decides what may be said: withheld (count or presence),
+     nothing withheld, or, where the case discloses nothing (no `withheld` key), a sentence that
+     is true either way. */
   const w = state.withheld;
   const hidden = !!(w && w.incomplete);
   const none = w ? 'This case has no entities'
@@ -4073,29 +3549,21 @@ function step() {
   g.alpha = Math.max(0.03, g.alpha * 0.985);
 }
 
-/* ── layout worker (U1, docs/02) ───────────────────────────────────────
- * ForceAtlas2 with Barnes-Hut runs OFF the main thread, so a large case
- * settles without freezing the interface. The main-thread spring
- * simulation below is kept for interactive drag: dragging perturbs a
- * couple of nodes locally and wants an immediate response, which is the
- * one job round-tripping to a worker would make worse.
- *
- * The worker is a same-origin script file, so it satisfies
- * `script-src 'self'` without a bundler — which is why this is hand-written
- * rather than graphology's implementation. Adopting a build step is a real
- * decision (docs/14 U1) and should not arrive as a side effect. */
+/* ── layout worker (docs/02) ───────────────────────────────────────────
+ * ForceAtlas2 with Barnes-Hut runs off the main thread, so a large case settles without
+ * freezing the interface; the main-thread spring simulation stays for drag, which wants an
+ * immediate local response. The worker is a same-origin script, so it satisfies
+ * `script-src 'self'` without a bundler, which is why it is hand-written rather than
+ * graphology's (adopting a build step is a decision of its own, docs/14). */
 
 const LAYOUT_WORKER_MIN_NODES = 60;   // below this the main loop is fine
 
 function startWorkerLayout() {
   const g = state.graph;
   if (!g || !window.Worker) return false;
-  /* The worker lays out the CONNECTED entities only. ForceAtlas2's
-     gravity is constant in distance, so an entity with no tie had nothing
-     to balance repulsion from the whole graph and drifted until the
-     iteration cap ran out: about 3,500 world units on OP-NIGHTJAR-26,
-     which is why Fit could not frame the flagship case (ux03 fit-cannot-
-     fit-flagship, ux04 fit-cannot-frame-flagship, 2026-09-22). */
+  /* The worker lays out the connected entities only: ForceAtlas2's gravity is constant in
+     distance, so an entity with no tie has nothing to balance the whole graph's repulsion and
+     drifts until the iteration cap, too far for Fit to frame. */
   const live = g.live;
   if (live.length < LAYOUT_WORKER_MIN_NODES) return false;
   try {
@@ -4117,14 +3585,9 @@ function startWorkerLayout() {
   const degree = new Array(live.length).fill(0);
   for (const l of links) { degree[l.a] += 1; degree[l.b] += 1; }
 
-  /* Moving the maths off the main thread is only half the win. The worker
-     posts progress dozens of times per run, and redrawing on every message
-     puts the cost straight back where it was: 400 nodes laid out in under a
-     second still froze the interface for most of it, because that second
-     contained ~67 full canvas repaints. Positions are applied immediately
-     (they are cheap) and the REPAINT is coalesced onto an animation frame,
-     so the browser draws at most once per frame no matter how chatty the
-     worker is. */
+  /* The worker posts progress dozens of times a run, and a repaint per message would freeze the
+     interface anyway. Positions are applied at once (they are cheap) and the repaint is
+     coalesced onto an animation frame, so the browser draws at most once per frame. */
   state.layoutWorker.onerror = (err) => {
     // A worker that dies silently leaves the graph in its scattered initial
     // positions with no explanation. Fall back to the main-thread loop.
@@ -4148,11 +3611,8 @@ function startWorkerLayout() {
       n.vx = 0; n.vy = 0;
     }
     shelveIsolates(cur);
-    /* Fit on EVERY report until the layout is done, not on the first.
-       The first report arrives before ForceAtlas2 has expanded the graph,
-       so a one-shot fit framed a picture a fraction of its final size and
-       the rest spilled off the canvas (ux18 laptop-canvas-fit,
-       2026-09-22). An analyst gesture clears needFit and stops this. */
+    /* Fit on every report until the layout is done, not on the first, which arrives before
+       ForceAtlas2 has expanded the graph. An analyst gesture clears needFit and stops this. */
     if (state.needFit) frameAll();
     if (!state.layoutPaint) {
       state.layoutPaint = requestAnimationFrame(() => {
@@ -4220,11 +3680,8 @@ function settle() {
 function frame() {
   const g = state.graph;
   if (!g) return;
-  /* Cleared FIRST. draw() used to run before g.raf was reassigned, so a
-     draw that threw left a stale id in g.raf and every `if (!g.raf)`
-     restart guard skipped forever: one bad token froze the layout for
-     the rest of the session (cr01 missing-token-now-kills-canvas,
-     2026-09-22). */
+  /* Cleared first: a draw that throws must not leave a stale id in g.raf, or every
+     `if (!g.raf)` restart guard skips for the rest of the session. */
   g.raf = 0;
   step();
   // Not while a hand is on a node: the shelf would slide under the drag.
@@ -4245,32 +3702,22 @@ function toWorld(sx, sy) {
   return { x: (sx - v.tx) / v.scale, y: (sy - v.ty) / v.scale };
 }
 
-/* Zoom limits. The OUT limit is not a constant any more: a fixed 0.12
-   floor in both fitView and the wheel meant a graph wider than about
-   eight canvases could never be seen whole, by either route (ux03
-   fit-cannot-fit-flagship, 2026-09-22). The floor now follows the last
-   fit, so zooming out always reaches at least the whole graph. */
+/* Zoom limits. The zoom-out floor follows the last fit, so zooming out always reaches at least
+   the whole graph. */
 const ZOOM_MIN = 0.12;
 const ZOOM_MAX = 6;
 const FIT_MAX = 2;
 const FIT_MIN = 0.005;
 
-/** The margin Fit leaves around the graph, in px. A padding in proportion
- *  to the canvas, not a flat 70px: on a 1366x768 laptop the canvas is
- *  under 300px tall and 140px of it went on margin before a single node
- *  was placed. One function, because the reveal test (inView) must never
- *  be stricter than this: an entity Fit put on the canvas IS on the
- *  canvas, and selecting it must not move the view. */
+/** The margin Fit leaves around the graph, in px, in proportion to the canvas so a short laptop
+ *  canvas is not spent on margin. One function, because the reveal test (inView) must never be
+ *  stricter: an entity Fit put on the canvas is on it, and selecting it must not move the view. */
 function fitPad(w, h) { return clamp(Math.min(w, h) * 0.1, 24, 70); }
 
-/** Fit's margins: fitPad on every side, and at the top and the bottom at
- *  least the band the canvas chrome covers plus the largest node radius,
- *  so no entity Fit places sits under a chip, a button or the names pill.
- *  fitPad alone was 45px at 1366x768 against a 35px head row, which left a
- *  top-row hub and the name above it under the Pin button (c12,
- *  2026-09-24). Never narrower than fitPad, which is what keeps inView's
- *  cap true; and the chrome never takes more than half the height, so a
- *  very short canvas still has room to draw in. */
+/** Fit's margins: fitPad on every side, and at the top and the bottom at least the band the
+ *  canvas chrome covers plus the largest node radius, so no entity Fit places sits under a chip,
+ *  a button or the names pill. Never narrower than fitPad, which keeps inView's cap true; the
+ *  chrome never takes more than half the height, so a very short canvas still has room. */
 function fitMargins(w, h) {
   const pad = fitPad(w, h);
   const c = chromeBoxes();
@@ -4344,26 +3791,16 @@ function fitView() {
   draw();
 }
 
-/** Pan so an entity is on screen. Called from draw() when the selection
- *  changes, which covers every way a selection arrives: arrow keys, the
- *  palette, search hits and the entity table all used to select a node
- *  that could be off the canvas, leaving the inspector and the canvas
- *  disagreeing about what was selected (ux18 no-keyboard-pan-or-reveal,
- *  2026-09-22). Pans only; the zoom is the analyst's. Returns false when
- *  the canvas has no size yet, so the reveal is retried once it has. */
+/** Pan so an entity is on screen. Called from draw() when the selection changes, which covers
+ *  every way a selection arrives (arrow keys, the palette, search hits, the entity table). Pans
+ *  only; the zoom is the analyst's. Returns false when the canvas has no size yet, so the reveal
+ *  is retried once it has. */
 function revealNode(n) { return revealPoint(n.x, n.y, (n.sr || 0) + 2); }
 
-/** Is a world point on the canvas, `r` px clear of every edge? For an
- *  entity `r` is its drawn radius, so "shown" means its whole disc is on
- *  the canvas, and a disc cut by the edge still counts as off.
- *
- *  Never stricter than Fit's padding. This test once used a flat margin
- *  of up to 40px, wider than the 29px Fit leaves at 1366x768, so an entity
- *  on the rim of a fitted view counted as hidden: selecting it re-centred
- *  the view and threw 50 of NIGHTJAR's 146 entities off the canvas, the
- *  very symptom the fit exists to cure (found by the verifier of the
- *  2026-09-22 fix round). Capped at fitPad less a pixel, every centre Fit
- *  placed passes. */
+/** Is a world point on the canvas, `r` px clear of every edge? For an entity `r` is its drawn
+ *  radius, so "shown" means its whole disc is on the canvas, and a disc cut by the edge counts as
+ *  off. Capped at fitPad less a pixel, never stricter than Fit's padding, so every centre Fit
+ *  placed passes and selecting it does not re-centre the view. */
 function inView(x, y, w, h, r) {
   const v = state.view;
   const sx = x * v.scale + v.tx, sy = y * v.scale + v.ty;
@@ -4408,13 +3845,10 @@ function panView(dx, dy) {
 }
 
 /* ── the shelf ─────────────────────────────────────────────────────────
- * Entities with no tie in the current projection, in a labelled block to
- * the right of the connected graph (a wide canvas has room to spare on
- * that side), grouped by type and then by label. They used to be left to
- * the layout, which flung them to the edges of the world: fitting the
- * case then meant fitting 5,000 units of empty space. Pinned ones stay
- * where the analyst put them. When nothing is connected the whole
- * projection IS the shelf, laid out in reading order. */
+ * Entities with no tie in the current projection, in a labelled block to the right of the
+ * connected graph, grouped by type and then by label, rather than flung to the edges of the
+ * world by the layout. Pinned ones stay where the analyst put them. When nothing is connected
+ * the whole projection is the shelf, laid out in reading order. */
 const SHELF_ROWS = 18;        // rows beside a connected graph before a new column
 const SHELF_CELL_MIN = 90;    // world units between shelved entities
 const SHELF_CELL_ALONE = 130; // spacing when nothing is connected at all
@@ -4475,14 +3909,9 @@ function resizeGraph() {
   // This is what makes it safe to call from both the observer and the
   // window listener, and on every tab switch.
   if (prev && prev.w === w && prev.h === h && prev.dpr === dpr) {
-    /* Same size, but work may have queued while the pane was hidden and
-       the canvas had no size to do it in: a fit the layout finished
-       without, or a selection made on another tab (a search hit, the
-       palette, the entity table) that could not be revealed. Showing the
-       pane is the moment for both. Returning here without a draw left
-       the jumped-to entity off the canvas, the inspector and the canvas
-       disagreeing again (ux18 no-keyboard-pan-or-reveal, found by the
-       verifier of the 2026-09-22 fix round). */
+    /* Same size, but work may have queued while the pane was hidden and the canvas had no size:
+       a fit the layout finished without, or a selection made on another tab that could not be
+       revealed. Showing the pane is the moment for both. */
     const g = state.graph;
     if (!g) return;
     const fit = state.needFit && g.settled;
@@ -4494,40 +3923,26 @@ function resizeGraph() {
   canvas.width = Math.round(w * dpr);
   canvas.height = Math.round(h * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  // The chrome rows wrap with the canvas's width (c12, 2026-09-24).
+  // The chrome rows wrap with the canvas's width.
   canvasChrome.stale = true;
 
   if (!Number.isFinite(state.view.tx) || !Number.isFinite(state.view.ty)) {
     state.view.tx = w / 2;
     state.view.ty = h / 2;
   } else if (prev && (prev.w !== w || prev.h !== h)) {
-    /* Keep whatever the analyst was looking at in the middle.
-     *
-     * The canvas backing store was already being resized here, but the
-     * translation was left alone, so growing the window pinned the graph to
-     * the old top-left and opened empty space on the right and bottom —
-     * maximising appeared to do nothing but add margin.
-     *
-     * Since screen = world * scale + t, holding the centred world point
-     * still means shifting t by half the size change. Deliberately NOT a
-     * re-fit of a view the analyst has panned or zoomed (a view that is
-     * still the fit is re-fitted below): docs/03 is explicit that "analysts build a spatial memory of
-     * their network — reshuffling it on every load destroys real analytic
-     * value", and a window resize is not a request to rearrange the case.
-     * Zoom is untouched for the same reason: a node keeps the size it had.
+    /* Keep whatever the analyst was looking at in the middle: since screen = world * scale + t,
+     * that means shifting t by half the size change. A view the analyst has panned or zoomed is
+     * not re-fitted, and zoom is untouched: analysts build a spatial memory of their network
+     * (docs/03), and a window resize is not a request to rearrange the case.
      */
     state.view.tx += (w - prev.w) / 2;
     state.view.ty += (h - prev.h) / 2;
   }
   state.viewport = { w: w, h: h, dpr: dpr };
   buildGround();
-  /* Two cases re-fit here. A layout that finished while the pane was
-     hidden could not fit into a canvas with no size, and kept needFit for
-     this moment. And a view that is still the fit (the analyst never took
-     it) stays the fit: the pane's height changes as the chrome around it
-     wraps, and holding the centre then left the edges of a fitted graph
-     outside the smaller canvas. Neither moves a node, so the spatial
-     memory the comment above protects is untouched. */
+  /* Two cases re-fit here: a layout that finished while the pane was hidden kept needFit for
+     this moment, and a view that is still the fit stays the fit as the chrome around the pane
+     wraps. Neither moves a node, so the analyst's spatial memory is untouched. */
   const g = state.graph;
   if ((state.needFit || state.viewFitted) && g && g.settled && frameAll()) {
     state.needFit = false;
@@ -4540,7 +3955,7 @@ function resizeGraph() {
 /** The value behind node size: the chosen metric, or the ties drawn when
  *  the metrics are not on screen. Raw, never negative. */
 function sizeRaw(n) {
-  /* The analysis run's metrics, offered after a run (2026-09-23). */
+  /* The analysis run's metrics, offered after a run. */
   if (AN_SIZE_KEYS.has(state.sizeMetric)) return analysisSizeRaw(n);
   if (!state.metrics) return n.deg;
   const row = state.metricById.get(n.id);
@@ -4553,15 +3968,10 @@ const NODE_R_MIN = 5;          // the floor: small enough to rank, big enough to
 const NODE_R_MAX = 16;
 const NODE_R_FLAT = 8;         // when there is nothing to compare
 
-/** Node AREA in proportion to the metric, anchored at zero: radius =
- *  R_MAX * sqrt(value / largest). Size is the only channel for "who
- *  matters", and it used to be log1p of the value, then the square root
- *  of that normalised against the SMALLEST value on screen: two
- *  compressions, so NIGHTJAR's 18-tie Meridian crew drew at 16px beside a
- *  5-tie persona at 13.6px, and the biggest step on the scale was 0 ties
- *  against 1 (ux04 size-scale-flattens-hubs, 2026-09-23). Now 18 ties is
- *  3.6 times the ink of 5. The domain is the CONNECTED entities: an
- *  unconnected one is on the shelf and sits at the floor. */
+/** Node area in proportion to the metric, anchored at zero: radius = R_MAX * sqrt(value /
+ *  largest), so 18 ties is 3.6 times the ink of 5. Size is the only channel for "who matters",
+ *  so it is not compressed further. The domain is the connected entities: an unconnected one is
+ *  on the shelf and sits at the floor. */
 function sizeDomain(g) {
   let hi = 0;
   for (const n of g.live) {
@@ -4590,13 +4000,10 @@ function confAlpha(confidence) {
   const a = PAINT.conf && PAINT.conf[confidence];
   return Number.isFinite(a) ? a : 1;
 }
-/** The confidence step a node is drawn at: the best among its ties in
- *  THIS projection. A node with no tie that meets the filter is drawn at
- *  the LOWEST step, never the highest. It used to fall through to full
- *  opacity, so raising the floor to "HIGH only" made every entity look
- *  surer, not less sure (ux03 minconf-isolates-full-opacity, ux04
- *  fit-cannot-frame-flagship, 2026-09-22). Nothing vouches for it here,
- *  and the inspector says so in words. */
+/** The confidence step a node is drawn at: the best among its ties in this projection. A node
+ *  with no tie that meets the filter is drawn at the lowest step, never the highest, or raising
+ *  the floor would make entities look surer. Nothing vouches for it here, and the inspector
+ *  says so in words. */
 function nodeStep(id) {
   const c = state.nodeConf.get(id);
   return PAINT.conf && Number.isFinite(PAINT.conf[c]) ? c : 'LOW';
@@ -4609,10 +4016,8 @@ function bodyAlpha(step) {
   const a = PAINT.body && PAINT.body[step];
   return Number.isFinite(a) ? a : confAlpha(step);
 }
-/** E2. The flag lives on the ROW (n.ref), which is what the API sends.
- *  The sim node never carried it, so every earlier read of
- *  `n.has_evidence` was undefined and no entity was ever drawn hollow,
- *  on any case (cr01 e2-hollow-core-never-fires, 2026-09-22). */
+/** The has_evidence flag lives on the row (n.ref), which is what the API sends; the sim node
+ *  does not carry it. */
 function nodeUnevidenced(n) {
   return state.showProvenance && n.ref.has_evidence === false;
 }
@@ -4622,13 +4027,9 @@ function edgeUnevidenced(e) {
 function nodeColour(n) {
   return PAINT.hues[hueClass(n.ref.node_type).slice(4)] || PAINT.hues.context;
 }
-/* Edge width, in px. The range is the restyle's (it was 1 to 4.4, which
-   turned a dense projection into a mat of green), but it is now actually
-   SPANNED: t runs over the projection's own lightest-to-heaviest range,
-   log-scaled, so the lightest tie on screen is EDGE_W_MIN and the
-   heaviest EDGE_W_MAX. When every tie weighs the same there is nothing to
-   compare, and they all draw at the middle of the ramp rather than at
-   its top. */
+/* Edge width, in px. t runs over the projection's own lightest-to-heaviest range, log-scaled,
+   so the lightest tie on screen is EDGE_W_MIN and the heaviest EDGE_W_MAX. When every tie
+   weighs the same there is nothing to compare, and all draw at the middle of the ramp. */
 const EDGE_W_MIN = 0.9;
 const EDGE_W_MAX = 2.8;
 function edgeWidth(e) {
@@ -4659,8 +4060,7 @@ function pairKey(a, b) { return a < b ? a + '|' + b : b + '|' + a; }
 function focusSets() {
   const g = state.graph;
   if (!g) return null;
-  /* An Analysis set shown on the graph is emphasised as a path is
-     (ux10-analytics:results-dont-reach-the-graph, 2026-09-23). */
+  /* An Analysis set shown on the graph is emphasised as a path is. */
   if (state.focus && state.focus.kind === 'set' && state.focus.lit) {
     return { mode: 'path', nodes: state.focus.lit, pairs: state.focus.pairs || new Set() };
   }
@@ -4689,30 +4089,17 @@ function edgeHidden(e) {
 
 /* ── the ground ─────────────────────────────────────────────────────────
  *
- * Until 2026-09-20 this was `fillRect` in --void and nothing else, which
- * made the sociogram the only part of the console outside the elevation
- * system theme.css describes: a flat black rectangle butted up against
- * panels built from glass over plum. It read as a hole.
+ * The sociogram's ground joins the elevation system theme.css describes with two marks, both
+ * theme tokens held by test_theme_contract to a measured ceiling (the binding mark is
+ * --sign-neutral, every neutral tie's colour, at a grid line under the brightest light):
  *
- * Two marks fix it, both theme tokens and both held by test_theme_contract
- * to a measured ceiling (the binding mark is --sign-neutral, the colour of
- * every neutral tie, at a grid line under the brightest part of the light):
+ *   - the key light `body` casts, so the top of the workspace is brightest. It depends only on
+ *     the canvas size, so it is painted once per size into an offscreen canvas (buildGround)
+ *     and blitted each frame;
+ *   - a graph-paper grid in world space, so it pans and zooms with the graph.
  *
- *   - the key light `body` casts, so the top of the workspace is where the
- *     room is brightest. It depends only on the canvas size, so it is
- *     painted ONCE per size into an offscreen canvas (buildGround) and
- *     blitted each frame. It used to be a fresh gradient and a second
- *     full-canvas fill on every frame, the largest single cost of a frame
- *     on a software-rastered VDI (cr01 ground-repainted-every-frame,
- *     2026-09-22);
- *   - a graph-paper grid in WORLD space, so it pans and zooms with the
- *     graph. A grid pinned to the viewport while the content slides under
- *     it reads as a broken layer.
- *
- * The grid spacing halves and doubles to stay inside GRID_MIN..GRID_MAX
- * screen pixels, which is what controls its density at every zoom. There
- * is deliberately no zoom threshold: the first cut had one, a fitted
- * projection sat below it, and the grid never drew at all. */
+ * The grid spacing halves and doubles to stay inside GRID_MIN..GRID_MAX screen pixels, which
+ * controls its density at every zoom, with no zoom threshold below which it vanishes. */
 const GRID_WORLD = 80;      // world units between lines at 1x
 const GRID_MIN = 22;        // screen px: below this, double the spacing
 const GRID_MAX = 128;       // screen px: above this, halve it
@@ -4726,13 +4113,9 @@ function buildGround() {
   const gx = gc.getContext('2d');
   gx.fillStyle = PAINT.void;
   gx.fillRect(0, 0, bw, bh);
-  /* A gradient stop that is not a colour THROWS, where fillStyle quietly
-     ignores it. A stop read straight off an unresolved token threw out of
-     draw() on every frame and left the canvas blank, which breaks the
-     "paint with the browser default" contract paintIsComplete states
-     (cr01 missing-token-now-kills-canvas, 2026-09-22). An empty token
-     skips the light (paintIsComplete has already reported it), and a
-     token that is present but unparseable is caught here. */
+  /* A gradient stop that is not a colour throws, where fillStyle quietly ignores it, and a throw
+     here would blank the canvas on every frame. An empty token skips the light
+     (paintIsComplete has already reported it); one present but unparseable is caught here. */
   if (PAINT.canvasKeylight && PAINT.canvasKeylightOut) {
     try {
       // Centred above the top edge, so the falloff crosses the canvas
@@ -4766,12 +4149,9 @@ function paintGround(w, h) {
   paintGrid(w, h);
 }
 
-/* ONE path of 1px rectangles, filled ONCE. Stroked as lines, Chromium
-   composited each 1px hairline on its own at DPR 1, so every crossing
-   took the grid's alpha twice and was the brightest point of the ground:
-   --sign-neutral measured 4.48:1 there, under the floor the theme claimed
-   (cr02 ceiling-comment-wrong-token, 2026-09-22). A fill covers the union
-   of the rectangles once, which is the case test_theme_contract models. */
+/* One path of 1px rectangles, filled once. Stroked as lines, Chromium composites each hairline
+   on its own at DPR 1, so every crossing takes the grid's alpha twice; a fill covers the union
+   once, which is the case test_theme_contract models. */
 function paintGrid(w, h) {
   const v = state.view;
   if (!v || !(v.scale > 0) || !PAINT.canvasGrid) return;
@@ -4791,18 +4171,9 @@ function paintGrid(w, h) {
 }
 
 /* ── node geometry ──────────────────────────────────────────────────────
- * A node is a translucent BODY in its type hue, a TYPE RING inset inside
- * the disc, and a small solid CORE. The old treatment was one opaque fill,
- * which at this density read as confetti and buried the edges under it.
- *
- * One treatment at EVERY radius. The restyle drew nodes under 5px as solid
- * dots and larger ones with a 0.40 body, so a node's apparent certainty
- * moved with its centrality and with the zoom, and one node visibly dimmed
- * by half when a wheel step carried it across 5px (cr01
- * ring-threshold-borrows-opacity-channel, cr02
- * node-opacity-follows-size-not-confidence, 2026-09-22). Ring width and
- * core size are fractions of r now, so the proportions are the same at
- * every size and a node's body pixel is the same whatever its radius. */
+ * A node is a translucent body in its type hue, a type ring inset inside the disc, and a small
+ * solid core, with one treatment at every radius: ring width and core size are fractions of r,
+ * so a node's apparent certainty never moves with its size or the zoom. */
 const NODE_RING_FRAC = 0.2;    // type ring width as a fraction of r
 const NODE_RING_W_MIN = 0.75;  // px
 const NODE_RING_W_MAX = 1.5;   // px
@@ -4814,13 +4185,10 @@ const NODE_DIM_BODY = 0.05;
 const EDGE_DIM_ALPHA = 0.08;
 const RING_DIM_ALPHA = 0.14;
 
-/* STATE rings, outside the node: [offset from r, width], innermost first.
-   The type ring is inset, so its outer edge IS r, and the first state
-   ring's inner edge sits 3.25px beyond it. The restyle stroked the type
-   ring ON r and the dashed --alert proposal ring 1px outside that, so on
-   a group node, whose hue sits close to --alert, pending review read as
-   part of the type colour (cr02 hue-ring-overloads-state-ring,
-   2026-09-22). test_sociogram_canvas holds the gaps. */
+/* State rings, outside the node: [offset from r, width], innermost first. The type ring is
+   inset, so its outer edge is r, and the first state ring's inner edge sits 3.25px beyond it,
+   so a pending review never reads as part of a type hue close to --alert.
+   test_sociogram_canvas holds the gaps. */
 const STATE_RINGS = {
   proposal: [4, 1.5],
   selected: [6.5, 2],
@@ -4829,13 +4197,9 @@ const STATE_RINGS = {
   ego: [14, 1],
 };
 
-/* E2 on a TIE: a hollow bead at its midpoint, a --void disc ringed in the
-   tie's own colour at the tie's own confidence. It was a 0.45 fade, which
-   borrowed the opacity channel from confidence and reversed its order: an
-   unevidenced HIGH tie drew fainter than an evidenced LOW one (ux07
-   unevidenced-fade-hijacks-confidence-opacity, 2026-09-22). It cannot be a
-   dash either, because dashed means inferred and that does not bend. So a
-   shape, and the same shape as the hollow entity. */
+/* No exhibit behind a tie: a hollow bead at its midpoint, a --void disc ringed in the tie's own
+   colour at the tie's own confidence. Not a fade, which would take the opacity channel from
+   confidence, and not a dash, which means inferred: a shape, the same as the hollow entity. */
 const BEAD_R = 2.2;            // px beyond half the line width
 const BEAD_R_SIGN = 7;         // wide enough to hold the + / - mark
 
@@ -4890,10 +4254,8 @@ const SHAPE_CORNER_FRAC = 0.3;   // corner radius, as a fraction of that half
 /* An assessed person's second ring, inside the type ring and outside the
    core. */
 const NODE_INNER_RING_FRAC = 0.62;
-/* The ego centre is TWO thin rings, this far apart: selected is one solid
-   ring, the path anchor one dashed ring, and three rings in one accent
-   family told apart by radius alone could not be read (ux04
-   legend-missing-drawn-encodings, 2026-09-23). */
+/* The ego centre is two thin rings, this far apart: selected is one solid ring and the path
+   anchor one dashed ring, and three accent rings told apart by radius alone cannot be read. */
 const EGO_SECOND = 2.5;
 
 /** A rounded quadrilateral through `pts`, corners of radius `c`. */
@@ -4927,10 +4289,8 @@ function stateRing(n, key, colour, dash, extra) {
   const spec = STATE_RINGS[key];
   const at = n.sr + spec[0] + (extra || 0);
   if (key === 'proposal') {
-    /* On a --void backing, so the dashes never run into a tie or a fill
-       and read as one mark in the orange family: the Group and Victim
-       hue sits close to --alert (ux04 victims-painted-as-groups,
-       2026-09-23). */
+    /* On a --void backing, so the dashes never merge with a tie, a fill or the Group and Victim
+       hue, which sits close to --alert. */
     const a = ctx.globalAlpha;
     canvasDisc(n.sx, n.sy, at);
     ctx.globalAlpha = 1;
@@ -4948,29 +4308,15 @@ function stateRing(n, key, colour, dash, extra) {
   return at + spec[1] / 2;
 }
 
-/** Keep the selection on screen (see revealNode). Not while the layout is
- *  still fitting itself: the fit frames every entity anyway, and a pan
- *  here would cancel it.
+/** Keep the selection on screen (see revealNode), but not while the layout is still fitting
+ *  itself: the fit frames every entity anyway, and a pan would cancel it.
  *
- *  Keyed on the selection OBJECT, not its id. selectNode and selectEdge
- *  build a new object every time, so choosing the same entity again from
- *  the palette or the entity table, after panning it off with Shift and
- *  an arrow, is a new request and brings it back. Keyed on the id it was
- *  ignored, and the inspector and the canvas disagreed again (ux18
- *  no-keyboard-pan-or-reveal, found in the 2026-09-22 fix round). A
- *  re-render keeps the same object, so it does not pan (setRendered).
- *
- *  A click is never a reason to move. What was clicked is under the
- *  pointer, on the canvas, however near the rim; panning it to the middle
- *  moved the view out from under the hand and threw a fitted case off the
- *  canvas (found by the verifier of the 2026-09-22 fix round). The pointer
- *  handler raises `pickedOnCanvas` around its selectNode and selectEdge,
- *  and such a selection is recorded as already shown.
- *
- *  A selection made while the pane is hidden (a search hit, the palette,
- *  the entity table, all on other tabs) cannot be revealed into a canvas
- *  with no size, so `revealed` stays behind and resizeGraph draws again
- *  when the pane is shown. */
+ *  Keyed on the selection object, not its id: selectNode and selectEdge build a new object each
+ *  time, so choosing the same entity again after panning it off brings it back, while a
+ *  re-render keeps the object and does not pan (setRendered). A click is never a reason to
+ *  move: the pointer handler raises `pickedOnCanvas` around its selection, which is recorded as
+ *  already shown. A selection made while the pane is hidden cannot be revealed into a canvas
+ *  with no size, so `revealed` stays behind and resizeGraph draws again when the pane shows. */
 let pickedOnCanvas = false;
 function followSelection(g) {
   if (state.needFit) return;
@@ -4995,12 +4341,9 @@ function linkOf(g, id) {
   return null;
 }
 
-/** Ties by keyboard. The arrows only ever reached entities, so a tie, and
- *  above all the second tie on a pair, could not be opened without a
- *  mouse (ux05 parallel-ties-unreachable, 2026-09-22). [ and ] step
- *  through the ties of the selected entity, or, with a tie selected, of
- *  the entity whose ties are being stepped. Ordered by the other end, so
- *  the ties on one pair are neighbours, in the order they bow. */
+/** Ties by keyboard: [ and ] step through the ties of the selected entity, or, with a tie
+ *  selected, of the entity whose ties are being stepped. Ordered by the other end, so the ties
+ *  on one pair are neighbours, in the order they bow. */
 function tiesOf(g, id) {
   const other = (l) => (l.a.id === id ? l.b : l.a);
   return g.links
@@ -5082,11 +4425,9 @@ function draw() {
     traceLink(geo);
     ctx.stroke();
     ctx.setLineDash([]);
-    /* Sign is a hue, and a hue alone is not an encoding: a red/green
-       confusion would invert the meaning of a vouch. A midpoint + / - gives
-       sign a second, achromatic channel. It cannot be the dash pattern,
-       which already means asserted versus inferred. Held back to closer
-       zooms so the wide view stays readable. */
+    /* A midpoint + / - gives sign a second, achromatic channel beside its hue (red/green
+       confusion would invert a vouch); not the dash pattern, which means inferred. Held back to
+       closer zooms so the wide view stays readable. */
     const signMark = lit && e.sign !== 0 &&
       (scale >= 1.2 || on || (fs && fs.mode === 'path'));
     if (lit && edgeUnevidenced(e)) {
@@ -5119,11 +4460,9 @@ function draw() {
     const lit = !fs || fs.nodes.has(n.id);
     const selected = sel && sel.kind === 'node' && sel.id === n.id;
     const r = n.sr;
-    /* Node opacity IS confidence (docs/06). A node carries no confidence
-       column of its own, so this is the best confidence among its ties in
-       THIS projection (nodeStep); the inspector states that in words and
-       gives the number, so the encoding is never colour or opacity alone.
-       Body, ring and core all take their alpha from the step. */
+    /* Node opacity is confidence (docs/06): the best among its ties in this projection
+       (nodeStep), which the inspector also states in words. Body, ring and core all take their
+       alpha from the step. */
     const conf = nodeStep(n.id);
     const base = lit ? confAlpha(conf) : NODE_DIM_ALPHA;
     const hue = nodeColour(n);
@@ -5131,16 +4470,9 @@ function draw() {
     /* The type's outline (SHAPE_BY_TYPE): hue's second channel. */
     const shape = n.shape;
     if (nodeUnevidenced(n)) {
-      /* E2. An entity that rests on no exhibit is HOLLOW: --void inside
-         the ring, no body, no core. The difference from an evidenced node
-         is the whole interior, not a 2.5px dot, so it survives the small
-         radii of a fitted view. Confidence is opacity and type is hue, so
-         this had to be a shape.
-         It marks the ABSENCE of evidence rather than its presence, on
-         purpose: an unevidenced case should look conspicuously unfinished.
-         If the mark meant "evidenced", a case with no exhibits at all
-         would look calm and complete, which is the exact impression to
-         avoid. */
+      /* An entity that rests on no exhibit is hollow: --void inside the ring, no body, no core,
+         a whole interior that survives the small radii of a fitted view. It marks the absence
+         of evidence on purpose, so a case with no exhibits looks unfinished rather than calm. */
       nodeOutline(shape, n.sx, n.sy, r);
       ctx.globalAlpha = 1;
       ctx.fillStyle = PAINT.void;
@@ -5192,20 +4524,12 @@ function draw() {
 }
 
 /* ── labels ─────────────────────────────────────────────────────────────
- * One pass AFTER every node, in priority order, each placed only where it
- * overprints nothing. The old rule was all or nothing by zoom (every label
- * from 0.7x, none below it), drawn inside the node loop: a fitted flagship
- * case showed no names at all, and where labels did show they collided,
- * fusing 'lupine_ram' and 'spectre_viper' into one plausible handle, with
- * later discs painted over earlier names (ux04
- * labels-all-or-nothing-and-colliding, 2026-09-22).
- *
- * Now: what the analyst points at or has selected is always named; then
- * the largest nodes by the size metric, each tried below, above, right and
- * left of its node and skipped if every spot would cover a node, a bead,
- * a sign mark or another label. Zooming in makes room, so more names
- * appear. Every name sits on a --void plate (placeText), which is why
- * test_theme_contract measures label contrast against --void. */
+ * One pass after every node, each label placed only where it overprints nothing, so no two
+ * handles fuse into one. What the analyst points at or has selected is always named; then the
+ * largest nodes by the size metric, each tried below, above, right and left of its node and
+ * skipped if every spot would cover a node, a bead, a sign mark or another label. Every name
+ * sits on a --void plate (placeText), which is why test_theme_contract measures label contrast
+ * against --void. */
 function labelText(n) {
   const raw = n.ref.label || '';
   return raw.length > LABEL_CHARS ? raw.slice(0, LABEL_CHARS - 1) + '…' : raw;
@@ -5256,10 +4580,8 @@ function boxHash() {
   };
 }
 
-/* Each name sits on a --void plate. A halo round the glyphs was tried
-   first and left a tie crossing the gap in "Meridian crew" reading as an
-   underscore, which is the one misreading a handle cannot afford. The
-   plate only ever covers plain lengths of tie: nodes, beads and sign
+/* Each name sits on a --void plate, not a halo, which lets a tie crossing a gap read as an
+   underscore in a handle. The plate covers only plain lengths of tie: nodes, beads and sign
    marks are obstacles the placement avoids. */
 function placeText(hash, text, tw, x, y, colour, alpha) {
   hash.add(x - LABEL_PAD, y - LABEL_PAD, tw + LABEL_PAD * 2, LABEL_H + LABEL_PAD * 2, null);
@@ -5271,18 +4593,11 @@ function placeText(hash, text, tw, x, y, colour, alpha) {
   ctx.fillText(text, x, y + 1);
 }
 
-/* The canvas's own chrome: the status chips and the layout buttons along
-   the top, the note, the names pill and the zoom cluster along the foot.
-   They are opaque plates laid over the canvas, and the label pass knew
-   nothing of them. On a fitted ego focus at 1366x768 the Pin button cut
-   'ember_owl29' down to 'ember', a different plausible handle, and the
-   names pill covered 'nightjar_grebe63' while counting it among the names
-   shown (c12, 2026-09-24). Every visible plate is now an obstacle no name
-   is placed under, and Fit keeps the rows of entities clear of them.
-   Measuring the plates forces a layout, so their boxes are cached, in
-   canvas px, and measured again only when the chrome has changed
-   (watchCanvasChrome) or the canvas was resized: never on every frame of
-   a pan. */
+/* The canvas's own chrome: the status chips and layout buttons along the top, the note, the
+   names pill and the zoom cluster along the foot. Every visible plate is an obstacle no name is
+   placed under (a plate over part of a handle can leave a different plausible handle), and Fit
+   keeps entities clear of them. Measuring forces a layout, so the boxes are cached in canvas px
+   and measured again only when the chrome changed (watchCanvasChrome) or the canvas resized. */
 const CHROME_PLATES = '.canvas-head .cs-chip, .canvas-head .btn, '
   + '.canvas-foot .canvas-note, .canvas-foot .cs-note, .canvas-foot .btn, '
   + '.canvas-foot .zoom-level';
@@ -5290,18 +4605,13 @@ const CHROME_PLATES = '.canvas-head .cs-chip, .canvas-head .btn, '
  *  the frame it describes (the names pill says how many names fit), so a
  *  pathological case could otherwise ask for a frame on every frame. */
 const CHROME_NUDGES = 2;
-/** A chain of nudges is frames that follow each other. A chrome change
- *  that arrives longer than this after the last nudge (a response landing
- *  seconds later) starts a new chain: the cap was reset only by a frame the
- *  analyst caused, so after two nudges a later chip could stay over a name
- *  until the next pan or hover (c12 verifier, 2026-09-24). */
+/** A chain of nudges is frames that follow each other. A chrome change that arrives longer than
+ *  this after the last nudge (a response landing seconds later) starts a new chain, so a later
+ *  chip never stays over a name until the next pan or hover. */
 const CHROME_CHAIN_MS = 250;
-/* Not `chrome`: app.js is a classic script, so a top-level `const` is a
-   global binding, and Chromium builds that define window.chrome as
-   non-configurable reject the whole file ("Identifier 'chrome' has already
-   been declared") before a line of it runs. The console was dead in the
-   bundled Chromium 151 (c12 verifier, 2026-09-24);
-   test_no_top_level_binding_takes_a_name_the_browser_reserves holds it. */
+/* Not `chrome`: app.js is a classic script, so a top-level `const` is a global binding, and
+   Chromium builds that define window.chrome as non-configurable reject the whole file before a
+   line of it runs. test_no_top_level_binding_takes_a_name_the_browser_reserves holds it. */
 const canvasChrome = { boxes: [], top: 0, bottom: 0, stale: true,
                        raf: 0, nudges: 0, nudging: false, nudgedAt: 0 };
 
@@ -5346,11 +4656,9 @@ function sameBoxes(a, b) {
   return true;
 }
 
-/** The chrome changed: a chip appeared, a count grew a digit, a button
- *  took its unsaved dot. Measure again, and when a plate moved or changed
- *  size, draw once more so no name stays under it. Most of these writes
- *  (the coverage chip, the warnings, the layout progress) land after the
- *  frame that placed the names. */
+/** The chrome changed (a chip appeared, a count grew a digit): measure again, and when a plate
+ *  moved or changed size, draw once more so no name stays under it. Most such writes land after
+ *  the frame that placed the names. */
 function chromeChanged() {
   const was = canvasChrome.boxes;
   canvasChrome.stale = true;
@@ -5395,7 +4703,7 @@ function drawLabels(g, fs, sel, w, h, withEdges, hash) {
     hash.add(n.sx - k, n.sy - k, k * 2, k * 2, n);
     if (n.sx >= 0 && n.sy >= 0 && n.sx <= w && n.sy <= h) cands.push(n);
   }
-  /* The chrome's plates are obstacles like any node (c12, 2026-09-24). */
+  /* The chrome's plates are obstacles like any node. */
   const plates = chromeBoxes().boxes;
   for (const b of plates) hash.add(b[0], b[1], b[2], b[3], null);
   ctx.font = PAINT.labelFont;
@@ -5407,10 +4715,8 @@ function drawLabels(g, fs, sel, w, h, withEdges, hash) {
      than none. */
   const first = g.shelf ? g.loose.find((n) => !n.pinned) : null;
   if (first && first.sx >= 0 && first.sx <= w) {
-    /* When the confidence floor is what emptied the picture, the caption
-       says so: 'HIGH only' on a case with no HIGH tie otherwise looked
-       like a case with no ties at all (ux03 minconf-isolates-full-opacity,
-       2026-09-22). */
+    /* When the confidence floor is what emptied the picture, the caption says so, or 'HIGH
+       only' on a case with no HIGH tie looks like a case with no ties at all. */
     const floor = state.proj && state.proj.min_confidence;
     const graded = floor === 'HIGH' ? 'graded HIGH'
       : (floor === 'MODERATE' ? 'graded MODERATE or above' : '');
@@ -5451,10 +4757,8 @@ function drawLabels(g, fs, sel, w, h, withEdges, hash) {
       at = i;
       break;
     }
-    /* What the analyst is pointing at is always named, over whatever it
-       has to cover, but not under the chrome while any spot on the canvas
-       is clear of it: the fallback put the hovered name back in the very
-       spot the Pin button covered (c12, 2026-09-24). */
+    /* What the analyst is pointing at is always named, over whatever it has to cover, but not
+       under the chrome while any spot on the canvas is clear of it. */
     if (at < 0 && isHot) {
       at = 0;
       for (let i = 0; i < spots.length; i += 2) {
@@ -5478,8 +4782,7 @@ function drawLabels(g, fs, sel, w, h, withEdges, hash) {
   if (!withEdges) return;
   for (const l of g.links) {
     if (!l.lit || !l.geo) continue;
-    /* The display name, not the key (ux19-copy raw-enums-and-polish,
-       2026-09-23). */
+    /* The display name, not the key. */
     const text = l.ref.edge_type ? edgeTypeName(l.ref.edge_type) : '';
     if (!text) continue;
     const tw = labelWidth(g, text);
@@ -5491,14 +4794,9 @@ function drawLabels(g, fs, sel, w, h, withEdges, hash) {
   }
 }
 
-/* What the canvas is not showing, said in words. The readout under the
-   canvas said "drawn: 146 nodes" while half of them were off screen, and
-   nothing on the canvas said so (ux03 fit-cannot-fit-flagship, ux18
-   laptop-canvas-fit, 2026-09-22). The count of entities outside the view
-   sits on the canvas, and only appears once the analyst has zoomed or
-   panned away from the fit. How many names were held back to avoid
-   overprinting sits beside the zoom level, which is what brings them back
-   (ux03 zoom-state-invisible, 2026-09-23). */
+/* What the canvas is not showing, said in words: the count of entities outside the view, once
+   the analyst has zoomed or panned away from the fit, and how many names were held back to
+   avoid overprinting, beside the zoom level that brings them back. */
 function noteView(g, w, h) {
   if (!w || !h) return;
   let off = 0;
@@ -5510,10 +4808,8 @@ function noteView(g, w, h) {
     notes.push(off + ' of ' + g.nodes.length +
                ' entities outside the view: 0 or Fit shows all');
   }
-  /* A tie with a twin on the same pair says so, on the canvas where the
-     twin is drawn. The inspector opened one tie at a time and nothing said
-     a second one existed, which is how a dispute was read as a vouch (ux05
-     parallel-ties-unreachable, 2026-09-22). */
+  /* A tie with a twin on the same pair says so, on the canvas where the twin is drawn, so a
+     dispute is not read as a vouch. */
   const sel = state.selection;
   const link = sel && sel.kind === 'edge' ? linkOf(g, sel.id) : null;
   if (link && link.pair) {
@@ -5530,18 +4826,14 @@ function noteView(g, w, h) {
   syncCanvasControls();
 }
 
-/* The zoom level, on the canvas. It was never shown, so names and sign
-   marks appeared or vanished with no cue, the legend spoke of "120%" the
-   analyst could not see, and a trackpad or keyboard user had no visible
-   zoom control at all (ux03 zoom-state-invisible, 2026-09-23). */
+/* The zoom level, on the canvas: names and sign marks appear or vanish with it, and the legend
+   speaks of it. */
 function noteZoom() {
   setCanvasText('zoom-level', Math.round(state.view.scale * 100) + '%');
 }
 
-/* Space held: say so while it is held, with what it took away. The key
-   used to change the picture with nothing on screen saying why, and with
-   no inferred tie drawn it seemed to do nothing at all (ux03
-   space-needs-canvas-focus, 2026-09-23). */
+/* Space held: say so while it is held, with what it took away, or with no inferred tie drawn
+   it seems to do nothing. */
 function noteHold(g) {
   let text = '';
   if (state.hideInferredHold) {
@@ -5555,11 +4847,9 @@ function noteHold(g) {
   setCanvasText('graph-hold', text);
 }
 
-/* The size key: two circles drawn at the radius the canvas gives them at
-   this zoom, with their values. The legend said "size = Degree" and
-   nothing else, so the scale could not be read off the screen (ux04
-   size-scale-flattens-hubs, 2026-09-23). Redrawn only when what it shows
-   changes, since noteView runs on every frame of a pan. */
+/* The size key: two circles drawn at the radius the canvas gives them at this zoom, with their
+   values, so the scale can be read off the screen. Redrawn only when what it shows changes,
+   since noteView runs on every frame of a pan. */
 const SIZE_KEY_ROOM = 14;      // the largest circle the key has room for, px
 let sizeKeyShown = '';
 
@@ -5581,8 +4871,7 @@ function noteSizeKey(g) {
   const cv = $('size-key');
   if (!cv) return;
   const hi = sizeDomain(g);
-  /* An analysis run's metric (ux10-analytics:results-dont-reach-the-graph)
-     is neither a whole count nor the ties drawn, metrics call or not. */
+  /* An analysis run's metric is neither a whole count nor the ties drawn, metrics call or not. */
   const an = AN_SIZE_KEYS.has(state.sizeMetric);
   const whole = !an && (!state.metrics || state.sizeMetric === 'degree'
     || state.sizeMetric === 'k_core');
@@ -5636,10 +4925,9 @@ function setDisabled(id, off) {
   if (b && b.disabled !== off) b.disabled = off;
 }
 
-/** The canvas's own buttons, kept true to what is drawn: nothing to fit or
- *  save when nothing is drawn (ux03 empty-case-says-widen, 2026-09-23), no
- *  pins to clear when nothing is pinned, and an unsaved arrangement marked
- *  on Save layout (ux03 pin-layout-work-lost, 2026-09-23). */
+/** The canvas's own buttons, kept true to what is drawn: nothing to fit or save when nothing is
+ *  drawn, no pins to clear when nothing is pinned, and an unsaved arrangement marked on Save
+ *  layout. */
 function syncCanvasControls() {
   const g = state.graph;
   const none = !g || !g.nodes.length;
@@ -5658,8 +4946,8 @@ function syncCanvasControls() {
   if (clearBtn && clearBtn.title !== clearTitle) clearBtn.title = clearTitle;
 
   const save = $('btn-save-layout');
-  /* Never on a read-only case: its Save layout is off, and a dot there
-     promised a save nothing can make (2026-09-24). */
+  /* Never on a read-only case: its Save layout is off, and a dot would promise a save nothing
+     can make. */
   const dirty = caseReadOnly() ? 0 : state.layoutDirty.size;
   if (save) {
     if (save.classList.contains('dirty') !== dirty > 0) save.classList.toggle('dirty', dirty > 0);
@@ -5673,8 +4961,7 @@ function syncCanvasControls() {
     }
   }
 
-  /* The selected entity's own pin, so one pin can be undone without
-     clearing every other (ux03 pin-layout-work-lost, 2026-09-23). */
+  /* The selected entity's own pin, so one pin can be undone without clearing every other. */
   const sel = state.selection;
   const n = !none && sel && sel.kind === 'node' ? g.index.get(sel.id) : null;
   const pinBtn = $('btn-pin');
@@ -5698,12 +4985,10 @@ function setCanvasText(id, text) {
 
 function setGraphNote(text) { setCanvasText('graph-note', text); }
 
-/* What the canvas holds for the case being left, dealt with before the
-   reset below drops the graph (resets run in the order they register).
-   Hand placements not yet saved are SAVED to the case they were made in,
-   and a banner says so: they lived only in memory, and switching case
-   lost them without a word (ux03 pin-layout-work-lost, 2026-09-23). The
-   metrics cache and a pending metrics retry are that case's too. */
+/* What the canvas holds for the case being left, dealt with before the reset below drops the
+   graph (resets run in the order they register). Unsaved hand placements live only in memory,
+   so they are saved to the case they were made in, and a banner says so. The metrics cache and
+   a pending metrics retry are that case's too. */
 onCaseSwitch(() => {
   if (state.caseId && ((state.layoutDirty.size && state.graph) || state.layoutCarry)) {
     leaveLayout();
@@ -5716,23 +5001,11 @@ onCaseSwitch(() => {
   state.hideInferredHold = false;
 });
 
-/* The previous case's graph goes the moment the case changes. openCase
-   used to keep it until the new projection arrived, and resizeGraph,
-   finding a SETTLED graph with needFit set for the new case, framed the
-   old graph and spent the new case's fit on it: switching from a settled
-   case left OP-NIGHTJAR-26 with 144 of 146 entities off the canvas
-   (ux03 fit-cannot-fit-flagship, found again in the 2026-09-22 fix
-   round). It was also case A's picture under case B's header for as long
-   as B took to load, which is the bleed this registry exists to stop.
-
-   It takes a sociogram number as well (final review C16, 2026-09-23).
-   refreshSociogram, enterEgo, enterPath and reapplyFocus are guarded by
-   state.graphSeq alone, and only they moved it, so a NIGHTJAR /graph reply
-   still out at the switch passed every check while KESTREL's open waited
-   on its record, layout and case graph. It rewrote gnodes and projMeta
-   and repainted this cleared canvas with NIGHTJAR's actors under
-   "Opening OP-KESTREL-26", and stayed there for good when KESTREL's
-   record could not be read. */
+/* The previous case's graph goes the moment the case changes: kept, resizeGraph would spend the
+   new case's fit on it, and it would stand under the new case's header while that loads. It
+   takes a sociogram number as well: refreshSociogram, enterEgo, enterPath and reapplyFocus are
+   guarded by state.graphSeq alone, so a /graph reply still out at the switch would otherwise
+   repaint the cleared canvas with the previous case. */
 onCaseSwitch(() => {
   stopWorkerLayout();
   stopGraph();
@@ -5788,11 +5061,9 @@ function linkDist(p, geo) {
   return d;
 }
 
-/** The tie under the pointer: the NEAREST one within reach, not the first
- *  in list order. The first-in-list rule meant a later parallel tie could
- *  never be hit, and the one that answered was not the one drawn on top
- *  (ux05 parallel-ties-unreachable, 2026-09-22). `<=` so that of two ties
- *  at the same distance the later-drawn one, the one on top, wins. */
+/** The tie under the pointer: the nearest one within reach, not the first in list order, so a
+ *  parallel tie can be hit. `<=` so that of two ties at the same distance the later-drawn one,
+ *  the one on top, wins. */
 function edgeAt(p) {
   const g = state.graph;
   if (!g) return null;
@@ -5842,21 +5113,15 @@ function initCanvas() {
     if (downAt && Math.hypot(p.x - downAt.x, p.y - downAt.y) > 3) moved = true;
 
     if (mode === 'drag' && g.drag) {
-      /* Inside the click threshold a node neither moves nor pins. A click
-         with a 2px wobble pinned the entity, while only a move past 3px
-         marked the layout unsaved, so the pin was silent: no dot on Save
-         layout, and the next save or a case switch stored it anyway (ux03
-         pin-layout-work-lost, fix round 2026-09-23). One test now decides
-         both. */
+      /* Inside the click threshold a node neither moves nor pins: one test decides both, so a
+         pin is never stored without the unsaved mark. */
       if (!moved) return;
       const w = toWorld(p.x, p.y);
       g.drag.x = w.x; g.drag.y = w.y;
       g.drag.vx = 0; g.drag.vy = 0;
-      /* Dragging a node IS pinning it — docs/03: pinned nodes stay pinned, and
-         an analyst who positioned something meant it. The placement is
-         unsaved until Save layout (or a case switch, which saves it). On
-         a read-only case the move is this view's alone: nothing can store
-         it, so nothing marks it unsaved (gap-closed-case-writes). */
+      /* Dragging a node pins it: an analyst who positioned something meant it (docs/03). The
+         placement is unsaved until Save layout or a case switch. On a read-only case the move is
+         this view's alone: nothing can store it, so nothing marks it unsaved. */
       g.drag.pinned = true;
       if (!caseReadOnly()) state.layoutDirty.add(g.drag.id);
       g.alpha = Math.max(g.alpha, 0.35);
@@ -5964,22 +5229,11 @@ function initCanvas() {
   wireCanvasControls();
   watchCanvasChrome();
 
-  /* Two paths, both installed, on purpose.
-   *
-   * The observer is RETAINED on state rather than left anonymous:
-   * `new ResizeObserver(cb).observe(el)` keeps no reference to the
-   * observer, and an observer that gets collected stops delivering
-   * silently — the canvas would simply stop tracking its container with
-   * nothing on screen to say why.
-   *
-   * The window listener is no longer an either/or fallback. It costs one
-   * event handler and covers the cases the observer misses: a callback
-   * that never arrives because the page was in a background tab when the
-   * window changed, and a device-pixel-ratio change from dragging the
-   * window to a monitor with different scaling, which alters what the
-   * backing store should be without changing the element's CSS size at
-   * all. resizeGraph() no-ops when nothing actually changed, so running
-   * both is free. */
+  /* Two paths, both installed on purpose. The observer is retained on state: an anonymous
+   * ResizeObserver can be collected and silently stop delivering. The window listener covers
+   * what the observer misses: a callback lost while the tab was in the background, and a
+   * device-pixel-ratio change on another monitor, which leaves the CSS size alone.
+   * resizeGraph() no-ops when nothing changed, so running both is free. */
   const onResize = () => {
     if (state.tab === 'graph') { resizeGraph(); resizeDensity(); }
   };
@@ -5992,30 +5246,12 @@ function initCanvas() {
 
 /** May a held Space hide inferred ties, with focus on `t`?
  *
- *  The hold used to live on the canvas's own keydown, so it worked only
- *  while the canvas had focus. After any click in the projection bar the
- *  focus stayed on that control and Space did the control's job instead:
- *  it flipped Include inferred (a refetch, a metered metrics call and a
- *  blanked Analysis pane) or pressed Save layout again (ux03
- *  space-needs-canvas-focus, 2026-09-23). Now, like onTriageKey for
- *  triage, it is answered for the whole graph tab, except where Space
- *  already means something: a place to type, and a control a KEYBOARD
- *  user tabbed to, whose Space is how they press it. A pointer interaction
- *  with a projection, timeline or canvas control hands focus back to the
- *  canvas (wireCanvasControls), so after a click Space peeks again.
- *
- *  Fix round, 2026-09-23: the timeline slider and the inspector beside
- *  the canvas were still dead ends. A slider has no use for Space, so it
- *  peeks from there and keeps the focus its arrow keys fine-tune with; the
- *  inspector is on screen with the graph, so its text and headings peek
- *  too, and its buttons and fields keep their own Space.
- *
- *  And the rail's Graph tab while it is the tab selected. The commonest
- *  way into the pane is a click on it, which leaves the focus on it, and
- *  Space there re-selected the pane already open instead of peeking: no
- *  peek, no "release Space" chip, inferred ties still drawn while the
- *  analyst held the key to hide them (2026-09-24). Pressing the
- *  selected tab again does nothing, so Space loses nothing there. */
+ *  Answered for the whole graph tab, like onTriageKey for triage, except where Space already
+ *  means something: a place to type, and a control a keyboard user tabbed to. A pointer on a
+ *  projection, timeline or canvas control hands focus back to the canvas (wireCanvasControls).
+ *  The timeline slider peeks and keeps its focus for the arrow keys; the inspector's text and
+ *  headings peek while its buttons and fields keep their Space; and the rail's Graph tab peeks
+ *  while selected, since pressing it again does nothing. */
 function spacePeeks(t) {
   if (state.tab !== 'graph' || !state.graph || !signedIn()) return false;
   if (!t || t === document.body || t === document.documentElement || t === canvas) {
@@ -6075,14 +5311,10 @@ function wireCanvasControls() {
   });
   window.addEventListener('beforeunload', guardLayout);
 
-  /* A pointer on a projection, timeline or canvas control: once it has
-     done its job, focus goes back to the canvas, where Space and the
-     canvas keys live. Only a pointer: a keyboard user who tabbed to a
-     control keeps it, and a click reported with detail 0 is a key press on
-     a button. The timeline joined the zones in the fix round (2026-09-23):
-     a mouse click on "as-of: now" kept the focus, and Space pressed it
-     again. Its slider keeps the focus instead, because Space peeks from
-     there (spacePeeks) and the arrow keys fine-tune it. */
+  /* A pointer on a projection, timeline or canvas control: once it has done its job, focus goes
+     back to the canvas, where Space and the canvas keys live. Only a pointer: a keyboard user
+     who tabbed to a control keeps it, and a click with detail 0 is a key press on a button. The
+     timeline slider keeps the focus, since Space peeks from there (spacePeeks). */
   const zones = [document.querySelector('.proj-bar'), $('scrubber'),
                  ...document.querySelectorAll('.canvas-tools')];
   let byPointer = false;
@@ -6106,9 +5338,8 @@ function wireCanvasControls() {
   }
 }
 
-/** Pin an entity where it is, or let it go back under the layout. One
- *  pin at a time: the only way to undo a stray drag used to be Clear pins,
- *  which unpinned the whole case (ux03 pin-layout-work-lost, 2026-09-23). */
+/** Pin an entity where it is, or let it go back under the layout: one pin at a time, so a stray
+ *  drag can be undone without Clear pins. */
 function togglePin(id) {
   const g = state.graph;
   const n = g && g.index.get(id);
@@ -6139,12 +5370,9 @@ function onCanvasKey(e) {
   const cur = state.selection && state.selection.kind === 'node'
     ? ids.indexOf(state.selection.id) : -1;
 
-  /* Shift with an arrow pans, a fifth of the canvas per press: the
-     keyboard had no way to move the view at all, so a keyboard-only
-     analyst could select an entity off the canvas and never see it
-     (ux18 no-keyboard-pan-or-reveal, 2026-09-22). The arrow names the
-     direction the view travels, as a scrollbar would. A plain arrow still
-     steps the selection, and draw() brings that entity into view. */
+  /* Shift with an arrow pans, a fifth of the canvas per press, in the direction the view
+     travels, as a scrollbar would. A plain arrow steps the selection, and draw() brings that
+     entity into view. */
   const PAN_KEYS = { ArrowLeft: [1, 0], ArrowRight: [-1, 0],
                      ArrowUp: [0, 1], ArrowDown: [0, -1] };
   if (e.shiftKey && PAN_KEYS[e.key]) {
@@ -6154,8 +5382,7 @@ function onCanvasKey(e) {
     return;
   }
 
-  /* Each key that changes what is selected or shown says so through
-     `sayGraph` (ux18-a11y:canvas-selection-silent, 2026-09-23). */
+  /* Each key that changes what is selected or shown says so through `sayGraph`. */
   if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
     e.preventDefault();
     selectNode(ids[(cur + 1 + ids.length) % ids.length]);
@@ -6237,12 +5464,9 @@ function sayFocusMode() {
  * it on every load destroys real analytic value. */
 
 async function loadLayout() {
-  /* 2026-09-23. openCase checks caseChanged only after
-     this returns, and this assigns state.layout itself, so NIGHTJAR's reply
-     landing after KESTREL's replaced KESTREL's saved positions: KESTREL
-     drew with none of its pins, and the next Save layout overwrote its
-     stored placement with the fresh simulation. A reply for a case the
-     analyst has left writes nothing, and its failure raises no banner. */
+  /* openCase checks caseChanged only after this returns, and this assigns state.layout itself,
+     so a reply for a case the analyst has left writes nothing (it would replace the new case's
+     saved positions) and its failure raises no banner. */
   const token = caseToken();
   try {
     const rows = await api(cpath('/graph/layout'));
@@ -6253,12 +5477,10 @@ async function loadLayout() {
     state.layout = new Map();
     fail(err);
   }
-  /* The same case read again (leaveLayout): its unsaved placements go back
-     over the layout just loaded, and stay marked unsaved. Unless the case
-     came back read-only (a status change to CLOSED re-opens it): nothing
-     can store them there, so they are this view's alone and are not
-     marked. Marking them lit the unsaved dot on a Save layout that is off,
-     and the next leave dropped them without a word (2026-09-24). */
+  /* The same case read again (leaveLayout): its unsaved placements go back over the layout just
+     loaded and stay marked unsaved, unless the case came back read-only (a status change to
+     CLOSED re-opens it), where nothing can store them, so they are this view's alone and
+     unmarked. */
   const carry = state.layoutCarry;
   if (carry && carry.caseId === state.caseId) {
     state.layoutCarry = null;
@@ -6329,25 +5551,18 @@ async function saveLayout() {
   }
 }
 
-/** Hand placements not yet saved, as the case is reset. Called by the
- *  case-switch registration before the canvas reset drops the graph, so
- *  `state.caseId` is still the case being left and is captured here.
+/** Hand placements not yet saved, as the case is reset. Called by the case-switch registration
+ *  before the canvas reset drops the graph, so `state.caseId` is still the case being left.
  *
- *  Where the analyst is going is not known until the resets have run:
- *  openCase and showCaseList set `state.caseId` straight after them,
- *  before either first awaits, so the choice waits one microtask.
- *  Somewhere else (another case, the case list): the placements are saved
- *  to the case they were made in, with a message, because a switch cannot
- *  be held open for a question. The SAME case read again (a title edit or
- *  a status change re-opens it): nothing was left, so nothing is saved
- *  behind the analyst's back. That re-open said "saved as you left" and
- *  raced its own layout read with the PUT (fix round, 2026-09-23). The
- *  placements now ride over the re-read still unsaved, and loadLayout puts
- *  them back with their dot. */
+ *  Where the analyst is going is known only after the resets (openCase and showCaseList set
+ *  `state.caseId` straight after them, before either awaits), so the choice waits one
+ *  microtask. Somewhere else: the placements are saved to the case they were made in, with a
+ *  message, because a switch cannot be held open for a question. The same case read again (a
+ *  title edit or a status change re-opens it): nothing is saved behind the analyst's back; the
+ *  placements ride over the re-read still unsaved, and loadLayout puts them back with their dot. */
 function leaveLayout() {
-  /* A read-only case refuses a layout write (gap-closed-case-writes), so
-     placements made or carried there are the view's alone: nothing is
-     stored as the analyst leaves, and no refusal follows them out. */
+  /* A read-only case refuses a layout write, so placements made or carried there are the view's
+     alone: nothing is stored as the analyst leaves, and no refusal follows them out. */
   if (caseReadOnly()) { state.layoutCarry = null; return; }
   const left = state.caseId;
   const code = caseCodeNow() || 'the case you left';
@@ -6393,15 +5608,10 @@ function saveLayoutOnLeave(caseId, code, positions, moved) {
     });
 }
 
-/** A status change about to make the case read-only (CLOSED, ARCHIVED,
- *  PURGED) while hand placements are unsaved: store them first, while the
- *  case still takes a layout write, and say so. Closing a case with its
- *  final picture arranged and not saved re-opened it with the unsaved dot
- *  on a Save layout that was off, and the next leave dropped the
- *  arrangement without a word (2026-09-24). Called by submitStatus
- *  before it sends the change. It never throws: the status change is what
- *  the analyst asked for, so a failed save is reported and the change
- *  goes ahead. */
+/** A status change about to make the case read-only (CLOSED, ARCHIVED, PURGED) while hand
+ *  placements are unsaved: store them first, while the case still takes a layout write, and say
+ *  so. Called by submitStatus before it sends the change. It never throws: the status change is
+ *  what the analyst asked for, so a failed save is reported and the change goes ahead. */
 async function saveLayoutBeforeShut(to) {
   if (!state.caseId || !state.graph || caseReadOnly()) return;
   if (!caseReadOnly({ status: to }) || !state.layoutDirty.size) return;
@@ -6414,10 +5624,9 @@ async function saveLayoutBeforeShut(to) {
     await api('/cases/' + caseId + '/graph/layout',
               { method: 'PUT', json: { positions: layoutPositions() } });
     if (!caseChanged(token)) state.layoutDirty = new Set();
-    /* Said before the change is sent, so it must hold if the change is then
-       refused: the layout was saved either way, and "once the case is
-       CLOSED" stays true whether or not it gets there (u10 verifier,
-       2026-09-24). */
+    /* Said before the change is sent, so it must hold if the change is then refused: the layout
+       was saved either way, and "once the case is CLOSED" stays true whether or not it gets
+       there. */
     banner('Layout of ' + code + ' saved',
       countOf(moved, 'entity', 'entities') + ' you moved or pinned '
       + agree(moved, 'was', 'were') + ' not saved yet, so '
@@ -6445,14 +5654,9 @@ function pinScopeIds() {
   return Array.from(ids);
 }
 
-/** Unpin, after a confirmation that says how many, with an Undo.
- *
- *  It was one click beside Save layout, in the same ghost style: every pin
- *  in the case, in or out of the focus on screen, gone and saved at once
- *  with no confirmation and no way back (ux03 pin-layout-work-lost,
- *  2026-09-23). Now it counts first, is scoped to the focus when there is
- *  one, stores ONLY the pins it cleared, and the banner that reports it
- *  can put every one of them back where it was. */
+/** Unpin, after a confirmation that says how many, with an Undo. Scoped to the focus when there
+ *  is one, it stores only the pins it cleared, and the banner that reports it can restore every
+ *  one of them. */
 async function clearPins() {
   const ids = pinScopeIds();
   if (!ids.length) {
@@ -6481,12 +5685,9 @@ async function clearPins() {
   }
   settle();
   draw();
-  /* Persist the unpinning too: a pin that comes back on reload was not
-     cleared, it was hidden. Only these positions: the rest of the stored
-     layout is not this action's to rewrite. Not on a read-only case,
-     whose saved layout is content the server refuses to change: there
-     the pins clear for this view only (gap-closed-case-writes,
-     2026-09-23), and Undo puts them back in this view alone. */
+  /* Persist the unpinning too: a pin that comes back on reload was hidden, not cleared. Only
+     these positions: the rest of the stored layout is not this action's to rewrite. On a
+     read-only case the pins clear for this view only, and Undo puts them back in this view. */
   const store = !caseReadOnly();
   try {
     if (store) {
@@ -6495,13 +5696,9 @@ async function clearPins() {
                                                 y: p.y, is_pinned: false })) } });
     }
   } catch (err) { fail(err); return; }
-  /* Sticky: the card carries the only Undo, and the confirmation promised
-     "the message that follows can put them back", so it must not pass by
-     itself after BANNER_EXPIRE_MS (g01's Undo under g10's expiring
-     banners, merged 2026-09-24). A second identical clear is counted on
-     the card already up rather than stacked, so the card keeps every
-     clear it counts and its one Undo puts them back newest first, one
-     after the other, as pressing Undo twice would. */
+  /* Sticky: the card carries the only Undo, which the confirmation promised, so it must not
+     expire after BANNER_EXPIRE_MS. A second identical clear is counted on the card already up,
+     so the card keeps every clear it counts and its one Undo puts them back newest first. */
   const b = banner('Pins cleared', countOf(ids.length, 'entity is', 'entities are')
     + ' back under the layout' + (store ? '.'
       : ' in this view only. The case is read-only, so its saved layout is '
@@ -6552,13 +5749,9 @@ function buildEntityFilter() {
     keep);
 }
 
-/* ux06-entry:entity-list-no-find (2026-09-23). The list had a type filter
-   and nothing else: no way to ask "is it already here?" but scrolling a
-   newest-first table, which is how duplicates get made, and its count was
-   computed from the fetched page, so a case past 1000 entities read "1000
-   of 1000" while its oldest, founding entities were missing. It now has a
-   label filter (every word, as the palette and the Link pickers match),
-   sortable columns, and says when the page is not the whole case. */
+/* ux06-entry:entity-list-no-find: the entity list has a label filter (every word, as the
+   palette and the Link pickers match), sortable columns, and a count that says when the page is
+   not the whole case. */
 
 /** The list's own state: the column sorted on and its direction (null
  *  keeps the server's newest-first order), and the case's entity and tie
@@ -6597,11 +5790,9 @@ function sortEntityRows(rows, sort, dir) {
   return out;
 }
 
-/** The count line. `page` is how many entities the case page held; when
- *  it is the page limit, the total the server counted is said instead of
- *  pretending the page is the case. The ties likewise: `edges` is the tie
- *  page's length and `edgeTotal` the server's count, or null when the
- *  page was not full. Pure. */
+/** The count line, pure. `page` is how many entities the case page held; at the page limit the
+ *  server's `total` is said rather than pretending the page is the case. Ties likewise: `edges`
+ *  is the tie page's length, `edgeTotal` the server's count or null when the page was not full. */
 function entityCountWords(shown, page, total, edges, edgeTotal) {
   const listed = total !== null && total > page
     ? shown + ' listed from the newest ' + page + ' of '
@@ -6680,15 +5871,11 @@ function renderEntities() {
     const tdClass = el('td');
     tdClass.appendChild(tlpChip(n.classification));
     tr.appendChild(tdClass);
-    /* An absent date reads as absent: the words stay, in the quiet style
-       every other missing value takes. At full strength "not recorded" was
-       the brightest text in the table (README screenshot review,
-       2026-09-23). */
+    /* An absent date reads as absent: the words stay, in the quiet style every other missing
+       value takes, not as the brightest text in the table. */
     const tdSeen = el('td', n.first_seen ? 'num' : 'num absent',
       fmtWhen(n.first_seen));
-    /* Derived by the server from the earliest observed time among the
-       entity's live claims; nothing wrote the column, so it was blank on
-       every row (gap-first-seen, 2026-09-23). */
+    /* Derived by the server from the earliest observed time among the entity's live claims. */
     tdSeen.title = n.first_seen
       ? 'The earliest observed time among its live claims'
       : 'No live claim records when it was observed';
@@ -6710,12 +5897,9 @@ function renderEntities() {
     + (tiesWhole ? socialSplit(state.edges) : '');
 }
 
-/** ", 446 social ties and 46 identity or other links": what the default
- *  view, All social ties, draws and leaves out (ux19-copy
- *  one-concept-many-names, 2026-09-23). "492 relationships in the case"
- *  sat beside "drawn: 446" with nothing to say where the other 46 were, so
- *  they read as lost. Empty until the ontology says which types are
- *  social. */
+/** ", 446 social ties and 46 identity or other links": what the default view, All social ties,
+ *  draws and leaves out, so the ties not drawn do not read as lost. Empty until the ontology says
+ *  which types are social. */
 function socialSplit(edges) {
   const types = state.ontology && state.ontology.edge_types;
   if (!types || !edges.length) return '';
@@ -6729,17 +5913,10 @@ function socialSplit(edges) {
 
 /* ── evidence ─────────────────────────────────────────────────────────── */
 
-/* The exhibit register, a page at a time (ux07-evidence, 2026-09-23).
- *
- * Until this date the pane read `/evidence-list?limit=200` and drew what
- * came back: the newest 200 exhibits with no count and no paging, a WORM
- * flag that outlived its lock, "acquired" meaning uploaded, a sixteen-hex
- * digest with the rest in a tooltip, and nothing to say what an exhibit
- * supports. It now reads `GET /evidence` (routers/evidence.py `register`),
- * one page with the case's totals, and the attach pickers read `GET
- * /evidence/index`, every exhibit's title, so an early seizure no longer
- * drops out of them. `state.evidence` is that index: the pickers and the
- * inspector's linker read it and nothing else. */
+/* The exhibit register, a page at a time: `GET /evidence` (routers/evidence.py `register`) is
+ * one page with the case's totals, and the attach pickers read `GET /evidence/index`, every
+ * exhibit's title, so an early seizure never drops out of them. `state.evidence` is that index:
+ * the pickers and the inspector's linker read it and nothing else. */
 const EV_PAGE = 50;
 const evView = { offset: 0, q: '', unbacked: false, only: null, page: null };
 let evSeq = 0;
@@ -6760,10 +5937,8 @@ onCaseSwitch(() => {
   show($('ev-pager'), false);
   show($('ev-locks'), false);
   setMsg($('ev-locks-msg'), '');
-  /* The provenance typed for the case being left goes with it, as the
-     file and title do (final review C18): an authority reference for one
-     case's seizure, written into another case's custody record, could
-     never be withdrawn. */
+  /* The provenance typed for the case being left goes with it, as the file and title do: an
+     authority reference written into another case's custody record could never be withdrawn. */
   for (const id of ['ev-desc', 'ev-source', 'ev-authority', 'ev-acquired']) {
     $(id).value = '';
   }
@@ -6802,7 +5977,7 @@ async function loadEvidence(opts) {
       api(cpath('/evidence' + evidenceQuery(evView))),
       o.pageOnly ? Promise.resolve(null) : api(cpath('/evidence/index')),
     ]);
-    if (caseChanged(token)) return;          // ux17-failure, 2026-09-22
+    if (caseChanged(token)) return;
     if (index) {
       /* Kept even when a newer page request overtook this one: the index
          does not depend on the page, and the newer request did not ask
@@ -6826,17 +6001,10 @@ async function loadEvidence(opts) {
   }
 }
 
-/** The register page again, when it is on screen. Each card's forward
- *  trace ("Backs 1 entity", "Nothing on the live graph rests on this
- *  exhibit") and the count line's "backs nothing" are the server's answer
- *  at read time, and nothing read them again after an exhibit was linked,
- *  a claim resting on one was added or retracted, or another analyst's
- *  change arrived: the card went on saying an exhibit backed nothing just
- *  after the analyst had linked it, and ticking "Only exhibits nothing
- *  rests on" then dropped it from a list the count line said it was in
- *  (c13, 2026-09-24). Selecting the tab re-reads the page (selectTab);
- *  this covers a write made while the register is showing, beside the
- *  inspector. Only the page: the index the pickers read is unchanged. */
+/** The register page again, when it is on screen: each card's forward trace and the count
+ *  line's "backs nothing" are the server's answer at read time, so a link, claim or retraction
+ *  made beside the register must re-read them. Selecting the tab re-reads the page too
+ *  (selectTab). Only the page: the index the pickers read is unchanged. */
 function reloadRegisterIfShown() {
   if (state.tab !== 'evidence' || !state.caseId) return Promise.resolve();
   return loadEvidence({ pageOnly: true });
@@ -6850,9 +6018,8 @@ function renderEvidencePolicy() {
     'Exhibits up to ' + fmtBytes(p.max_bytes) + '. Each is written once and locked until the case\'s retention date.');
 }
 
-/** What the count line says: how many exhibits there are, which of them
- *  are on screen, and how many back nothing. A page is never presented
- *  as the whole (ux07-evidence:evidence-list-silently-capped). */
+/** What the count line says: how many exhibits there are, which of them are on screen, and how
+ *  many back nothing. A page is never presented as the whole. */
 function registerCountText(page, view) {
   const total = Number(page.total) || 0;
   if (!total) return '';
@@ -6894,12 +6061,10 @@ function registerCountText(page, view) {
   return 'Showing ' + range + ' in the case' + order + idle;
 }
 
-/** What the pane says about locks that end before the case's retention
- *  date, from the register's count over every page of what this reader
- *  may see: '' when there are none (x-lock-extension, verifier,
- *  2026-09-24). An exhibit lodged before its lock followed the case, or
- *  whose lengthening failed, would otherwise sit deletable at the store
- *  with only a chip's tooltip to say so. */
+/** What the pane says about locks that end before the case's retention date, from the
+ *  register's count over every page this reader may see; '' when there are none. Without it an
+ *  exhibit whose lock fell short would sit deletable at the store with only a chip's tooltip
+ *  to say so. */
 function shortLocksText(page) {
   const n = Number(page && page.locks_short) || 0;
   if (!n) return '';
@@ -6966,7 +6131,7 @@ function renderEvidence() {
   const page = evView.page;
   if (!page) return;
   for (const ev of page.items || []) {
-    list.appendChild(exhibitCardWithSimilar(ev, page));   // F6.4
+    list.appendChild(exhibitCardWithSimilar(ev, page));
   }
   setMsg($('ev-count'), registerCountText(page, evView));
   renderShortLocks(page);
@@ -6997,34 +6162,20 @@ function methodName(key) { return EV_METHODS[key] || String(key || NO_VALUE); }
 
 /** The storage-lock chip: [className, text, title], or null for none.
  *
- *  ux07-evidence:worm-chip-outlives-lock (2026-09-23). This was a fixed
- *  "WORM LOCKED" whose title said the object "cannot be replaced or
- *  deleted", on every exhibit for ever. The COMPLIANCE lock was set once,
- *  when the exhibit was lodged, for EVIDENCE_RETENTION_DAYS (365 by
- *  default) and nothing extended it, so once it ended the store no longer
- *  refused a delete. An analyst repeating the old chip under oath would be
- *  wrong. The chip now carries the date, turns into a warning once the
- *  lock can no longer be counted on, and says what protects the bytes
- *  after that. Since 2026-09-24 the lock follows the case's retention
- *  date (x-lock-extension), and a lock that still ends first says so.
- *
- *  The lock ends at an instant part way through its last day, not at the
- *  end of it: the first version said "until the end of" the day, which
- *  overstated the lock by up to 24 hours (verifier, 2026-09-23). Where the
- *  record carries the instant (`lock_ends_at`, every exhibit lodged since)
- *  the title names it; where it carries only the day, the server stops
- *  counting on the lock from the start of that day and the chip says so
- *  rather than claiming the lock has ended. */
+ *  The chip carries the lock's date, turns into a warning once the lock cannot be counted on,
+ *  and says what protects the bytes after that; the lock follows the case's retention date,
+ *  and one that still ends first says so. The lock ends at an instant part way through its last
+ *  day: where the record carries the instant (`lock_ends_at`) the title names it; where it
+ *  carries only the day, the server stops counting on the lock from the start of that day and
+ *  the chip says so rather than claiming the lock has ended. */
 function lockChip(ev) {
   if (ev.purged_at || !ev.is_worm_locked) return null;
   const after = 'After it ends the case\'s retention date, '
     + (ev.legal_hold ? 'the legal hold on this exhibit ' : 'any legal hold ')
     + 'and the dual-control purge protect the bytes; the store itself no '
     + 'longer refuses.';
-  /* The lock follows the case's retention date, from lodging and when the
-     date is extended (x-lock-extension, 2026-09-24); until then nothing
-     moved it, and this said the lock did not follow the date. One that
-     still ends first says so, and where it can be lengthened (verifier). */
+  /* The lock follows the case's retention date, from lodging and when the date is extended. One
+     that still ends first says so, and where it can be lengthened. */
   const fixed = 'The lock runs to the case\'s retention date, as far ahead '
     + 'as the deployment sets one, for at least a fixed period from lodging, '
     + 'and is lengthened when that date is extended. ';
@@ -7059,10 +6210,8 @@ function lockChip(ev) {
     + 'asks. ' + (short || fixed) + after];
 }
 
-/** "acquired": when the material was obtained, and who lodged it.
- *  ux07-evidence:upload-drops-provenance (2026-09-23): the pane printed
- *  the upload moment as "acquired". A time nobody stated is now said to
- *  be the lodging time rather than passed off as the acquisition. */
+/** "acquired": when the material was obtained, and who lodged it. A time nobody stated is said
+ *  to be the lodging time rather than passed off as the acquisition. */
 function acquiredText(ev) {
   const who = ev.acquired_by_name ? visibleText(ev.acquired_by_name)
     : 'account ' + shortId(ev.acquired_by);
@@ -7071,14 +6220,12 @@ function acquiredText(ev) {
     : 'at lodging, no earlier time stated,') + ' by ' + who;
 }
 
-/** The newest integrity check on the custody record, as a line:
- *  [className, text]. Kept on the card, where the verdict of a Verify used
- *  to vanish on the next render (ux07-evidence:verify-writes-custody-
- *  silently, 2026-09-23). */
+/** The newest integrity check on the custody record, as a line: [className, text]. Kept on the
+ *  card so a Verify's verdict survives the next render. */
 function lastCheckText(check) {
   if (!check) {
-    /* "since it was lodged": the ACQUIRED row's read-back is the check
-       this counts from, and "acquired" on the card is the stated time. */
+    /* "since it was uploaded": the ACQUIRED row's read-back is the check this counts from, and
+       "acquired" on the card is the stated time. */
     return ['help ev-last', 'Not verified since it was uploaded.'];
   }
   const who = check.by_name ? visibleText(check.by_name) : 'an account';
@@ -7102,10 +6249,8 @@ function runsFact(label, runs) {
   return wrap;
 }
 
-/** A full identifier, selectable and copyable: the whole SHA-256 and the
- *  exhibit id (ux07-evidence:hash-and-id-not-reachable, 2026-09-23). The
- *  digest was sixteen characters with the rest in a tooltip nobody can
- *  select, and the id the custody verifier asks for appeared nowhere. */
+/** A full identifier, selectable and copyable: the whole SHA-256, and the exhibit id the
+ *  custody verifier asks for. */
 function exhibitIdLine(label, value, what) {
   const row = el('div', 'ev-id');
   row.appendChild(el('span', 'fact-k', label));
@@ -7119,17 +6264,13 @@ const BACKS_RULE = 'Counted the way the canvas marks an element as '
   + 'evidenced: a live claim carries this exhibit, or it is linked to the '
   + 'element directly, on an entity or relationship you can see.';
 
-/** What rests on the exhibit (ux07-evidence:no-forward-trace-from-exhibit,
- *  2026-09-23): a count that opens into the entities and relationships,
- *  each one a way into the inspector, or a plain statement that nothing
- *  does, which is what an unused exhibit looked like the same as a
- *  load-bearing one. */
+/** What rests on the exhibit: a count that opens into the entities and relationships, each one
+ *  a way into the inspector, or a plain statement that nothing does. */
 function backsLine(ev) {
   const box = el('div', 'ev-backs');
   const n = Number(ev.backs_nodes) || 0, e = Number(ev.backs_edges) || 0;
-  /* A purged exhibit backs nothing, by the projection's rule: an element
-     cannot rest on bytes the record says are gone. The server counts it
-     so (verifier, 2026-09-23); the line says why, rather than reading as
+  /* A purged exhibit backs nothing, by the projection's rule: an element cannot rest on bytes
+     the record says are gone. The server counts it so; the line says why, rather than reading as
      an exhibit nobody used. */
   if (ev.purged_at) {
     const gone = el('span', 'ev-backs-none', 'Purged, so nothing on the '
@@ -7267,8 +6408,8 @@ function exhibitCard(ev, page) {
     dcpRuns(desc, ev.description_segments);
     item.appendChild(desc);
   }
-  /* Why it is held, for the people who place and lift holds: the server
-     sends the text to nobody else (2026-10-08). */
+  /* Why it is held, for the people who place and lift holds: the server sends the text to
+     nobody else. */
   if (ev.legal_hold && ev.legal_hold_reason) {
     item.appendChild(el('p', 'help', 'Held: ' + visibleText(ev.legal_hold_reason)));
   }
@@ -7279,12 +6420,10 @@ function exhibitCard(ev, page) {
   const last = el('p', lastCls[0], lastCls[1]);
   item.appendChild(last);
 
-  /* No in-page render control here, and no download of attacker markup
-     from this origin: those bytes are only ever served from the separate
-     sample origin (invariant 10, docs/19), which is where "Produce" fetches
-     them. A non-hostile exhibit can be exported for disclosure through the
-     step-up gate. Either writes an EXPORTED custody row
-     (ux07-evidence:no-exhibit-export-control, 2026-09-23). */
+  /* No in-page render control here, and no download of attacker markup from this origin: those
+     bytes are only served from the separate sample origin (invariant 10, docs/19), where
+     "Produce" fetches them. A non-hostile exhibit is exported through the step-up gate. Either
+     writes an EXPORTED custody row. */
   const actions = el('div', 'ev-actions');
   const verdict = el('span', 'ev-verdict');
   verdict.setAttribute('role', 'status');
@@ -7299,9 +6438,8 @@ function exhibitCard(ev, page) {
     copyText(b.value, b);
   });
   if (!ev.purged_at) {
-    /* "(logged)": a Verify is a permanent custody entry in the analyst's
-       name, and the button read like a harmless check
-       (ux07-evidence:verify-writes-custody-silently, 2026-09-23). */
+    /* "(logged)": a Verify is a permanent custody entry in the analyst's name, not a harmless
+       check. */
     const bVerify = el('button', 'btn small', 'Verify (logged)');
     bVerify.type = 'button';
     bVerify.title = 'Re-reads the stored bytes and compares them with the '
@@ -7330,12 +6468,9 @@ function exhibitCard(ev, page) {
   actions.appendChild(bCustody);
   if (page.may_export && !ev.purged_at) {
     if (ev.is_hostile_markup) {
-      /* x-hostile-export (2026-09-24). This said "No export here" and sent
-         the analyst to an exhibit procedure outside the product, because
-         nothing could produce attacker markup: this origin refuses its
-         bytes (docs/19 section 1.1) and the sample origin served samples
-         alone. The sample origin now produces it, on a one-shot ticket
-         minted here, in the Lab's password-protected archive. */
+      /* Attacker markup: this origin refuses its bytes (docs/19 section 1.1), so the sample
+         origin produces it, on a one-shot ticket minted here, in the Lab's password-protected
+         archive. */
       const bProduce = el('button', 'btn small', 'Produce through the sample origin…');
       bProduce.type = 'button';
       bProduce.title = 'Save this exhibit to this computer for disclosure, in '
@@ -7363,9 +6498,8 @@ function exhibitCard(ev, page) {
     }
   }
   if (page.may_audit) {
-    /* The custody verifier asks for an exhibit id, which this pane did not
-       show (ux07-evidence:hash-and-id-not-reachable); this carries it
-       there for an account that may run the verifier. */
+    /* The custody verifier asks for an exhibit id; this carries it there for an account that
+       may run the verifier. */
     const bChain = el('button', 'btn ghost small', 'Verify the custody chain');
     bChain.type = 'button';
     bChain.addEventListener('click', () => {
@@ -7388,14 +6522,11 @@ function exhibitCard(ev, page) {
   return item;
 }
 
-/** Place or lift a legal hold on an exhibit, with a reason either way,
- *  behind the step-up gate: the exhibit card's half of the console's hold
- *  controls (docs/17, "no console control for a hold", 2026-10-08), built as
- *  the collected document's is (`documentHoldActions`). The route is
- *  `POST /retention/legal-hold`, which decides for itself: this only offers
- *  the control to a reader whose register said `may_hold`. A lift needs the
- *  lifter cleared for the exhibit, which a reader of the register is. Holds
- *  are governance, so the control stays on a CLOSED case. */
+/** Place or lift a legal hold on an exhibit, with a reason either way, behind the step-up gate,
+ *  built as the collected document's is (`documentHoldActions`). `POST /retention/legal-hold`
+ *  decides for itself; this only offers the control to a reader whose register said `may_hold`.
+ *  A lift needs the lifter cleared for the exhibit, which a reader of the register is. Holds are
+ *  governance, so the control stays on a CLOSED case. */
 function exhibitHoldButton(ev, card) {
   const verb = ev.legal_hold ? 'Lift the legal hold' : 'Place a legal hold';
   const btn = el('button', 'btn small ghost', verb);
@@ -7428,8 +6559,8 @@ function exhibitHoldButton(ev, card) {
   return btn;
 }
 
-/** An exhibit's card with its Similar control (F6.4, 2026-09-24):
- *  exhibits like this one, by title and description, opened under it. */
+/** An exhibit's card with its Similar control: exhibits like this one, by title and
+ *  description, opened under it. */
 function exhibitCardWithSimilar(ev, page) {
   const item = exhibitCard(ev, page);
   if (!ev.purged_at) item.appendChild(similarControl('evidence', ev.id));
@@ -7468,8 +6599,7 @@ async function loadCustody(ev, box) {
   clear(box);
   box.hidden = false;
   box.appendChild(el('p', 'help', 'Loading custody log…'));
-  /* A case switch mid-read must not land this exhibit's log in the next
-     case's pane (the 2026-09-22 case-switch registry). */
+  /* A case switch mid-read must not land this exhibit's log in the next case's pane. */
   const token = caseToken();
   try {
     const log = await api(cpath('/evidence/' + ev.id + '/custody'));
@@ -7522,15 +6652,12 @@ function exportFileName(ev) {
     + (ext ? '.' + ext[1].toLowerCase() : '');
 }
 
-/** Export one exhibit for disclosure (ux07-evidence:no-exhibit-export-
- *  control, 2026-09-23). `POST .../export` existed, step-up gated, egress
- *  checked and writing an EXPORTED custody row, and nothing in the console
- *  called it, so disclosure went round the custody record.
+/** Export one exhibit for disclosure through `POST .../export`: step-up gated, egress checked,
+ *  and writing an EXPORTED custody row, so disclosure never goes round the custody record.
  *
- *  A raw fetch, because the answer is the file's bytes, which `api()`
- *  reads as text: through `sessionRefusedRaw` like every such request.
- *  The sign-in the gate needs is asked for first when this tab knows it
- *  has lapsed, and once more if the server says so (the report's C15). */
+ *  A raw fetch, because the answer is the file's bytes, which `api()` reads as text: through
+ *  `sessionRefusedRaw` like every such request. The sign-in the gate needs is asked for first
+ *  when this tab knows it has lapsed, and once more if the server says so. */
 async function exportExhibit(ev, msg, custodyBox) {
   if (!window.confirm('Export "' + visibleText(ev.title) + '" for '
       + 'disclosure?\n\nThe stored bytes are checked against the recorded '
@@ -7603,17 +6730,13 @@ function productionFileName(ev) {
   return 'exhibit-' + String(ev.sha256 || ev.id).slice(0, 16) + '.zip';
 }
 
-/** Produce an exhibit of attacker markup (x-hostile-export, 2026-09-24).
- *
- *  docs/19 section 1.1: its bytes leave only from the separate sample
- *  origin, through the gate a Lab download passes, and this origin
- *  refuses them. So it is `downloadSample`'s two legs: a one-shot ticket
- *  minted HERE through `api()` (the cookie, the CSRF double-submit, the
- *  export gate and its step-up), then spent at the SAMPLE origin by a
- *  request with no cookie and no header of ours, the ticket in a form
- *  body, to the absolute URL the mint returned. What comes back is the
- *  Lab's archive (ZIP, password "infected"), so the markup cannot be
- *  double-clicked open into a browser either. */
+/** Produce an exhibit of attacker markup. Its bytes leave only from the separate sample origin,
+ *  through the gate a Lab download passes (docs/19 section 1.1), so this is `downloadSample`'s
+ *  two legs: a one-shot ticket minted here through `api()` (the cookie, the CSRF double-submit,
+ *  the export gate and its step-up), then spent at the sample origin by a request with no cookie
+ *  and no header of ours, the ticket in a form body, to the absolute URL the mint returned. What
+ *  comes back is the Lab's archive (ZIP, password "infected"), so the markup cannot be
+ *  double-clicked open into a browser. */
 async function produceExhibit(ev, msg, custodyBox) {
   if (!window.confirm('Produce "' + visibleText(ev.title) + '" for '
       + 'disclosure?\n\nIt is attacker-authored markup, so the separate sample '
@@ -7688,8 +6811,8 @@ async function produceExhibit(ev, msg, custodyBox) {
   if (!custodyBox.hidden) loadCustody(ev, custodyBox);
 }
 
-/* The authority field is offered with Legal process, the one method that
-   rests on an instrument (ux07-evidence:upload-drops-provenance). */
+/* The authority field is offered with Legal process, the one method that rests on an
+   instrument. */
 function syncEvidenceMethod() {
   show($('ev-authority-field'), $('ev-method').value === 'LEGAL');
 }
@@ -7724,19 +6847,10 @@ function wireEvidencePane() {
   $('ev-locks-go').addEventListener('click', lengthenLocks);
 }
 
-/** The integrity chip on one custody row: [className, text, title], or
- *  null for no chip. THREE states, never two.
- *
- *  ux07 custody-failed-hash-shown-as-not-checked (2026-09-22). This was
- *  `c.hash_verified ? 'hash verified' : 'hash not checked'`, a truthiness
- *  test that read `false` (the stored bytes did NOT match: the tamper
- *  alarm) exactly like `null` (this row attests no check), and filed both
- *  under the quiet grey `.chip.stale`. So a tampered exhibit's log read as
- *  routine, under an action name (HASH_VERIFIED) that sounds like
- *  reassurance, on the record that goes to court; and every clean
- *  acquisition read "hash not checked", a lapse that never happened.
- *  Compared with `=== true` / `=== false` on purpose: a truthiness test is
- *  the bug. */
+/** The integrity chip on one custody row: [className, text, title], or null for no chip. Three
+ *  states, never two: `false` (the stored bytes did not match, the tamper alarm) and `null` (this
+ *  row attests no check) must never read alike on the record that goes to court, so they are
+ *  compared with `=== true` / `=== false` on purpose, never by truthiness. */
 function custodyHashChip(action, verified) {
   if (verified === true) {
     return ['chip good', 'hash verified',
@@ -7750,11 +6864,9 @@ function custodyHashChip(action, verified) {
       + 'on the custody record permanently.'];
   }
   if (action === 'ACQUIRED') {
-    /* NULL on ACQUIRED: the digest of the bytes as received is on the
-       record, but this row does not itself attest a read-back of the
-       stored object. New acquisitions write TRUE (evidence.py ingest); a
-       re-acquisition of bytes already held, and rows written before
-       2026-09-22, stay NULL. */
+    /* NULL on ACQUIRED: the digest of the bytes as received is on the record, but this row does
+       not attest a read-back of the stored object. New acquisitions write TRUE (evidence.py
+       ingest); a re-acquisition of bytes already held, and older rows, stay NULL. */
     return ['chip stale', 'digest recorded',
       'The SHA-256 of the bytes as received is recorded. This row does not '
       + 'attest a read-back of the stored object: the bytes were already '
@@ -7768,22 +6880,19 @@ function custodyHashChip(action, verified) {
 function renderCustodyRow(c) {
   const row = el('div', 'custody-row' + (c.hash_verified === false ? ' bad' : ''));
   row.appendChild(el('span', null, c.action));
-  /* To the second, in UTC and saying so: two rows of one exhibit a few
-     seconds apart read as one time at minute precision
-     (ux07-evidence:custody-rows-not-court-legible, 2026-09-23). */
+  /* To the second, in UTC and saying so: two rows of one exhibit seconds apart read as one time
+     at minute precision. */
   row.appendChild(el('span', 'when', fmtTime(c.occurred_at, true)));
-  /* A person, not an eight-hex id: the log answers "who touched this
-     exhibit" (README screenshot review, 2026-09-23). The id stays in the
-     title, and is the text only when the account no longer resolves. */
+  /* A person, not an eight-hex id: the log answers "who touched this exhibit". The id stays in
+     the title, and is the text only when the account does not resolve. */
   const who = c.actor_name
     ? el('span', 'small', 'by ' + visibleText(c.actor_name))
     : el('span', 'mono small', 'account ' + shortId(c.actor_id));
   who.title = 'Account ' + c.actor_id;
   row.appendChild(who);
-  /* The account id beside the name, to copy: the ledger holds the id, and
-     a tooltip cannot be selected (ux07-evidence:custody-rows-not-court-
-     legible, 2026-09-23). The click is handled once on the custody box
-     (`exhibitCard`), so this row stays a plain render a test can run. */
+  /* The account id beside the name, to copy: the ledger holds the id, and a tooltip cannot be
+     selected. The click is handled once on the custody box (`exhibitCard`), so this row stays a
+     plain render a test can run. */
   if (c.actor_name && c.actor_id) {
     const copy = el('button', 'copy-btn custody-id', '⎘');
     copy.type = 'button';
@@ -7799,11 +6908,8 @@ function renderCustodyRow(c) {
     flag.title = chip[2];
     row.appendChild(flag);
   }
-  /* What the row itself records, last, so the chips keep their places.
-     Without it a re-acquisition of bytes already held read exactly like
-     the original ACQUIRED row, which invites the question of whether the
-     exhibit was acquired twice (ux07-evidence:custody-rows-not-court-
-     legible, 2026-09-23). */
+  /* What the row itself records, last, so the chips keep their places. Without it a
+     re-acquisition of bytes already held reads like the original ACQUIRED row. */
   const d = c.detail || {};
   const said = c.detail ? custodyDetailText(c.action, d) : '';
   const runs = [['source', d.source_segments], ['authority', d.authority_segments]]
@@ -7830,9 +6936,8 @@ function custodyDetailText(action, d) {
       bits.push('obtained ' + fmtTime(d.acquired_at, true));
     }
     if (Number.isFinite(d.bytes)) bits.push(fmtBytes(d.bytes));
-    /* The storage lock's exact end, recorded at lodging since 2026-09-23
-       (ux07-evidence:worm-chip-outlives-lock, verifier): the record that
-       goes to court says how long the store refused a delete. */
+    /* The storage lock's exact end, recorded at lodging: the record that goes to court says how
+       long the store refused a delete. */
     if (d.lock_ends_at) bits.push('locked in storage until ' + fmtTime(d.lock_ends_at, true));
   }
   if (action === 'HASH_VERIFIED') {
@@ -7840,21 +6945,19 @@ function custodyDetailText(action, d) {
     if (d.sha256_ok === false) bits.push('SHA-256 differs');
     if (d.blake3_ok === false) bits.push('BLAKE3 differs');
   }
-  /* How attacker markup left: from the sample origin, in the Lab's archive
-     (x-hostile-export, 2026-09-24). */
+  /* How attacker markup left: from the sample origin, in the Lab's archive. */
   if (action === 'EXPORTED' && d.via === 'sample_origin') {
     bits.push('produced through the sample origin, in a password-protected archive');
   }
-  /* The case's retention was extended past the lock, and the lock with it
-     (x-lock-extension, 2026-09-24). */
+  /* The case's retention was extended past the lock, and the lock with it. */
   if (action === 'LOCK_EXTENDED') {
     if (d.lock_ends_at) bits.push('locked in storage until ' + fmtTime(d.lock_ends_at, true));
     if (d.previous_lock_ends_at) {
       bits.push('was until ' + fmtTime(d.previous_lock_ends_at, true));
     }
     if (d.case_retention_until) {
-      /* Stopped by the deployment's horizon short of the date (verifier,
-         2026-09-24): the row says so rather than claiming it met it. */
+      /* Stopped by the deployment's horizon short of the date: the row says so rather than
+         claiming it met it. */
       bits.push((d.capped_at_horizon
         ? 'toward the case\'s retention date '
         : 'to meet the case\'s retention date ')
@@ -7883,10 +6986,8 @@ async function uploadEvidence(event) {
       + 'Do not split it: the digest of the whole is what custody attests.');
     return;
   }
-  /* Provenance (ux07-evidence:upload-drops-provenance, 2026-09-23). The
-     API took a description and a source and this form never sent them,
-     and "acquired" was always the upload moment. Checked here as well as
-     at the server, so the analyst reads the reason beside the field. */
+  /* Provenance, checked here as well as at the server so the analyst reads the reason beside
+     the field. */
   const method = $('ev-method').value;
   const authority = $('ev-authority').value.trim();
   if (method === 'LEGAL' && !authority) {
@@ -7925,10 +7026,8 @@ async function uploadEvidence(event) {
   if (method === 'LEGAL') form.append('authority_ref', authority);
   const description = $('ev-desc').value.trim();
   if (description) form.append('description', description);
-  /* An exhibit lodged is in custody for good, so where it went is said
-     even when the answer lands after a switch; it is said in a banner
-     naming that case, not in this case's cleared form (final review C18,
-     2026-09-23). */
+  /* An exhibit lodged is in custody for good, so where it went is said even when the answer
+     lands after a switch, in a banner naming that case, not in this case's cleared form. */
   const token = caseToken();
   const code = caseCodeNow();
   try {
@@ -7970,11 +7069,7 @@ const SEARCH_MAX = 200;
    they have left, and is dropped rather than drawn. */
 let searchSeq = 0;
 
-/* stale-results-across-cases (ux09-search, 2026-09-22): switching cases
-   left the old query and the old case's hits on screen under the new
-   case's header and TLP chip. KESTREL appeared to hold NIGHTJAR's
-   umbra_shrike, AMBER labels sat under a GREEN banner, and a click on one
-   landed on "node does not exist in this case". */
+/* A case switch clears the query and the hits: they belong to the case being left. */
 onCaseSwitch(() => {
   searchSeq += 1;
   $('search-q').value = '';
@@ -7985,17 +7080,10 @@ onCaseSwitch(() => {
   setMsg($('search-scope'), '');
 });
 
-/* Per column: the box it fills, what a hit is called, how a hit is drawn,
-   what to say when nothing matched, and what to say when the caller may
-   not search that kind at all. The empty text suggests the next move,
-   because a bare "No matches." reads as "this is not in the case", and
-   until 2026-09-22 that was often wrong (whole-token-false-negatives).
-
-   Documents and assertions since 2026-09-23 (ux09-search
-   documents-unsearchable and assertions-unsearchable): the server could
-   search collected documents and the pane never asked, and nothing
-   anywhere searched a claim's rationale or grading. Each column reads its
-   own route, so each has its own total and its own "show more". */
+/* Per column: the box it fills, what a hit is called, how a hit is drawn, what to say when
+   nothing matched, and what to say when the caller may not search that kind at all. The empty
+   text suggests the next move, because a bare "No matches." reads as "this is not in the case".
+   Each column reads its own route, so each has its own total and its own "show more". */
 const SEARCH_COLUMNS = {
   nodes: {
     box: 'search-nodes', one: 'entity', many: 'entities',
@@ -8035,7 +7123,7 @@ async function runSearch(event) {
   event.preventDefault();
   const q = $('search-q').value.trim();
   if (!q) return;
-  // A similarity mode compares passages, by POST (F6.3, 2026-09-24).
+  // A similarity mode compares passages, by POST.
   const mode = searchMode();
   if (mode !== 'text') { runSimilarSearch(q, mode); return; }
   const token = caseToken();
@@ -8063,11 +7151,8 @@ async function runSearch(event) {
   });
 }
 
-/** Put a query into the Search pane and run it: the command palette's
- *  "Search this case for" row (ux09-search two-searches-disagree,
- *  2026-09-23). The palette jumps to names; a miss there is not a miss
- *  here, and until this row it was a dead end with the text already
- *  typed. */
+/** Put a query into the Search pane and run it: the command palette's "Search this case for"
+ *  row. The palette jumps to names, and a miss there is not a miss here. */
 function searchCaseFor(q) {
   selectTab('search');
   const box = $('search-q');
@@ -8084,10 +7169,8 @@ function showSearchColumn(box, kind, settled, q) {
   } else searchProblem(box, settled.reason);
 }
 
-/* A kind the caller may not search says so in its column, never "No
-   matches." (documents-unsearchable, 2026-09-23): an empty answer that
-   means "nothing here" and one that means "you were not allowed to look"
-   need opposite responses. */
+/* A kind the caller may not search says so in its column, never "No matches.": "nothing here"
+   and "you were not allowed to look" need opposite responses. */
 function notSearched(box, why) {
   clear(box);
   box.appendChild(el('p', 'empty not-searched', 'Not searched. ' + why));
@@ -8116,9 +7199,7 @@ function renderHits(box, kind, page, q) {
   const hits = (page && page.hits) || [];
   const total = page && Number.isFinite(page.total) ? page.total : hits.length;
   if (!hits.length) { box.appendChild(el('p', 'empty', column.none)); return; }
-  /* silent-truncation-50 (ux09-search, 2026-09-22): the pane drew the
-     first 50 of 73 with nothing to say so, and the analyst took the list
-     as every entity matching the term. */
+  /* A partial list says so, or it reads as every entity matching the term. */
   box.appendChild(el('p', 'hit-count', hits.length < total
     ? 'Showing ' + hits.length + ' of ' + total + ' ' + column.many
       + ', best match first.'
@@ -8153,23 +7234,16 @@ async function moreHits(box, kind, q, button) {
   showSearchColumn(box, kind, settled, q);
 }
 
-/* hit-rows-unexplained (ux09-search, 2026-09-23). A row was a label and a
-   bare "0.608": in a product that encodes confidence with care, an
-   unlabelled decimal beside a name reads as a confidence, the GROUP
-   "Umbra crew" and the personas it found looked identical, and nothing
-   said why a row was there. A row now carries the type and TLP chips the
-   inspector draws and a line saying what matched; the rank is gone from
-   the screen and orders the list ("best match first") as before. */
+/* A hit row carries the type and TLP chips the inspector draws and a line saying what matched.
+   The rank is not shown, since a bare decimal beside a name reads as a confidence; it only
+   orders the list ("best match first"). */
 function hitButton(hit, q, kind, onPick) {
   const b = el('button', 'hit');
   b.type = 'button';
   const main = el('span', 'hit-main');
-  /* CR14: the bulk load paths map through `withSafeLabel` at landing (see
-     loadCaseGraph). Search did not, and Search is the primary find-by-name
-     tool, so a label carrying U+202E rendered de-fanged everywhere else
-     and raw here, in the one place an analyst clicks a name to decide
-     which entity they are looking at. The selector value below gets the
-     same treatment for the same reason. */
+  /* Search hits do not pass through `withSafeLabel` at landing, as the bulk loads do
+     (loadCaseGraph), so the label and the selector value are made safe here: this is where an
+     analyst clicks a name to decide which entity they are looking at. */
   main.appendChild(el('span', 'hit-label', visibleText(hit.label)));
   const via = kind === 'evidence' ? exhibitReason(hit)
     : (viaLine(hit, q) || nameReason(hit));
@@ -8199,14 +7273,10 @@ function hitChips(hit) {
   return chips;
 }
 
-/** Why an entity is here when no selector, merged record or attribute
- *  says so (see viaLine): its own name, or, for a query whose words are
- *  spread over several parts, each part that holds one. The server names
- *  those parts (`attributes`, `label_part`). This said "via the name and
- *  attributes together" for every such hit, and "meridian exchange" found
- *  18 personas through crew and first_seen_forum whose names held neither
- *  word (verifier of hit-rows-unexplained, 2026-09-23). The last line is
- *  for a server that names no part, and claims neither. */
+/** Why an entity is here when no selector, merged record or attribute says so (see viaLine): its
+ *  own name, or, for a query whose words are spread over several parts, each part that holds one,
+ *  as the server names them (`attributes`, `label_part`). The last line is for a server that
+ *  names no part, and claims neither. */
 function nameReason(hit) {
   if (hit.in_label) return 'via the name';
   const keys = (hit.attributes || []).map((k) => visibleText(k));
@@ -8236,7 +7306,7 @@ function documentHit(d, noSimilar) {
   where.push(d.posted_at ? 'posted ' + fmtTime(d.posted_at) : 'posting time not recorded');
   main.appendChild(el('span', 'hit-via', where.join(' · ')));
   if (d.excerpt) main.appendChild(el('span', 'hit-excerpt', visibleText(d.excerpt)));
-  // Documents like this one (F6.3). Not inside a Similar panel.
+  // Documents like this one, but not inside a Similar panel.
   if (!noSimilar) main.appendChild(similarControl('document', d.id));
   card.appendChild(main);
   card.appendChild(hitChips(d));
@@ -8315,15 +7385,12 @@ async function openAssertionHit(a) {
 
 /* ── Similarity: the Match modes and the Similar panels ──────────────────
  *
- * F6.3 and F6.4 (embeddings, 2026-09-24). Similar wording compares
- * character patterns on this host; similar meaning asks an operator's
- * model server. Both are POSTs with the text in the body, so a pasted
- * passage never enters a URL or a log line (routers/similarity.py). The
- * number the server returns is never printed: a hit shows its band
- * (similar wording) or its position (similar meaning) and what the two
- * texts share, because a bare 0.87 is either over-trusted or ignored
- * (docs/13 #9). Beside every answer, the standing sentence that similar
- * text is not the same author (invariant 2).
+ * Similar wording compares character patterns on this host; similar meaning asks an operator's
+ * model server. Both are POSTs with the text in the body, so a pasted passage never enters a URL
+ * or a log line (routers/similarity.py). The number the server returns is never printed: a hit
+ * shows its band or its position and what the two texts share, because a bare 0.87 is either
+ * over-trusted or ignored (docs/13). Beside every answer stands the sentence that similar text
+ * is not the same author (invariant 2).
  */
 
 const EMB = { status: null };
@@ -8560,9 +7627,8 @@ function similarCoverageLine(cov, column) {
     more.push(grouped(cov.empty) + ' ' + agree(cov.empty, 'has', 'have')
       + ' nothing to compare');
   }
-  /* 2026-09-25: a claim whose row is owed to material it
-     cites that this reader cannot read is counted here, with no reason,
-     because any reason would describe that material. */
+  /* A claim whose row is owed to material it cites that this reader cannot read is counted
+     here, with no reason, because any reason would describe that material. */
   if (cov.not_compared) {
     more.push(grouped(cov.not_compared) + ' cannot be compared');
   }
@@ -8690,11 +7756,9 @@ async function loadSimilarPanel(kind, id, panel, opts) {
   panel.appendChild(el('p', 'help similar-note', NOT_THE_SAME_AUTHOR));
 }
 
-/* The inspector reads a selection's assertions asynchronously (loadInto),
-   so the card exists some time after the selection. Polled briefly rather
-   than hooked into the inspector, and given up the moment the analyst
-   selects something else or leaves the case. `focusAssertionCard` says
-   why when the card never appears (retracted, still loading, failed). */
+/* The inspector reads a selection's assertions asynchronously (loadInto), so the card appears
+   some time after the selection: polled briefly, and given up the moment the analyst selects
+   something else or leaves the case. `focusAssertionCard` says why when it never appears. */
 const CARD_WAIT_MS = 100;
 const CARD_WAIT_TRIES = 50;
 function showCardWhenLoaded(assertionId, key, token, tries) {
@@ -8712,16 +7776,10 @@ function showCardWhenLoaded(assertionId, key, token, tries) {
     CARD_WAIT_MS);
 }
 
-/* jump-does-not-reveal (ux09-search, 2026-09-23). A jump from Search or
-   the palette selected the entity and left the view as it was: on
-   NIGHTJAR's fitted view (scale 0.155) a wallet landed above the canvas,
-   and harrow_wolf22 was one speck in a dense cluster at the bottom edge.
-   The general reveal (followSelection) now pans an off-canvas selection
-   into view, and deliberately never zooms, because the zoom is the
-   analyst's. A jump is different: it is a request to LOOK at one entity,
-   so it centres it and zooms in to at least JUMP_SCALE, never out. An
-   entity the projection leaves off the canvas cannot be shown, and a
-   banner says so (the inspector says why, under Metrics). */
+/* A jump from Search or the palette is a request to look at one entity, so unlike the general
+   reveal (followSelection), which pans but never zooms, it centres the entity and zooms in to
+   at least JUMP_SCALE, never out. An entity the projection leaves off the canvas cannot be
+   shown, and a banner says so (the inspector says why, under Metrics). */
 const JUMP_SCALE = 1;
 function jumpToEntity(id) {
   selectNode(id);
@@ -8750,28 +7808,20 @@ function jumpToEntity(id) {
   draw();
 }
 
-/* The selector that put an entity in the results (selectors-unsearchable,
-   ux09-search, 2026-09-22). Shown when the name does not already say why
-   the entity is here, which is the usual case for a wallet or a Jabber id,
-   and always for an exact match, because "this wallet is this entity's"
-   is the finding. */
+/* The selector that put an entity in the results. Shown when the name does not already say why
+   the entity is here (usual for a wallet or a Jabber id), and always for an exact match,
+   because "this wallet is this entity's" is the finding. */
 function viaLine(hit, q) {
   const v = hit.via;
-  /* 2026-09-23: a merged record's own name now finds
-     its survivor, and the server names the record whose name matched
-     when it is the only reason or the better one. Without this line the
-     survivor would be a hit whose name does not contain the query, or
-     ranks 1.000 on a partial match of it, and nothing on screen says why.
-     An exact selector still says more, so it wins. */
+  /* A merged record's own name finds its survivor, and the server names the record whose name
+     matched when it is the only or the better reason; without this line the survivor is a hit
+     whose name does not explain it. An exact selector says more, so it wins. */
   if (hit.merged_name && !(v && v.exact)) {
     return 'via the name of merged record ' + visibleText(hit.merged_name);
   }
-  /* Names and attributes share one search vector, so "meridian" found
-     mer_ash, mer_kite and mer_ledger through crew=meridian and the hits
-     read as a match on the "mer" of their names. The server names the
-     attribute only when nothing else explains the hit (README screenshot
-     review, 2026-09-23). An attribute key is data like a label, so it is
-     de-fanged the same way. */
+  /* Names and attributes share one search vector, so a hit can come through an attribute alone;
+     the server names the attribute only when nothing else explains the hit. An attribute key is
+     data like a label, so it is de-fanged the same way. */
   if (!v && hit.attribute) {
     return 'via attribute ' + visibleText(hit.attribute);
   }
@@ -8788,11 +7838,8 @@ function viaLine(hit, q) {
 
 function focusEvidence(evidenceId) {
   if (!$('ev-' + evidenceId)) {
-    /* Not on the page on screen: the register is asked for that one
-       exhibit, with "Show every exhibit" to go back. The banner this
-       replaced told the analyst to reload the tab, which could not help,
-       because there was no paging to reach it by
-       (ux07-evidence:evidence-list-silently-capped, 2026-09-23). */
+    /* Not on the page on screen: the register is asked for that one exhibit, with "Show every
+       exhibit" to go back. */
     evView.only = evidenceId;
     evView.offset = 0;
     /* The filter is not what is on screen now, so it is not left looking
@@ -8802,9 +7849,8 @@ function focusEvidence(evidenceId) {
     $('ev-q').value = '';
     $('ev-unbacked').checked = false;
   }
-  /* Selecting the tab re-reads the page (c13, 2026-09-24), and that read
-     marks the exhibit when it lands. It is marked at once as well when it
-     is already drawn, so the jump does not wait on the network. */
+  /* Selecting the tab re-reads the page, and that read marks the exhibit when it lands. It is
+     marked at once as well when it is already drawn, so the jump does not wait on the network. */
   evFocus = evidenceId;
   selectTab('evidence');
   markFocusedExhibit(evidenceId);
@@ -8816,20 +7862,10 @@ function nodeById(id) {
   return state.nodes.find((x) => x.id === id) ||
          state.gnodes.find((x) => x.id === id) || null;
 }
-/** The display label for a node id, never null.
- *
- *  Falls through the entity list (the richer record), then the projection
- *  (a node the sociogram drew that the entity page does not hold), then a
- *  placeholder that says what it stands in for and carries the short id.
- *
- *  THE ONLY declaration. Until 2026-09-09 there were two: this one, and a
- *  second at the merge panel that consulted `state.nodes` alone and
- *  returned `null`. Function declarations hoist and the last one wins, so
- *  every caller written against this one -- the focus flag, the path
- *  anchor, `edgeById`'s synthesised endpoint labels, the palette -- printed
- *  "ego of null" for any projection-only node. Nothing threw, which is why
- *  it shipped. The merge panel's own callers are served by the same
- *  fallback and no longer guard against a null this cannot return.
+/** The display label for a node id, never null: the entity list (the richer record), then the
+ *  projection (a node the sociogram drew that the entity page does not hold), then a
+ *  placeholder that says what it stands in for and carries the short id. Keep this the only
+ *  declaration: function declarations hoist and the last one wins.
  */
 function labelOf(id) {
   const n = nodeById(id);
@@ -8849,7 +7885,7 @@ function edgeById(id) {
 
 function selectNode(id) {
   state.selection = { kind: 'node', id: id };
-  noteRecentEntity(id);   // the palette's first screen (2026-09-23)
+  noteRecentEntity(id);   // the palette's first screen
   renderEntities();
   renderInspector();
   draw();
@@ -8857,13 +7893,9 @@ function selectNode(id) {
 
 /* ── what the keyboard did, said out loud ─────────────────────────────
  *
- * ux18-a11y:canvas-selection-silent (2026-09-23). The canvas is
- * role="application" and its name promises that the arrow keys move the
- * selection, and they did, in silence: the inspector is not a live region
- * and nothing announced which entity was now selected. A screen-reader
- * analyst had to leave the canvas and read the inspector after every
- * press. One polite status region under the canvas now says what the key
- * did. Emptied first, so the same sentence twice is still heard twice. */
+ * The canvas is role="application" and the inspector is not a live region, so one polite status
+ * region under the canvas says what each key did. Emptied first, so the same sentence twice is
+ * still heard twice. */
 let _graphSayTimer = null;
 
 function sayGraph(text) {
@@ -8884,8 +7916,8 @@ function describeNodeForSpeech(id) {
   const parts = [labelOf(id)];
   if (n && n.node_type) parts.push(typeName(n.node_type));
   parts.push(countOf(state.nodeTies.get(id) || 0, 'tie', 'ties'));
-  /* Both halves of the ring, as the inspector names them: a proposal
-     waiting in Triage, and a tie still to review (gap-tie-review). */
+  /* Both halves of the ring, as the inspector names them: a proposal waiting in Triage, and a
+     tie still to review. */
   const proposed = state.nodeProposed.get(id) || 0;
   if (proposed) {
     parts.push(countOf(proposed, 'proposal in Triage', 'proposals in Triage'));
@@ -8922,13 +7954,9 @@ function selectEdge(id) {
   draw();
 }
 
-/** An entity's observation window as one phrase (gap-first-seen,
- *  2026-09-23). The server derives both ends from the observed times of
- *  the entity's live claims (`projections.seen_sql`), because nothing
- *  wrote them and the line read "first seen not recorded, last seen not
- *  recorded" above a claim that said when it was observed. Both ends come
- *  from the same claims, so one date means one sighting, said once rather
- *  than twice. Pure, for test_first_seen_ui.py. */
+/** An entity's observation window as one phrase. The server derives both ends from the observed
+ *  times of the entity's live claims (`projections.seen_sql`), so one date means one sighting,
+ *  said once. Pure, for test_first_seen_ui.py. */
 function seenPhrase(first, last) {
   if (!first && !last) return 'no claim records when it was observed';
   if (!first || !last || first === last) return 'seen ' + fmtWhen(first || last);
@@ -8937,17 +7965,10 @@ function seenPhrase(first, last) {
 
 /* ── when an entity was observed ────────────────────────────────────────
  *
- * ux05-inspector:first-last-seen-always-dash (2026-09-23). The line under
- * an entity's name read "first seen (dash) · last seen (dash)" for every
- * node in every case, above an assertion that said when it was observed:
- * nothing wrote core.node.first_seen, and a field that is always empty
- * but looks like data tells an analyst the actor was never seen. The
- * dates that do exist are the observed times on its live claims, so the
- * window is read from those and SAYS so; the server's window, derived
- * from the same claims (`seenPhrase` above), is shown until the claims
- * arrive; and when neither exists the
- * line says that no claim dates an observation, rather than a blank. The
- * selectors below carry their own first and last observation. */
+ * The window is read from the observed times on the entity's live claims, and says so; the
+ * server's window, derived from the same claims (`seenPhrase` above), is shown until the claims
+ * arrive; when neither exists the line says no claim dates an observation, never a blank that
+ * looks like data. The selectors below carry their own first and last observation. */
 
 /** The earliest and latest `observed_at` among live claims, or null.
  *  Pure, for test_inspector_entry_ui.py. */
@@ -8963,11 +7984,9 @@ function observedWindow(assertions) {
   return first ? { first: first.iso, last: last.iso } : null;
 }
 
-/** Both ends of one window in ONE format: calendar days when both are
- *  whole days, times (UTC) when either carries a time of day. `fmtWhen`
- *  per end printed "27 Aug 2025 to 2026-01-02 10:15 UTC", one window in
- *  two styles (the 2026-09-23 verifier). One end, or two that print the
- *  same, read as one. Pure. */
+/** Both ends of one window in one format: calendar days when both are whole days, times (UTC)
+ *  when either carries a time of day, never one window in two styles. One end, or two that print
+ *  the same, read as one. Pure. */
 function fmtWindow(first, last) {
   if (!first || !last || fmtWhen(first) === fmtWhen(last)) {
     return fmtWhen(first || last);
@@ -9025,11 +8044,9 @@ function renderInspector() {
     classChip.className = 'chip tlp-' + n.classification;
     classChip.textContent = 'TLP:' + n.classification;
     $('insp-label').textContent = n.label;
-    /* fmtWhen, not a local-time formatter: a day-precision value read
-       back a day early west of UTC (ux05-inspector:dates-shift-a-day,
-       2026-09-22). The validity interval is the node's world time, which
-       the form records and this line never showed. The observed window
-       is painted again once the claims arrive (`paintSeen`). */
+    /* fmtWhen, not a local-time formatter, so a day-precision value does not read back a day
+       early west of UTC. The validity interval is the node's world time, which the form records.
+       The observed window is painted again once the claims arrive (`paintSeen`). */
     sub.textContent = nodeSubLine(n, null);
     show($('insp-sel-sec'), true);
     show($('insp-metrics-sec'), true);
@@ -9045,8 +8062,7 @@ function renderInspector() {
     if (!e) { state.selection = null; renderInspector(); return; }
     tie = e;
     typeChip.className = 'chip type-chip';
-    /* The display name, as the entity chip gives its type's (ux19-copy
-       raw-enums-and-polish, 2026-09-23). */
+    /* The display name, as the entity chip gives its type's. */
     typeChip.textContent = edgeTypeName(e.edge_type);
     classChip.className = 'chip tlp-' + e.classification;
     classChip.textContent = 'TLP:' + e.classification;
@@ -9055,31 +8071,19 @@ function renderInspector() {
     $('insp-label').textContent = tieEndLabel(e, 'src') + ' → ' + tieEndLabel(e, 'dst');
     const signWord = e.sign > 0 ? 'positive tie'
       : (e.sign < 0 ? 'negative tie' : 'neutral tie');
-    /* Named for what it is (ux05 two-disagreeing-confidences, 2026-09-23).
-       The data half of that finding made a tie's stored confidence its
-       strongest live claim (migration 0064), so this and the assertion
-       cards below can no longer disagree, and a disagreement flag would
-       never fire. What was left was the wording: a bare 'opacity 1.00'
-       read as a probability, and nothing said this is the value the canvas
-       draws and the confidence filter tests.
-       "LOW when none grades it" since the final review (2026-09-23):
-       a tie held up only by a weight or attribute correction has no live
-       claim that grades it, takes LOW, and was described as resting on
-       "its strongest live claim" when it rested on none. */
-    /* "tie confidence", so it is not confused with each card's own
-       "assertion confidence" below (ux19-copy
-       opacity-shown-as-confidence-number, 2026-09-23). */
+    /* A tie's stored confidence is its strongest live claim (migration 0064), so this and the
+       assertion cards below cannot disagree; the words say it is the value the canvas draws and
+       the confidence filter tests. A tie held up only by a weight or attribute correction has no
+       grading claim and takes LOW. */
+    /* "tie confidence", not to be confused with each card's "assertion confidence" below. */
     sub.textContent = signWord + ' · weight ' + e.weight +
       ' · tie confidence ' + e.confidence +
       ' (the highest grade among its live claims, LOW when none grades it;' +
       ' the canvas and the filter use it)' +
       ' · ' + (e.is_inferred ? 'INFERRED (dashed, excluded from metrics unless ' +
                               'the projection opts in)' : 'asserted') +
-      /* No "review PROPOSED" in this line: while `edge.review` was written
-         by nothing every tie read as unreviewed
-         (ux08-triage:graph-says-unreviewed-triage-says-nothing,
-         2026-09-23). The state is real since gap-tie-review and is said,
-         with its verbs, in the tie's own Review section below. */
+      /* No review state in this line: it is said, with its verbs, in the tie's own Review
+         section below. */
       ' · ' + fmtInterval(e.valid_from, e.valid_to);
     show($('insp-sel-sec'), false);
     show($('insp-metrics-sec'), false);
@@ -9090,25 +8094,20 @@ function renderInspector() {
   /* Linking starts from an entity, never from a tie. */
   show($('btn-link-from'), sel.kind === 'node');
   show($('btn-link-to'), sel.kind === 'node');
-  /* Adding a claim is offered on a tie (final review C14, 2026-09-23). */
+  /* Adding a claim is offered on a tie. */
   syncTieClaim(sel);
-  /* The Correct form belongs to one element (gap-api-grade-required). */
+  /* The Correct form belongs to one element. */
   syncCorrection(sel);
 
   const seq = ++state.inspSeq;
-  /* A tie's review: shown and read on a tie, hidden on an entity
-     (gap-tie-review, 2026-09-23). */
+  /* A tie's review: shown and read on a tie, hidden on an entity. */
   syncTieReview(sel, tie, seq);
   renderRelationships(sel, seq);
   const base = cpath((sel.kind === 'node' ? '/nodes/' : '/edges/') + sel.id);
-  /* ALWAYS with the retracted rows; the checkbox decides only what
-     renderAssertions SHOWS. The Retract confirmation has to count what
-     actually holds the element up, and the projection's live-provenance
-     leg is `retracted_at IS NULL AND superseded_at IS NULL` (the second
-     half since the final review, U11): counting the rendered list instead told
-     an analyst with "Include retracted" ticked that the element would stay
-     when it was about to vanish (ux05 retract-confirmation-wrong,
-     2026-09-22). */
+  /* Always with the retracted rows; the checkbox decides only what renderAssertions shows. The
+     Retract confirmation must count what actually holds the element up, by the projection's
+     live-provenance rule (`retracted_at IS NULL AND superseded_at IS NULL`), not the rendered
+     list. */
   /* What the section holds, and whether it is still loading or failed,
      so the Evidence section's "Show assertion" can say WHY a card is
      missing instead of always blaming the checkbox. */
@@ -9141,10 +8140,9 @@ function renderInspector() {
   }
 }
 
-/* The inspector's reads are case-scoped. A case switch bumps `inspSeq`, so
- * a section still loading for the old case's selection drops its reply in
- * `loadInto` instead of rendering it under the new case, and forgets what
- * the old selection had linked (the 2026-09-22 case-switch registry). */
+/* The inspector's reads are case-scoped. A case switch bumps `inspSeq`, so a section still
+ * loading for the old case's selection drops its reply in `loadInto` instead of rendering it
+ * under the new case, and forgets what the old selection had linked. */
 onCaseSwitch(() => {
   state.inspSeq = (state.inspSeq || 0) + 1;
   state.linkedEvidenceIds = [];
@@ -9155,30 +8153,15 @@ onCaseSwitch(() => {
 
 /* ── inspector: relationships ──────────────────────────────────────────
  *
- * ux05 parallel-ties-unreachable and ux18 edges-mouse-only (2026-09-22).
- * An existing tie could be opened ONE way: a mouse click on the canvas,
- * which `edgeAt` resolves to the first link within 6px. Two ties between
- * one pair lie along the same line, so the second could never be opened
- * (NIGHTJAR holds 49 such pairs, one of them a vouch and a dispute, where
- * clicking the red dispute line opened the vouch), and a keyboard or
- * screen-reader analyst could open no tie at all, because `onCanvasKey`
- * steps through entities only. The model records disagreement as separate
- * ties on purpose ("two analysts, two claims, both recorded"), so an
- * inspector that reaches only one of them shows the wrong one.
+ * The model records disagreement as separate ties, so the entity inspector lists every tie at
+ * the entity, and the tie inspector names its two ends and every other tie between the same
+ * pair. Every row is a <button> into the tie inspector, reachable by keyboard, and T on the
+ * sociogram jumps here.
  *
- * So the entity inspector lists EVERY tie at the entity, and the tie
- * inspector names its two ends and every OTHER tie between the same pair.
- * Every row is a <button> into the tie inspector, and T on the sociogram
- * jumps here. Drawing parallel ties apart on the canvas is the painter's
- * half of the fix and is not done here.
- *
- * Rows come from the projection first (what the canvas draws), then from
- * the unprojected tie list marked "not drawn": a tie a filter leaves off
- * the canvas is still a claim somebody may need to open. That list is
- * fetched for the ENTITY (`/edges?node_id=`), not taken from the case-wide
- * page the console loads at open, because that page stops at 1000 ties
- * and a list that says "every tie" must not quietly stop there too (the
- * 2026-09-22 verifier). The rows the console already holds are painted at
+ * Rows come from the projection first (what the canvas draws), then from the unprojected tie
+ * list marked "not drawn": a tie a filter leaves off the canvas is still a claim somebody may
+ * need to open. That list is fetched for the entity (`/edges?node_id=`), not taken from the
+ * case-wide page, which stops at 1000 ties. The rows the console already holds are painted at
  * once, and repainted when the entity's own list arrives.
  */
 
@@ -9225,12 +8208,10 @@ function samePair(a, b) {
       || (a.src_node_id === b.dst_node_id && a.dst_node_id === b.src_node_id);
 }
 
-/** Drawn ties first, then the ties still PROPOSED, then by the other end's
- *  name, then by type, so the list reads the same way twice. A PROPOSED
- *  tie comes up before the rest because the entity's "Ties awaiting
- *  review" row sends the analyst here to open it, and on a hub it would
- *  otherwise sit behind "Show all N ties" (gap-tie-review with
- *  ux08-triage, merged 2026-09-24). */
+/** Drawn ties first, then the ties still PROPOSED, then by the other end's name, then by type,
+ *  so the list reads the same way twice. A PROPOSED tie comes first because the entity's "Ties
+ *  awaiting review" row sends the analyst here, and on a hub it would otherwise sit behind
+ *  "Show all N ties". */
 function tieOrder(from) {
   const other = (e) => (from && e.src_node_id === from
     ? tieEndLabel(e, 'dst') : tieEndLabel(e, 'src')).toLowerCase();
@@ -9241,11 +8222,9 @@ function tieOrder(from) {
     || String(a.e.edge_type).localeCompare(String(b.e.edge_type));
 }
 
-/** A tie's review state as its Relationships row says it, or null when
- *  there is nothing to say. Only the states that ask something of the
- *  analyst are marked: an ACCEPTED tie is the normal case, and marking
- *  every row was the noise ux08-triage removed while `edge.review` was
- *  written by nothing. Pure, for test_tie_review_ui.py. */
+/** A tie's review state as its Relationships row says it, or null when there is nothing to
+ *  say. Only the states that ask something of the analyst are marked: an ACCEPTED tie is the
+ *  normal case. Pure, for test_tie_review_ui.py. */
 function tieReviewFlag(review) {
   if (review === 'PROPOSED') {
     return { flag: 'PROPOSED', spoken: ', review PROPOSED, awaiting a person' };
@@ -9266,14 +8245,11 @@ function openFromInspector(kind, id) {
   if (label) label.focus();
 }
 
-/** One tie as a button into the tie inspector. `from` is the entity the
- *  list belongs to, so a tie reads as outgoing (→) or incoming (←); null
- *  names both ends. Type, direction, sign, confidence and review are all
- *  on the row, because telling a vouch from a dispute between the same two
- *  actors is the reason the row exists. The review is marked only when it
- *  is PROPOSED or DISPUTED (`tieReviewFlag`): ux08-triage took the raw
- *  column off the row while nothing wrote it, and gap-tie-review made it
- *  real again, so the ring's "tie to review" can be found here. */
+/** One tie as a button into the tie inspector. `from` is the entity the list belongs to, so a
+ *  tie reads as outgoing or incoming; null names both ends. Type, direction, sign, confidence
+ *  and review are all on the row, because telling a vouch from a dispute between the same two
+ *  actors is the reason the row exists. The review is marked only when it is PROPOSED or
+ *  DISPUTED (`tieReviewFlag`), so the ring's "tie to review" can be found here. */
 function tieButton(rec, from) {
   const e = rec.e;
   const src = tieEndLabel(e, 'src'), dst = tieEndLabel(e, 'dst');
@@ -9436,9 +8412,7 @@ function paintRelationships(sel, status) {
         box.appendChild(el('p', 'help', 'No other tie joins this pair.'));
       }
     } else {
-      /* Said out loud and in the alert tone: until 2026-09-22 nothing here
-         admitted a second tie existed, and the one the click opened was not
-         necessarily the one drawn on top. */
+      /* Said out loud and in the alert tone: each other tie is a separate claim to open. */
       box.appendChild(el('p', 'help warn', 'This pair has ' + others.length
         + more + ' other tie' + (others.length === 1 && !more ? '' : 's')
         + '. Each is a separate claim with its own assertions and grading; '
@@ -9457,11 +8431,9 @@ function paintRelationships(sel, status) {
   }
 }
 
-/** The Relationships section for a selection: painted at once from what
- *  the console holds, then completed from the entity's own tie list (for a
- *  tie, its source end's, which holds every tie of the pair). `seq` is the
- *  inspector's, so a reply for a selection or a case that has since
- *  changed is dropped. */
+/** The Relationships section for a selection: painted at once from what the console holds, then
+ *  completed from the entity's own tie list (for a tie, its source end's, which holds every tie
+ *  of the pair). `seq` is the inspector's, so a reply for a changed selection or case is dropped. */
 function renderRelationships(sel, seq) {
   paintRelationships(sel, 'loading');
   let anchor = sel.id;
@@ -9506,12 +8478,9 @@ function wireRelationshipKeys() {
   });
 }
 
-/* Tags on the selected node, plus the controls to add and remove them.
- *
- * `state.caseTags` is the case's vocabulary, fetched once per case render
- * so the picker does not re-query on every selection change. A tag the
- * node already carries is excluded — assigning twice is idempotent at the
- * endpoint, but offering it invites a click that appears to do nothing.
+/* Tags on the selected node, plus the controls to add and remove them. `state.caseTags` is the
+ * case's vocabulary, fetched once per case. A tag the node already carries is not offered:
+ * assigning twice is idempotent at the endpoint, but the click would appear to do nothing.
  */
 function renderTags(box, list, sel) {
   if (!list.length) box.appendChild(el('p', 'empty', 'No tags.'));
@@ -9551,11 +8520,9 @@ function renderTags(box, list, sel) {
   if (free.length) {
     const pick = el('select', 'input small');
     pick.setAttribute('aria-label', 'Tag to apply');
-    /* An empty value, as the exhibit linker's prompt has: an option with
-       no value attribute submits its text, so Tag posted to
-       "/curation/tags/Apply a tag…/nodes" and the analyst read a UUID
-       validation error (final review u24, 2026-09-24). Not choosable
-       again once a tag is, like the role picker's prompt. */
+    /* An empty value, as the exhibit linker's prompt has: an option with no value attribute
+       submits its text, which would be posted as a tag id. Not choosable again once a tag is,
+       like the role picker's prompt. */
     const none = el('option', null, 'Apply a tag…');
     none.value = ''; none.disabled = true; none.selected = true;
     pick.appendChild(none);
@@ -9614,47 +8581,21 @@ function renderTags(box, list, sel) {
 
 /* ── correcting and retiring the selected element ──────────────────────
  *
- * Both endpoints landed 2026-07-30 and neither had a caller. The verbs
- * (`graph.node.update`, `graph.node.delete`, `graph.edge.update`,
- * `graph.edge.delete`) were seeded in 0017 and granted in 0021, and
- * nothing had ever checked them.
+ * `attrs` is never sent: the endpoint treats it as a whole-object replacement
+ * (`COALESCE(%s::jsonb, attrs)`), so a partial object silently deletes every attribute not in
+ * it. Editing attributes needs a form that starts from the current object.
  *
- * TWO THINGS HERE ARE EASY TO GET WRONG AND ARE DELIBERATE:
- *
- * `attrs` is NEVER sent. The endpoint treats it as a WHOLE-OBJECT
- * REPLACEMENT (`COALESCE(%s::jsonb, attrs)`), so sending a partial object
- * silently deletes every attribute not in it. Omitting the field entirely
- * is the only safe thing a label-correction dialogue can do, and editing
- * attributes needs a real form that starts from the current object.
- *
- * The DELETEs REQUIRE a JSON body `{reason}`. A bodyless
- * `fetch(..., {method:'DELETE'})` returns 422 — the most likely
- * integration break in this pair, and the reason is not optional because
- * retiring a hub dissolves every tie it carries and a reviewer six months
- * later cannot reconstruct why.
+ * The DELETEs require a JSON body `{reason}` (a bodyless DELETE gets 422): retiring a hub
+ * dissolves every tie it carries, and the reason is what lets someone later reconstruct why.
  */
-/* Case lifecycle: the record, who is on the case, and its status.
+/* Case lifecycle: the record, who is on the case, and its status. Two dialogs: the record, with
+ * the corrections the server allows and its rules said beside them (`openCaseRecord`), and the
+ * moves the transition table allows from here and no others (`openStatus`).
  *
- * `CaseService.update_metadata` and `assign_user_checked` have existed
- * since Phase 1 with no router, and `POST /status` had a router that
- * nothing called. So a case could be created from the browser and then
- * never corrected, shared or closed from it, only through
- * `scripts/bootstrap.py`, which is not a thing an analyst has.
- *
- * Case… was then a prompt that could only rename, and Status… a free-text
- * prompt over all six statuses with CLOSED typed in for you (ux02-cases,
- * 2026-09-23). Both are dialogs now: the record, with the corrections the
- * server allows and its rules said beside them (`openCaseRecord`), and
- * the moves the transition table allows from here and no others
- * (`openStatus`).
- *
- * CLASSIFICATION MAY ONLY BE RAISED from the record, and the endpoint
- * refuses to lower it at all. Raising is safe (every element is read at
- * the stricter of its own label and the case's, so the case going RED
- * covers everything inside it); lowering declassifies in one statement
- * everything that was protected only by the case label, and is not undone
- * by raising it back. It needs its own verb with step-up, so it is absent
- * rather than half-offered.
+ * Classification may only be raised from the record; the endpoint refuses to lower it. Raising
+ * is safe (every element is read at the stricter of its own label and the case's); lowering
+ * declassifies at once everything protected only by the case label, is not undone by raising
+ * it back, and needs its own verb with step-up, so it is absent rather than half-offered.
  */
 
 /** The page title before any case, put back on the case list. */
@@ -9672,17 +8613,12 @@ function readLocation() {
   return { caseId: c ? c[1] : null, tab: t ? t[1] : null };
 }
 
-/** Write the open case and pane into the address.
+/** Write the open case and pane into the address, so a reload and Back keep the case.
  *
- *  ux02-cases:reload-and-back-lose-the-case (2026-09-23). The address and
- *  the tab title never said which case was open, so a reload dropped the
- *  analyst on the case list, Back left the console altogether, and two
- *  tabs on two cases looked the same. The fragment carries no credential
- *  (a `#token=` is erased on arrival and never written back) and never
- *  reaches the server, so the case id stays out of every access log, and
- *  the deep-link reader at boot already knows its shape. `push` adds a
- *  history entry: opening a case from the list, or leaving it for the
- *  list, does; a pane change or a reopen of the same case does not. */
+ *  The fragment carries no credential (a `#token=` is erased on arrival and never written back)
+ *  and never reaches the server, so the case id stays out of every access log; the deep-link
+ *  reader at boot already knows its shape. `push` adds a history entry: opening a case from the
+ *  list, or leaving it for the list, does; a pane change or a reopen of the same case does not. */
 function writeLocation(caseId, tab, push) {
   const url = location.pathname
     + (caseId ? '#case=' + caseId + (tab ? '&tab=' + tab : '') : '');
@@ -9694,16 +8630,11 @@ function writeLocation(caseId, tab, push) {
   } catch (_e) { /* a sandboxed frame: the console works without it */ }
 }
 
-/** The tab title for an open case. Neither its code nor its marking:
- *  the browser files every title into its history with the `#case=`
- *  address beside it, and Log out cannot reach that. The page itself is
- *  thrown away on Log out so whoever sits down next at a shared desk finds
- *  nothing of the last analyst's case (`discardPage`), and their history
- *  still read "OP-HALCYON-25 · TLP:RED", for a compartmented case they
- *  could not open (final review u18, 2026-09-24). The header names the
- *  case, and the address still brings Back and reload to the right one;
- *  the case id in it names nothing. Two tabs on two cases share a title
- *  again, which is the price. */
+/** The tab title for an open case: neither its code nor its marking, because the browser files
+ *  every title into its history beside the `#case=` address, where Log out (`discardPage`)
+ *  cannot reach it. The header names the case, and the address still brings Back and reload to
+ *  the right one; the case id in it names nothing. Two tabs on two cases share a title, which
+ *  is the price. */
 function caseTitle() {
   return 'Case · NocTORnal';
 }
@@ -9744,12 +8675,8 @@ function caseRoleWords(rec) {
     ? visibleText(rec.my_role_name || rec.my_role) : 'your role';
 }
 
-/** The app bar's case controls and the live dot, all about the open case,
- *  hidden together: on the case list and after a sign-out they offered to
- *  act on nothing and did nothing when clicked, and the dot promised live
- *  updates to "this case" beside "No case selected"
- *  (ux01-firstrun:dead-case-buttons-after-return and
- *  ux02-cases:case-actions-linger-on-case-list, 2026-09-23). */
+/** The app bar's case controls and the live dot, all about the open case, hidden together, so
+ *  on the case list and after a sign-out nothing offers to act on a case that is not open. */
 function hideCaseChrome() {
   for (const id of ['btn-case-edit', 'btn-case-share', 'btn-case-status',
                     'btn-case-hold', 'hdr-hold', 'live-dot']) {
@@ -9760,11 +8687,9 @@ function hideCaseChrome() {
   closeCaseHold();
 }
 
-/** And shown for an open case, each saying what the caller's role there
- *  lets them do with it (ux02-cases:header-says-analyst-no-permission-
- *  cues, 2026-09-23). Share… and Case… open for every reader, because the
- *  roster and the record are theirs to read; the dialogs then offer only
- *  what the role carries and say who can do the rest. */
+/** And shown for an open case, each saying what the caller's role there lets them do with it.
+ *  Share and Case open for every reader, because the roster and the record are theirs to read;
+ *  the dialogs then offer only what the role carries and say who can do the rest. */
 function showCaseChrome(rec) {
   const edit = $('btn-case-edit');
   const status = $('btn-case-status');
@@ -9782,15 +8707,12 @@ function showCaseChrome(rec) {
     ? 'Move this case through its lifecycle'
     : 'Where this case can go next. Changing its status needs case.close, '
       + 'which ' + caseRoleWords(rec) + ' on this case does not include.';
-  /* The LEGAL HOLD chip and the Hold… button, here with the rest of the
-     case chrome because opening a case draws it through this function and
-     not through `applyCaseRecord` (2026-10-08). */
+  /* The LEGAL HOLD chip and the Hold button, here with the rest of the case chrome because
+     opening a case draws it through this function and not through `applyCaseRecord`. */
   renderCaseHold(rec);
 }
 
-/** Who the signed-in person is here: their role on the open case, and
- *  their clearance. The chip said "analyst" for every account, owners and
- *  administrators included (ux02-cases, 2026-09-23). */
+/** Who the signed-in person is here: their role on the open case, and their clearance. */
 function renderHeaderRole() {
   const node = $('hdr-role');
   if (!node) return;
@@ -9818,19 +8740,11 @@ function applyCaseRecord(rec) {
 }
 
 /* --- the dialogs hold the keyboard -------------------------------------
- * Escape closes, a click on the backdrop closes, and Tab cycles inside:
- * modal in fact, not only in `aria-modal` (ux18-a11y, 2026-09-23).
- *
- * And no other key leaves them (final review c22, 2026-09-24). Only Tab
- * and Escape were held, so the page's own shortcuts still ran under an
- * open Case…, Status… or Share… dialog: Alt+3 switched the pane behind
- * it, Ctrl+K and ? opened the palette and the keyboard sheet over it, and
- * one Escape then closed both layers and threw away the correction being
- * typed. The session sheets were fixed for the same thing (`onSheetKey`)
- * and these dialogs now follow them: a key pressed inside goes to its
- * field or button and stops at the dialog's edge, and a key pressed with
- * the focus outside (on <body>, after a button disabled in flight) is
- * the dialog's, never the page's. */
+ * Escape closes, a click on the backdrop closes, and Tab cycles inside: modal in fact, not only
+ * in `aria-modal`. No other key leaves them, as with the session sheets (`onSheetKey`): a key
+ * pressed inside goes to its field or button and stops at the dialog's edge, and a key pressed
+ * with the focus outside (on <body>, after a button disabled in flight) is the dialog's, never
+ * the page's, so no page shortcut runs under an open dialog. */
 
 /** Each page dialog's scrim id, and how it closes (`holdDialogKeys`). */
 const PAGE_DIALOGS = new Map();
@@ -9976,7 +8890,7 @@ function renderCaseRecord(rec) {
       + 'corrected.'
     : 'Correcting this record needs case.update, which ' + caseRoleWords(rec)
       + ' on this case does not include. The case owner can.');
-  renderCaseRouting(rec);   // F7, keep a case out of Jira
+  renderCaseRouting(rec);   // keep a case out of Jira
   if (!can) return;
   $('case-edit-title').value = rec.title || '';
   $('case-edit-summary').value = rec.summary || '';
@@ -10030,12 +8944,10 @@ const CASE_FIELD_WORDS = {
   classification: 'classification',
 };
 
-/** What lengthening did to the exhibits' storage locks, from the PATCH
- *  answer's `lock_extension` or the Evidence pane's `POST .../locks`:
- *  [sentence, failed?], or null when there is nothing to say
- *  (x-lock-extension, 2026-09-24). Counts only, and only of exhibits this
- *  caller may see (the server counts no others, verifier 2026-09-24):
- *  which exhibits failed is in the audit log. */
+/** What lengthening did to the exhibits' storage locks, from the PATCH answer's
+ *  `lock_extension` or the Evidence pane's `POST .../locks`: [sentence, failed?], or null when
+ *  there is nothing to say. Counts only, and only of exhibits this caller may see (the server
+ *  counts no others): which exhibits failed is in the audit log. */
 function lockExtensionWords(x) {
   if (!x || !x.exhibits || x.date_passed) return null;
   const parts = [];
@@ -10059,11 +8971,9 @@ function lockExtensionWords(x) {
   return parts.length ? [parts.join(' '), Boolean(x.failed)] : null;
 }
 
-/** The question a retention extension asks before it is saved
- *  (x-lock-extension, verifier, 2026-09-24). Extending the date lengthens
- *  a lock nobody can shorten, a commitment one person makes by typing a
- *  year, so it is confirmed with the date spelled out, as raising the
- *  classification is. */
+/** The question a retention extension asks before it is saved. Extending the date lengthens a
+ *  lock nobody can shorten, a commitment one person makes by typing a year, so it is confirmed
+ *  with the date spelled out, as raising the classification is. */
 function retentionLockQuestion(code, day) {
   return 'Extend the retention of ' + code + ' to ' + fmtDate(day) + '?\n\n'
     + 'The storage lock on every exhibit in the case, and on every one lodged '
@@ -10112,9 +9022,8 @@ async function saveCaseRecord(e) {
           .join(', ') + '.'
       : '');
     delete out.access_lost;
-    /* x-lock-extension (2026-09-24): a longer retention date lengthens the
-       exhibits' storage locks, and a lock that could not be is said here
-       rather than found later. */
+    /* A longer retention date lengthens the exhibits' storage locks, and a lock that could not be
+       lengthened is said here rather than found later. */
     const locks = lockExtensionWords(out.lock_extension);
     delete out.lock_extension;
     if (locks) said += ' ' + locks[0];
@@ -10280,8 +9189,7 @@ async function submitStatus(e, confirmed) {
   btn.disabled = true;
   const token = caseToken();
   try {
-    /* Unsaved hand placements, stored while the case still takes them
-       (saveLayoutBeforeShut, u10, 2026-09-24). */
+    /* Unsaved hand placements, stored while the case still takes them (saveLayoutBeforeShut). */
     await saveLayoutBeforeShut(to);
     if (caseChanged(token)) return;
     await api('/cases/' + state.caseId + '/status',
@@ -10297,9 +9205,8 @@ async function submitStatus(e, confirmed) {
       await statusAfterSignIn(rec, to);
       return;
     }
-    /* PURGED is gated on case.delete, not case.close, so its refusal names
-       that verb (g10's words, kept when g12's dialog replaced g10's;
-       merged 2026-09-24). The server's own detail still comes first. */
+    /* PURGED is gated on case.delete, not case.close, so its refusal names that verb. The
+       server's own detail still comes first. */
     const why = to === 'PURGED'
       ? 'Marking a case PURGED needs case.delete on it and a sign-in from '
         + 'the last 15 minutes.'
@@ -10334,17 +9241,15 @@ onCaseSwitch(() => {
   closeCaseHold();
 });
 
-/* --- Hold…: a legal hold on the whole case ------------------------------
+/* --- Hold: a legal hold on the whole case -------------------------------
  *
- * docs/17, "no console control for a hold" (2026-10-08). A case-level hold
- * freezes everything the case governs against every deletion path: its
- * exhibits, those lodged later too, its ingest records, lookups and
- * samples, and the collected documents it cites. Placing one is open to
- * whoever holds retention.manage on the case, lifting one to somebody
- * cleared for everything the case holds, and both take a written reason and
- * a sign-in from the last 15 minutes. `POST /retention/cases/{id}/legal-hold`
- * decides all of it; the case record's `may_hold` only says whether to
- * offer the control. It is governance, so it works on a CLOSED case too.
+ * A case-level hold freezes everything the case governs against every deletion path: its
+ * exhibits, those lodged later too, its ingest records, lookups and samples, and the collected
+ * documents it cites. Placing one is open to whoever holds retention.manage on the case,
+ * lifting one to somebody cleared for everything the case holds, and both take a written reason
+ * and a sign-in from the last 15 minutes. `POST /retention/cases/{id}/legal-hold` decides all
+ * of it; the case record's `may_hold` only says whether to offer the control. It is
+ * governance, so it works on a CLOSED case too.
  */
 
 /** The header's LEGAL HOLD chip, for every reader of a held case, and the
@@ -10480,8 +9385,8 @@ function wireCaseActions() {
   const share = $('btn-case-share');
   const status = $('btn-case-status');
   if (!edit || !share || !status) return;
-  /* The non-ACTIVE strip's own way to the lifecycle control, so "reopen
-     it first" is one click from where it is said (ux02-cases, 2026-09-22). */
+  /* The non-ACTIVE strip's own way to the lifecycle control, so "reopen it first" is one click
+     from where it is said. */
   $('case-state-change').addEventListener('click', () => status.click());
 
   edit.addEventListener('click', openCaseRecord);
@@ -10495,10 +9400,8 @@ function wireCaseActions() {
   share.addEventListener('click', openShare);
   $('share-form').addEventListener('submit', submitShare);
   $('share-close').addEventListener('click', closeShare);
-  /* Held like the other two (final review c22, 2026-09-24). Its Escape was
-     on the document, for the button disabled in flight that drops the
-     focus to <body>; `onPageDialogKey` hears that key now, and Share had
-     no Tab cycle at all. */
+  /* Held like the other two: `onPageDialogKey` also hears an Escape pressed while a button
+     disabled in flight has dropped the focus to <body>. */
   holdDialogKeys('share-scrim', closeShare);
 
   status.addEventListener('click', openStatus);
@@ -10511,16 +9414,11 @@ function wireCaseActions() {
   window.addEventListener('popstate', onHistoryMove);
 }
 
-/* The audit chain, verified on demand.
- *
- * Deliberately a button rather than a load-on-open: this recomputes a
- * SHA-256 over every audit row ever written, and a panel that did it on
- * every visit would be a self-inflicted denial of service on the one
- * surface an officer reaches for during an incident.
- *
- * `checked` is reported next to the verdict on purpose. `intact` is true
- * for an empty window as well as a verified one — "0 events, intact" is
- * not a pass, and a UI that showed only a green tick would say it was.
+/* The audit chain, verified on demand: a button, not a load-on-open, because it recomputes a
+ * SHA-256 over every audit row, and doing so on every visit would be a self-inflicted denial of
+ * service on the surface an officer reaches for during an incident. `checked` is reported beside
+ * the verdict because `intact` is true for an empty window too, and "0 events, intact" is not a
+ * pass.
  */
 function wireAuditVerify() {
   const btn = $('btn-audit-verify');
@@ -10535,23 +9433,13 @@ function wireAuditVerify() {
       r = await api('/audit/verify');
     } catch (err) {
       box.textContent = '';
-      /* A 403 here is the expected answer for most accounts, not a
-         malfunction, so it is explained rather than thrown at the banner
-         stack as an error.
-         THROUGH `refusalText`, which puts the SERVER's detail first. The
-         first version of this asserted "your account does not hold
-         audit.read" — a guess about the caller, and exactly the mistake
-         `refusalText` exists to stop: three strings in this file once
-         told the holder of a permission that they did not hold it,
-         because the real refusal was a stale step-up. An inactive account
-         403s the same way here. The written context is kept after it,
-         because WHY the verb is scarce is worth saying. */
+      /* A 403 here is the expected answer for most accounts, so it is explained rather than
+         raised as a banner, through `refusalText`, which puts the server's detail first: the
+         refusal may be a stale step-up or an inactive account, not a missing permission. The
+         written context follows, because why the verb is scarce is worth saying. */
       if (err instanceof ApiError && err.status === 403) {
-        /* The context says what needs the code, not who it is granted
-           to: with role names in place of codes, "audit.read is granted
-           to SECURITY_OFFICER alone" read "the Security officer role is
-           granted to Security officer alone" (verifier of ux19-copy
-           developer-speak-in-copy, 2026-09-23). */
+        /* The context says what needs the code, not who it is granted to: with role names in
+           place of codes, a "granted to" sentence would name the role twice. */
         box.appendChild(el('p', 'help warn', refusalText(err,
           'Verifying the audit chain needs audit.read: the ' +
           'administrator configures, the officer audits, and neither ' +
@@ -10567,29 +9455,24 @@ function wireAuditVerify() {
     const head = el('div', 'card');
     head.appendChild(el('span', 'chip ' + (ok ? 'good' : 'bad'),
       r.checked === 0 ? 'NOTHING TO CHECK' : (r.intact ? 'INTACT' : 'BROKEN')));
-    /* Counts agree with their nouns and verbs: a bracketed plural
-       hedged a number the line already knew (README screenshot set
-       review, 2026-09-23). The noun is chosen from the number, not from
-       the grouped text, which a locale can print as "1.000". */
+    /* Counts agree with their nouns. The noun is chosen from the number, not from the grouped
+       text, which a locale can print as "1.000". */
     head.appendChild(el('p', 'help',
       r.checked.toLocaleString() + ' ' + agree(r.checked, 'event', 'events')
       + ' checked' +
       (r.first_seq ? ' · seq ' + r.first_seq + ' to ' + r.last_seq : '')));
-    /* The caveat on EVERY run (2026-10-03), not only a windowed one: the
-       checks are relative, so rows removed from the end, or edited and
-       re-chained, leave the green tick lit. The newest row is shown so an
-       operator can record it where this system cannot write and hand it
-       back as an anchor on a later run. */
+    /* The caveat on every run, not only a windowed one: the checks are relative, so rows removed
+       from the end, or edited and re-chained, leave the green tick lit. The newest row is shown
+       so an operator can record it where this system cannot write and hand it back as an anchor
+       on a later run. */
     if (r.caveat) head.appendChild(el('p', 'help warn', r.caveat));
     if (r.tail_row_hash) {
       head.appendChild(el('p', 'help',
         'Newest row to record: seq ' + r.tail_seq + ', hash ' + r.tail_row_hash));
     }
-    /* A fork from before migration 0149 is a SEPARATE, quieter line and not
-       a break: the old sequence order let concurrent writers make them, an
-       append-only table cannot be cleaned of them, and counting them as
-       tampering made this panel answer BROKEN on untouched history. One
-       written since is a break, and arrives in `breaks` with its kind. */
+    /* A fork from before migration 0149 is a separate, quieter line, not a break: concurrent
+       writers made them under the old sequence order, and an append-only table cannot be cleaned
+       of them. One written since is a break, and arrives in `breaks` with its kind. */
     if (r.forks) {
       head.appendChild(el('p', 'help',
         countOf(r.forks, 'row shares', 'rows share') + ' a predecessor. '
@@ -10618,13 +9501,9 @@ function wireAuditVerify() {
 }
 
 function wireElementActions() {
-  /* Here rather than in `wire()`: it belongs to the inspector, and this is
-     the inspector's own wiring (2026-09-22, ux18 edges-mouse-only). */
+  /* Here rather than in `wire()`: it belongs to the inspector, and this is its own wiring. */
   wireRelationshipKeys();
-  /* The two ends of the Link form, from the entity in hand. The link-form
-     group and the inspector group were built in parallel on 2026-09-22:
-     the Link form grew openLinkFormFrom() for exactly this, and the
-     inspector, which was not its to edit, never called it. Wired at merge. */
+  /* The two ends of the Link form, from the entity in hand (openLinkFormFrom). */
   for (const [id, which] of [['btn-link-from', 'src'], ['btn-link-to', 'dst']]) {
     const btn = $(id);
     if (!btn) continue;
@@ -10640,20 +9519,15 @@ function wireElementActions() {
   const retire = $('btn-retire-element');
   if (!edit || !retire) return;
 
-  /* A form, no longer two prompts: a correction is a claim, and the
-     analyst grades it (gap-api-grade-required, 2026-09-23). See
-     "inspector: correct the selected element". */
+  /* A form: a correction is a claim, and the analyst grades it. See "inspector: correct the
+     selected element". */
   edit.addEventListener('click', openCorrection);
 
   retire.addEventListener('click', async () => {
     const sel = state.selection;
     if (!sel) return;
-    /* NAME the element, COUNT what goes with it, and promise no undo. The
-       prompt said "clearing the flag brings it back", and no route,
-       service method or control ever clears `deleted_at`: for an analyst a
-       retirement is final, and the text said the opposite at the moment of
-       decision (ux17 retire-promises-nonexistent-undo, 2026-09-22). The
-       tie count arrived only afterwards, in a banner. */
+    /* Name the element, count what goes with it, and promise no undo: no route, service method
+       or control clears `deleted_at`, so for an analyst a retirement is final. */
     let what;
     if (sel.kind === 'node') {
       const ties = state.nodeTies.get(sel.id) || 0;
@@ -10665,14 +9539,9 @@ function wireElementActions() {
         + e.dst_label + '"?\n\n' : 'Retire this tie?\n\n';
     }
     const reason = window.prompt(
-      /* SAY WHAT IT ACTUALLY DOES. The first version of this promised
-         "an as-of query into the past still shows it", which is false:
-         `projections.py` filters `deleted_at IS NULL` unconditionally, with
-         no as_of interaction at all, so a retirement leaves EVERY view
-         including the historical ones. That is precisely the difference
-         from `valid_to`, and telling an analyst the opposite would have
-         them retire things believing the record of last week survives on
-         screen. It survives in the TABLE; it does not survive in a view. */
+      /* Say what it actually does: `projections.py` filters `deleted_at IS NULL` with no as_of
+         interaction, so a retirement leaves every view, historical ones included. That is the
+         difference from `valid_to`: the record survives in the table, not in any view. */
       what + 'Why is this being retired? (required)\n\n' +
       'Nothing is destroyed: the row, its assertions and its evidence ' +
       'links stay in the database, and the act is recorded against your ' +
@@ -10702,8 +9571,8 @@ function wireElementActions() {
       state.selection = null;
       await loadCaseGraph();
       refreshSociogram();
-      /* A retired entity or tie no longer rests on its exhibits, so the
-         register's "Backs" line changes with it (c13 verifier, 2026-09-24). */
+      /* A retired entity or tie rests on no exhibit, so the register's "Backs" line changes with
+         it. */
       reloadRegisterIfShown();
       renderInspector();
     } catch (err) { fail(err); }
@@ -10712,21 +9581,10 @@ function wireElementActions() {
 
 /** The case's tag vocabulary, including the global taxonomy.
  *
- * CLEARED FIRST, AND GUARDED ON THE CASE IT WAS FETCHED FOR. This is not
- * awaited by `openCase` — blocking a case open on a curation read would be
- * the wrong trade — which leaves two ways for the picker to offer another
- * case's tags:
- *
- *   1. between opening case B and its vocabulary arriving, `state.caseTags`
- *      still held case A's;
- *   2. two case opens in quick succession can resolve out of order, so A's
- *      slower response lands last and wins.
- *
- * Neither could cause a cross-case WRITE — the router re-checks the tag
- * against the path's case and 404s — but the console would be offering an
- * analyst a vocabulary from a case they may have just left, and (1) is
- * indefinite if the second fetch fails. The same `Seq` guard the sociogram
- * and the inspector already use fixes both.
+ * Cleared first, and guarded on the case it is fetched for: `openCase` does not await it, so
+ * otherwise the picker could offer the previous case's tags until this case's arrive, or a
+ * slower reply for the previous case could land last and win. The router re-checks a tag
+ * against the path's case and 404s, so neither could cause a cross-case write.
  */
 async function loadCaseTags() {
   state.caseTags = [];
@@ -10775,8 +9633,7 @@ function renderNodeMetrics(nodeId) {
     return;
   }
 
-  /* The preset's name, as the dropdown says it, not its key ("all")
-     (ux19-copy developer-speak-in-copy, 2026-09-23). */
+  /* The preset's name, as the dropdown says it, not its key ("all"). */
   const presetKey = state.projMeta ? state.projMeta.preset : state.proj.preset;
   const presetRow = (state.presets || []).find((x) => x.key === presetKey);
   scope.textContent = presetRow ? presetRow.label : presetKey;
@@ -10784,13 +9641,9 @@ function renderNodeMetrics(nodeId) {
   const conf = state.nodeConf.get(nodeId);
   const proposed = state.nodeProposed.get(nodeId) || 0;
 
-  /* "Positive ties" and "Negative ties", not "Positive degree N vouches"
-     (ux05-inspector:positive-degree-called-vouches, 2026-09-23). The row
-     counted EVERY positive tie, communication and membership included, and
-     every parallel tie, and called the sum "vouches": an actor with no
-     vouch read "9 vouches", beside a Degree of 7 it could not be reconciled
-     with. The vouches are their own row now, by direction, and the note
-     under the grid says why the tie counts can exceed Degree. */
+  /* "Positive ties" and "Negative ties", not "vouches": the rows count every tie of that sign,
+     communication, membership and parallel ties included. The vouches are their own row, by
+     direction, and the note under the grid says why the tie counts can exceed Degree. */
   const rows = [
     ['degree', 'Degree', num(row.degree), true],
     ['weighted_degree', 'Weighted degree', num(row.weighted_degree, 4), true],
@@ -10840,12 +9693,9 @@ function renderNodeMetrics(nodeId) {
   box.appendChild(el('div', 'metric-v', String(ties)));
   box.appendChild(el('div', 'metric-rank', ''));
 
-  /* The word, never the canvas opacity as a number beside it
-     (ux19-copy opacity-shown-as-confidence-number, 2026-09-23). Printed
-     in a grid of real metrics, "MODERATE / 0.74" read as a 74% likelihood,
-     which ICD 203 confidence is explicitly not, and an isolate's
-     "none" beside full opacity read as full confidence. The opacity it is drawn at is
-     still said, in the tooltip, as the canvas encoding it is. */
+  /* The word, never the canvas opacity as a number beside it: in a grid of real metrics a number
+     reads as a likelihood, which ICD 203 confidence is not. The opacity is said in the tooltip,
+     as the canvas encoding it is. */
   box.appendChild(el('div', 'metric-k', 'Best tie confidence'));
   box.appendChild(el('div', 'metric-v', conf || 'No confidence claimed'));
   const ct = el('div', 'metric-rank', conf ? 'of its ties' : '');
@@ -10867,10 +9717,8 @@ function renderNodeMetrics(nodeId) {
       + 'Accepting, rejecting or deferring it there clears the ring.';
     box.appendChild(pt);
   }
-  /* A tie at this entity still PROPOSED (gap-tie-review, 2026-09-23):
-     the same ring, cleared under the tie's Review rather than in
-     Triage. Names the control that clears it: this said the node waited
-     on a disposal no control could make. */
+  /* A tie at this entity still PROPOSED: the same ring, cleared under the tie's Review rather
+     than in Triage, and the row names that control. */
   const unreviewed = state.nodeUnreviewed.get(nodeId) || 0;
   if (unreviewed) {
     box.appendChild(el('div', 'metric-k', 'Ties awaiting review'));
@@ -10920,8 +9768,7 @@ function dyadWords(row, metrics) {
 
 function projectionSentence() {
   const p = state.projMeta || state.proj;
-  /* In the readout's words (viewWords), not a third spelling of the same
-     projection (ux19-copy developer-speak-in-copy, 2026-09-23). */
+  /* In the readout's words (viewWords), not a third spelling of the same projection. */
   let line = 'Computed over this view. ' + viewWords(p);
   if (state.metrics) {
     line += ' · ' + countOf(state.metrics.node_count, 'entity', 'entities') + ', '
@@ -10969,17 +9816,9 @@ async function loadInto(box, seq, fetcher, render) {
 
 /* ── inspector: what each assertion claims, from what, by whom ─────────
  *
- * ux05 assertion-drops-claim-and-source (2026-09-22). A card showed the
- * basis, the grading, the rationale and "by 335dfe6b", and nothing about
- * WHAT was claimed or FROM what. So a label correction (the Correct...
- * dialogue sent only a rationale and the server filled in its defaults,
- * both until gap-api-grade-required, 2026-09-23, when the grading became
- * required) read "Direct observation · F6 · LOW CONFIDENCE", identical to
- * a first-hand sighting; a triage-accepted attribute showed neither the
- * attribute nor its value nor the document it came from; and the author
- * was a hash nobody could resolve. `GET .../assertions` now returns the
- * claim, the document and source, the author's name, the exhibit's title
- * (only when the reader may see it) and whether the row is a correction.
+ * `GET .../assertions` returns the claim, the document and source, the author's name, the
+ * exhibit's title (only when the reader may see it) and whether the row is a correction, so a
+ * card says what was claimed and from what, and a correction never reads as a sighting.
  */
 
 /** A claimed value, short enough for one line, de-fanged: an attribute
@@ -10999,9 +9838,8 @@ function claimLine(a, kind) {
     const v = a.claim_value;
     if (v && typeof v === 'object' && !Array.isArray(v)) {
       const keys = a.claim_path ? [a.claim_path] : Object.keys(v);
-      // The end date reads as a date, not as `valid_to → nothing` and a
-      // raw timestamp (verify round, 2026-10-03). The form writes the end
-      // of a UTC day; anything else is shown as it was recorded.
+      // The end date reads as a date, not a raw timestamp. The form writes the end of a UTC day;
+      // anything else is shown as recorded.
       const part = (k) => {
         if (k !== 'valid_to') return k + ' → ' + claimValueText(v[k]);
         if (v[k] === null || v[k] === undefined) return 'no end date';
@@ -11056,12 +9894,8 @@ function documentFacts(a) {
  *  read failed. Set by renderInspector, cleared on a case switch. */
 let assertLoad = null;
 
-/** Why an assertion's card is not on screen, as a sentence. Pure, for
- *  test_inspector_evidence_ui.py.
- *
- *  Until the 2026-09-22 verifier this always said the assertion was
- *  superseded and hidden by the checkbox, which was also what it said
- *  while the section was still loading or had failed to load. */
+/** Why an assertion's card is not on screen, as a sentence that tells loading and a failed read
+ *  apart from a card the checkbox hides. Pure, for test_inspector_evidence_ui.py. */
 function assertionNotListedWords(assertionId, load, key, includeRetracted) {
   if (!load || load.key !== key || (load.all === null && !load.failed)) {
     return 'The Assertions section is still loading. Try again when it has '
@@ -11131,15 +9965,10 @@ function renderAssertions(box, all) {
     card.id = 'assert-' + a.id;
     card.tabIndex = -1;
     const top = el('div', 'assert-top');
-    /* A correction is marked as one INSTEAD of showing its recorded basis
-       up here, because the headline is where a card is told apart from a
-       sighting, and a correction changes a field of something already
-       recorded. Since gap-api-grade-required (2026-09-23) its basis is the
-       one the analyst chose in the Correct form. Corrections recorded
-       before then carry the API's old defaults (Direct observation, F6,
-       LOW), which nobody chose, and headlining that basis on an edit note
-       was the misreading this fixed. Either way the recorded basis stays
-       in the meta line below, so nothing is hidden. */
+    /* A correction is headlined as one instead of with its recorded basis, because the headline
+       is where a card is told apart from a sighting, and corrections older than
+       gap-api-grade-required carry the API's default basis and grading, which nobody chose. The
+       recorded basis stays in the meta line below, so nothing is hidden. */
     top.appendChild(el('span', 'assert-basis',
       a.is_correction ? 'Correction' : basisName(a.basis)));
 
@@ -11150,10 +9979,8 @@ function renderAssertions(box, all) {
       'unknown credibility');
     top.appendChild(grade);
 
-    /* "assertion confidence", beside the tie's own "tie confidence" in
-       the header (ux19-copy opacity-shown-as-confidence-number,
-       2026-09-23): two confidences on one panel with the same label
-       invited quoting the wrong one. */
+    /* "assertion confidence", beside the tie's own "tie confidence" in the header: two
+       confidences on one panel with one label invite quoting the wrong one. */
     const conf = el('span', 'conf conf-' + a.confidence,
       'assertion confidence ' + a.confidence);
     conf.title = 'ICD 203 analytic confidence in this claim. A tie is drawn '
@@ -11163,10 +9990,8 @@ function renderAssertions(box, all) {
     if (a.retracted_at) top.appendChild(el('span', 'chip bad', 'RETRACTED'));
     if (a.superseded_at) top.appendChild(el('span', 'chip stale', 'SUPERSEDED'));
     card.appendChild(top);
-    /* The grade in words, printed (ux05-inspector:grade-words-hover-only,
-       2026-09-23). They lived only in the chip's title on a span nobody can
-       focus, so keyboard and touch readers, and a prosecutor reading a
-       shared screen, got "C3" and nothing to decode it with. */
+    /* The grade in words, printed: a title on a span nobody can focus never reaches keyboard and
+       touch readers, or anyone reading a shared screen. */
     card.appendChild(el('div', 'assert-grade',
       gradeWords(a.reliability, a.credibility)));
 
@@ -11183,11 +10008,10 @@ function renderAssertions(box, all) {
       a.rationale ? visibleText(a.rationale) : 'No rationale recorded.');
     card.appendChild(rationale);
 
-    /* Where the claim came from: the exhibit it cites (by title, and one
-       click from the exhibit itself), the captured document and the
-       collection source, by name when the reader may see them (the server
-       applies the Collected documents list's own rule) and always with
-       the copyable id, because no pane opens a document by id yet. */
+    /* Where the claim came from: the exhibit it cites (by title, one click from the exhibit), the
+       captured document and the collection source, by name when the reader may see them (the
+       Collected documents list's rule), always with the copyable id, since no pane opens a
+       document by id. */
     if (a.evidence_id || a.document_id || a.source_id) {
       const src = el('div', 'assert-source');
       if (a.evidence_id) {
@@ -11241,20 +10065,15 @@ function renderAssertions(box, all) {
       btn.title = 'Withdraw this claim. Nothing is deleted: the row is ' +
         'stamped and kept. But if this is the last live assertion behind ' +
         'the element, the element leaves the graph.';
-      /* What else holds the element up, counted the way the projection
-         counts: every row neither retracted nor superseded, whatever the
-         checkbox shows. Superseded rows counted until the final review
-         (2026-09-23), so after the demo seed's --regrade the last
-         live claim was offered as "1 other live assertion remains" and the
-         tie stayed drawn on a replaced claim nobody could retract. */
+      /* What else holds the element up, counted the way the projection counts: every row neither
+         retracted nor superseded, whatever the checkbox shows. */
       const others = all.filter(
         (x) => !x.retracted_at && !x.superseded_at && x.id !== a.id);
       btn.addEventListener('click',
         () => retractAssertion(a.id, others, a.is_correction));
       actions.appendChild(btn);
-      /* Dating a claim that never had a date (docs/00 open question 11,
-         settled 2026-10-02): only where there is none, and by supersession,
-         never by writing the date onto the recorded claim. */
+      /* Dating a claim that never had a date (docs/00 open question 11): only where there is
+         none, and by supersession, never by writing the date onto the recorded claim. */
       if (!a.observed_at) {
         const dateBtn = el('button', 'btn small', 'Date this claim');
         dateBtn.type = 'button';
@@ -11264,8 +10083,8 @@ function renderAssertions(box, all) {
       }
       card.appendChild(actions);
     }
-    // Live claims like this one (F6.4). Outside .assert-actions, which
-    // a read-only case turns off: comparing is a read.
+    // Live claims like this one. Outside .assert-actions, which a read-only case turns off:
+    // comparing is a read.
     if (!dead) card.appendChild(similarControl('assertion', a.id));
     box.appendChild(card);
   }
@@ -11276,23 +10095,13 @@ function renderAssertions(box, all) {
   }
 }
 
-/** What retracting one assertion will do, in the words of what the code
- *  actually does. Pure, so test_inspector_evidence_ui.py can hold it to that.
+/** What retracting one assertion will do, in the words of what the code actually does. Pure, so
+ *  test_inspector_evidence_ui.py can hold it to that. The projection's live-provenance leg is
+ *  `retracted_at IS NULL` with no as-of term, so an element whose last support is retracted is
+ *  gone at every as-of position.
  *
- *  ux05 retract-confirmation-wrong (2026-09-22). This used to be told the
- *  length of the RENDERED list, which with "Include retracted" ticked
- *  counted dead rows, so a claim that was the last support read "Other
- *  live assertions remain, so the element stays in the graph" and the
- *  element then vanished. It also promised "an earlier as-of position
- *  will still show it", and the banner "Move the as-of scrubber back to
- *  see it": false, because the projection's live-provenance leg is
- *  `retracted_at IS NULL` with no as-of term, so a retracted element is
- *  gone at EVERY as-of position. The Retire dialogue had already been
- *  corrected for the same false promise; this one had not.
- *
- *  `others`: the element's other unretracted assertions. `kind`: 'node'
- *  or 'edge'. `ties`: for an entity, how many ties the canvas draws at
- *  it. Returns {last, prompt, done}. */
+ *  `others`: the element's other unretracted assertions. `kind`: 'node' or 'edge'. `ties`: for an
+ *  entity, how many ties the canvas draws at it. Returns {last, prompt, done}. */
 function retractionWords(others, kind, ties, isCorrection) {
   const what = kind === 'edge' ? 'tie' : 'entity';
   const last = others.length === 0;
@@ -11328,10 +10137,9 @@ function retractionWords(others, kind, ties, isCorrection) {
     done = 'The ' + what + ' remains: ' + n + ' other live assertion'
       + (n === 1 ? '' : 's') + ' still support' + (n === 1 ? 's' : '') + ' it.';
   }
-  /* A correction gives its value back (graph-retracted-correction-stays-
-     in-force, 2026-10-03): the server restores each field it set to the
-     newest live correction of that field, or to what the element held
-     before its first correction. `isCorrection` is the card's flag. */
+  /* A correction gives its value back: the server restores each field it set to the newest live
+     correction of that field, or to what the element held before its first correction.
+     `isCorrection` is the card's flag. */
   if (isCorrection && !last) {
     prompt += ' This claim is a correction, so what it set goes back to the '
       + 'value the remaining claims support: the newest live correction of '
@@ -11373,15 +10181,13 @@ async function retractAssertion(assertionId, others, isCorrection) {
 
 /* --- Inspector: date a claim that never had a date -----------------------
  *
- * Docs/00 open question 11, settled by the owner 2026-10-02. Claims accepted
- * from Triage before Alpha 6 carry no observation date, so First seen and
- * Last seen ignore them. Writing a date onto a recorded claim would rewrite
- * it, and invariant 5 is NOT amended: the date is given by SUPERSESSION. The
- * analyst names the date and why; the server records a new claim that is the
- * old one in every other respect, citing it, and stamps the old one
- * superseded. The old claim is kept as it was recorded (Include retracted
- * lists it). Offered only on a live claim with no date, and, like Retract,
- * inside `.assert-actions`, which a read-only case turns off.
+ * Claims accepted from Triage by older releases carry no observation date, so First seen and
+ * Last seen ignore them (docs/00 open question 11). Writing a date onto a recorded claim would
+ * rewrite it (invariant 5), so the date is given by supersession: the analyst names the date and
+ * why, and the server records a new claim that is the old one in every other respect, citing it,
+ * and stamps the old one superseded; the old claim is kept as recorded. Offered only on a live
+ * claim with no date, and, like Retract, inside `.assert-actions`, which a read-only case turns
+ * off.
  */
 
 /** The button's hover text. Pure. */
@@ -11476,28 +10282,14 @@ function openDateClaimForm(a, card) {
 
 /* ── inspector: add a claim about the selected tie ─────────────────────
  *
- * Final review C14 (2026-09-23). Since migration 0064 a tie's confidence
- * is the highest grade among its live claims, so a correction can raise a
- * tie and cannot lower it past a claim that still stands: the server
- * answers 409 and names the remedy, "add the lower claim, then retract the
- * higher one". Nothing in the console could add a claim to an existing
- * tie (`POST /edges/{id}/assertions` had no caller), so the one route left
- * was to retract the founding claim and correct afterwards. That recorded
- * the claim as withdrawn when only its grade had changed, dropped its
- * exhibit from the tie's backing, and left the tie resting on a correction
- * with the server's ungraded defaults (DIRECT_OBSERVATION, F6, no exhibit),
- * which ACH then weighted as F6. (The API no longer grades a claim for
- * anyone: a correction's grading is required since gap-api-grade-required,
- * 2026-09-23, and the Correct form asks for it.)
- *
- * This form is that missing control. It is graded the way the create
- * forms are (nothing chosen for the analyst, `gradingProblem`,
- * `rationaleProblem`, the exhibit picker), it belongs to ONE tie and is
- * emptied when the selection moves to another element or the case
- * changes, so a claim typed for one tie can never be recorded against the
- * next. A correction is still not superseded on the analyst's behalf:
- * invariant 5 makes it a retraction plus a new assertion, and the
- * retraction carries a reason.
+ * A tie's confidence is the highest grade among its live claims (migration 0064), so a
+ * correction can raise a tie but not lower it past a claim that still stands: the server answers
+ * 409 and names the remedy, "add the lower claim, then retract the higher one". This form is
+ * that control. It is graded the way the create forms are (nothing chosen for the analyst,
+ * `gradingProblem`, `rationaleProblem`, the exhibit picker), and it belongs to one tie and is
+ * emptied when the selection or the case changes, so a claim typed for one tie can never be
+ * recorded against the next. Nothing is superseded on the analyst's behalf: invariant 5 makes it
+ * a retraction plus a new assertion, and the retraction carries a reason.
  */
 
 /** Which tie the form's contents belong to, or null. */
@@ -11615,9 +10407,8 @@ async function addTieClaim(event) {
     if (caseChanged(token)) return;
     const e = edgeById(edgeId);
     const tie = e ? e.confidence : null;
-    /* A claim below the tie leaves a step to take (retract each claim
-       above it), so that banner stays until dismissed instead of passing
-       mid-task (ux17-failure:banners-block-appbar, 2026-09-23). */
+    /* A claim below the tie leaves a step to take (retract each claim above it), so that banner
+       stays until dismissed instead of passing mid-task. */
     banner('Claim recorded', tieClaimDoneWords(assertion.confidence,
       tie, !!assertion.evidence_id), 'info',
       { sticky: tie in CONF_RANK
@@ -11644,24 +10435,14 @@ function wireTieClaim() {
 
 /* ── inspector: correct the selected element ──────────────────────────
  *
- * gap-api-grade-required (2026-09-23). The API now refuses a claim whose
- * grading is missing (a 422 naming the field) instead of grading it
- * DIRECT_OBSERVATION F6 LOW for the caller, and a correction is a claim:
- * "this is now called X" is a statement about the world (invariant 1).
- * Correct... was two window prompts, the value and a reason, and it sent
- * the reason alone, leaving the grade to the server. The comment it
- * carried said what the fix had to be: if a correction is gradable, the
- * dialogue has to ASK, and that is a real form, not two more prompts.
- *
- * So this is that form, graded the way the create forms and Add a claim
- * are: nothing chosen for the analyst (`resetGrading`), refused until all
- * four are picked (`gradingProblem`), an inference must say why
- * (`rationaleProblem`), and the exhibit picker. On an entity it corrects
- * the label. On a tie it re-grades it: the confidence chosen here is the
- * correction's own grade, which since migration 0064 is what moves the
- * tie, so the form asks for it once and sends it as both `confidence` and
- * `assertion.confidence`. Like the claim form it belongs to ONE element
- * and is emptied when the selection moves or the case changes.
+ * A correction is a claim ("this is now called X" is a statement about the world, invariant 1),
+ * and the API refuses a claim with no grading (a 422 naming the field). So this form is graded
+ * the way the create forms and Add a claim are: nothing chosen for the analyst (`resetGrading`),
+ * refused until all four are picked (`gradingProblem`), an inference must say why
+ * (`rationaleProblem`), and the exhibit picker. On an entity it corrects the label. On a tie it
+ * re-grades it: the correction's own grade is what moves the tie (migration 0064), so the form
+ * asks for it once and sends it as both `confidence` and `assertion.confidence`. Like the claim
+ * form it belongs to one element and is emptied when the selection or the case changes.
  */
 
 /** The element the form's contents belong to, or none. */
@@ -11708,8 +10489,7 @@ onCaseSwitch(() => {
  *  confidence as last read (unused for an entity). Pure, for
  *  test_correction_form_ui.py. */
 function correctionWords(kind, current) {
-  /* The end date and the restore on retraction (graph-valid-to-cannot-be-
-     set-after-creation and graph-retracted-correction, 2026-10-03). */
+  /* The words cover the end date and what a retraction restores. */
   if (kind === 'node') {
     return {
       heading: 'Correct this entity',
@@ -11764,13 +10544,11 @@ function openCorrection() {
   $(node ? 'fix-label' : 'fix-basis').focus();
 }
 
-/** The end date a correction sends, from the Stopped being true on field:
- *  undefined when it shows the date the element already holds (nothing to
- *  send), null when it was emptied (the end date is cleared), else the end
- *  of that UTC day, inclusive, as the create forms write `valid_to`
+/** The end date a correction sends, from the Stopped being true on field: undefined when it
+ *  shows the date the element already holds (nothing to send), null when emptied (the end date
+ *  is cleared), else the end of that UTC day, inclusive, as the create forms write `valid_to`
  *  (`intervalFrom`). `current` is the stored `valid_to`. Pure, for
- *  test_review_graph_valid_to_ui.py (graph-valid-to-cannot-be-set-after-
- *  creation, 2026-10-03). */
+ *  test_review_graph_valid_to_ui.py. */
 function correctionEndDate(day, current) {
   const held = current ? new Date(current) : null;
   const was = held && !Number.isNaN(held.getTime())
@@ -11781,10 +10559,9 @@ function correctionEndDate(day, current) {
   return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
 }
 
-/** Move what the analyst entered here into the tie's Add a claim form,
- *  which is where a LOWER grade has to go (final review C14): the grading
- *  and the reason are theirs, so they travel rather than being typed
- *  again. Nothing is sent; the claim form waits for its own button. */
+/** Move what the analyst entered here into the tie's Add a claim form, which is where a lower
+ *  grade has to go: the grading and the reason travel rather than being typed again. Nothing is
+ *  sent; the claim form waits for its own button. */
 function carryCorrectionIntoTieClaim(conf) {
   openTieClaim(conf);
   resetGrading('claim', gradingOf('fix'));
@@ -11831,19 +10608,16 @@ async function submitCorrection(event) {
        is left where it is, as a weight correction leaves it. */
     body = {};
   } else if (sel.kind === 'edge') {
-    /* Refused HERE, before anything is sent, when the re-grade would lower
-       the tie (final review C14, 2026-09-23): the server refuses it (409),
-       since a correction cannot lower a tie past a claim that still
-       stands. The claim form it opens is the remedy the server names, and
-       it opens holding what the analyst entered here. */
+    /* Refused here, before anything is sent, when the re-grade would lower the tie: the server
+       refuses that (409), since a correction cannot lower a tie past a claim that still stands.
+       The claim form it opens is the remedy the server names, holding what was entered here. */
     const e = edgeById(sel.id) || relTieCache.get(sel.id) || null;
     const lowering = tieLoweringWords(e ? e.confidence : null,
                                       assertion.confidence);
     if (lowering) {
       carryCorrectionIntoTieClaim(assertion.confidence);
-      /* Sticky: it names two steps, and the second (retract) comes
-         after the claim form is filled in (ux17-failure:banners-block-
-         appbar, 2026-09-23). */
+      /* Sticky: it names two steps, and the second (retract) comes after the claim form is
+         filled in. */
       banner('Not corrected', lowering, 'warn', { sticky: true });
       return;
     }
@@ -11905,21 +10679,12 @@ function wireCorrection() {
 
 /* ── inspector: a tie's review ─────────────────────────────────────────
  *
- * gap-tie-review and ux05-inspector:review-state-never-leaves-proposed
- * (2026-09-23). `core.edge.review` defaulted to PROPOSED and nothing in the
- * product could move it, so every tie in every case read "review PROPOSED":
- * an analyst's own direct observation and a suggestion already accepted in
- * Triage alike. The canvas ringed every node, the Metrics row "Unreviewed
- * proposals" always equalled "Ties in projection", and the tooltip told the
- * analyst to dispose of something no control could dispose of.
- *
- * The server now bears a person's own tie ACCEPTED and a machine's
- * PROPOSED, and `POST .../graph/edges/{id}/review` (proposal.review,
- * audited) moves it. This section is the console half: the state in
- * words, who decided it and why, and the verbs the state offers. A review
- * changes nothing the projection draws except the ring, so the change is
- * applied to the ties the console holds and the rings are recounted
- * locally, rather than spending an analytics read on a reload. */
+ * The server bears a person's own tie ACCEPTED and a machine's PROPOSED, and
+ * `POST .../graph/edges/{id}/review` (proposal.review, audited) moves it. This section is the
+ * console half: the state in words, who decided it and why, and the verbs the state offers. A
+ * review changes nothing the projection draws except the ring, so the change is applied to the
+ * ties the console holds and the rings are recounted locally, rather than spending an analytics
+ * read on a reload. */
 
 /** What each review state means to the analyst reading it, and what
  *  clears the ring. Pure data, read by test_tie_review_ui.py. */
@@ -11978,8 +10743,8 @@ function reviewDoneWords(review) {
     + 'ends carry the unreviewed proposal ring again.';
 }
 
-/** One recorded decision as a sentence: "ACCEPTED by Ana Analyst,
- *  2026-09-23 14:02 UTC (was PROPOSED): two captures agree". Pure. */
+/** One recorded decision as a sentence: "ACCEPTED by Ana Analyst, YYYY-MM-DD HH:MM UTC (was
+ *  PROPOSED): two captures agree". Pure. */
 function reviewEventWords(ev) {
   const who = ev.by_name ? visibleText(ev.by_name) : shortId(ev.by);
   return ev.review + ' by ' + who + ', ' + fmtTime(ev.at)
@@ -12118,21 +10883,13 @@ onCaseSwitch(() => {
   setMsg($('review-ok'), '');
 });
 
-/* Attach an exhibit already in this case to the selected node or edge.
+/* Attach an exhibit already in this case to the selected node or edge
+ * (`POST /evidence/{id}/links`).
  *
- * `POST /evidence/{id}/links` has existed since Phase 1 and NOTHING in the
- * console has ever called it — a 2026-07-26 audit found zero occurrences of
- * "/links" in this file. The READ side was fine (the panel below is fed by
- * GET /nodes/{id}/evidence, which joins core.evidence_link), so the panel
- * was not broken so much as unfillable: an analyst could see linked
- * exhibits and could never create a link, which is why it read as
- * permanently empty.
- *
- * The picker offers only exhibits from `state.evidence` — this case's own,
- * already filtered by the caller's clearance on the way in. The server
- * re-checks the same-case constraint regardless (routers/evidence.py: the
- * comment there notes core.evidence_link has no same-case CHECK, unlike
- * core.edge), so this is convenience, never the control.
+ * The picker offers only exhibits from `state.evidence`, this case's own, already filtered by the
+ * caller's clearance. The server re-checks the same-case constraint regardless
+ * (routers/evidence.py: core.evidence_link has no same-case CHECK, unlike core.edge), so this is
+ * convenience, never the control.
  */
 function renderEvidenceLinker(box, sel) {
   if (!state.evidence.length) return;
@@ -12164,11 +10921,8 @@ function renderEvidenceLinker(box, sel) {
     note.disabled = true;
     pick.appendChild(note);
   }
-  /* What in the exhibit supports the element. `LinkBody` has always taken
-     `relevance`; the linker never sent it, so a link said that an exhibit
-     mattered and never what in it did (ux07 two-evidence-paths-disagree,
-     2026-09-22). Optional, because a screenshot of the handle itself needs
-     no explaining. */
+  /* What in the exhibit supports the element (`LinkBody.relevance`). Optional, because a
+     screenshot of the handle itself needs no explaining. */
   const why = el('input', 'input small');
   why.type = 'text';
   why.maxLength = 500;
@@ -12189,17 +10943,13 @@ function renderEvidenceLinker(box, sel) {
       await api(cpath('/evidence/' + evidenceId + '/links'), {
         method: 'POST', json: body,
       });
-      /* Re-render the whole inspector rather than pushing the new row in
-         by hand: the server decides what is visible, and a client that
-         optimistically draws a link it has not read back can show one the
-         caller is not cleared to see.
-         Then refresh the projection, because a link now makes the element
-         EVIDENCED: its canvas mark and the coverage figure both change, and
-         until 2026-09-22 neither did. */
+      /* Re-render the whole inspector rather than pushing the new row in by hand: the server
+         decides what is visible, and a link drawn optimistically could show one the caller is
+         not cleared to see. Then refresh the projection: a link makes the element evidenced, so
+         its canvas mark and the coverage figure both change. */
       renderInspector();
       refreshSociogram();
-      /* And the register, whose card said the exhibit backed nothing
-         after this very link (c13, 2026-09-24). */
+      /* And the register, whose card would still say the exhibit backs nothing. */
       reloadRegisterIfShown();
     } catch (err) { fail(err); go.disabled = false; }
   });
@@ -12230,15 +10980,9 @@ function backingLine(b) {
   return line;
 }
 
-/** The exhibits behind the selected element, and how each is attached.
- *
- *  ux05 linked-evidence-vs-evidenced and ux07 two-evidence-paths-disagree
- *  (2026-09-22). This section read `core.evidence_link` alone while the
- *  canvas, the coverage figure and the report counted assertion-carried
- *  exhibits alone, so the two answered "is this evidenced?" in opposite
- *  directions. The server now returns both routes under the one rule
- *  (`projections.evidenced_sql`), and each exhibit says which assertion
- *  carries it or who linked it and why. */
+/** The exhibits behind the selected element, and how each is attached: the server returns both
+ *  routes, assertion-carried and linked, under the one rule (`projections.evidenced_sql`), and
+ *  each exhibit says which assertion carries it or who linked it and why. */
 function renderLinkedEvidence(box, list) {
   /* Remembered so the picker can exclude what is already attached, by
      EITHER route: an exhibit a claim already carries was offered again. */
@@ -12257,11 +11001,8 @@ function renderLinkedEvidence(box, list) {
        an exhibit's is often the attacker's subject line. */
     top.appendChild(el('span', 'ev-title', visibleText(ev.title)));
     top.appendChild(tlpChip(ev.classification));
-    /* The same chips the Evidence pane's card draws, from the same
-       function (x-inspector-chips, 2026-09-24). This list drew a bare
-       "WORM" for ever and a sixteen-hex digest with the rest in a
-       tooltip, the two claims the card stopped making on 2026-09-23: the
-       lock lapses on a date, and the digest is what custody attests. */
+    /* The same chips the Evidence pane's card draws, from the same function: the lock lapses on
+       a date, and the whole digest is what custody attests. */
     const chips = [lockChip(ev)];
     if (ev.legal_hold) chips.push(['chip flag', 'LEGAL HOLD', 'Under a legal '
       + 'hold: nothing may destroy these bytes while it stands.']);
@@ -12302,11 +11043,9 @@ function renderSelectors(box, list) {
   for (const s of list) {
     const item = el('div', 'sel-item');
     item.appendChild(el('div', 'label', s.selector_type));
-    /* CR13: visibleText, not raw. `el()` uses textContent, which stops
-       EXECUTION but not visual reordering — a U+202E inside a Jabber
-       address renders as a different address than the bytes the system
-       correlated on, and two distinct selectors can render identically.
-       These values are attacker-chosen forum identifiers. */
+    /* visibleText, not raw: textContent stops execution but not visual reordering, so a U+202E
+       in an attacker-chosen identifier would render as a different value than the bytes the
+       system correlated on, and two distinct selectors could render identically. */
     /* Copy the RAW value, not the de-fanged rendering: the raw form is
        what the next tool needs, and visibleText only changes how it
        looks. */
@@ -12318,16 +11057,14 @@ function renderSelectors(box, list) {
         s.norm_value, 'normalised value'));
     }
     item.appendChild(el('div', 'ev-meta', selectorSeenWords(s)));
-    lookupButton(item, s);   // F15.3
+    lookupButton(item, s);
     box.appendChild(item);
   }
-  lookupAllButton(box, list);   // F15.4
+  lookupAllButton(box, list);
 }
 
-/** "observed 3 times, 27 Aug 2025 to 2 Jan 2026": the count WITH its
- *  window (ux05-inspector:first-last-seen-always-dash, 2026-09-23). The
- *  count used to arrive alone although the selector row keeps both
- *  dates. Pure, for test_inspector_entry_ui.py. */
+/** "observed 3 times, 27 Aug 2025 to 2 Jan 2026": the count with its window, from the selector
+ *  row's two dates. Pure, for test_inspector_entry_ui.py. */
 function selectorSeenWords(s) {
   const n = Number(s.observation_cnt);
   const count = 'observed ' + (n === 1 ? 'once' : countOf(n, 'time', 'times'));
@@ -12343,12 +11080,9 @@ function buildPickers() {
      choices are put back. Another case: everything starts empty. */
   const same = adoptCaseInCreateForms();
   const tlpPairs = TLP.map((t) => [t, t]);
-  /* An element may not be classified BELOW its case (the server enforces a
-   * floor), so defaulting to a fixed AMBER makes every entity form fail in
-   * an AMBER_STRICT or RED case, and the rejection reads as a mysterious
-   * 400 rather than "you picked something too low". Default to the case's
-   * own classification, which is always legal, and drop the options that
-   * are not: an analyst cannot choose a value the server will refuse. */
+  /* An element may not be classified below its case (the server enforces a floor), so the
+   * default is the case's own classification, always legal, and the options below it are
+   * dropped: an analyst cannot choose a value the server will refuse. */
   const caseClass = state.caseRec ? state.caseRec.classification : 'AMBER';
   const floor = TLP.indexOf(caseClass);
   const legal = tlpPairs.filter(([t]) => TLP.indexOf(t) >= floor);
@@ -12391,29 +11125,17 @@ const createForms = {
   /* The endpoints chosen when the reset emptied the entity lists, held
      until the case's entities arrive and restored only for the same case. */
   keptEnds: null,
-  /* Entities the Link form was opened from that the case's entity page
-     does not hold, by id (2026-09-23). The page is the
-     newest 1000 (`/nodes?limit=1000`) and the canvas draws the oldest 800,
-     so in a large case an entity can be drawn, selected and offered "Link
-     from this..." without being in `state.nodes`, and the pickers, built
-     from that list alone, opened on "Choose the source entity" without a
-     word and could not offer the entity at all. Kept here rather than
-     pushed into `state.nodes`, because every reload replaces that list
-     and would drop the choice again. Emptied for another case. */
+  /* Entities the Link form was opened from that the case's entity page does not hold, by id:
+     the page is the newest 1000, so in a large case a drawn entity may be missing from
+     `state.nodes`. Kept here rather than pushed into `state.nodes`, which every reload rebuilds.
+     Emptied for another case. */
   pinnedEnds: new Map(),
 };
 
-/* The four grading fields every claim carries, with how the refusal names
-   each one.
-   ux06 grading-prefilled-upward (2026-09-22): both forms opened on Direct
-   observation / C / 3 / MODERATE, so typing a label and pressing Create
-   recorded a graded claim that nobody graded, pitched ABOVE the server's
-   own not-graded defaults (F / 6 / LOW). ACH weights cells by Admiralty
-   grade and the confidence filter acts on these values, and a disclosure
-   reviewer cannot tell an untouched default from a considered C3. The
-   Correct... dialogue already refused to invent a grade on the analyst's
-   behalf; these forms did it on every entry. They now open with nothing
-   chosen and refuse to submit until all four are picked. */
+/* The four grading fields every claim carries, with how the refusal names each one. The forms
+   open with nothing chosen and refuse to submit until all four are picked: ACH weights cells by
+   Admiralty grade, the confidence filter acts on these values, and a disclosure reviewer cannot
+   tell an untouched default from a considered grade. */
 const GRADING_FIELDS = [
   ['basis', 'a basis'],
   ['conf', 'a confidence'],
@@ -12474,9 +11196,8 @@ function gradingProblem(prefix) {
  *  the grading it will apply, so it is never a silent default. */
 function renderSameGrading(prefix) {
   const btn = $(prefix + '-same-grading');
-  /* The tie inspector's claim form (final review C14) is graded through
-     `resetGrading` too, and offers no "same grading": each claim about an
-     existing tie is graded on its own. */
+  /* The tie inspector's claim form is graded through `resetGrading` too, and offers no "same
+     grading": each claim about an existing tie is graded on its own. */
   if (!btn) return;
   const last = createForms.lastGrading[prefix];
   show(btn, !!last);
@@ -12495,15 +11216,10 @@ const CREATE_FORM_TYPED = [
   'edge-observed', 'edge-valid-from', 'edge-valid-to',
 ];
 
-/** The registered case-switch reset. It drops only what is case-scoped
- *  DATA: the entity lists the endpoints were built from, and the messages
- *  about the last entry.
- *
- *  It used to clear the typed fields too, and openCase(state.caseId) runs
- *  it for a reopen of the SAME case, which is what editing a case's title
- *  or status does: a half-typed label or rationale was thrown away by an
- *  unrelated edit (fix-round verifier, 2026-09-22). The typed fields are
- *  judged by `adoptCaseInCreateForms`, once the new case id is known. */
+/** The registered case-switch reset. It drops only case-scoped data: the entity lists the
+ *  endpoints were built from, and the messages about the last entry. The typed fields are
+ *  judged by `adoptCaseInCreateForms` once the new case id is known, since openCase also runs
+ *  this to reopen the same case after a title or status edit. */
 function resetCreateForms() {
   /* Held only while the lists are live: the list view and openCase both
      run this, and the second run must not overwrite the choice the first
@@ -12542,16 +11258,10 @@ function adoptCaseInCreateForms() {
   return same;
 }
 
-/* ux06 edge-endpoint-pickers (2026-09-22). The endpoints were two plain
-   selects of every entity in the case, newest first, and both opened on
-   the SAME entity: the form started on a self-loop, with a note advising
-   the analyst to "reverse the direction" of VICTIM to VICTIM. With twenty
-   wallets that all begin "bc1q" and twenty-six hosts that all begin
-   "vps-", typing to jump did not work either, so the likeliest mistake was
-   picking the look-alike next door: a tie recorded against the wrong
-   actor. Each endpoint now has a filter box (the palette's rule: every
-   word must appear in the label or the type), the list is grouped by
-   entity type and sorted by label, and both ends open unchosen. */
+/* The Link form's endpoints: each has a filter box (the palette's rule: every word must appear in
+   the label or the type), the list is grouped by entity type and sorted by label, and both ends
+   open unchosen, so look-alike labels are not picked by accident and the form never starts on a
+   self-loop. */
 
 function endpointMatches(node, terms) {
   if (!terms.length) return true;
@@ -12587,11 +11297,9 @@ function endpointNode(id) {
   return id ? endpointPool().find((n) => n.id === id) || null : null;
 }
 
-/** Make `nodeId` one the pickers offer. The entity page first, then the
- *  sociogram's own record (a drawn entity is usually there), then a read
- *  of the entity under this session's clearance. Returns null, or why it
- *  could not be offered. `token` is the case the caller started in: a
- *  reply for a case since left pins nothing. */
+/** Make `nodeId` one the pickers offer: the entity page first, then the sociogram's own record,
+ *  then a read under this session's clearance. Returns null, or why it could not be offered.
+ *  `token` is the case the caller started in: a reply for a case since left pins nothing. */
 async function pinEndpoint(nodeId, token) {
   if (endpointNode(nodeId)) return null;
   const drawn = (state.gnodes || []).find((n) => n.id === nodeId);
@@ -12641,11 +11349,8 @@ function buildEndpointSelect(which, keepId) {
       group.label = typeName(n.node_type) + ' (' + n.node_type + ')';
       select.appendChild(group);
     }
-    /* The type by its display name, as the entity list and the inspector
-       chip name it: "oriel [IDENTITY]" printed the raw code (README
-       screenshot set review, 2026-09-23). The code stays in the group
-       label above, which is what the filter's "a type such as WALLET"
-       refers to. */
+    /* The type by its display name, as the entity list and the inspector chip name it. The code
+       stays in the group label above, which the filter's "a type such as WALLET" refers to. */
     const o = el('option', null,
       n.label + ' (' + typeName(n.node_type) + ')');
     o.value = n.id;
@@ -12658,9 +11363,8 @@ function buildEndpointSelect(which, keepId) {
   const count = $('edge-' + which + '-count');
   $('edge-' + which + '-filter').disabled = total === 0;
   if (total < 2) {
-    /* Said once, under the source, beside the way out (Add an entity):
-       with nothing to link, "type above to filter" named the wrong next
-       step (fix-round verifier, 2026-09-22, on the empty OP-WHEATEAR-26). */
+    /* Said once, under the source, beside the way out (Add an entity): with nothing to link,
+       filtering is not the next step. */
     count.textContent = which !== 'src' ? ''
       : (total ? 'This case has one entity so far. '
                : 'This case has no entities yet. ') +
@@ -12712,15 +11416,10 @@ async function restoreEndpoint(which, nodeId) {
   refreshEdgeTypes();
 }
 
-/** Open the Link form with one end already chosen, `which` being 'src' or
- *  'dst'. The inspector's "Link from this..." and "Link to this..." call
- *  it. The other end, the type and the grading stay unchosen.
- *
- *  The entity is pinned first when the case's entity page does not hold
- *  it (2026-09-23): it used to open on "Choose the
- *  source entity" without a word for any entity beyond that page, which in
- *  a large case is most of the ones the canvas draws. If it cannot be read
- *  at all, the form says so instead of opening blank. */
+/** Open the Link form with one end already chosen, `which` being 'src' or 'dst', for the
+ *  inspector's "Link from this..." and "Link to this...". The other end, the type and the
+ *  grading stay unchosen. The entity is pinned first when the case's entity page does not hold
+ *  it; if it cannot be read at all, the form says so instead of opening blank. */
 async function openLinkFormFrom(which, nodeId) {
   const token = caseToken();
   const problem = await pinEndpoint(nodeId, token);
@@ -12740,11 +11439,9 @@ async function openLinkFormFrom(which, nodeId) {
  *  form that is not finished. */
 function onEndpointFilterKey(which, event) {
   if (event.key !== 'Enter') return;
-  /* Nothing typed, nothing to pick from: the first entity of the whole list
-     is not a choice anyone made, and nothing on this form is chosen for
-     the analyst (fix-round verifier, 2026-09-22). Enter then does what it
-     does in any other field, submitting, and createEdge refuses an
-     unfinished form with the reason. */
+  /* Nothing typed, nothing to pick: the first entity of the whole list is not a choice anyone
+     made. Enter then submits, as in any other field, and createEdge refuses an unfinished form
+     with the reason. */
   if (!endpointTerms(which).length) return;
   event.preventDefault();
   const first = endpointChoices(which)[0];
@@ -12754,9 +11451,8 @@ function onEndpointFilterKey(which, event) {
   $('edge-' + which).focus();
 }
 
-/** Swap the two ends, filters included. The answer to "nothing runs this
- *  way, N run the other way", which the note used to give as advice with
- *  no control to act on it. */
+/** Swap the two ends, filters included: the control for the note's "nothing runs this way, N run
+ *  the other way". */
 function swapEndpoints() {
   const s = $('edge-src').value, d = $('edge-dst').value;
   const fs = $('edge-src-filter').value, fd = $('edge-dst-filter').value;
@@ -12787,19 +11483,10 @@ function signWords(sign) {
   return 'neutral (sign 0)';
 }
 
-/** Offer only the relationship types the ontology permits for the chosen
- *  endpoints, starting on "Choose a relationship type".
- *
- *  ux06 edge-type-defaults-to-scam-accusation (2026-09-22): this rebuilt
- *  the list with nothing selected, so the browser selected the first
- *  option, and the ontology sorts by key: for the commonest pair in the
- *  product, persona to persona, that is ACCUSED_SCAM. Pressing Create
- *  without opening the list recorded a scam accusation, a NEGATIVE tie
- *  that moves signed degree and structural balance. It also ran on every
- *  endpoint change and kept nothing, so an analyst who chose "vouched
- *  for" and then corrected the target got the accusation instead, with
- *  no word. Now nothing is chosen for them, and a choice survives an
- *  endpoint change when it is still legal and is cleared ALOUD when not. */
+/** Offer only the relationship types the ontology permits for the chosen endpoints, starting on
+ *  "Choose a relationship type": with nothing selected the browser would pick the first type,
+ *  which can be a negative tie such as ACCUSED_SCAM. A choice survives an endpoint change when
+ *  it is still legal and is cleared aloud when not. */
 function refreshEdgeTypes() {
   const note = $('edge-type-note');
   const sel = $('edge-type');
@@ -12872,18 +11559,11 @@ function refreshEdgeTypes() {
   describeEdgeType(legal.length, pair);
 }
 
-/** What a chosen type says, read both ways between the two ends the
- *  analyst picked: "harrow_skua2 accused ferric_auk98 of a scam. Read the
- *  other way: ferric_auk98 was accused by harrow_skua2." Then its sign and
- *  whether the social metrics count it. Pure, for
- *  test_inspector_entry_ui.py.
- *
- *  ux06-entry:edge-type-note-stale (2026-09-23): the note described the
- *  first PERMITTED type, not the chosen one, so an analyst picking
- *  "is an alias of" was told it counted as a social tie. The describing
- *  half was fixed on 2026-09-22; the reading and the separate count came
- *  after it. The reading is the check that the direction is right
- *  before the tie is committed, and it is what a swap changes. */
+/** What the chosen type says, read both ways between the two ends the analyst picked:
+ *  "harrow_skua2 accused ferric_auk98 of a scam. Read the other way: ferric_auk98 was accused by
+ *  harrow_skua2." Then its sign and whether the social metrics count it. The reading checks the
+ *  direction before the tie is committed, and is what a swap changes. Pure, for
+ *  test_inspector_entry_ui.py. */
 function edgeTypeWords(t, src, dst) {
   const s = src ? src.label : 'the source', d = dst ? dst.label : 'the target';
   let words = s + ' ' + t.display_name + ' ' + d + '.';
@@ -12946,14 +11626,9 @@ function assertionFrom(prefix) {
   };
 }
 
-/** The "Observed at (UTC)" field's value as an instant.
- *
- *  A `datetime-local` input has no zone, and `new Date(value)` read it in
- *  the browser's. Every time the console shows is now UTC, so 17:00 typed
- *  in Los Angeles came back as "observed 13 Jul" (00:00Z the next day,
- *  which `fmtWhen` reads as a bare day): the analyst's own entry, read back
- *  as another date (verifier, ux05 fix round, 2026-09-22). The field is
- *  labelled UTC and read as UTC, so what is typed is what is shown. */
+/** The "Observed at (UTC)" field's value as an instant. A `datetime-local` input has no zone and
+ *  `new Date(value)` would read it in the browser's; the field is labelled UTC and read as UTC,
+ *  so what is typed is what is shown. */
 function observedAtUtc(value) {
   if (!value) return null;
   const d = new Date(value + 'Z');
@@ -12987,8 +11662,8 @@ function intervalProblem(interval) {
  *  rather than showing a silently empty dropdown. */
 function refreshEvidencePickers() {
   const list = state.evidence || [];
-  /* 'claim': the tie inspector's Add a claim form (final review C14). */
-  /* 'fix': the inspector's Correct form (gap-api-grade-required). */
+  /* 'claim': the tie inspector's Add a claim form. */
+  /* 'fix': the inspector's Correct form. */
   for (const prefix of ['node', 'edge', 'claim', 'fix']) {
     const select = $(prefix + '-evidence');
     if (!select) continue;
@@ -12998,9 +11673,8 @@ function refreshEvidencePickers() {
       pairs.push([ev.id, ev.title + '  (' + ev.media_type + ')']);
     }
     opts(select, pairs, keep);
-    /* `state.evidence` is the whole index now, not the pane's first page
-       (ux07-evidence:evidence-list-silently-capped, 2026-09-23). Past the
-       index's own bound the picker says what it is not offering. */
+    /* `state.evidence` is the whole index, not the pane's page; past the index's own bound the
+       picker says what it is not offering. */
     const missing = (state.evidenceTotal || 0) - list.length;
     if (missing > 0) {
       const note = el('option', null, countOf(missing, 'older exhibit is',
@@ -13028,23 +11702,14 @@ function syncRationaleHint(prefix) {
 
 /* ── Add entity: is it already here, and is it a selector? ─────────────
  *
- * ux06-entry:no-duplicate-check-on-create and ux06-entry:selector-
- * entities-bypass-normalisation (2026-09-23). The form posted straight to
- * /nodes: "Harrow_Skua2" for an existing "harrow_skua2" made a second
- * persona, and merging was offered only after the damage, although
- * docs/01 calls merging "the operation most likely to quietly corrupt a
- * case". And a Selector, Comms account or Crypto wallet took its label
- * raw: '@Vendor', a Jabber id with stray case, a bare Telegram id the
- * Comms pane refuses, none of it normalised, refused or entered in the
- * selector index, so it never correlated with the same selector seen
- * elsewhere and the graph silently showed two actors.
- *
- * As the label is typed the form asks the server (`POST .../graph/nodes/
- * check`, a read): same-type entities whose label matches once case and
- * whitespace are folded, and for a selector type the canonical form, the
- * ontology's refusal, and who already holds it. A refusal blocks Create; a
- * match asks for Open existing or Create anyway; a create with a selector
- * type records the selector against the new entity on the server. */
+ * Merging is the operation most likely to quietly corrupt a case (docs/01), so duplicates are
+ * caught before they are made, and a selector entity's label must be normalised and indexed or
+ * it never correlates with the same selector seen elsewhere. As the label is typed the form asks
+ * the server (`POST .../graph/nodes/check`, a read): same-type entities whose label matches once
+ * case and whitespace are folded, and for a selector type the canonical form, the ontology's
+ * refusal, and who already holds it. A refusal blocks Create; a match asks for Open existing or
+ * Create anyway; a create with a selector type records the selector against the new entity on
+ * the server. */
 
 /** Entity types whose label IS a selector value. */
 const SELECTOR_ENTITY_TYPES = new Set(['SELECTOR', 'COMMS_ACCOUNT', 'WALLET']);
@@ -13257,13 +11922,10 @@ function wireNodeCheck() {
   $('node-sel-type').addEventListener('change', onNodeFormInput);
 }
 
-/** What an entry leaves for the next one (ux06-entry:post-create-state,
- *  2026-09-23). The rationale and the validity interval are about the
- *  element just made and always go. The exhibit, the observed time and
- *  the reference are the SOURCE and go together, unless the analyst ticked
- *  "Keep" for batch entry from one document: the exhibit and observed time
- *  used to stay silently while the reference beside them was cleared, so
- *  the next claim could be filed against the wrong exhibit. */
+/** What an entry leaves for the next one. The rationale and the validity interval are about the
+ *  element just made and always go. The exhibit, the observed time and the reference are the
+ *  source and go together, unless the analyst ticked "Keep" for batch entry from one document,
+ *  so the next claim is never filed against the wrong exhibit. */
 function resetAfterCreate(prefix) {
   for (const f of ['rationale', 'valid-from', 'valid-to']) {
     $(prefix + '-' + f).value = '';
@@ -13275,14 +11937,10 @@ function resetAfterCreate(prefix) {
   setMsg($(prefix + '-ok'), '');
 }
 
-/** A create pane's messages are about the entry made while it was open,
- *  so they go when the pane is left: an analyst coming back found a stale
- *  "Created..." above an empty label, which read as already submitted
- *  (ux06-entry:post-create-state, 2026-09-23). Watched on the pane itself
- *  rather than in `selectTab`, so every way of leaving it counts, and on
- *  LEAVING rather than opening, so a message set as the pane opens (the
- *  inspector's "Link from this..." explaining an entity it could not read)
- *  is still there to read. */
+/** A create pane's messages are about the entry made while the pane was open, so they go when it
+ *  is left, or a stale "Created..." reads as already submitted. Watched on the pane itself rather
+ *  than in `selectTab`, so every way of leaving counts, and on leaving rather than opening, so a
+ *  message set as the pane opens (the inspector's "Link from this...") is still there to read. */
 function watchCreatePanes() {
   for (const prefix of ['node', 'edge']) {
     const pane = $('pane-add-' + prefix);
@@ -13325,10 +11983,9 @@ function selectorHeldWords(selType, ownerLabel, strong) {
     + 'compare them under Entity resolution below.';
 }
 
-/** Another entity this reader can see already holds a selector that a
- *  correction or an accepted proposal just asked for. The index keeps its
- *  first owner, so the two are a lead for Entity resolution
- *  (graph-selector-index-drift, 2026-10-03). Pure. */
+/** Another entity this reader can see already holds a selector that a correction or an accepted
+ *  proposal just asked for. The index keeps its first owner, so the two are a lead for Entity
+ *  resolution. Pure. */
 function selectorLeadWords(selType, ownerLabel) {
   return 'This ' + selType + ' is already recorded against ' + ownerLabel
     + ', so it stays there and this entity does not hold it. Two entities '
@@ -13338,17 +11995,10 @@ function selectorLeadWords(selType, ownerLabel) {
 
 /* ── what a create just made ───────────────────────────────────────────
  *
- * ux06-entry:post-create-state (2026-09-23). The outcome
- * went to the corner banner stack first, and the verifier measured what
- * that did: the stack is fixed over the top of the inspector, so a
- * success card sat on the name of the entity just opened, one more
- * stacked up per entry during batch work, a success took the error edge
- * (the stack had no style for it), and the cards outlived a case switch.
- * The outcome is about ONE element, and the inspector is open on that
- * element as the form closes, so it is said there: under the element's
- * name, in the alert tone when the claim has no exhibit behind it, one at
- * a time, and gone when the analyst moves on, dismisses it or leaves the
- * case. */
+ * The outcome is about one element, and the inspector is open on that element as the form
+ * closes, so it is said there, not in the banner stack over the inspector: under the element's
+ * name, in the alert tone when the claim has no exhibit behind it, one at a time, and gone when
+ * the analyst moves on, dismisses it or leaves the case. */
 
 /** The last create's outcome, and the element it is about (`kind:id`).
  *  `seen` turns true once it has been shown on that element. */
@@ -13368,11 +12018,9 @@ function dropCreatedNote() {
   createdNote.seen = false;
 }
 
-/** What the notice does for a selection: 'show' on the element it is
- *  about; 'drop' once the analyst has moved on from that element; 'wait'
- *  while it has not been shown yet, because the reload after a create
- *  repaints the OLD selection before the new element is selected, and
- *  that repaint must not throw the notice away. Pure, for
+/** What the notice does for a selection: 'show' on the element it is about; 'drop' once the
+ *  analyst has moved on from it; 'wait' while it has not been shown yet, because the reload after
+ *  a create repaints the old selection before the new element is selected. Pure, for
  *  test_inspector_entry_ui.py. */
 function createdNoteFate(note, sel) {
   if (!note.key) return 'drop';
@@ -13488,9 +12136,8 @@ async function createEdge(event) {
     return;
   }
   if (!edgeType) {
-    /* Two different refusals: a pair the ontology does not connect, and a
-       type nobody has chosen yet. The second used to be impossible only
-       because the form chose one itself (see refreshEdgeTypes). */
+    /* Two different refusals: a pair the ontology does not connect, and a type nobody has chosen
+       yet (the form never chooses one itself, see refreshEdgeTypes). */
     const s = endpointNode(src);
     const d = endpointNode(dst);
     const none = s && d && !legalEdgeTypes(s.node_type, d.node_type).length;
@@ -13510,10 +12157,9 @@ async function createEdge(event) {
   if (badInterval) { setMsg(errBox, badInterval); return; }
   const token = caseToken();
   try {
-    /* The confidence travels in `assertion` and only there. Since 0064 a
-       tie's confidence IS its assertions' (the highest live one), so the
-       grade chosen here is the one the canvas, the filter and the metrics
-       read (ux06 edge-confidence-not-stored, 2026-09-22). */
+    /* The confidence travels in `assertion` and only there: a tie's confidence is its highest
+       live assertion's (migration 0064), so the grade chosen here is the one the canvas, the
+       filter and the metrics read. */
     const out = await api(cpath('/edges'), {
       method: 'POST',
       json: {
@@ -13557,19 +12203,9 @@ async function createEdge(event) {
  * on screen is reachable from a keystroke, and nothing here does anything the
  * UI cannot also do — a palette that hides capabilities is a trap. */
 
-/* Every pane in the rail, in rail order. This list was written when
-   the rail had six panes and stayed at six while the rail grew to
-   seventeen, so until 2026-09-09 the palette's "Go to" offered a third
-   of the console and said nothing about the rest. `test_ui_invariants`
-   holds it to the `data-tab` set in index.html, in order.
-
-   The name is the rail's own caption and the third field the other words
-   an analyst reaches for (ux19-copy one-concept-many-names, 2026-09-23).
-   The palette said "Sociogram", "Entity list" and "Add relationship" for
-   rail tiles captioned Graph, Entities and Link, so typing "link" (the
-   caption) answered "Nothing matches." and typing "graph" offered node
-   sizes but not the Graph pane. test_search_ui_invariants holds each name
-   to its rail caption. */
+/* Every pane in the rail, in rail order; `test_ui_invariants` holds it to the `data-tab` set in
+   index.html, in order. The name is the rail's own caption (test_search_ui_invariants holds
+   each to it) and the third field the other words an analyst reaches for. */
 const TAB_NAMES = [
   ['graph', 'Graph', 'sociogram, network, canvas'],
   ['entities', 'Entities', 'entity list, table'],
@@ -13599,8 +12235,7 @@ function buildPaletteItems() {
       items.push({ kind: 'Case', label: c.code + ': ' + c.title,
                    hint: c.status, run: () => openCase(c.id) });
     }
-    /* Deployment-wide, so offered with no case open, to the same accounts
-       the header offers it to (ux16, 2026-09-22). */
+    /* Deployment-wide: offered with no case open, to the accounts the header offers it to. */
     if (canAdmin || canReview || canCountersign
         || canConfirmAuthority) {
       items.push({ kind: 'View', label: 'Go to ' + adminViewName(),
@@ -13612,7 +12247,7 @@ function buildPaletteItems() {
   }
 
   for (const [key, label, also] of TAB_NAMES) {
-    if (caseControlOff('tab-' + key)) continue;    // gap-closed-case-writes
+    if (caseControlOff('tab-' + key)) continue;
     /* "Go to Search" puts the caret in the box, which is what anyone
        going there is about to need. */
     items.push({ kind: 'View', label: 'Go to ' + label, hint: also,
@@ -13621,9 +12256,7 @@ function buildPaletteItems() {
                    if (key === 'search') $('search-q').focus();
                  } });
   }
-  /* Hints in the analyst's words (ux19-copy developer-speak-in-copy,
-     2026-09-23): they said "from /graph/metrics", "refetches the
-     projection", "PUT positions" and "settle the simulation". */
+  /* Hints in the analyst's words, not the API's. */
   for (const p of state.presets) {
     items.push({
       kind: 'Projection',
@@ -13699,12 +12332,9 @@ function buildPaletteItems() {
   return items;
 }
 
-/* The palette's first screen (ux09-search palette-first-screen-and-keycap,
-   2026-09-23). With nothing typed it opened on seventeen "Go to" rows and
-   some forty commands before the first entity, although docs/06 puts
-   jumping to an entity first. Now: the entities looked at most recently,
-   the commands for the selection, one row that expands into the panes,
-   then everything else. Typing searches the whole list as before. */
+/* The palette's first screen puts jumping to an entity first (docs/06): the entities looked at
+   most recently, the commands for the selection, one row that expands into the panes, then
+   everything else. Typing searches the whole list. */
 const RECENT_ENTITIES = 6;
 const FIRST_SCREEN_ENTITIES = 8;
 let recentEntities = [];
@@ -13743,45 +12373,23 @@ function paletteFirstScreen(all) {
   ).slice(0, 200);
 }
 
-/** The last row whenever a case is open and something is typed: the same
- *  text as a full search, in the pane (ux09-search two-searches-disagree,
- *  2026-09-23). The palette matches names; the pane also reads exhibits,
- *  collected documents and claims, and a miss here was a dead end. */
+/** The last row whenever a case is open and something is typed: the same text as a full search,
+ *  in the pane. The palette matches names; the pane also reads exhibits, collected documents and
+ *  claims. */
 function paletteSearchRow(raw) {
   return { kind: 'Search', label: 'Search this case for "' + raw + '"',
            hint: 'entities, evidence, documents and assertions',
            run: () => searchCaseFor(raw) };
 }
 
-/* Selectors in the palette (selectors-unsearchable, ux09-search,
-   2026-09-22). The palette matches names in memory, and a wallet, a Jabber
-   id or an email lives in the selector table, which only the server can
-   search: pasting ember_hobby's own wallet here answered "Nothing
-   matches." So input that could be a selector (three characters or more,
-   no spaces, or a value behind its type label: PAL_SEL_LABELLED) is also
-   sent to `/search/selectors`, once it settles, and the
-   entities it finds are listed with the selector as their hint. Cached per
-   query for one opening of the palette and at most PAL_SEL_TTL_MS, and
-   dropped on a case switch; a command typed with spaces never spends the
-   search meter the Search pane shares.
-
-   The cache is short on purpose. Held for the whole case, an empty answer
-   stuck: a wallet looked up before anyone recorded it kept answering
-   "Nothing matches." until a case switch or a reload, which is this
-   finding again in a narrower window (verifier of the 2026-09-22 fix).
-
-   Since 2026-09-23 the lookup is `/search/nodes`, the Search pane's own
-   Entities route, not `/search/selectors` (ux09-search
-   two-searches-disagree). The two searches used different matching rules
-   and answered differently: "umbra" was 3 entities here and 10 in the
-   pane, because the crew members matched through an attribute this list
-   never saw. The names above are still matched in memory, at once, and
-   what the server adds (attributes, selectors, merged records) now
-   follows the pane's rule, so for entities the palette finds at least
-   what the pane finds. A spaced query is sent too when no command row
-   matches it (`palSelectorQuery`), so "umbra crew" reaches the server and
-   "fit view" does not. The names keep "selector" from when that was all
-   this looked up. */
+/* Server matches in the palette. Names are matched in memory at once, but a wallet, a Jabber id
+   or an email lives in the selector table, which only the server can search. Input that could
+   be a selector (three characters or more with no spaces, or a value behind its type label:
+   PAL_SEL_LABELLED), or a spaced query no command row matches (`palSelectorQuery`), is also
+   sent, once it settles, to `/search/nodes`, the Search pane's Entities route, so the palette
+   finds at least what the pane finds. Cached per query for one opening and at most
+   PAL_SEL_TTL_MS, so an empty answer does not stick, and dropped on a case switch; a command
+   such as "fit view" never spends the search meter the Search pane shares. */
 const PAL_SEL_DELAY_MS = 250;
 const PAL_SEL_LIMIT = 20;
 const PAL_SEL_TTL_MS = 30000;
@@ -13800,13 +12408,10 @@ onCaseSwitch(() => {
   resetPalSel();
 });
 
-/* Also a value pasted behind its one-word type label ("ICQ: 123456789",
-   "IMEI 490154203237518"), which the server reads as that type's value
-   (curation.type_label). Spaced, it was never sent, so the palette
-   answered "Nothing matches." for a number the Search pane finds
-   (verifier of the second 2026-09-22 fix round). A label followed by a
-   colon, or by a value holding a digit: two-word commands ("Save layout",
-   "Fit view") are neither, so they still never spend the search meter. */
+/* Also a value pasted behind its one-word type label ("ICQ: 123456789", "IMEI 490154203237518"),
+   which the server reads as that type's value (curation.type_label): a label followed by a
+   colon, or by a value holding a digit. Two-word commands ("Save layout", "Fit view") are
+   neither, so they never spend the search meter. */
 const PAL_SEL_LABELLED = /^[A-Za-z][\w-]*(?::\s*\S{3,}|\s+(?=\S*\d)\S{3,})$/;
 
 function palSelectorQuery(raw, commandMatched) {
@@ -13884,12 +12489,10 @@ function addSelectorMatches(matches, sq) {
   const listed = new Set(matches.map((it) => it.nodeId).filter(Boolean));
   for (const hit of entry.hits) {
     if (listed.has(hit.id)) continue;
-    /* The same reason line the Search pane prints (viaLine), so the two
-       say the same thing about the same hit; the selector value and the
-       merged record's name are de-fanged there (CR14). A hit whose words
-       are spread over several attributes gets the pane's nameReason too
-       (verifier of hit-rows-unexplained, 2026-09-23); a name match needs
-       no reason beside the name, so it shows the type. */
+    /* The same reason line the Search pane prints (viaLine, which de-fangs the selector value
+       and the merged record's name), or the pane's nameReason for a hit whose words are spread
+       over several attributes; a name match needs no reason beside the name, so it shows the
+       type. */
     matches.push({
       kind: 'Entity', nodeId: hit.id, label: visibleText(hit.label),
       hint: viaLine(hit, sq)
@@ -14048,15 +12651,9 @@ function initPalette() {
       e.preventDefault();
       toggleKeys(false);
     }
-    /* Alt+1..9 jumps to a pane. An analyst working one case crosses
-       Graph -> Evidence -> Comms -> Report dozens of times an hour, and
-       the rail is a mouse trip each way.
-
-       ALT, not a bare digit: bare digits are typed into every field in
-       this console, and Ctrl+digit is the browser's own tab switcher.
-       The guard against INPUT/TEXTAREA/SELECT/contentEditable is kept
-       anyway -- Alt+2 in a note should not teleport the analyst out of
-       what they are writing. */
+    /* Alt+1..9 jumps to a pane. Alt, not a bare digit (typed into every field) or Ctrl+digit
+       (the browser's tab switcher); and not while typing in a field, so Alt+2 in a note does not
+       move the analyst out of what they are writing. */
     if (e.altKey && !e.ctrlKey && !e.metaKey && /^[1-9]$/.test(e.key)) {
       const t = e.target;
       const typing = t && (t.isContentEditable
@@ -14079,9 +12676,7 @@ function initPalette() {
      label, and assigning textContent to it would delete both. */
   $('palette-key').textContent = mac ? '⌘K' : 'Ctrl K';
   $('keys-palette').textContent = mac ? '⌘K' : 'Ctrl K';
-  /* And the hint strip under the canvas, which said ⌘K on every
-     platform beside a header chip that said Ctrl K (README screenshot set
-     review, 2026-09-23). */
+  /* And the hint strip under the canvas, so it agrees with the header chip. */
   $('canvas-keys-palette').textContent = mac ? '⌘K' : 'Ctrl K';
 }
 
@@ -14102,35 +12697,18 @@ function toggleKeys(on) {
 
 /* ── guided walkthrough: the first-sign-in tour and Getting started ──────
  *
- * Added 2026-10-06 for the public beta, so that a first-time user is told
- * what this console is, what it must not be used on yet, and where to start,
- * instead of landing on an empty case list. One dialog (`#tour-scrim`), two
- * views:
+ * Tells a first-time user what this console is, what it must not be used on yet, and where to
+ * start. One dialog (`#tour-scrim`), two views: "tour", six short steps shown once after a
+ * successful sign-in on a browser (`maybeShowWelcomeTour`, at the end of `startApp`) and from
+ * Help, Take the tour; and "help", Getting started, from the Help button in the top bar.
  *
- *   - "tour": six short steps, shown by itself ONCE after a successful
- *     sign-in on a browser (`maybeShowWelcomeTour`, called at the end of
- *     `startApp`) and from Help, Take the tour;
- *   - "help": Getting started, the first five things to try, from the Help
- *     button in the top bar.
- *
- * "Seen" is a per-viewer convenience, so it lives in localStorage inside
- * try/catch like the other two (`TRIAGE_KEYS_PREF`, `SMP_BANNER_KEY`): where
- * storage is blocked the tour is simply shown again at the next sign-in, and
- * `tourAutoShown` keeps that to once per page load.
- *
- * Every word on screen is a string in `TOUR_STEPS` or `GETTING_STARTED`
- * written with `textContent` (through `el`). Nothing is assigned as markup and
- * nothing is written to `element.style`: the spotlight is the class
- * `tour-spot`, put on the rail tile or button a step talks about and taken
- * off when the step changes or the dialog closes. A target that is not on
- * the screen (the rail is hidden on the case list) is skipped, so a step
- * never waits on an element. The dialog is held like the case record's
- * (`holdDialogKeys`): Tab stays inside, Escape closes, and focus goes back
- * to whatever opened it.
- *
- * The wording follows what the console really offers: the pane names are
- * the rail's own captions and the form labels are the forms' own labels
- * (test_ui_walkthrough holds the six titles, the counter and the command).
+ * "Seen" is a per-viewer convenience in localStorage inside try/catch, like `TRIAGE_KEYS_PREF`
+ * and `SMP_BANNER_KEY`: where storage is blocked the tour shows again at the next sign-in, and
+ * `tourAutoShown` keeps that to once per page load. Every word is a string in `TOUR_STEPS` or
+ * `GETTING_STARTED` written with `textContent`, and nothing is written to `element.style`: the
+ * spotlight is the class `tour-spot`, and a target not on screen is skipped. The dialog is held
+ * like the case record's (`holdDialogKeys`). test_ui_walkthrough holds the six titles, the
+ * counter and the command.
  */
 const TOUR_SEEN_KEY = 'noctornal.tour.seen';
 
@@ -14147,12 +12725,10 @@ function rememberTour() {
   catch (_e) { /* storage blocked: the tour shows again at the next sign-in */ }
 }
 
-/** The demo case's recipe, as `scripts/bootstrap.py` (its default code) and
- *  the installer's closing card give it: Operation Latticework, the one
- *  case the installer offers, not the larger showcase the README builds
- *  from OP-SHOWCASE-26. The owner is the signed-in address when that is
- *  a plain address, and the placeholder YOU otherwise: a value pasted into
- *  a shell is never taken from anywhere that could hold a metacharacter. */
+/** The demo case's recipe, as `scripts/bootstrap.py` and the installer's closing card give it
+ *  (Operation Latticework). The owner is the signed-in address when that is a plain address and
+ *  the placeholder YOU otherwise: a value pasted into a shell never comes from anywhere that
+ *  could hold a metacharacter. */
 const TOUR_SAFE_EMAIL = /^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$/;
 
 function tourDemoCommand(email) {
@@ -14474,31 +13050,22 @@ function wireTour() {
 
 /* ── notifications ────────────────────────────────────────────────────
  *
- * Phase 5. Two things about this panel are load-bearing rather than
- * cosmetic.
+ * The badge is the only thing that tells an analyst a second signature is waiting, so it is
+ * polled with the case, like the triage badge, rather than refreshed only when the tab is open:
+ * an approval nobody is told about is one nobody gives.
  *
- * The BADGE is the only thing that tells an analyst a second signature is
- * waiting for them, so it is polled with the case rather than refreshed
- * only when the tab is open — the same reasoning as the triage badge. An
- * approval nobody is told about is an approval nobody gives, and then dual
- * control is just a merge button that does not work.
- *
- * The BODY of a notification renders here and only here. docs/07: email
- * carries a summary and a link, never the content, and anything above
- * TLP:AMBER does not leave the platform at all. The server enforces that
- * (the email renderer cannot even reach the body — see transports.py); this
- * panel is the other end of that arrangement, the place where the detail is
- * safe to show because the reader has already passed the access gate.
+ * The body of a notification renders here and only here (docs/07): email carries a summary and
+ * a link, never the content, and nothing above TLP:AMBER leaves the platform. The server
+ * enforces that (the email renderer cannot reach the body, see transports.py); this panel shows
+ * the detail because its reader has passed the access gate.
  */
 
 /* Not reset on a case switch, deliberately: notifications are the
  * analyst's own, across every case they hold, so nothing here belongs to
  * the case being left. What DID need fixing is below. */
 async function loadInbox() {
-  /* "Needs action", not "Unread only" (ux08-triage:urgent-read-vs-ack-
-     invisible, 2026-09-23): an urgent alarm that was merely glanced at is
-     read, still unacknowledged, and still escalates in an hour, and the
-     unread filter hid it from the analyst working their inbox by it. */
+  /* "Needs action", not "Unread only": an urgent alarm merely glanced at is read but still
+     unacknowledged, and still escalates in an hour. */
   const needs = $('inbox-needs-action').checked;
   try {
     const data = await api('/notifications?limit=100'
@@ -14509,9 +13076,8 @@ async function loadInbox() {
     state.inboxFailed = false;
     clearLoadFailure('inbox-empty');
   } catch (err) {
-    /* ux17-failure:failure-renders-as-empty-claim (2026-09-22): a failed
-       read rendered "Nothing waiting.", which is the inbox saying no
-       second signature is wanted at the moment it could not tell. */
+    /* A failed read must not render "Nothing waiting.", a claim that no second signature is
+       wanted when the inbox cannot tell. */
     state.inbox = [];
     state.inboxFailed = true;
     renderInbox();
@@ -14537,13 +13103,8 @@ async function refreshInboxBadge() {
   refreshWaiting();
 }
 
-/** What the inbox badges say, from the two counts.
- *
- *  ux08-triage:urgent-read-vs-ack-invisible (2026-09-23). The badge was
- *  one accent pill counting unread, so a glance at an "exhibit failed its
- *  integrity check" alarm, or Mark all read, took it to zero while the
- *  alarm went on to escalate an hour later. An unacknowledged urgent item
- *  now keeps the badge up, marked urgent, whatever has been read. */
+/** What the inbox badges say, from the two counts. An unacknowledged urgent item keeps the badge
+ *  up, marked urgent, whatever has been read, since reading does not stop its escalation. */
 function inboxBadgeState(unread, urgent) {
   const u = unread || 0, p1 = urgent || 0;
   const n = u || p1;
@@ -14575,19 +13136,12 @@ function renderInboxBadge() {
 
 const PRIORITY_LABEL = { 1: 'urgent', 2: 'normal', 3: 'low' };
 
-/** Where a notification's Open goes, by what it is about, or null.
- *
- *  ux08-triage:notifications-no-path-to-object and open-approvals-wrong-
- *  case (2026-09-23). The only way from a card to its subject was "Open
- *  approvals", which switched to the CURRENT case's Triage, so an
- *  approver following a request from another case was told there were
- *  no pending requests there. Every other kind was a dead end, the P1
- *  integrity alarm included. Each route names the case it opens when
- *  that is not the one on screen. */
+/** Where a notification's Open goes, by what it is about, or null. Each route names the case it
+ *  opens when that is not the one on screen. */
 function notificationRoute(n) {
   const t = n.object_type;
-  /* F9 (2026-09-24): a deployment-wide request has no case, and is
-     read under Administration or Oversight, Two-person controls. */
+  /* A deployment-wide request has no case, and is read under Administration or Oversight,
+     Two-person controls. */
   if (t === 'approval_request' && !n.case_id) {
     return { label: 'Open the change', oversight: true, dual: n.object_id };
   }
@@ -14604,9 +13158,7 @@ function notificationRoute(n) {
     return { label: 'Open the merge', tab: 'graph', merge: n.object_id };
   }
   if (t === 'case_review' && n.case_id) {
-    /* The rail tab's own caption (2026-09-24): "Open Lifecycle" named
-       a tab renamed Records in the same pass, and led to a pane headed
-       with a word the button never said. */
+    /* The rail tab's own caption, so the button and the pane it opens say the same word. */
     return { label: 'Open Records', tab: 'governance', sub: 'retention' };
   }
   if (t === 'break_glass') {
@@ -14630,11 +13182,9 @@ async function openNotificationTarget(n) {
   const route = notificationRoute(n);
   if (!route) return;
   if (route.oversight) {
-    /* The officer's case-less alerts are read in the case-less Inbox, and
-       showAdmin knows nothing of that view: it left #view-inbox standing
-       under Oversight, both on screen at once (verifier's fix round,
-       2026-09-23). Put the pane back once Oversight is up, not before,
-       so the screen is never empty while its access is read. */
+    /* The officer's case-less alerts are read in the case-less Inbox, which showAdmin knows
+       nothing of, so the Inbox is left once Oversight is up, not before, and the screen is never
+       empty while its access is read. */
     if (route.dual) DUAL.target = route.dual;
     await showAdmin();
     if (adminView) leaveInbox();
@@ -14692,17 +13242,11 @@ async function focusMerge(mergeId) {
   }
 }
 
-/** One inbox action, with its outcome said. ux08-triage:inbox-actions-
- *  fail-silently (2026-09-23): these were `await api(...); await
- *  loadInbox()` with no catch, so an Acknowledge on an urgent alarm that
- *  failed (a dropped connection, a 404 after a clearance change) changed
- *  nothing on screen, and the analyst believed they had stopped the
- *  escalation. */
+/** One inbox action, with its outcome said: a failed Acknowledge on an urgent alarm must not
+ *  leave the analyst believing they stopped the escalation. */
 async function inboxAction(btn, path, done, where) {
-  /* A failure goes on the card that was pressed, `where` (ux17-failure:
-     inbox-actions-fail-silently, 2026-09-23), or on the inbox's own
-     line; a success on the inbox's line, because the list is read again
-     and the card is redrawn. */
+  /* A failure goes on the card that was pressed (`where`) or on the inbox's own line; a success
+     on the inbox's line, because the list is read again and the card is redrawn. */
   btn.disabled = true;
   const top = $('inbox-msg');
   const msg = where || top;
@@ -14815,15 +13359,9 @@ function renderInbox() {
 /** The channel as a person names it; the key stays beside it. */
 const CHANNEL_NAME = { SMTP: 'Email', WEBHOOK: 'Webhook', JIRA: 'Jira' };
 
-/** What a minimum priority delivers and leaves out, from the server's own
- *  kind table.
- *
- *  ux08-triage:prefs-unlabelled-and-opaque (2026-09-23). The three tiers
- *  never said which notifications they covered, so nothing told an
- *  analyst that "urgent only" on email silently stops approval-request
- *  mail (priority 2), and a second signature could go unasked all
- *  evening. `GET /notifications/preferences` has always returned the
- *  kinds with their priorities; nothing read them. */
+/** What a minimum priority delivers and leaves out, from the server's own kind table
+ *  (`GET /notifications/preferences`): "urgent only" on email stops approval-request mail
+ *  (priority 2), and a second signature could go unasked. */
 function prefKindsText(kinds, min) {
   const rows = Object.entries(kinds || {}).map(([key, k]) => ({ key, ...k }))
     .sort((a, b) => a.priority - b.priority
@@ -14844,14 +13382,9 @@ function prefAsksText(kinds, min) {
     ? 'Requests for your second signature will not arrive on this channel, only in this inbox.' : '';
 }
 
-/** The zone quiet hours are read in, said next to the times.
- *
- *  ux08-triage:quiet-hours-utc-not-local (2026-09-23). The inputs said
- *  "your local time" and the server applied them in the preference's
- *  stored zone, UTC for everyone, so 22:00 to 07:00 on US Eastern
- *  deferred mail from 17:00 to 02:00. The zone is now shown, chosen and
- *  saved; every other time in this console is UTC and says so, and this
- *  is the one setting where a person's own night is the point. */
+/** The zone quiet hours are read in, said next to the times, chosen and saved. Every other time
+ *  in this console is UTC and says so; this is the one setting where a person's own night is the
+ *  point. */
 function prefZoneOptions(stored, browserZone) {
   const zones = [];
   for (const z of [stored || 'UTC', 'UTC', browserZone]) {
@@ -14925,8 +13458,7 @@ async function loadInboxPreferences() {
   try {
     data = await api('/notifications/preferences');
   } catch (err) {
-    /* An empty box read as "no channels to set" (ux17-failure:
-       inbox-actions-fail-silently, 2026-09-23). */
+    /* A failed read says so, rather than an empty box that reads as "no channels to set". */
     if (err && err.handled) return;
     showLoadFailure('inbox-prefs-empty', 'Your delivery preferences', err,
       loadInboxPreferences);
@@ -14947,10 +13479,9 @@ async function loadInboxPreferences() {
     enabled.type = 'checkbox';
     enabled.checked = p.enabled;
     row.appendChild(prefField('Deliver on this channel', enabled, 'control'));
-    /* F8 and F7 (2026-09-24): a channel that cannot deliver says
-       why, and is not switched on into a hold; switching it off stays
-       possible. Jira takes no digest, no quiet window and no threshold:
-       the destination's routed kinds are the filter. */
+    /* A channel that cannot deliver says why, and is not switched on into a hold; switching it
+       off stays possible. Jira takes no digest, no quiet window and no threshold: the
+       destination's routed kinds are the filter. */
     const avail = (data.channels || {})[p.channel];
     const jira = p.channel === 'JIRA';
     if (avail && !avail.available && !p.enabled) enabled.disabled = true;
@@ -15047,14 +13578,10 @@ async function loadInboxPreferences() {
 
 /* ── the inbox without a case ─────────────────────────────────────────
  *
- * ux08-triage:no-work-waiting-at-sign-in (2026-09-23). The Inbox and its
- * badge lived only in the case rail, so the first question after sign-in
- * ("what needs me now") meant opening a case first, and a security
- * officer whose alerts belong to no case had to open an unrelated one to
- * read them. The header's Inbox button works everywhere: inside a case it
- * is the rail tab; on the case list it moves #pane-inbox into #view-inbox,
- * the way `showAdmin` moves the accounts pane, and the case-switch reset
- * puts it back. One pane, one set of ids and loaders. */
+ * "What needs me now" must not need a case open, and a security officer's alerts belong to no
+ * case. The header's Inbox button works everywhere: inside a case it is the rail tab; on the
+ * case list it moves #pane-inbox into #view-inbox, as `showAdmin` moves the accounts pane, and
+ * the case-switch reset puts it back. One pane, one set of ids and loaders. */
 let inboxView = false;
 let inboxHome = null;
 
@@ -15104,11 +13631,9 @@ onCaseSwitch(() => {
 
 /* ── what is waiting, per case ────────────────────────────────────────
  *
- * ux08-triage:no-work-waiting-at-sign-in (2026-09-23): proposals waiting
- * in each case's triage queue, and approval requests this person could
- * sign. The case list shows them in its own column, and the Triage badge
- * adds the signatures to its count, so a request whose notification has
- * been read is still visible somewhere. */
+ * Proposals waiting in each case's triage queue, and approval requests this person could sign.
+ * The case list shows them in its own column, and the Triage badge adds the signatures to its
+ * count, so a request whose notification has been read is still visible somewhere. */
 async function refreshWaiting() {
   if (!signedIn()) return;
   try {
@@ -15145,13 +13670,9 @@ function paintCaseWaiting() {
 function initInbox() {
   $('inbox-needs-action').addEventListener('change', loadInbox);
   $('btn-inbox').addEventListener('click', openInbox);
-  /* One click cleared the unread signal on every notification, approval
-     requests included, with no confirmation, no way back and no word when
-     it failed (ux17-failure:inbox-actions-fail-silently and ux08-triage,
-     2026-09-23). It now says what it would change, and what it does not:
-     reading is not acknowledging, so an unacknowledged item keeps
-     nagging. Every case's badge in one click, with no undo: said before,
-     not discovered after. */
+  /* Mark all read clears the unread signal on every notification in every case, with no undo, so
+     it first says what it would change and what it does not: reading is not acknowledging, so
+     an unacknowledged item keeps nagging. */
   const all = $('inbox-read-all');
   all.addEventListener('click', async () => {
     const msg = $('inbox-read-all-msg');
@@ -15185,20 +13706,13 @@ function initInbox() {
 }
 
 
-/* ── comms: channels, durable selectors, contact blocks (Phase 7) ──────
+/* ── comms: channels, durable selectors, contact blocks ──────────────────
  *
- * docs/10: "Read the durable selector column carefully. Getting this wrong
- * is the single biggest source of false attribution in this domain."
- *
- * So the centrepiece of this pane is the NORMALISE PREVIEW, not the form.
- * An analyst who cannot see that their 76-hex Tox ID will be indexed on
- * its first 64 characters has no way to understand why two observations
- * did or did not correlate — and the failure is silent either way: the
- * graph simply shows one person, or two.
- *
- * Every refusal is shown WITH ITS REASON for the same reason. "No durable
- * value" on its own reads as a broken form; "a Telegram @username is not
- * durable because usernames are recycled" is a fact the analyst can act on.
+ * The durable selector is the biggest source of false attribution in this domain (docs/10), so
+ * the centrepiece of this pane is the normalise preview, not the form: an analyst must see that
+ * a 76-hex Tox ID is indexed on its first 64 characters, or two observations correlate, or not,
+ * silently. Every refusal is shown with its reason ("a Telegram @username is not durable because
+ * usernames are recycled"), which the analyst can act on.
  */
 
 let commsPlatforms = [];
@@ -15224,11 +13738,9 @@ function platformByKey(key) {
   return commsPlatforms.find((p) => p.key === key) || null;
 }
 
-/** A normaliser note as a sentence of its own: capital first letter and a
- *  closing full stop. The service writes its notes as clauses ("a Telegram
- *  @username is NOT durable ..."), which read correctly after a colon, and
- *  this pane puts them after a full stop, so the Correlate answer began a
- *  sentence in lower case (README screenshot review, 2026-09-23). */
+/** A normaliser note as a sentence of its own: capital first letter and a closing full stop. The
+ *  service writes its notes as clauses ("a Telegram @username is NOT durable ..."), which read
+ *  correctly after a colon, and this pane puts them after a full stop. */
 function asSentence(note) {
   const text = String(note || '').trim();
   if (!text) return '';
@@ -15343,8 +13855,7 @@ function initCommsCorrelate() {
       /* "N binding(s) in this case" must be about the case on screen. */
       if (caseChanged(token)) return;
       const head = el('p', 'hint');
-      /* The count's own noun: "0 binding(s)" was in the README capture
-         (README screenshot review, 2026-09-23). */
+      /* The count's own noun, singular or plural. */
       const n = body.matches.length;
       head.textContent = body.durable_value
         ? 'Correlating on ' + body.durable_value + ' finds ' + n
@@ -15453,10 +13964,8 @@ function initCommsBlocks() {
           publisher_handle: $('comms-block-handle').value.trim() || null,
         },
       });
-      /* The parse belongs to the case it was sent to. Rendered after a
-         switch it sat in the new case's output, which the switch had just
-         cleared, naming another case's publisher (verifier, fix round of
-         2026-09-22). */
+      /* The parse belongs to the case it is for; rendered after a switch it would name another
+         case's publisher in the new case's output. */
       if (caseChanged(token)) {
         banner('Contact block parsed in ' + code,
           'You had moved to another case before the reply arrived, so the '
@@ -15465,9 +13974,7 @@ function initCommsBlocks() {
         return;
       }
       renderContactBlock(block);
-      /* It printed "Raised as a proposal for review" and left the Triage
-         badge where it was until the case was reopened (ux08-triage:
-         stale-badges-and-list, 2026-09-23). */
+      /* A proposal it raised updates the Triage queue and its badge at once. */
       if ((block.entries || []).some((e) => e.proposal_id)) loadTriage();
     } catch (err) {
       if (caseChanged(token)) {
@@ -15487,7 +13994,7 @@ function initComms() {
   initCommsBlocks();
 }
 
-/** The PGP half of the pane (F10, F10a, F10b, F10c, 2026-09-24). */
+/** The PGP half of the pane. */
 function initCommsPgp() {
   $('comms-pgp-binding-clear').addEventListener('click', clearPgpBinding);
   for (const id of ['comms-pgp-kind-clear', 'comms-pgp-kind-detached']) {
@@ -15537,9 +14044,9 @@ function wire() {
   wireCustodyVerify();
   wireRetentionConfirm();
   wireDeliveries();
-  initIntegrations();   // F8 and F7
-  initProviders();      // F15.2
-  initCaseRouting();    // F7 and F15.3
+  initIntegrations();
+  initProviders();
+  initCaseRouting();
   wireAssumptions();
   wireCaseActions();
   wireCaseHold();
@@ -15574,21 +14081,18 @@ function wire() {
   });
   $('apr-refresh').addEventListener('click', loadApprovals);
   $('apr-state').addEventListener('change', loadApprovals);
-  initCasePolicy();   // the merge switch (F9b)
+  initCasePolicy();   // the merge switch
   document.addEventListener('keydown', onTriageKey);
   wireTriageLetters();
   $('an-run').addEventListener('click', runAnalysis);
-  /* Changing decay invalidates what is on screen: every number depends on
-     it. Blank it rather than leave numbers that no longer match the
-     controls above them, through blankAnalytics, so a run still out under
-     the old parameters is dropped rather than drawn under the new ones
-     (final review C3). */
+  /* Changing decay invalidates what is on screen, since every number depends on it: blanked
+     through blankAnalytics, so a run still out under the old parameters is dropped rather than
+     drawn under the new ones. */
   $('an-decay').addEventListener('change', () => {
     blankAnalytics('Parameters changed. Run the analysis again.');
   });
-  /* The projection options (L3 and F2, 2026-09-24) are part of what every
-     number means, exactly as decay is, so changing one blanks the pane the
-     same way. */
+  /* The projection options are part of what every number means, as decay is, so changing one
+     blanks the pane the same way. */
   for (const id of ['an-ties', 'an-om-forum', 'an-om-wallet', 'an-om-max']) {
     $(id).addEventListener('change', () => {
       blankAnalytics('Parameters changed. Run the analysis again.');
@@ -15596,7 +14100,7 @@ function wire() {
   }
   $('an-kpp-n').addEventListener('change', onKppSizeChange);
   $('an-concor-depth').addEventListener('change', onConcorDepthChange);
-  /* REGE (2026-10-02): the regular-role card's two controls fetch only it. */
+  /* REGE: the regular-role card's two controls fetch only it. */
   $('an-rege-roles').addEventListener('change', onRegeChange);
   $('an-rege-weighting').addEventListener('change', onRegeChange);
   for (const th of document.querySelectorAll('#an-table th[data-sort]')) {
@@ -15690,24 +14194,19 @@ function wire() {
   window.addEventListener('resize', () => { resizeDensity(); resizeHistory(); });
 }
 
-/* A token handed over in the URL fragment (#token=...) is adopted and the
- * fragment immediately erased, so it never reaches a bookmark, the history
- * entry, or a Referer header. Written for `bootstrap.py session`, which is
- * the way in when TOTP cannot work — a host whose clock disagrees with the
- * phone's can never produce a matching code. A fragment is not sent to the
- * server, so the token does not appear in the access log either.
+/* A token handed over in the URL fragment (#token=...) is adopted and the fragment erased at
+ * once, so it never reaches a bookmark, the history entry or a Referer header; a fragment is
+ * never sent to the server, so it is not in the access log either. For `bootstrap.py session`,
+ * the way in when TOTP cannot work (a host clock that disagrees with the phone's).
  *
- * Returns the banner to show once boot() has settled the view (title,
- * detail, kind), or null. Banners raised here directly would be lost:
- * `endSession` suppresses them while `state.booting` is set. */
+ * Returns the banner to show once boot() has settled the view (title, detail, kind), or null:
+ * banners raised here would be lost, since `endSession` suppresses them while `state.booting`
+ * is set. */
 async function adoptSessionFromFragment() {
   const hash = window.location.hash || '';
-  /* Read the deep link BEFORE the fragment is erased. `#case=<id>&tab=feeds`
-   * opens a named case at a named pane — "look at the dead-letter queue on
-   * NIGHTJAR" is a thing one analyst says to another, and without this the
-   * answer is six words of clicking. Kept in the same fragment as the token
-   * because a fragment is never sent to the server, so neither the token nor
-   * the case id reaches an access log. */
+  /* Read the deep link before the fragment is erased: `#case=<id>&tab=feeds` opens a named case
+   * at a named pane. Kept in the same fragment as the token because a fragment is never sent to
+   * the server, so neither the token nor the case id reaches an access log. */
   const wanted = /(?:^|[#&])tab=([a-z-]+)/.exec(hash);
   const wantedCase = /(?:^|[#&])case=([0-9a-fA-F-]{36})/.exec(hash);
   if (wanted) state.deepLinkTab = wanted[1];
@@ -15723,20 +14222,13 @@ async function adoptSessionFromFragment() {
   const token = decodeURIComponent(match[1]);
   history.replaceState(null, '', window.location.pathname);
 
-  /* A fragment must never replace a session this browser already holds
-     (2026-09-09). Cookies are per profile, not per tab: until this check
-     the exchange below ran unconditionally with the bearer forced, so a
-     link of the documented deep-link shape carrying someone ELSE's token,
-     opened by a signed-in analyst, swapped the cookie under every tab
-     they had open -- each still showed the analyst, `authHeaders()` in
-     each read the new CSRF cookie live, and every write from them was
-     attributed to the other account in the audit chain. So: ask /auth/me
-     on the cookie first (`state.token` is null here, so no bearer goes
-     with it). A live session WITH its readable half is kept and the
-     handed-over token is dropped on the floor. A live session WITHOUT it
-     (`halfSession`) is one the exchange may repair: the server re-mints
-     the pair for the same account and refuses a different one with 409,
-     which is the line that holds even when this code is wrong. */
+  /* A fragment must never replace a session this browser already holds: cookies are per
+     profile, not per tab, so a link carrying someone else's token would swap the cookie under
+     every open tab and attribute their writes to the other account. So /auth/me is asked on the
+     cookie first (`state.token` is null here, so no bearer goes with it). A live session with its
+     readable half is kept and the handed-over token dropped. One without it (`halfSession`) the
+     exchange may repair: the server re-mints the pair for the same account and refuses a
+     different one with 409, which holds even when this code is wrong. */
   let holder = null;
   try {
     holder = await api('/auth/me');
@@ -15755,15 +14247,12 @@ async function adoptSessionFromFragment() {
     };
   }
 
-  /* ASK BEFORE SIGNING IN (http_ui-017, 2026-10-03). Nothing above made
-     this browser anyone: it holds no session. The link was made by
-     whoever holds a session token, which is not necessarily the person
-     who opened it, and exchanging it quietly signed a colleague whose own
-     session had lapsed in as the link's author, who can read everything
-     they then did. `GET /auth/me` with the handed-over token as the
-     bearer names the account without signing anything in (it sets no
-     cookie), and the person is asked about THAT account by name. Held in
-     memory only for the question, and dropped on a refusal. */
+  /* Ask before signing in: the link was made by whoever holds a session token, not necessarily
+     the person who opened it, and a quiet exchange would sign a colleague in as the link's
+     author, who could then read everything they did. `GET /auth/me` with the handed-over token as
+     the bearer names the account without signing anything in (it sets no cookie), and the person
+     is asked about that account by name. Held in memory only for the question, dropped on a
+     refusal. */
   let who = null;
   try {
     who = await api('/auth/me', { bearer: token });
@@ -15785,13 +14274,11 @@ async function adoptSessionFromFragment() {
     };
   }
 
-  /* Exchange it ONCE for the cookie pair (`POST /auth/cookie`), forcing
-     the bearer so the NEW token is presented and not the cookie. Held in
-     memory before the call because a console the browser refuses Secure
-     cookies on runs on this token alone (see the header). A refusal --
-     a stale token's 401, another account's 409 -- comes back here rather
-     than through `endSession`: the tab's own session, if any, is not
-     what was judged. Nothing is written to storage on any path. */
+  /* Exchange it once for the cookie pair (`POST /auth/cookie`), forcing the bearer so the new
+     token is presented, not the cookie. Held in memory first, because where the browser refuses
+     Secure cookies the console runs on this token alone. A refusal (a stale token's 401, another
+     account's 409) comes back here, not through `endSession`: the tab's own session was not what
+     was judged. Nothing is written to storage on any path. */
   state.token = token;
   try {
     await api('/auth/cookie', { method: 'POST', bearer: token });
@@ -15802,10 +14289,9 @@ async function adoptSessionFromFragment() {
   }
 }
 
-/** The question a `#token=` link asks before it signs this browser in:
- *  the account by name and address, what signing in means, and that the
- *  person should only continue if they expected it. Names go through
- *  `visibleText`, so a display name built to look like somebody else's
+/** The question a `#token=` link asks before it signs this browser in: the account by name and
+ *  address, what signing in means, and that the person should continue only if they expected
+ *  it. Names go through `visibleText`, so a display name built to look like somebody else's
  *  cannot hide its odd characters. */
 function signInLinkQuestion(who) {
   const w = who || {};
@@ -15817,10 +14303,9 @@ function signInLinkQuestion(who) {
     + 'for it.\n\nSign in as ' + name + '?';
 }
 
-/** The banner for a link that was refused: a stale or used token, another
- *  account's session, an API that did not answer. To whoever opened the
- *  link, who may not be the operator who made it
- *  (ux01-firstrun:shell-only-recovery-copy, 2026-09-23). */
+/** The banner for a link that was refused: a stale or spent token, another account's session, an
+ *  API that did not answer. Written to whoever opened the link, who may not be the operator who
+ *  made it. */
 function signInLinkRefused(err) {
   const why = err instanceof ApiError && err.status === 401
     ? 'The link has expired or has already been used.'
@@ -15833,15 +14318,10 @@ function signInLinkRefused(err) {
   };
 }
 
-/** Honour a `#tab=` deep link once the workspace is up.
- *
- *  Called after the case loads rather than during boot: several panes are
- *  case-scoped and selecting one before `state.caseId` exists produces a
- *  pane that renders its empty state and then never refreshes, which looks
- *  exactly like "there is no data".
- *
- *  `chosenMeanwhile` is true when the analyst picked a pane while the case was
- *  loading: the link is spent either way, but it does not take the pane back.
+/** Honour a `#tab=` deep link once the workspace is up: selected before `state.caseId` exists, a
+ *  case-scoped pane renders its empty state and never refreshes. `chosenMeanwhile` is true when
+ *  the analyst picked a pane while the case was loading: the link is spent either way, but does
+ *  not take the pane back.
  */
 function applyDeepLinkTab(chosenMeanwhile) {
   const name = state.deepLinkTab;
@@ -15853,21 +14333,13 @@ function applyDeepLinkTab(chosenMeanwhile) {
 
 
 /* =====================================================================
- * ENTITY RESOLUTION (Phase 6)
+ * ENTITY RESOLUTION
  *
- * docs/01: "Merging is the operation most likely to quietly corrupt a
- * case." So the control says what it will do BEFORE it does it, names
- * which record loses, and every merge stays listed with a one-click
- * reversal beside it.
- *
- * Only same-type entities are offered. Merging a persona into a person is
- * an ATTRIBUTION carrying a confidence (invariant 2) and the server
- * refuses it -- but an interface that offers a choice the server will
- * reject is worse than one that never offered it.
- *
- * `labelOf` is the inspector's (one declaration, see there): a second copy
- * lived here until 2026-09-09 and, being declared last, silently replaced
- * the first for every caller in the file.
+ * Merging is the operation most likely to quietly corrupt a case (docs/01), so the control says
+ * what it will do before it does it, names which record loses, and every merge stays listed with
+ * a one-click reversal beside it. Only same-type entities are offered: merging a persona into a
+ * person is an attribution carrying a confidence (invariant 2), which the server refuses.
+ * `labelOf` is the inspector's: keep it one declaration.
  * ===================================================================== */
 
 /** A label reduced to its letters and digits, lower case: "Harrow_Skua2",
@@ -15878,11 +14350,7 @@ function mergeKey(label) {
   return String(label || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
 }
 
-/** Same-type candidates, likely matches first (ux06-entry:no-duplicate-
- *  check-on-create, 2026-09-23: the panel listed every same-type entity
- *  alphabetically, "Tandem Logistics (136)", "(643)", "(806)", with
- *  nothing marked as a likely match). Pure, for
- *  test_inspector_entry_ui.py. */
+/** Same-type candidates, likely matches first. Pure, for test_inspector_entry_ui.py. */
 function mergeCandidates(node, nodes) {
   const key = mergeKey(node.label);
   const all = nodes.filter((n) => n.id !== node.id && n.node_type === node.node_type)
@@ -15996,18 +14464,14 @@ async function runMerge() {
            '". Reverse it from the entity resolution panel if this was wrong.',
            'info');
   } catch (err) {
-    /* Dual control is a refusal with a NEXT STEP, not a fault. The router
-       answers 409 when the case has the switch on and no approval was
-       supplied -- and before this there was nothing the analyst could do
-       about it from the browser, because raising a request had no
-       surface. Offer to raise it, carrying the SAME reason they just
-       typed: the approver signs the reason, and a merge whose recorded
-       reason is not the one signed off makes the audit log say something
-       nobody agreed to. */
+    /* Dual control is a refusal with a next step, not a fault: the router answers 409 when the
+       case has the switch on and no approval was supplied. Offer to raise a request carrying the
+       same reason just typed: the approver signs the reason, and a merge recorded with another
+       reason would make the audit log say something nobody agreed to. */
     if (err instanceof ApiError && err.status === 409
         && /approval/i.test(err.detail || err.title || '')) {
-      /* The server's own sentence first (F9b, 2026-09-24): it says
-         whether the case or the whole deployment asks for the signature. */
+      /* The server's own sentence first: it says whether the case or the whole deployment asks
+         for the signature. */
       const ask = window.confirm(
         closeClause(err.detail || 'This case requires a second signature '
           + 'on merges') + '\n\n' +
@@ -16045,13 +14509,9 @@ async function runMerge() {
   }
 }
 
-/** The banner after raising a request, with the server's reach in it.
- *
- *  ux08-triage:approval-reach-warning-dropped (2026-09-23). The POST's
- *  reply was thrown away, and with it `warnings`, which says when no
- *  approver was notified because nobody else on the case holds the
- *  permission and the clearance. The banner said a decision was pending
- *  regardless, so a merge stalled on a signature from nobody. */
+/** The banner after raising a request, with the server's reach in it: the reply's `warnings`
+ *  say when no approver was notified because nobody else on the case holds the permission and
+ *  the clearance, or the merge would wait on a signature from nobody. */
 function approvalRaisedTitle(raised) {
   const warned = (raised && raised.warnings) || [];
   return warned.length ? 'Approval requested, but nobody was told'
@@ -16072,31 +14532,21 @@ function approvalRaisedText(raised) {
     + 'own request.';
 }
 
-/** The server's catalogue key for a merge approval.
- *
- *  Named once because it is a CONTRACT, not a label. The first version of
- *  this pane sent the string 'MERGE', which `approvals.py` rejects with
- *  "unknown operation" -- so raising a request 400'd and the Execute-merge
- *  button, which compared against the same wrong string, could never
- *  appear. Both halves were internally consistent and wrong together:
- *  exactly the defect the co-participation pane shipped, in the pane
- *  written after it. Asserted against `approvals.py` in
- *  `test_ui_invariants.py`.
+/** The server's catalogue key for a merge approval: a contract with `approvals.py`, not a label,
+ *  named once because raising a request and offering Execute merge must both use it.
+ *  `test_ui_invariants.py` asserts it against `approvals.py`.
  */
 const MERGE_OPERATION = 'node.merge';
 
-/* --- The case's merge switch (F9b, 2026-09-24) --------------------------
+/* --- The case's merge switch -----------------------------------------------
  *
- * `PUT /cases/{id}/policy` turned a case's second signature on merges on
- * and off, and nothing in the console called it: the only way to turn it
- * on was curl, and turning it off took one person. It is drawn here, above
- * the approvals it produces. Turning it ON is one signature. Turning it
- * OFF takes a second Lead investigator on the case: this raises a
- * `case.policy.relax` request for the switch as it stands (its epoch), the
- * other lead decides it below, and the one who asked applies it from its
- * row. Under a deployment that requires a second signature on every merge
- * (Administration, Two-person controls), a case cannot turn it off at all.
- * Governance, so it stays live on a closed case.
+ * `PUT /cases/{id}/policy` turns a case's second signature on merges on and off, drawn here above
+ * the approvals it produces. Turning it on is one signature. Turning it off takes a second Lead
+ * investigator on the case: this raises a `case.policy.relax` request for the switch as it
+ * stands (its epoch), the other lead decides it below, and the one who asked applies it from its
+ * row. Under a deployment that requires a second signature on every merge (Administration,
+ * Two-person controls), a case cannot turn it off at all. Governance, so it stays live on a
+ * closed case.
  */
 const RELAX_OPERATION = 'case.policy.relax';
 
@@ -16136,8 +14586,8 @@ function paintCasePolicy(p) {
   if (p.dual_control_merge) {
     let said = 'Merges in this case need a second signature.';
     if (may && !p.relax_signers) {
-      /* F39 (2026-10-02): somebody else holds the permission but has not
-         held it for the window yet, so say when, not "name a deputy". */
+      /* Somebody else holds the permission but has not held it for the window yet, so say when,
+         not "name a deputy". */
       if (p.relax_next_eligible) {
         said += ' Nobody else on this case can approve turning that off yet: '
           + 'the second person must have held case.update on the case for '
@@ -16273,20 +14723,12 @@ onCaseSwitch(() => {
 
 /* --- Dual control ------------------------------------------------------
  *
- * Approvals had no analyst surface at all. The notification centre's
- * "Open approvals" button switched to the Triage tab, which contained
- * none, and `runMerge` could not supply the `approval_request_id` its own
- * 409 demands -- so on a case with dual control switched on, Merge was
- * unreachable from the browser. The control did not make merging
- * two-person; it made it impossible.
- *
- * Requests are listed with their PAYLOAD rather than a summary. An
- * approval authorises one execution of exact parameters, so an approver
- * who cannot see the parameters is signing a description of them.
+ * Requests are listed with their payload rather than a summary: an approval authorises one
+ * execution of exact parameters, so an approver who cannot see them is signing a description.
  */
 async function loadApprovals() {
   if (!state.caseId) return;
-  loadCasePolicy();   // the switch above the list (F9b)
+  loadCasePolicy();   // the switch above the list
   const wanted = $('apr-state').value;
   const token = caseToken();
   listPending('apr-list', 'apr-empty');
@@ -16314,15 +14756,13 @@ async function loadApprovals() {
         err, 'Approvals need case.read on this case.'));
       return;
     }
-    /* Beside the line, not in it: written in, it outlived the failure
-       (ux17-failure:sticky-error-text-in-empty-slot, 2026-09-23). */
+    /* Beside the line, not in it: written in, it would outlive the failure. */
     showLoadFailure('apr-empty', 'The approval requests', err, loadApprovals);
   }
 }
 
-/** The request a notification's Open was for, brought into view and
- *  marked once the list has drawn (ux08-triage:open-approvals-wrong-case,
- *  2026-09-23). Consumed once: a later reload does not jump again. */
+/** The request a notification's Open was for, brought into view and marked once the list has
+ *  drawn. Consumed once: a later reload does not jump again. */
 function focusApprovalTarget() {
   const id = state.approvalTarget;
   if (!id) return;
@@ -16348,19 +14788,9 @@ function approvalEntity(subject, id) {
   return 'entity ' + shortId(id) + ', which you cannot see';
 }
 
-/** What a request asks for, in words, with the entities NAMED and the
- *  direction written out.
- *
- *  The card was titled with the catalogue key and its body was the
- *  payload's UUIDs, so an approver deciding a merge could not see which
- *  two entities it merged: dual control as a blind click, the opposite of
- *  its purpose (ux19 raw-ids-instead-of-names, 2026-09-22). The names came
- *  from the console's own graph after that, which holds only what the
- *  projection drew, so a merge outside it was still two UUIDs, and the
- *  sentence did not say which entity survives (ux08-triage:approval-row-
- *  uuids-no-requester, 2026-09-23). The server resolves them now, for the
- *  entities this approver may see. The exact parameters are still printed
- *  beneath: an approval authorises one execution of THOSE. */
+/** What a request asks for, in words, with the entities named (the server resolves those this
+ *  approver may see) and the direction written out, so dual control is never a blind click. The
+ *  exact parameters are printed beneath: an approval authorises one execution of those. */
 function approvalTitle(a) {
   const p = a.payload || {};
   if (a.operation === MERGE_OPERATION && p.source_node_id && p.target_node_id) {
@@ -16368,7 +14798,7 @@ function approvalTitle(a) {
     return 'Merge ' + approvalEntity(s.source, p.source_node_id) + ' INTO '
       + approvalEntity(s.target, p.target_node_id);
   }
-  // The case's own switch, in the words the policy block uses (F9b).
+  // The case's own switch, in the words the policy block uses.
   if (a.operation === RELAX_OPERATION) {
     return 'Stop requiring a second signature on merges in this case';
   }
@@ -16392,10 +14822,8 @@ function approvalRow(a) {
   const head = el('div', 'row-head');
   const title = approvalTitle(a);
   head.appendChild(el('span', 'row-title', title));
-  /* `is_expired` is DERIVED, never stored (0028: no EXPIRED state and no
-     sweeper). A PENDING request past its expiry is not pending in any
-     useful sense, and showing it as PENDING invites somebody to wait for
-     a decision that can no longer be acted on. */
+  /* `is_expired` is derived, never stored (migration 0028 has no EXPIRED state and no sweeper).
+     A PENDING request past its expiry cannot be acted on, so it is not shown as pending. */
   const dead = a.state === 'PENDING' && a.is_expired;
   head.appendChild(el('span', 'chip ' + (
     a.state === 'APPROVED' ? 'ok'
@@ -16407,9 +14835,8 @@ function approvalRow(a) {
                + 'the parameters it was raised over.';
     head.appendChild(chip);
   }
-  /* ux08-triage:approval-reach-warning-dropped (2026-09-23): a pending
-     request nobody was told about said nothing, so the requester waited
-     on a signature from someone who did not exist or never heard. */
+  /* A pending request nobody was told about says so, or the requester waits on a signature
+     from someone who does not exist or never heard. */
   if (a.state === 'PENDING' && !dead && a.approvers_notified === 0) {
     const chip = el('span', 'chip warn', 'no approver notified');
     chip.title = 'Nobody else on this case both holds the permission this '
@@ -16451,9 +14878,8 @@ function approvalRow(a) {
   }
 
   if (a.state === 'PENDING' && !dead) {
-    /* F39 (2026-10-02): a colleague who has not held case.update on the
-       case for the window yet is told the rule and the date before they
-       press Approve; Reject stays available, as everywhere. */
+    /* A colleague who has not yet held case.update on the case for the window is told the
+       rule and the date before they press Approve; Reject stays available, as everywhere. */
     if (a.signer_block && !mine) {
       card.appendChild(el('p', 'help', visibleText(a.signer_block.reason)));
     }
@@ -16487,9 +14913,8 @@ function approvalRow(a) {
     });
     card.appendChild(run);
   }
-  /* F9b (2026-09-24): an approved relax is spent from its own row by
-     the one who asked, like Execute merge, and is governance, so it carries
-     no `case-write` and works on a closed case. */
+  /* An approved relax is spent from its own row by the one who asked, like Execute merge. It
+     is governance, so it carries no `case-write` and works on a closed case. */
   if (a.state === 'APPROVED' && !a.consumed_at && !a.is_expired
       && a.operation === RELAX_OPERATION && mine) {
     const off = el('button', 'btn small', 'Stop requiring it now');
@@ -16503,12 +14928,8 @@ function approvalRow(a) {
 /** Approve and Reject for everyone but the requester; Withdraw for the
  *  requester alone, behind a confirmation.
  *
- *  ux08-triage:approval-row-uuids-no-requester (2026-09-23). All three
- *  were offered to every viewer, and the server refuses two of them to
- *  each party (it allows Withdraw only for `requested_by` and never lets
- *  a requester approve their own request), so each side saw a button
- *  that could only fail. The requester's Withdraw fired on one click and
- *  cannot be undone. */
+ *  This mirrors the server, which allows Withdraw only for `requested_by` and never lets a
+ *  requester approve their own request. Withdraw cannot be undone. */
 function approvalActions(a, title, asker, mine) {
   const actions = el('div', 'row-actions');
   /* A merge's decision is a content write the read-only gate refuses on
@@ -16601,30 +15022,22 @@ async function reverseMerge(m) {
 }
 
 /* =====================================================================
- * TRIAGE (Phase 4)
+ * TRIAGE
  *
- * The human half of "machines propose, analysts dispose". Every row here
- * is a suggestion that has NOT touched the graph, and the only ways out
- * are accept, reject and defer.
- *
- * Two things shape the design. Every suggestion shows the text it came
- * from, because a handle lifted out of a quoted signature block looks
- * identical to a real one until you see the sentence around it. And it is
- * keyboard driven, because docs/09 wants triage to be "a pleasant hour
- * rather than a grim one" and reaching for a mouse a hundred times is what
- * makes it grim.
+ * Every row is a suggestion that has not touched the graph; the only ways out are accept,
+ * reject and defer. Each shows the text it came from, because a handle lifted out of a quoted
+ * signature block looks like a real one until you see the sentence around it. The queue is
+ * keyboard driven, so a long one does not take a hundred trips to the mouse (docs/09).
  * ===================================================================== */
 
 async function loadTriage() {
   if (!state.caseId) return;
-  /* Loaded on every case open once the record is in, so the capture form
-     is fitted to this case here (final review c15, 2026-09-24): its
-     levels now, whether it takes a capture at all once the queue says. */
+  /* Loaded on every case open once the record is in, so the capture form is fitted to this
+     case here: its levels now, whether it takes a capture at all once the queue says. */
   syncCaptureForm(state.caseRec);
   const wanted = $('triage-state').value;
   const token = caseToken();
-  /* "Nothing awaiting review." only once the queue has answered
-     (ux17-failure:loading-shows-empty-claims, 2026-09-23). */
+  /* "Nothing awaiting review." only once the queue has answered. */
   listPending('triage-list', 'triage-empty');
   try {
     const data = await api(cpath('/proposals?state=' + wanted + '&limit=200'));
@@ -16635,20 +15048,16 @@ async function loadTriage() {
     state.captureRefused = data.capture_refused || '';
     state.captureLabels = data.capture_labels || null;
     syncCaptureForm(state.caseRec, state.captureRefused, state.captureLabels);
-    /* The canvas's proposal ring reads THIS queue, so the two cannot
-       disagree about what is waiting (ux08-triage:graph-says-unreviewed-
-       triage-says-nothing, 2026-09-23). */
+    /* The canvas's proposal ring reads this queue, so the two cannot disagree about what is
+       waiting. */
     state.nodeProposed = new Map(Object.entries(data.pending_by_node || {}));
     clearLoadFailure('triage-empty');
     renderTriage();
     redrawProposalRing();
   } catch (err) {
     if (caseChanged(token)) return;
-    /* ux17-failure:failure-renders-as-empty-claim (2026-09-22). This drew
-       an empty queue, so the pane said "Nothing awaiting review." and the
-       badge disappeared: the one signal that work is waiting, reporting
-       that none is, because it could not look. On a 403 there was not
-       even a banner. */
+    /* A failed load is marked as failed, not drawn as an empty queue: "Nothing awaiting
+       review." and a hidden badge would say no work is waiting when nobody could look. */
     state.triage = [];
     state.triageCounts = {};
     state.triageFailed = true;
@@ -16688,18 +15097,15 @@ onCaseSwitch(() => {
      id that means nothing here. */
   clear($('triage-last'));
   show($('triage-last'), false);
-  /* The capture box too (final review C18, 2026-09-23). A forum dump
-     pasted on NIGHTJAR stayed in it, and Capture after a switch parsed it
-     into KESTREL: a stored capture document, proposals raised and the
-     owner notified, none of which can be taken back. The comms reset
-     clears a pasted block for the same reason. */
+  /* The capture box too: text pasted on one case and captured after a switch would be stored
+     in the other, raising proposals and notifying its owner, none of which can be undone. The
+     comms reset clears a pasted block for the same reason. */
   $('cap-text').value = '';
   $('cap-title').value = '';
   $('cap-url').value = '';
-  /* The classification select gets every level again, at AMBER, and the
-     button is free, until the next case's record arrives and loadTriage
-     fits the form to it: the old case's floor and compartments are not
-     this one's (final review c15). */
+  /* The classification select gets every level again, at AMBER, and the button is free, until
+     the next case's record arrives and loadTriage fits the form to it: the old case's floor and
+     compartments are not this one's. */
   state.captureRefused = null;
   state.captureLabels = null;
   syncCaptureForm(null, '');
@@ -16710,10 +15116,8 @@ onCaseSwitch(() => {
 /** The rail badge is the only thing that tells an analyst work is waiting,
  *  so it is refreshed with the case rather than only when the tab is open.
  *
- *  It counts approval requests this person could sign as well as
- *  proposals (ux08-triage:no-work-waiting-at-sign-in, 2026-09-23): both
- *  live in this pane, and a request whose notification had been read
- *  left no trace on any badge. */
+ *  It counts approval requests this person could sign as well as proposals: both live in
+ *  this pane, and a request whose notification has been read leaves no other trace. */
 function renderTriageBadge() {
   const badge = $('triage-badge');
   if (state.triageFailed) {
@@ -16725,10 +15129,9 @@ function renderTriageBadge() {
       + 'is unknown.';
     return;
   }
-  /* A read-only case's queue is a record, not work (2026-09-24): accept, reject and defer
-  all refuse there and nothing
-     expires, so its count badged the case for good. The server's
-     Waiting counts leave it out the same way. */
+  /* A read-only case's queue is a record, not work: accept, reject and defer all refuse there
+     and nothing expires, so its count would badge the case for good. The server's Waiting
+     counts leave it out the same way. */
   const proposed = caseReadOnly() ? 0 : (state.triageCounts || {}).PROPOSED || 0;
   const mine = (state.waiting || {})[state.caseId] || {};
   const sign = mine.signatures || 0;
@@ -16738,11 +15141,9 @@ function renderTriageBadge() {
   badge.title = triageBadgeTitle(proposed, sign);
 }
 
-/** Both work badges, after the case turned read-only under the console
- *  (2026-09-24). Closing it here goes through openCase,
- *  which reloads both; closing it in another tab reached only
- *  renderCaseState, and the counts stood until the next load. Only the
- *  zeroing is done here: a reopen goes through openCase again. */
+/** Both work badges, after the case turned read-only under the console. Closing it here goes
+ *  through openCase, which reloads both; closing it in another tab reaches only
+ *  renderCaseState. Only the zeroing is done here: a reopen goes through openCase again. */
 function repaintWorkBadges() {
   if (!state.caseId) return;
   renderTriageBadge();
@@ -16759,12 +15160,8 @@ function triageBadgeTitle(proposed, sign) {
   return parts.join(', ');
 }
 
-/* Triage's own words for the review states (ux08-triage:queue-vocabulary-
-   and-empty-text, 2026-09-23). The stored state for a parked item is
-   DISPUTED, and the counts line and the card printed it raw, so an item
-   the analyst parked with D came back labelled "disputed", which in this
-   domain means contested evidence. And every queue said "Nothing awaiting
-   review." when it was empty, the Accepted and Rejected ones included. */
+/* Triage's own words for the review states. A parked item is stored as DISPUTED, which in
+   this domain means contested evidence, so it is shown as "deferred". */
 const TRIAGE_STATE_WORD = {
   PROPOSED: 'awaiting review', DISPUTED: 'deferred', ACCEPTED: 'accepted',
   REJECTED: 'rejected', SUPERSEDED: 'superseded',
@@ -16798,15 +15195,12 @@ function triageRefName(p, id) {
   return 'entity ' + shortId(id) + ', not visible to you';
 }
 
-/** The card's title: WHAT accepting it would write.
+/** The card's title: what accepting it would write.
  *
- *  ux08-triage:attribute-proposal-no-label-no-value (2026-09-23). An
- *  ATTRIBUTE card read "(no label)": its payload is {node_id, claim_path,
- *  claim_value} and the card printed `payload.label`, so the reviewer was
- *  asked to attach a Tox ID to an identity with neither on screen, which
- *  docs/10 calls the single biggest source of false attribution. An EDGE
- *  would have shown two UUIDs. Both are written out now, the entities
- *  resolved by the server for the ones this reader may see. */
+ *  An ATTRIBUTE payload is {node_id, claim_path, claim_value} and an EDGE joins two entities;
+ *  both are written out, naming the entities the server resolved for this reader. Attaching a
+ *  value to an identity without seeing either is the biggest source of false attribution
+ *  (docs/10). */
 function triageTitle(p) {
   const pl = (p && p.payload) || {};
   if (p.kind === 'ATTRIBUTE') {
@@ -16830,8 +15224,7 @@ function triageClaimValue(p) {
 
 /** The labels an Accept may write at: the proposal's own (its capture's,
  *  never below the case) and anything stricter. Nothing below it is
- *  offered, because the server refuses it (ux08-triage:accept-downgrades-
- *  classification, 2026-09-23). */
+ *  offered, because the server refuses it. */
 function triageAcceptLevels(p) {
   const from = TLP.indexOf(p.classification);
   return from < 0 ? TLP.slice() : TLP.slice(from);
@@ -16845,12 +15238,10 @@ function renderTriage() {
   const hadFocus = box.contains(document.activeElement);
   clear(box);
   const rows = state.triage || [];
-  /* The cursor is a proposal, not a position (final review c14,
-     2026-09-24). Every live reload re-sorts the queue by score, and the
-     bare index then pointed at whatever card had moved into its place, so
-     A, R and D acted on a proposal the analyst never picked. It is found
-     again by id on every rebuild; a card that has left the list falls
-     back to the nearest one still in it. */
+  /* The cursor is a proposal, not a position: a live reload re-sorts the queue by score, and a
+     bare index would let A, R and D act on a card the analyst never picked. It is found again
+     by id on every rebuild; a card that has left the list falls back to the nearest one still
+     listed. */
   const at = state.triageId == null ? -1
     : rows.findIndex((p) => p.id === state.triageId);
   state.triageIndex = at >= 0 ? at
@@ -16870,10 +15261,9 @@ function renderTriage() {
     if (opened[p.id]) state.triageSources[p.id] = opened[p.id];
   }
 
-  /* The list is the one place the letter keys act, and it says which
-     suggestion they will act on: the active card is the group's active
-     descendant, so a screen reader hears it as J and K move
-     (ux18-a11y:triage-letter-keys-global, 2026-09-23). */
+  /* The list is the one place the letter keys act, and it says which suggestion they will act
+     on: the active card is the group's active descendant, so a screen reader hears it as J
+     and K move. */
   box.removeAttribute('aria-activedescendant');
   rows.forEach((p, i) => {
     const on = i === state.triageIndex;
@@ -16894,8 +15284,7 @@ function renderTriage() {
     if (p.payload && p.payload.attrs && p.payload.attrs.selector_type) {
       head.appendChild(el('span', 'chip small', p.payload.attrs.selector_type));
     }
-    /* The handling marking travels with the suggestion, as it does with
-       every notification (ux08-triage:accept-downgrades-classification). */
+    /* The handling marking travels with the suggestion, as it does with every notification. */
     if (p.classification) {
       head.appendChild(el('span', 'chip tlp-' + p.classification,
         'TLP:' + p.classification));
@@ -16919,10 +15308,7 @@ function renderTriage() {
         'the value'));
       card.appendChild(line);
     }
-    /* A claim the server would refuse to attach says so where Accept
-       would be (final review c1, 2026-09-24): the card wore the
-       material's TLP chip while the accept wrote at the entity's lower
-       label. */
+    /* A claim the server would refuse to attach says so where Accept would be. */
     if (p.accept_blocked && p.state === 'PROPOSED') {
       card.appendChild(el('p', 'msg warn triage-blocked',
         visibleText(p.accept_blocked) + ' Reject or defer it.'));
@@ -16947,18 +15333,13 @@ function renderTriage() {
   }
 }
 
-/** Make card i the one the keys act on, WITHOUT rebuilding the list.
+/** Make card i the one the keys act on, without rebuilding the list.
  *
- *  ux08-triage:source-document-not-reachable, verifier's fix round
- *  (2026-09-23). A click anywhere on a card called renderTriage(), which
- *  rebuilt every card: a click or a drag-select inside an opened capture
- *  closed it and threw the selection away, so the analyst could read the
- *  passage around a match but never copy a line of it. Moving the
- *  highlight is all a click has to do. */
+ *  A rebuild would close an opened capture and drop any text selected in it, so a click only
+ *  moves the highlight. */
 function pickTriageCard(i) {
   state.triageIndex = i;
-  /* Anchored by id, so a live reload keeps this card, not this place in
-     the list (final review c14, 2026-09-24). */
+  /* Anchored by id, so a live reload keeps this card, not this place in the list. */
   const p = (state.triage || [])[i];
   state.triageId = p ? p.id : null;
   const box = $('triage-list');
@@ -16984,12 +15365,7 @@ function pickTriageCard(i) {
   }
 }
 
-/** "from <capture title> · <extractor>", and a way to read the capture.
- *
- *  ux08-triage:source-document-not-reachable (2026-09-23). The card said
- *  "from extractor/selectors/v3", the name of the regex, and "found at
- *  characters N-M of the captured document" with no title and no way to
- *  open it. */
+/** "from <capture title> · <extractor>", and a way to read the capture. */
 function triageSourceLine(p) {
   const line = el('div', 'triage-source-line');
   const doc = p.document_id
@@ -16999,7 +15375,7 @@ function triageSourceLine(p) {
   line.appendChild(el('span', 'muted small',
     'from ' + (doc ? doc + ' · ' : '') + visibleText(p.origin)));
   if (p.lookup) {
-    // F15.3: raised from a lookup answer, which the reader may open.
+    // Raised from a lookup answer, which the reader may open.
     line.appendChild(el('span', 'muted small', 'from a lookup on '
       + visibleText(p.lookup.provider_name) + ', fetched '
       + fmtTime(p.lookup.fetched_at)));
@@ -17012,8 +15388,7 @@ function triageSourceLine(p) {
       + 'marked.';
     const view = el('div', 'triage-source');
     view.hidden = true;
-    /* Reopened from what was read, not fetched again, when the list is
-       rebuilt under it (verifier's fix round, 2026-09-23). */
+    /* Reopened from what was read, not fetched again, when the list is rebuilt under it. */
     const had = (state.triageSources || {})[p.id];
     if (had) {
       fillTriageSource(view, had);
@@ -17122,10 +15497,9 @@ function triageActions(p) {
     });
     actions.appendChild(pick);
   }
-  /* The Undo is offered only to a role that can retire what the accept
-     wrote, so the tooltip promises it only then (final review u11,
-     2026-09-24): a REVIEWER holds proposal.review and none of the delete
-     or retract verbs, and was told an Undo that could only fail. */
+  /* The Undo is offered only to a role that can retire what the accept wrote, so the tooltip
+     promises it only then: a REVIEWER holds proposal.review but none of the delete or retract
+     verbs. */
   const accept = mk('Accept', 'primary', acceptProposal,
     'Writes at once: the element is created inferred and graded low, '
     + 'attributed to you with an AUTOMATED_INFERENCE assertion recording that '
@@ -17146,13 +15520,10 @@ function triageActions(p) {
   return actions;
 }
 
-/** Carry out a disposition and SAY what happened.
+/** Carry out a disposition and say what happened.
  *
- *  ux08-triage:triage-keys-fire-on-browser-chords (2026-09-23). An accept
- *  wrote a graph element and the card simply left the queue, so an
- *  analyst whose Ctrl+A had been taken as A never learned a proposal had
- *  been taken out of review. Every outcome is now stated on the line
- *  above the queue, and an accept's line carries an Undo. */
+ *  Every outcome is stated on the line above the queue, and an accept's line carries an
+ *  Undo, so an accept fired by a stray key is never silent. */
 async function disposition(p, path, body, verb) {
   try {
     const out = await api(cpath('/proposals/' + p.id + '/' + path), {
@@ -17168,11 +15539,8 @@ async function disposition(p, path, body, verb) {
       await reloadAll();
     }
   } catch (err) {
-    /* Not every 409 here is a race with another reviewer: a case closed
-       in another tab answers with the read-only gate's 409, and calling
-       that "Already dispositioned" told the analyst someone had beaten
-       them to a proposal nobody had touched (gap-closed-case-writes,
-       2026-09-23). */
+    /* Not every 409 here is a race with another reviewer: a case closed in another tab answers
+       with the read-only gate's 409, which must not read as "Already dispositioned". */
     if (err instanceof ApiError && err.status === 409
         && err.title !== CASE_READ_ONLY_TITLE) {
       banner('Not ' + verb, err.detail || '', 'warn');
@@ -17192,17 +15560,15 @@ function showTriageOutcome(p, path, out) {
       ? ', written at TLP:' + level : '';
     line.appendChild(document.createTextNode(
       'Accepted: ' + what + written + '. '));
-    /* The accepted selector is already held by another entity this reader
-       can see: a lead, said where the accept is (graph-selector-index-
-       drift, 2026-10-03). */
+    /* The accepted selector is already held by another entity this reader can see: a lead,
+       said where the accept is. */
     if (out.selector_owner_id) {
       const attrs = (p.payload && p.payload.attrs) || {};
       line.appendChild(document.createTextNode(selectorLeadWords(
         attrs.selector_type || 'selector', labelOf(out.selector_owner_id)) + ' '));
     }
-    /* Only for a role that can retire it (final review u11, 2026-09-24):
-       a REVIEWER's Undo answered 403 from the delete it called, and the
-       element stayed. They are told who can take it back instead. */
+    /* Only for a role that can retire it: a REVIEWER's Undo would be refused by the delete it
+       calls, so they are told who can take it back instead. */
     if (!triageCanUndo(p)) {
       line.appendChild(document.createTextNode(
         'Your role on this case cannot retire it, so there is no Undo. The '
@@ -17211,8 +15577,8 @@ function showTriageOutcome(p, path, out) {
       show(line, true);
       return;
     }
-    /* `case-write`: the Undo retires or retracts content, which a case
-       closed since the accept refuses (gap-closed-case-writes). */
+    /* `case-write`: the Undo retires or retracts content, which a case closed since the
+       accept refuses. */
     const undo = el('button', 'btn ghost small case-write', 'Undo');
     undo.type = 'button';
     undo.title = 'Retire what this accept wrote. The proposal stays in the '
@@ -17237,9 +15603,8 @@ const TRIAGE_UNDO_WORDS = {
   ATTRIBUTE: 'retract claims',
 };
 
-/** Whether the caller's role here can undo accepting `p` (final review
- *  u11, 2026-09-24). Unknown counts as yes, as caseCan says: the server
- *  decides either way. */
+/** Whether the caller's role here can undo accepting `p`. Unknown counts as yes, as caseCan
+ *  says: the server decides either way. */
 function triageCanUndo(p) {
   const need = TRIAGE_UNDO_PERMISSION[p && p.kind];
   return !need || caseCan(state.caseRec, need);
@@ -17289,15 +15654,13 @@ async function undoAccept(p, out, btn) {
   }
 }
 
-/* The three verdicts check the case first. Their buttons are off on a
-   read-only case (applyCaseReadOnly), but the a, r and d keys reach
-   them without a button, and a reject or defer would ask for a reason
-   the server then refuses to record (gap-closed-case-writes,
-   2026-09-23). */
+/* The three verdicts check the case first. Their buttons are off on a read-only case
+   (applyCaseReadOnly), but the a, r and d keys reach them without a button, and a reject or
+   defer would ask for a reason the server then refuses to record. */
 function acceptProposal(p) {
   if (caseReadOnly()) return;
-  /* The server refuses this claim onto its entity (final review c1), and
-     the A key reaches here without the disabled button. */
+  /* The server refuses this claim onto its entity, and the A key reaches here without the
+     disabled button. */
   if (p.accept_blocked) {
     banner('Not accepted', visibleText(p.accept_blocked), 'warn');
     return;
@@ -17306,9 +15669,8 @@ function acceptProposal(p) {
     { note: null, classification: triageChosenLevel(p) }, 'accepted');
 }
 
-/* Each prompt names what it will act on (final review c14, 2026-09-24):
-   they named nothing, so a card swapped under the cursor by a live
-   reload was rejected or deferred with a note about another one. */
+/* Each prompt names what it will act on, so a card swapped under the cursor by a live reload
+   is not rejected or deferred with a note meant for another. */
 function rejectProposal(p) {
   if (caseReadOnly()) return;
   const note = window.prompt(
@@ -17336,16 +15698,10 @@ function deferProposal(p) {
 
 /** Whether a keystroke landed where the queue's keys may act on it: the
  *  page itself, the Triage pane, or a card. Never a button, a link or
- *  any other pane's control.
- *
- *  ux08-triage:triage-keys-fire-on-browser-chords (2026-09-23). The only
- *  guard was INPUT, TEXTAREA and SELECT, so a plain A pressed while the
- *  Dual control "Load" button had the focus accepted the highlighted
- *  proposal: a keypress meant for a button wrote the graph. */
+ *  any other pane's control: a key meant for a focused button must not write the graph. */
 function triageKeyTarget(t) {
   if (!t || t === document.body || t === document.documentElement) return true;
-  /* The list itself, which holds the focus between cards
-     (ux18-a11y:triage-letter-keys-global). */
+  /* The list itself, which holds the focus between cards. */
   if (t.id === 'pane-triage' || t.id === 'triage-list') return true;
   return !!(t.classList && t.classList.contains('triage-card'));
 }
@@ -17384,39 +15740,30 @@ function anyDialogOpen() {
   return !!document.querySelector('.palette-scrim:not([hidden])');
 }
 
-/** docs/09: "triage is a pleasant hour rather than a grim one".
+/** The triage letter keys (docs/09).
  *
- *  ux18-a11y:triage-letter-keys-global (2026-09-23). The letters listened
- *  on the whole document and skipped only text fields, so with the focus
- *  on a rail tab, a button, or inside the ? sheet, a stray A (or a speech
- *  command that sounded like one) accepted a machine proposal into the
- *  evidential graph in the analyst's name, at once. WCAG 2.1.4. They now
- *  act only while the focus is inside the triage list, never while a
- *  dialog is open, A asks before it writes, and the ? sheet turns them
- *  off. */
+ *  A stray A, or a speech command that sounds like one, would put a machine proposal into the
+ *  evidential graph in the analyst's name (WCAG 2.1.4). So the letters act only while the
+ *  focus is inside the triage list, never while a dialog is open, A asks before it writes,
+ *  and the ? sheet can turn them off. */
 function onTriageKey(e) {
   if (state.tab !== 'triage') return;
-  /* Only inside the list, never under a dialog, and not at all once the
-     keyboard sheet has turned the letters off (ux18-a11y:triage-letter-
-     keys-global, 2026-09-23). */
+  /* Only inside the list, never under a dialog, and not at all once the keyboard sheet has
+     turned the letters off. */
   const list = $('triage-list');
   const target = e.target;
   if (!list || !target || !list.contains(target)) return;
   if (anyDialogOpen() || !triageLettersOn()) return;
-  /* A chord is the browser's or the operating system's, never a verdict:
-     Ctrl+A (select all) accepted the highlighted proposal with no prompt,
-     and Ctrl+R and Ctrl+D opened the reject and defer prompts instead of
-     reloading or bookmarking (README screenshot review, 2026-09-23). */
+  /* A chord is the browser's or the operating system's, never a verdict: Ctrl+A, Ctrl+R and
+     Ctrl+D select, reload and bookmark. */
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   // Never steal a key from a field, a button or another pane's control.
   if (!triageKeyTarget(target)) return;
   const rows = state.triage || [];
   if (!rows.length) return;
-  /* The keys act on the card the analyst picked, found by its id (final
-     review c14, 2026-09-24), never on whatever a live reload moved into
-     its place. With no id yet, the highlighted position. A picked card
-     that has gone is acted on by nobody; a row past the end of the list
-     was undefined, and R or D prompted and then threw on it. */
+  /* The keys act on the card the analyst picked, found by its id, never on whatever a live
+     reload moved into its place; with no id yet, the highlighted position. A picked card that
+     has gone, or a position past the end of the list, is acted on by nobody. */
   const at = state.triageId == null ? state.triageIndex
     : rows.findIndex((p) => p.id === state.triageId);
   const picked = at >= 0 && at < rows.length ? rows[at] : null;
@@ -17446,9 +15793,8 @@ function onTriageKey(e) {
   state.triageId = rows[state.triageIndex].id;
   e.preventDefault();
   renderTriage();
-  /* The re-render replaced the card whose button had the focus: the keys
-     stay in the list rather than falling to the page, where they no
-     longer act. */
+  /* The re-render removes the card whose button had the focus; the focus stays in the list
+     rather than falling to the page, where the keys do not act. */
   if (!list.contains(document.activeElement)) list.focus();
   const card = $('triage-list').children[state.triageIndex];
   if (card) {
@@ -17457,10 +15803,8 @@ function onTriageKey(e) {
   }
 }
 
-/** What the A key asks before it accepts: exactly what it will write.
- *  An ATTRIBUTE or EDGE has no label, so its confirm read "Accept "this
- *  suggestion" (ATTRIBUTE)" and could not catch a swapped card (final
- *  review c14, 2026-09-24). */
+/** What the A key asks before it accepts: exactly what it will write, so the confirm can
+ *  catch a card swapped under the cursor. */
 function triageAcceptQuestion(p) {
   return 'Accept ' + triageNamed(p) + ' into the graph?\n\nIt is recorded '
     + 'as accepted by you, with an assertion saying a machine suggested it.';
@@ -17476,23 +15820,15 @@ function triageNamed(p) {
     + (p.classification ? ', TLP:' + p.classification : '') + ')';
 }
 
-/** The capture form, fitted to the open case (final review c15,
- *  2026-09-24). The Classification select offered all five levels and was
- *  put back to AMBER on every case, so a thread pasted into RED
- *  OP-HALCYON-25 was stored at AMBER, below its case, in the collection
- *  every AMBER reader lists. It now starts at the case's own level and
- *  offers nothing below it (the server raises anything lower whatever is
- *  sent). A case walled off for victim data takes no capture, and the form
- *  says so rather than offering one: `refused` is the server's sentence
- *  from the queue read (`capture_refused`), '' when the case takes a
- *  capture, and left out to fit the select alone. `rec` null is no case:
- *  every level, at AMBER.
+/** The capture form, fitted to the open case.
  *
- *  Since L1 (2026-09-24) a compartmented case captures, and the text is
- *  stored under the case's compartments: `labels` is the queue read's
- *  `capture_labels`, and when it names compartments the note under the
- *  help says who can list the text, as a plain note rather than a
- *  warning (the class is toggled, never a style). */
+ *  The Classification select starts at the case's own level and offers nothing below it (the
+ *  server raises anything lower whatever is sent). A case walled off for victim data takes no
+ *  capture, and the form says so: `refused` is the server's sentence from the queue read
+ *  (`capture_refused`), '' when the case takes a capture, and left out to fit the select alone.
+ *  `rec` null is no case: every level, at AMBER. `labels` is the queue read's `capture_labels`;
+ *  when it names compartments, a plain note says who can list the text (the class is toggled,
+ *  never a style). */
 function syncCaptureForm(rec, refused, labels) {
   const sel = $('cap-class');
   const cls = rec && TLP.includes(rec.classification) ? rec.classification : null;
@@ -17532,14 +15868,12 @@ function syncCaptureForm(rec, refused, labels) {
   }
 }
 
-/** What the capture reply says about labels (c15, 2026-09-24). The server
- *  raises a capture to its case, and a re-paste's proposals to the
- *  earlier capture's label, but a re-paste leaves the shared document
- *  where it was: it is one copy of the text, which other cases read at
- *  that label. So "Stored at" is said only when the document and the
- *  proposals agree. A label above the analyst's clearance comes back
- *  null and is not named. The compartments the document is stored in
- *  are named after its label (L1, 2026-09-24): they are the case's. */
+/** What the capture reply says about labels. The server raises a capture to its case, and a
+ *  re-paste's proposals to the earlier capture's label, but a re-paste leaves the shared
+ *  document where it was: it is one copy of the text, which other cases read at that label.
+ *  So "Stored at" is said only when the document and the proposals agree. A label above the
+ *  analyst's clearance comes back null and is not named. The document's compartments, the
+ *  case's, are named after its label. */
 function captureLabelWords(out) {
   const cls = out.classification;
   const doc = out.document_classification;
@@ -17571,9 +15905,9 @@ async function runCapture() {
     setMsg(errBox, visibleText(state.captureRefused));
     return;
   }
-  /* The reply is the case's that was open at the press (C18): answered
-     after a switch, it is said in a banner that names that case, and this
-     case's cleared pane and fields are left alone. */
+  /* The reply belongs to the case that was open at the press: answered after a switch, it is
+     said in a banner that names that case, and this case's cleared pane and fields are left
+     alone. */
   const token = caseToken();
   const code = caseCodeNow();
   btn.disabled = true;
@@ -17619,26 +15953,22 @@ async function runCapture() {
 }
 
 /* =====================================================================
- * ANALYSIS PANEL (Phase 3)
+ * ANALYSIS PANEL
  *
  * Global structural metrics: brokerage, structural holes, communities,
  * cut vertices, signed balance and the key-player set.
  *
- * Two rules from docs/03 shape everything below. The projection
- * parameters are restated on the panel, because the same actor has
- * different centrality under a different filter and a number without its
- * projection is not reproducible. And every caveat the API returns is
- * rendered rather than dropped: an approximation flag, a truncated node
- * set, a two-mode graph or a disconnected eigenvector basis all change
- * what a number is allowed to mean, and an analyst deciding who to arrest
- * is entitled to know.
+ * Two rules from docs/03. The projection parameters are restated on the panel, because a
+ * number without its projection is not reproducible. And every caveat the API returns is
+ * rendered: an approximation flag, a truncated node set, a two-mode graph or a disconnected
+ * eigenvector basis all change what a number may mean.
  * ===================================================================== */
 
 /** num() coerces null to 0, which for a structural metric is a lie: an
  *  isolate has no effective size, and printing 0.00 ranks it as the worst
  *  broker in the case rather than as undefined. The API returns null for
  *  exactly these cases, so preserve the distinction, in words: "not
- *  defined" and not a lone dash (README screenshot review, 2026-09-23). */
+ *  defined" and not a lone dash. */
 function metricNum(v, dp) {
   return (v === null || v === undefined) ? 'not defined' : num(v, dp);
 }
@@ -17646,24 +15976,22 @@ function metricNum(v, dp) {
 /** The cell class for a value the row does not have. A word standing
  *  in for a number takes the quiet `td.absent` style the entity table's
  *  missing dates use, so it does not become the brightest text in a
- *  column of figures (README screenshot review, 2026-09-23). */
+ *  column of figures. */
 function absentClass(v) {
   return v === null || v === undefined || v === '' ? 'absent' : null;
 }
 
-/** The venue families the pane can project to entities (F2, 2026-09-24),
- *  with the word each is called in the pane's sentences. Conversations are
- *  not among them (docs/00 decision 73): the Comms pane projects those,
- *  with its protections for third parties. */
+/** The venue families the pane can project to entities, with the word each is called in the
+ *  pane's sentences. Conversations are not among them (docs/00 decision 73): the Comms pane
+ *  projects those, with its protections for third parties. */
 const AN_ONE_MODE = [['forum', 'forums'], ['wallet', 'wallets']];
 
 function anQuery() {
   const q = projQuery();
   const decay = $('an-decay').value;
   if (decay) q.set('decay_half_life_months', decay);
-  /* L3 and F2 (2026-09-24): each option is set only when it is not the
-     default, so the default query string, and with it every stored
-     projection name and the query a run is remembered under, is unchanged. */
+  /* Each option is set only when it is not the default, so the default query string, and with
+     it every stored projection name and the query a run is remembered under, stays the same. */
   if ($('an-ties').value === 'accepted') q.set('review_scope', 'accepted');
   let venues = false;
   for (const [family] of AN_ONE_MODE) {
@@ -17678,21 +16006,11 @@ function anQuery() {
   return q;
 }
 
-/* final review C3, 2026-09-23. No case-switch reset touched this pane, and
- * none of its loaders took a token. openCase nulled state.analytics and
- * left the screen alone, so after NIGHTJAR's Analysis had rendered,
- * KESTREL's Analysis (never analysed: /analytics/latest answers 404, which
- * returns quietly) went on showing NIGHTJAR's ranked, named actors, its
- * brokers and cut vertices under KESTREL's header and TLP chip, and a row
- * click selected a NIGHTJAR id inside KESTREL. A Run still out at the
- * switch was worse: its reply set state.analytics, and loadLatestAnalysis,
- * seeing it set, never asked for KESTREL's own run at all.
- *
- * `state.analyticsGen` numbers what may draw here. A run, a switch, a
- * changed projection and a changed parameter each take a new number, and a
- * reply carrying an older one is dropped, the way graphSeq works for the
- * canvas. The case token is checked beside it because it is the
- * codebase's one test for "this reply is for a case I have left". */
+/* `state.analyticsGen` numbers what may draw here. A run, a case switch, a changed projection
+ * and a changed parameter each take a new number, and a reply carrying an older one is
+ * dropped, the way graphSeq works for the canvas, so one case's ranked actors never draw
+ * under another's header. The case token is checked beside it because it is the codebase's
+ * one test for "this reply is for a case I have left". */
 const AN_EMPTY_TEXT = 'Run the analysis to see brokers, communities and key players.';
 const AN_HIST_EMPTY_TEXT = 'Pick an entity in the table above to chart it.';
 const AN_PROJECTION_CHANGED = 'The projection changed. Run the analysis '
@@ -17700,18 +16018,14 @@ const AN_PROJECTION_CHANGED = 'The projection changed. Run the analysis '
 
 /** What a failed analysis request says to an analyst.
  *
- *  ux10-analytics:rerun-failure-wipes-results-shared-budget (2026-09-23):
- *  a throttled run printed "rate limit 'analytics.suite' exceeded; retry
- *  in 8s", an internal bucket name. The budget is shared on purpose with
- *  the sociogram's own metrics (ratelimit.py: two doors onto one cost), and
- *  every timeline settle spends from it, which is why an analyst who has
- *  not pressed Run for minutes can still be throttled. So the line says
- *  that, and when to try again. */
+ *  A throttle never shows the internal bucket name. The budget is shared on purpose with the
+ *  sociogram's own metrics (ratelimit.py: two doors onto one cost), and every timeline settle
+ *  spends from it, so an analyst who has not pressed Run for minutes can still be throttled.
+ *  The line says that, and when to try again. */
 function analysisFailureText(err, fallback) {
-  /* F1 and F2 (2026-09-24): the role analysis and a view with venues
-     projected spend budgets of their own, so a throttle there says so
-     rather than blaming the timeline. Regular roles (REGE, 2026-10-02)
-     have one too, and are role analysis in the same words. */
+  /* Role analysis and a view with venues projected spend budgets of their own, so a throttle
+     there says so rather than blaming the timeline. Regular roles (REGE) count as role
+     analysis here. */
   if (err instanceof ApiError && err.status === 429
       && /analytics\.(one_mode|concor|rege)/.test(err.detail || '')) {
     const m = /retry in (\d+)\s*s/i.exec(err.detail || '');
@@ -17744,9 +16058,8 @@ function ageText(iso) {
   return countOf(Math.round(hours / 24), 'day', 'days') + ' ago';
 }
 
-/** The server's currency verdict, in words. `current` is checked by
- *  re-projecting the graph since 2026-09-23 (ux10-analytics:
- *  stored-run-currency-and-timestamp): true, false, or not checked. */
+/** The server's currency verdict, in words. `current` is checked by re-projecting the graph:
+ *  true, false, or not checked. */
 function currencyText(current) {
   if (current === true) return 'The graph is unchanged since.';
   if (current === false) return 'The graph has changed since. Run the analysis again.';
@@ -17754,8 +16067,7 @@ function currencyText(current) {
 }
 
 /** The status line for a run read back from storage: when, how long ago,
- *  and whether it still describes the graph. It printed the raw ISO
- *  instant and "not recomputed" until 2026-09-23. */
+ *  and whether it still describes the graph. */
 function storedRunStatus(body) {
   const when = body.computed_at
     ? 'Showing the run of ' + fmtTime(body.computed_at) + ' ('
@@ -17772,13 +16084,13 @@ function blankAnalytics(note) {
   state.analyticsGen = (state.analyticsGen || 0) + 1;
   state.analytics = null;
   state.analyticsKpp = null;
-  /* The Roles card is one run's too (F1, 2026-09-24). */
+  /* The Roles card is one run's too. */
   state.analyticsConcor = null;
   state.analyticsConcorAll = {};
-  /* And the regular-role card (REGE, 2026-10-02). */
+  /* And the regular-role card (REGE). */
   state.analyticsRege = null;
   state.analyticsRegeAll = {};
-  /* A held-back one-mode check was for the run just cleared (F2). */
+  /* A held-back one-mode check was for the run just cleared. */
   if (state.analyticsOneModeTimer) {
     clearTimeout(state.analyticsOneModeTimer);
     state.analyticsOneModeTimer = null;
@@ -17825,14 +16137,11 @@ async function runAnalysis() {
   const btn = $('an-run');
   const token = caseToken();
   const gen = state.analyticsGen = (state.analyticsGen || 0) + 1;
-  /* The projection is compared when each reply lands, not only the case
-     and the generation (release review c17, 2026-09-24). An as-of move
-     reaches this pane through analyticsAfterGraphRefresh, which returns at
-     once when nothing is on screen, so during a first Run nothing retired
-     it: the old instant's suite passed both checks, was drawn beside the
-     graph at the new one, and the Node size control and the inspector's
-     rank line read another time slice's brokerage. Compared at landing,
-     a drag that comes back to the same instant still keeps its run. */
+  /* The projection is compared when each reply lands, not only the case and the generation.
+     An as-of move reaches this pane through analyticsAfterGraphRefresh, which returns at once
+     when nothing is on screen, so during a first Run only this check stops an old instant's
+     suite being drawn beside the graph at the new one. A drag that comes back to the same
+     instant keeps its run. */
   const q = anQuery();
   const moved = () => anQuery().toString() !== q.toString();
   const stale = () => caseChanged(token) || gen !== state.analyticsGen || moved();
@@ -17853,8 +16162,8 @@ async function runAnalysis() {
        and is cached against its own removal-set size. A failure of the
        expensive one must not blank the cheap one. */
     const suite = await api(cpath('/analytics?' + q.toString()));
-    /* Before anything is kept: this suite belongs to the case and the
-       parameters the run started under (C3). */
+    /* Before anything is kept: this suite belongs to the case and the parameters the run
+       started under. */
     if (stale()) { retire(); return; }
     /* De-fang at the boundary. Analytics is the pane that NAMES people —
        "removing these three would disconnect the network" — so a label
@@ -17865,14 +16174,11 @@ async function runAnalysis() {
     state.analyticsAt = new Date().toISOString();
     state.analyticsCurrency = { current: suite.current === true ? true : null,
                                 checkedAt: state.analyticsAt, note: '' };
-    /* The size is read HERE, once the suite has landed, and the card is
-       drawn only under the key-player number taken with it (final review
-       C3, restored 2026-09-23 for ux10-analytics:rerun-failure-wipes-
-       results-shared-budget). Read when Run was pressed, a size changed
-       during the suite put the old size's set under the new control; and
-       a size changed during THIS request has started its own load, whose
-       answer is the one for the control on screen, so this reply is not
-       allowed to overwrite it. */
+    /* The size is read here, once the suite has landed, and the card is drawn only under the
+       key-player number taken with it, so a size changed during the suite never puts the old
+       size's set under the new control. A size changed during this request has started its
+       own load, whose answer is the one for the control on screen, so this reply must not
+       overwrite it. */
     const kq = new URLSearchParams(q);
     kq.set('n', $('an-kpp-n').value);
     const kgen = state.analyticsKppGen = (state.analyticsKppGen || 0) + 1;
@@ -17886,30 +16192,24 @@ async function runAnalysis() {
     if (stale()) { retire(); return; }
     if (kgen === state.analyticsKppGen) state.analyticsKpp = safeLabelsDeep(kpp);
     renderAnalytics();
-    /* F1 (2026-09-24): the Roles card after the suite and the key player
-       are drawn, and NOT awaited, so a slow or failed role analysis never
-       delays or blanks the table. It reads the stored run first and
-       computes only when there is none or the graph has moved. */
+    /* The Roles card after the suite and the key player are drawn, and not awaited, so a slow
+       or failed role analysis never delays or blanks the table. It reads the stored run first
+       and computes only when there is none or the graph has moved. */
     loadConcor(false);
-    /* The regular-role card the same way, on its own run and meter (REGE,
-       2026-10-02), so neither role card waits on the other. */
+    /* The regular-role card the same way, on its own run and meter, so neither role card
+       waits on the other. */
     loadRege(false);
-    /* The open trend is fetched again, not only re-filtered (release
-       review u14, 2026-09-24). renderAnalytics re-draws the series fetched
-       when Trend was pressed, so the run just computed was missing from the
-       chart and the table and "3 runs" still counted three: the rising or
-       falling line docs/03 reads a promotion from was read without its
-       latest point. Nothing is spent when no actor has been charted. */
+    /* The open trend is fetched again, not only re-filtered: renderAnalytics re-draws the
+       series fetched when Trend was pressed, which lacks the run just computed, and docs/03
+       reads a promotion from that line's latest point. Nothing is spent when no actor has
+       been charted. */
     if (state.analyticsHistoryNode) {
       loadMetricHistory(state.analyticsHistoryNode, state.analyticsHistoryLabel);
     }
-    /* computed_at_ms is how long the ORIGINAL run took, so on a cache hit
-       it describes that run, not this response. Saying "served from cache
-       in 24 ms" would claim the cache took 24 ms.
-
-       "unchanged" is a claim about the GRAPH, so it is read from `current`
-       -- the API's currency verdict -- and not from `cached`, which since
-       2026-09-02 says only that the bytes came out of storage. */
+    /* computed_at_ms is how long the original run took, so on a cache hit it describes that
+       run, not this response. "unchanged" is a claim about the graph, so it is read from
+       `current`, the API's currency verdict, not from `cached`, which says only that the bytes
+       came out of storage. */
     const ms = (suite.computed_at_ms || 0) + ' ms';
     setMsg($('an-status'), suite.cached
       ? (suite.current === true
@@ -17922,10 +16222,8 @@ async function runAnalysis() {
        nothing about what is on screen now. */
     if (stale()) { retire(); return; }
     const why = analysisFailureText(err, 'The analysis request failed.');
-    /* ux10-analytics:rerun-failure-wipes-results-shared-budget
-       (2026-09-23): any failure blanked the pane, so a throttled re-run
-       threw away valid results for the same projection. They stay, and the
-       status line says the new run did not happen. */
+    /* A failed re-run keeps the valid results for the same projection, and the status line
+       says the new run did not happen. */
     if (state.analytics && state.analyticsQuery === q.toString()) {
       setMsg($('an-status'), 'The new run did not complete. ' + closeClause(why)
         + ' The results below are from the earlier run.');
@@ -17947,25 +16245,16 @@ async function runAnalysis() {
 
 /* --- the graph moving under the numbers ---------------------------------
  *
- * ux10-analytics:analysis-survives-graph-changes (2026-09-23). A preset or
- * confidence change blanked the pane, while an as-of move, a new or
- * retired tie, a correction or another analyst's live change left the old
- * ranks on screen with no mark. Analysts learned that numbers left on
- * screen are current, which made the gaps worse: retire the dubious tie
- * behind a surprising broker, come back, and the broker is still there.
+ * Every path that changes the graph ends in refreshSociogram, which calls
+ * analyticsAfterGraphRefresh once the new projection has landed. Two rules:
  *
- * Two rules now, one hook. Every path that changes the graph ends in
- * refreshSociogram, which calls analyticsAfterGraphRefresh once the new
- * projection has landed:
- *
- *  - the PROJECTION the results were computed under is no longer the one
- *    on screen (the as-of time moved, most often): they describe another
- *    question, so they are cleared, as a preset change clears them;
- *  - the projection is the same but the graph may have moved: the numbers
- *    stay, and the server is asked whether the run on screen still hashes
- *    as the graph does now. A "no" marks them stale with the time of the
- *    check; a "yes" clears any mark. An edit outside this projection, or
- *    one undone, is not called a change it was not.
+ *  - the projection the results were computed under is not the one on screen (most often
+ *    the as-of time moved): they describe another question, so they are cleared, as a preset
+ *    change clears them;
+ *  - the projection is the same but the graph may have moved: the numbers stay, and the
+ *    server is asked whether the run on screen still hashes as the graph does now. A "no"
+ *    marks them stale with the time of the check; a "yes" clears any mark, so an edit outside
+ *    this projection, or one undone, is not called a change.
  */
 function analyticsAfterGraphRefresh() {
   if (!state.analytics) return;
@@ -17973,11 +16262,10 @@ function analyticsAfterGraphRefresh() {
     blankAnalytics(AN_PROJECTION_CHANGED);
     return;
   }
-  /* F2 (2026-09-24): with venues projected every check
-     re-projects AND transforms, and spends the one-mode budget an explicit
-     Run needs too, so on a busy case colleagues' live edits could empty it.
-     Those checks run at most once in AN_ONE_MODE_CHECK_MS; the status line
-     still says when the last one was made. */
+  /* With venues projected, every check re-projects and transforms, and spends the one-mode
+     budget an explicit Run needs too, so on a busy case colleagues' live edits could empty it.
+     Those checks run at most once in AN_ONE_MODE_CHECK_MS; the status line says when the last
+     one was made. */
   if (new URLSearchParams(state.analyticsQuery).has('one_mode')) {
     checkOneModeCurrencyLater();
     return;
@@ -17999,12 +16287,11 @@ function checkOneModeCurrencyLater() {
   }, Math.max(600, AN_ONE_MODE_CHECK_MS - since));
 }
 
-/** Whether the runs on screen still describe the graph: ONE request for
- *  every card (F2, 2026-09-24), so the graph is projected once rather than
- *  once per card. Each verdict lands only on the card it was asked for:
- *  the suite's under the pane's own guard, and the key player's and the
- *  roles' only while that card is still the one on screen, since a size
- *  or depth changed during the check has started its own load. */
+/** Whether the runs on screen still describe the graph: one request for every card, so the
+ *  graph is projected once rather than once per card. Each verdict lands only on the card it
+ *  was asked for: the suite's under the pane's own guard, and the key player's and the roles'
+ *  only while that card is still the one on screen, since a size or depth changed during the
+ *  check has started its own load. */
 async function checkAnalysisCurrency() {
   const a = state.analytics;
   if (!state.caseId || !a || !a.run_id) return;
@@ -18015,8 +16302,7 @@ async function checkAnalysisCurrency() {
   const q = new URLSearchParams(state.analyticsQuery);
   const k = state.analyticsKpp;
   const roles = state.analyticsConcor;
-  /* The regular-role run (REGE, 2026-10-02): the fourth and last run the
-     route takes in one ask. */
+  /* The regular-role run (REGE): the fourth and last run the route takes in one ask. */
   const regular = state.analyticsRege;
   const asked = (card) => !!(card && card.run_id && !card.error);
   q.append('run_id', a.run_id);
@@ -18060,20 +16346,11 @@ async function checkAnalysisCurrency() {
 
 /* --- the key-player card, on its own ------------------------------------
  *
- * ux10-analytics:kpp-blank-on-stored-run and rerun-failure-wipes-results
- * (2026-09-23). Opening the pane on a stored run left "Key player" as an
- * empty heading, and changing the removal-set size blanked the whole suite
- * with "Parameters changed", although the suite does not depend on it. The
- * card now loads on its own: the stored run for this size first (a read),
- * and a fresh one only when there is none or the graph has moved since.
- *
- * `state.analyticsKppGen` numbers what may draw on the card. The blanking
- * this replaced also dropped a key-player reply still out for the OLD
- * size (final review C3); without it, a size changed during a first Run
- * left the old size's set under the new control for good, and a late Run
- * reply could overwrite the newer size's answer (found reviewing the fix,
- * 2026-09-23). So every size change takes a new number, and runAnalysis
- * and loadKeyPlayer draw the card only under the number they took. */
+ * The suite does not depend on the removal-set size, so the card loads on its own: the stored
+ * run for this size first (a read), and a fresh one only when there is none or the graph has
+ * moved since. `state.analyticsKppGen` numbers what may draw on the card: every size change
+ * takes a new number, and runAnalysis and loadKeyPlayer draw the card only under the number
+ * they took, so a late reply for an old size never lands under the new control. */
 
 /** The removal-set size control changed: only the card is fetched again. */
 function onKppSizeChange() {
@@ -18091,9 +16368,8 @@ async function loadKeyPlayer(storedOnly) {
     || kgen !== state.analyticsKppGen;
   const q = new URLSearchParams(state.analyticsQuery);
   q.set('n', String(n));
-  /* `reading` until a computation is actually asked for: the card said
-     "Finding the removal set" while it only read a stored one, which
-     sounds like the metered search it is not. */
+  /* `reading` until a computation is actually asked for, so a read of a stored set does not
+     sound like the metered search. */
   state.analyticsKpp = { pending: true, reading: true, n };
   renderKeyPlayer();
   let kpp = null;
@@ -18123,7 +16399,7 @@ async function loadKeyPlayer(storedOnly) {
   renderKeyPlayer();
 }
 
-/* --- the Roles card: CONCOR positions (F1, 2026-09-24) --------------------
+/* --- the Roles card: CONCOR positions -----------------------------------
  *
  * The key-player card's shape, on purpose: its own run, stored for each
  * number of splits, read first and computed only when there is none or the
@@ -18181,7 +16457,7 @@ async function loadConcor(storedOnly) {
   renderConcor();
 }
 
-/* --- the regular-role card: REGE (ROADMAP-REMAINING phase 3, 2026-10-02) --
+/* --- the regular-role card: REGE -----------------------------------------
  *
  * The Roles card's shape, on purpose: its own run, stored for each number
  * of roles and weighting, read first and computed only when there is none
@@ -18264,10 +16540,7 @@ function communitySize(id) {
   return hit ? hit.size : null;
 }
 
-/** Trust decay in words. The server's note said "decay is off", so the
- *  line read "decay: decay is off", and named its columns
- *  "valid_from/valid_to" (ux10-analytics:explanations-in-developer-
- *  language, 2026-09-23). */
+/** Trust decay in words. */
 function decayWords(a) {
   const d = a.decay || {};
   if (!d.half_life_months) return 'off';
@@ -18280,20 +16553,12 @@ function decayWords(a) {
 }
 
 /** What the numbers rest on, in one sentence: reviewed or not, evidenced
- *  or not (ux10-analytics:metrics-hide-review-and-evidence-state).
+ *  or not.
  *
- *  A disputed tie is not settled (release review c11, 2026-09-24). Tie
- *  review can only accept, dispute or reopen a tie, and a disputed one
- *  stays in the graph on its claims, so it still drives betweenness and
- *  the removal set. This said "All 58 ties behind these numbers have been
- *  reviewed" as a calm note over five disputed ties at a named broker. The
- *  server counts them since then (and works them out for a stored run), so
- *  a missing count is read as none.
- *
- *  Every clause agrees with its own count (c11 fix round, 2026-09-24): the
- *  closing sentence said "until those ties are reviewed and the disputes
- *  settled" over one proposal and one dispute, and "1 of 58 rest on an
- *  exhibit" where the other clauses here say "1 of 58 ties is". */
+ *  A disputed tie is not settled. Tie review can only accept, dispute or reopen a tie, and a
+ *  disputed one stays in the graph on its claims, so it still drives betweenness and the
+ *  removal set. The server counts disputed ties (and works them out for a stored run), so a
+ *  missing count is read as none. Every clause agrees in number with its own count. */
 function reviewCoverageText(rc) {
   const reviewed = rc.ties - rc.proposed;
   const disputed = rc.disputed || 0;
@@ -18355,7 +16620,7 @@ function leftOutParts(counts, one, many) {
   return out;
 }
 
-/** What the accepted-ties scope left out, in words (L3, 2026-09-24).
+/** What the accepted-ties scope left out, in words.
  *  "Accepted", not "reviewed": a disputed tie has been reviewed and is
  *  still left out, and the coverage line counts it as reviewed. Reads
  *  `left_out.ties`, and `left_out.affiliations` when venues were
@@ -18385,10 +16650,9 @@ function derivedTotal(om) {
     + (Number(dt.wallet_flow) || 0);
 }
 
-/** What projecting venues did, as a note (F2, 2026-09-24). Says that the
- *  derived ties are derived and that they count although stored inferred
- *  ties may be left out, so the projection line and this note never read
- *  as contradicting each other. */
+/** What projecting venues did, as a note. Says that the derived ties are derived and that
+ *  they count although stored inferred ties may be left out, so the projection line and this
+ *  note never read as contradicting each other. */
 function oneModeText(om, includeInferred) {
   const dt = om.derived_ties || {};
   const parts = [];
@@ -18493,13 +16757,10 @@ function renderAnalytics() {
   if (!a) return;
   show($('an-empty'), false);
   show($('an-results'), true);
-  /* The trend canvas is sized on tab entry, and on entry to a case with no
-     run #an-results is hidden, so `resizeHistory` found a zero-width box and
-     returned. Nothing sized it after Run, and the chart drew into the
-     default 300x150 bitmap stretched to the CSS box: a blurred strip with an
-     oversized label (README screenshot review, 2026-09-23). Sized here,
-     once the box has a width; drawHistory also sizes itself since
-     ux10-analytics:trend-chart-unsized-canvas. */
+  /* The trend canvas is sized on tab entry, when a case with no run has #an-results hidden
+     and the box has no width; unsized, the chart draws into the default 300x150 bitmap
+     stretched to the CSS box. So it is sized here, once the box has a width; drawHistory also
+     sizes itself. */
   resizeHistory();
 
   state.analyticsCommunityNo = new Map(
@@ -18507,17 +16768,12 @@ function renderAnalytics() {
 
   const p = a.projection || {};
   const rc = a.review_coverage;
-  /* The as-of instant through fmtTime, as every console time is, and the
-     counts agreed with their nouns ("1 actors" was possible) (README
-     screenshot set review, 2026-09-23). The view in the readout's words
-     (viewWords), where this said "Projection: All ties | confidence >=
-     LOW | inferred in" (ux19-copy developer-speak-in-copy). "Dyads" is
-     the build team's word: the reader's is connected pairs, and the ties
-     behind them are counted too, since parallel ties collapse into one
-     pair (ux10-analytics: explanations-in-developer-language). */
-  /* L3 and F2 (2026-09-24): the projection options are part of the view,
-     so the line says them. Derived ties are counted although stored
-     inferred ties may be left out, and it says so rather than leaving
+  /* The as-of instant goes through fmtTime, as every console time does, the counts agree with
+     their nouns, and the view is in the readout's words (viewWords). Dyads are "connected
+     pairs", and the ties behind them are counted too, since parallel ties collapse into one
+     pair. */
+  /* The projection options are part of the view, so the line says them. Derived ties are
+     counted although stored inferred ties may be left out, and it says so rather than leaving
      "inferred left out" beside numbers that rest on derived ties. */
   const om = a.one_mode;
   $('an-projection').textContent = viewWords(p)
@@ -18529,8 +16785,8 @@ function renderAnalytics() {
     + ' | ' + countOf(a.node_count, 'entity', 'entities') + ', '
     + countOf(a.dyad_count, 'connected pair', 'connected pairs') + ' from '
     + countOf(a.edge_count, 'tie', 'ties') +
-    /* "reviewed" counts a disputed tie, since a reviewer looked at it, so
-       the dispute is named beside it rather than read as settled (c11). */
+    /* "reviewed" counts a disputed tie, since someone looked at it, so the dispute is named
+       beside it rather than read as settled. */
     (rc ? ' | reviewed ' + (rc.ties - rc.proposed) + ' of ' + rc.ties
           + (rc.disputed ? ', disputed ' + rc.disputed : '')
           + ', on an exhibit ' + rc.evidenced + ' of ' + rc.ties : '') +
@@ -18572,19 +16828,18 @@ function renderAnalyticsFlags(a) {
   if (a.eigenvector_meaningful === false) flags.push(['note', a.eigenvector_note]);
   const rc = a.review_coverage;
   if (rc && rc.ties) {
-    /* A disputed tie is a doubt a reviewer recorded, so it warns as an
-       unreviewed one does (release review c11, 2026-09-24). */
+    /* A disputed tie is a recorded doubt, so it warns as an unreviewed one does. */
     flags.push([rc.proposed || rc.disputed || rc.rejected ? 'warn' : 'note',
       reviewCoverageText(rc)]);
   } else if (!rc) {
     flags.push(['note', 'Stored before review and evidence coverage were recorded. '
       + 'Run the analysis again to see it.']);
   }
-  /* L3 (2026-09-24): the scope is always said, and what it left out. */
+  /* The scope is always said, and what it left out. */
   if (a.review_scope && a.review_scope.scope === 'accepted') {
     flags.push(['note', reviewScopeText(a.review_scope)]);
   }
-  /* F2 (2026-09-24): what was projected, then every exclusion, warned. */
+  /* What was projected, then every exclusion, warned. */
   if (a.one_mode) {
     flags.push(['note', oneModeText(a.one_mode,
       !!(a.projection && a.projection.include_inferred))]);
@@ -18599,16 +16854,12 @@ function renderAnalyticsFlags(a) {
   }
 }
 
-/** docs/03 wants the interface to TEACH the broker pattern rather than
- *  print a number: "high betweenness with low degree is the classic broker
- *  signature ... that person is usually far more consequential than the
- *  loudest poster."
+/** docs/03 wants the interface to teach the broker pattern rather than print a number: high
+ *  betweenness with low degree is the classic broker signature.
  *
- *  ux10-analytics:broker-lead-card-overclaims (2026-09-23): the card was
- *  the top five of the table with the busiest actors relabelled as brokers,
- *  cut silently at five. The server's rule is relative now; this says, in
- *  each actor's own numbers, why they qualified, keeps the two leads apart,
- *  says "5 of 9" when a list is cut, and says so when nobody qualifies. */
+ *  The server's rule is relative; this says, in each actor's own numbers, why they qualified,
+ *  keeps the two leads apart, says "5 of 9" when a list is cut, and says so when nobody
+ *  qualifies. */
 function renderAnalyticsLeads(a) {
   const box = $('an-leads');
   clear(box);
@@ -18671,11 +16922,8 @@ function renderAnalyticsLeads(a) {
 
 /** An actor's name as a real control: "Show null_auk on graph".
  *
- *  ux10-analytics:row-drilldown-mouse-only (2026-09-23): the whole row was
- *  a click target with no role and no tab stop, so a keyboard user could
- *  not reach the pane's main drill-down, and a mouse user was moved to
- *  another pane by clicking a table row with nothing marking it as a
- *  link. The row is inert now; the name is the button. */
+ *  The row is inert and the name is the button, so the drill-down has a role and a tab stop
+ *  and a click on a row never moves a mouse user to another pane unannounced. */
 function actorButton(n) {
   const b = el('button', 'an-entity', n.label);
   b.type = 'button';
@@ -18690,11 +16938,8 @@ function actorButton(n) {
 
 /* --- the actor table: sortable, and filterable by community ---------------
  *
- * ux10-analytics:communities-anonymous-table-unsortable (2026-09-23): the
- * table was fixed in betweenness order and the community column was a bare
- * integer, so "who is least constrained" or "who else is in community 2"
- * meant scanning every row by eye, 146 on NIGHTJAR. Each heading is now a
- * button carrying aria-sort, and a cluster filter sits above the table. */
+ * Each heading is a button carrying aria-sort, and a cluster filter sits above the table, so
+ * "who is least constrained" or "who else is in community 2" is not a scan of every row. */
 const AN_SORTS = {
   label: { first: 'ascending', get: (n) => String(n.label || '').toLowerCase() },
   degree: { first: 'descending', get: (n) => n.degree },
@@ -18853,51 +17098,32 @@ function rankCell(value, rank, percentile, total) {
 
 /* ── metric history ────────────────────────────────────────────────────
  *
- * Phase 3's checklist calls a rising betweenness trend "visible". It has
- * been visible to `curl` since the endpoint was built: nothing in this file
- * called it.
+ * Rules this pane keeps:
  *
- * Four things this pane must not do, each of which the console has already
- * learned the hard way:
- *
- *  1. It never joins the suite in a `Promise.all`. The suite needs
- *     `analytics.run` and so does this, but a failure here must not blank a
- *     table that already rendered.
- *  2. A 403 is not an empty state. "No history" and "you may not see the
- *     history" are different facts and an analyst acts on them differently.
- *  3. A GAP IS NOT A ZERO — and the harder half of that is what this
- *     CANNOT show. `analytics_runs` skips the row entirely when a metric
- *     is undefined for a node (`if value is None: continue` — the
- *     constraint of an isolate), and `node_metric.value` is NOT NULL. So
- *     an undefined run is not a null in the series, it is ABSENT, and
- *     absent is indistinguishable from "no run happened" at this endpoint.
- *     The line therefore spans it, and the help text says so rather than
- *     letting the reader assume the axis is continuous. The `pen` break
- *     below still guards a null, because a value the client cannot render
- *     must not be drawn as a position — but it is a guard, not the
- *     mechanism, and calling it the mechanism would be the same confident
- *     wrong claim this pane is here to avoid.
- *  4. The series arrives NEWEST FIRST. A left-to-right time axis has to
- *     reverse it, and getting that backwards silently inverts every trend
- *     on screen — rising reads as falling.
- *
- * And since ux10-analytics:trend-mixes-run-time-and-world-time
- * (2026-09-23), two more. The x axis is the WORLD time a run measured (its
- * as-of, or its start when it measured the live graph), not when somebody
- * clicked Run: three as-of dates computed a minute apart were three points
- * on today in click order. And only runs under the projection on screen
- * are joined into the line: a LOW run and a HIGH run, or inferred ties in
- * and out, are different measurements, and a line between them draws a
- * "promotion" that is a change of parameters.
+ *  1. It never joins the suite in a `Promise.all`: both need `analytics.run`, but a failure
+ *     here must not blank a table that already rendered.
+ *  2. A 403 is not an empty state: "no history" and "you may not see the history" are
+ *     different facts.
+ *  3. A gap is not a zero, and this cannot show one. `analytics_runs` skips the row when a
+ *     metric is undefined for a node (the constraint of an isolate) and `node_metric.value`
+ *     is NOT NULL, so an undefined run is absent, which this endpoint cannot tell from "no
+ *     run happened". The line spans it and the help text says so. The `pen` break below
+ *     still guards a null, but it is a guard, not the mechanism.
+ *  4. The series arrives newest first; a left-to-right time axis reverses it, or every trend
+ *     on screen inverts.
+ *  5. The x axis is the world time a run measured (its as-of, or its start on the live
+ *     graph), not when somebody clicked Run.
+ *  6. Only runs under the projection on screen are joined into the line: runs under other
+ *     parameters are different measurements, and a line between them draws a "promotion"
+ *     that is a change of parameters.
  */
 const histCanvas = $('an-hist-chart');
 const histCtx = histCanvas.getContext('2d');
 
 async function loadMetricHistory(nodeId, label) {
   if (!state.caseId || !nodeId) return;
-  /* One actor's trend at a time, and only in the case it was asked in
-     (final review C3, 2026-09-23): a reply for the case left behind, or
-     for an actor picked before the latest, charted the wrong person. */
+  /* One actor's trend at a time, and only in the case it was asked in: a reply for the case
+     left behind, or for an actor picked before the latest, would chart the wrong person. */
   const token = caseToken();
   const gen = state.analyticsHistoryGen = (state.analyticsHistoryGen || 0) + 1;
   const stale = () => caseChanged(token) || gen !== state.analyticsHistoryGen;
@@ -18933,11 +17159,9 @@ async function loadMetricHistory(nodeId, label) {
   }
 }
 
-/** ux10-analytics:trend-click-no-visible-response (2026-09-23): the chart
- *  renders below the whole table, 1,068px down at row 20 of CORVID's 30,
- *  and the view did not move, so Trend looked broken. The chart's heading
- *  is brought into view and focused (a keyboard user lands on it), and the
- *  charted row is marked so the chart can be traced back to it. */
+/** The chart renders below the whole table, so its heading is brought into view and focused
+ *  (a keyboard user lands on it), and the charted row is marked so the chart can be traced
+ *  back to it. */
 function revealTrend() {
   const head = $('an-hist-head');
   head.scrollIntoView({ block: 'start', behavior: reduceMotion ? 'auto' : 'smooth' });
@@ -18958,9 +17182,9 @@ function markChartedRow(nodeId) {
  *  out on purpose, because it is the axis. */
 function trendKey(preset, params) {
   const p = params || {};
-  /* The review scope (L3) and the venue projection (F2, every one of its
-     parameters, min_shared included) measure something else too, so runs
-     under them never join another projection's line (2026-09-24). */
+  /* The review scope and the venue projection (every one of its parameters, min_shared
+     included) measure something else too, so runs under them never join another projection's
+     line. */
   const om = p.one_mode;
   return [preset || p.preset || '', p.min_confidence || '',
           String(!!p.include_inferred), String(p.decay_half_life_months || ''),
@@ -19029,11 +17253,8 @@ function histRow(p) {
   const tr = el('tr');
   if (p.same === false) tr.classList.add('other-projection');
   tr.appendChild(el('td', null, fmtTime(p.at)));
-  /* The world time the run measured. Runs at three as-of dates, taken a
-     minute apart, read as one minute three times, and a rising value looked
-     like noise rather than history (README screenshot set review,
-     2026-09-23). A run with no as_of measured the live graph, so its own
-     start is the world time it describes. */
+  /* The world time the run measured, not when it ran. A run with no as_of measured the live
+     graph, so its own start is the world time it describes. */
   const asOf = (p.params && p.params.as_of) || p.at;
   tr.appendChild(el('td', absentClass(asOf), fmtTime(asOf)));
   const val = el('td', absentClass(p.value), metricNum(p.value, 4));
@@ -19052,11 +17273,9 @@ function histRow(p) {
   tr.appendChild(el('td', absentClass(p.percentile),
     p.percentile === null || p.percentile === undefined
       ? 'unranked' : 'p' + num(p.percentile, 0)));
-  /* The projection is per point and not per chart on purpose: weights are
-     not comparable across parameters, so two points from different
-     projections are two different measurements and the row has to say so:
-     the preset, the confidence floor, inferred ties in or out, and decay
-     (ux10-analytics:trend-mixes-run-time-and-world-time, 2026-09-23). */
+  /* The projection is per point and not per chart on purpose: weights are not comparable
+     across parameters, so two points from different projections are two measurements and the
+     row says so: the preset, the confidence floor, inferred ties in or out, and decay. */
   const params = p.params || {};
   const preset = el('td', absentClass(p.preset), p.preset || NO_VALUE);
   const bits = [];
@@ -19067,8 +17286,7 @@ function histRow(p) {
   if (params.decay_half_life_months) {
     bits.push('decay ' + params.decay_half_life_months + ' months');
   }
-  /* L3 and F2 (2026-09-24): said only when set, so a default row reads
-     as it always has. */
+  /* Said only when set, so a default row carries neither. */
   if (params.review_scope === 'accepted') bits.push('accepted ties only');
   if (params.one_mode) bits.push('projected: ' + andList(oneModeFamilies(params.one_mode)));
   if (bits.length) preset.appendChild(el('span', 'muted small', '  ' + bits.join(', ')));
@@ -19079,13 +17297,8 @@ function histRow(p) {
 /** The canvas bitmap made to match its box, at the device pixel ratio.
  *  Returns false while the box has no size (a hidden pane).
  *
- *  ux10-analytics:trend-chart-unsized-canvas (2026-09-23): the bitmap was
- *  sized only on tab entry and window resize, and on first entry the box
- *  was hidden, so the chart plotted 964 CSS pixels of time onto the
- *  default 300-pixel bitmap: the left third of the range, stretched across
- *  the width, with the newest runs (the ones that matter) cut off and a
- *  single run drawn as nothing. Every draw now sizes first, and a
- *  ResizeObserver redraws whenever the box itself changes. */
+ *  Every draw sizes first, and a ResizeObserver redraws whenever the box changes: a bitmap
+ *  sized while the pane was hidden stays at the default 300 pixels and crops the newest runs. */
 function syncHistoryBitmap() {
   const dpr = window.devicePixelRatio || 1;
   const w = histCanvas.clientWidth, h = histCanvas.clientHeight;
@@ -19148,11 +17361,8 @@ function drawHistory() {
   const vals = defined.map((q) => q.p.value);
   const vLow = Math.min.apply(null, vals);
   const vHigh = Math.max.apply(null, vals);
-  /* ux10-analytics:trend-axis-fabricated-bounds (2026-09-23). A flat
-     series was padded by 0.5 either side and the padded bounds printed, so
-     a constraint of 0.189 was labelled 0.689 (and -0.311, an impossible
-     value). The drawing range is still padded, a flat series still draws
-     as a flat line down the middle, but only measured values are printed. */
+  /* The drawing range is padded, so a flat series draws as a flat line down the middle, but
+     only measured values are printed: a padded bound can be an impossible value. */
   const flat = vHigh - vLow < 1e-12;
   const span = flat ? Math.max(Math.abs(vHigh) * 0.1, 0.5) : (vHigh - vLow) * 0.08;
   const vMin = vLow - span, vMax = vHigh + span;
@@ -19209,10 +17419,8 @@ function drawHistory() {
   histCtx.font = PAINT.monoFont || '10px monospace';
   histCtx.textBaseline = 'alphabetic';
   histCtx.textAlign = 'left';
-  /* Both ends in one label on the left. "lowest" used to sit in the top
-     right corner, which on a rising series is where the newest and highest
-     point is, so the latest value read as the lowest (README screenshot
-     review, 2026-09-24). */
+  /* Both ends in one label on the left: the top right corner is where a rising series has its
+     newest and highest point, so a label there reads as that point's value. */
   histCtx.fillText(flat
     ? num(vHigh, 3) + (defined.length > 1 ? ' in every run shown' : '')
     : 'highest ' + num(vHigh, 3) + ' · lowest ' + num(vLow, 3), pad.l, pad.t - 4);
@@ -19264,9 +17472,8 @@ function renderKeyPlayer() {
   if (state.focus && state.focus.kind === 'set') renderFocusFlag();
   const k = state.analyticsKpp;
   const size = Number($('an-kpp-n').value);
-  /* ux10-analytics:kpp-blank-on-stored-run (2026-09-23): a missing result
-     said nothing, and a blank section under "who holds this network
-     together" reads as "nobody does". */
+  /* A missing result says so: a blank section under "who holds this network together" reads
+     as "nobody does". */
   if (!k || k.missing) {
     const card = el('div', 'card');
     card.appendChild(el('p', 'muted small', 'Not computed for this view yet.'));
@@ -19297,12 +17504,9 @@ function renderKeyPlayer() {
     card.appendChild(el('p', 'muted small', 'From the key-player run of '
       + fmtTime(k.computed_at) + ' (' + ageText(k.computed_at) + ').'));
   }
-  /* F was printed and never defined (ux10-analytics:explanations-in-
-     developer-language, 2026-09-23). The share of pairs cut off is the
-     reading; F is the same number as a fraction. The card that names a
-     set has just given that share, so it says "that share"; the card
-     that names nobody has not, so it says which share (found reviewing
-     that fix, 2026-09-23). */
+  /* The share of pairs cut off is the reading; F is the same number as a fraction, defined in
+     the tooltip. The card that names a set has just given that share, so it says "that share";
+     the card that names nobody has not, so it says which share. */
   const method = () => {
     const line = el('p', 'muted small', 'Fragmentation (F) goes from ' + num(r.fragmentation_before, 3)
       + ' to ' + num(r.fragmentation_after, 3) + '.');
@@ -19311,11 +17515,8 @@ function renderKeyPlayer() {
       + 'but not always, the best there is.';
     return line;
   };
-  /* A set that cuts nobody off is not a finding, and this is the pane that
-     names people for removal: on a network that holds together without
-     any set the search found, "Removal set: a, b, c" put three names
-     under a heading about who holds it together, for nothing (found
-     driving OP-CORVID-26 after the fix, 2026-09-23). */
+  /* A set that cuts nobody off is not a result, and this is the pane that names people for
+     removal, so a network that holds together without the set gets a sentence, not names. */
   if (!(r.fragmentation_after > r.fragmentation_before + 1e-9)) {
     card.appendChild(el('p', null,
       'Removing the best set of ' + countOf(r.n_remove, 'entity', 'entities')
@@ -19327,9 +17528,6 @@ function renderKeyPlayer() {
     return;
   }
   card.appendChild(el('p', null,
-    /* "these 1 actors" was possible, and the word was the Analysis
-       pane's own for an entity (ux19-copy one-concept-many-names,
-       2026-09-23). */
     'Removing ' + (Number(r.n_remove) === 1 ? 'this entity'
       : 'these ' + r.n_remove + ' entities') + ' would leave '
     + pctOf(r.fragmentation_after) + ' of pairs of entities unable to reach each '
@@ -19379,19 +17577,15 @@ function modularityReading(q) {
   return 'strongly separated';
 }
 
-/** ux10-analytics:communities-anonymous-table-unsortable (2026-09-23):
- *  "4 communities (Leiden, modularity 0.334)" meant nothing to the
- *  intended reader, and said neither how big each cluster is nor whether
- *  0.334 is strong. The sentence says both in words; the method and the
- *  number are in its tooltip, and each cluster can be shown on the graph. */
+/** The cohesion sentence says in words how big each cluster is and how strong the split is;
+ *  the method and the modularity are in its tooltip, and each cluster can be shown on the
+ *  graph. */
 function renderCohesion(a) {
   const box = $('an-cohesion');
   clear(box);
   const c = a.cohesion || {};
   const card = el('div', 'card');
-  /* "1 communities", and a bracketed plural for the components, were in
-     the Analysis capture (README screenshot set review, 2026-09-23). Every
-     count here is known, so every noun agrees, "size" with its list too. */
+  /* Every count here is known, so every noun agrees with it, "size" with its list too. */
   const sizes = c.component_sizes || [];
   const clusters = (c.community_sizes || []).map((s) => s.size);
   const reading = c.community_count > 1 ? modularityReading(c.modularity) : null;
@@ -19471,11 +17665,10 @@ function concorFitText(r2) {
 }
 
 /** One relation's block densities as a table. A block at or above the
- *  relation's own density is shaded by a class AND marked in words, and
+ *  relation's own density is shaded by a class and marked in words, and
  *  the caption states the cut, so nothing rests on colour alone
- *  (docs/06). Three decimals, because an investigative graph
- *  is sparse: at two, a block of 0.004 over a cut of 0.003 read "0.00
- *  tied" under "at least 0.00" (seen on the demo estate, 2026-09-24). */
+ *  (docs/06). Three decimals, because an investigative graph is sparse: at two, a block of
+ *  0.004 over a cut of 0.003 reads "0.00 tied" under "at least 0.00". */
 function concorImageTable(c, rel, letters) {
   const d = (c.density || {})[rel.key] || [];
   const img = (c.image || {})[rel.key] || [];
@@ -19512,7 +17705,7 @@ function concorImageTable(c, rel, letters) {
   return wrap;
 }
 
-/** The Roles card (F1, 2026-09-24): CONCOR positions, the fit that says
+/** The Roles card: CONCOR positions, the fit that says
  *  how far to trust them, the density image per relation, and the pairs
  *  that are alike but not tied. Every count agrees with its noun, and every
  *  reading is worded as a possibility: these are leads about people. */
@@ -19676,7 +17869,7 @@ function renderConcor() {
   box.appendChild(card);
 }
 
-/** Where REGE's roles were cut, in words (REGE, 2026-10-02): the lowest
+/** Where REGE's roles were cut, in words: the lowest
  *  similarity at which members were joined, and how alike the closest two
  *  roles left apart are. 1 means alike in every tie. */
 function regeCutText(cut) {
@@ -19738,12 +17931,11 @@ function regeImageTable(g, rel, numbers) {
   return wrap;
 }
 
-/** The regular-role card (REGE, ROADMAP-REMAINING phase 3, 2026-10-02):
- *  roles of entities with the same kinds of ties to the same kinds of
- *  others, where the cut fell, each role's members and how alike they are,
- *  the role-to-role image per relation, and every limit the server states.
- *  A role is worded as a hypothesis throughout: it is a lead about how
- *  entities sit in this view, never a finding about who they are. */
+/** The regular-role card (REGE): roles of entities with the same kinds of ties to the same
+ *  kinds of others, where the cut fell, each role's members and how alike they are, the
+ *  role-to-role image per relation, and every limit the server states. A role is worded as a
+ *  hypothesis throughout: a lead about how entities sit in this view, never a statement about
+ *  who they are. */
 function renderRege() {
   const box = $('an-rege');
   clear(box);
@@ -19955,12 +18147,6 @@ function renderBalance(a) {
 
 /* --- results on the sociogram -------------------------------------------
  *
- * ux10-analytics:results-dont-reach-the-graph (2026-09-23). Where the
- * brokers sit, which cluster community 2 is, and what the network looks
- * like with the removal set taken out were the three questions this pane
- * exists to answer, and each meant hunting names across two panes, which
- * on NIGHTJAR's 146 is impractical.
- *
  *  - After a run the Node size control offers the run's betweenness, low
  *    constraint and effective size, captioned with the run they came from.
  *    They leave the control when the run leaves the pane.
@@ -20006,10 +18192,8 @@ function syncAnalysisSizeOptions() {
 }
 
 /** Node size from the analysis run, on the same scale as the local
- *  metrics: the raw value, area in proportion from zero (sizeScale; ux04
- *  size-scale-flattens-hubs retired the log compression this once
- *  matched). An entity the run did not include draws at the smallest
- *  size, and the run's caption says which run it was. */
+ *  metrics: the raw value, area in proportion from zero (sizeScale). An entity the run did
+ *  not include draws at the smallest size, and the run's caption says which run it was. */
 function analysisSizeRaw(n) {
   const row = state.analyticsById && state.analyticsById.get(n.id);
   if (!row) return 0;
@@ -20028,14 +18212,12 @@ function analysisSizeRaw(n) {
  *  is kept with it, so the flag can say when that run has left the pane
  *  or the graph has moved past it (setFocusSource). */
 function showSetOnGraph(spec) {
-  /* A regular role (REGE, 2026-10-02) is a run of its own, as a CONCOR
-     position is. */
+  /* A regular role is a run of its own, as a CONCOR position is. */
   const from = spec.fromKpp ? state.analyticsKpp
     : (spec.fromConcor ? state.analyticsConcor
       : (spec.fromRege ? state.analyticsRege : state.analytics));
-  /* A set grouped over projected venues (F2, 2026-09-24) is drawn on a
-     graph that still shows the forums and wallets as recorded, so the flag
-     says why the ties that grouped them are not the ties on screen. */
+  /* A set grouped over projected venues is drawn on a graph that still shows the forums and
+     wallets as recorded, so the flag says why the ties that grouped them are not on screen. */
   const om = from && from.one_mode;
   const venues = om ? ' The ties that grouped them run through '
     + oneModeFamilies(om).join(' or ') + ', which the graph draws as recorded.' : '';
@@ -20055,15 +18237,10 @@ function showSetOnGraph(spec) {
 
 /** Where the set on the graph came from, in words, for the FOCUS flag.
  *
- *  A set shown from the pane stayed labelled "from the Analysis pane"
- *  after the pane had cleared that run (the as-of moved) or marked it
- *  stale (a tie was retired), so the graph kept emphasising a cluster or
- *  a removal set the pane no longer vouched for (found reviewing
- *  ux10-analytics:results-dont-reach-the-graph, 2026-09-23). The set is
- *  still the analyst's to look at; the flag says what it now rests on. */
+ *  The pane may have cleared that run (the as-of moved) or marked it stale (a tie was
+ *  retired). The set is still the analyst's to look at; the flag says what it rests on. */
 function setFocusSource(f) {
-  /* The key player and the Roles card (F1, 2026-09-24) are runs of their
-     own, each with its own verdict. */
+  /* The key player and the Roles card are runs of their own, each with its own verdict. */
   const run = f.fromKpp ? state.analyticsKpp
     : (f.fromConcor ? state.analyticsConcor
       : (f.fromRege ? state.analyticsRege : state.analytics));
@@ -20090,12 +18267,7 @@ function applySetFocus(options) {
 }
 
 /** The inspector's line for the selected actor from the analysis run on
- *  the Analysis pane, and the way there.
- *
- *  ux10-analytics:explanations-in-developer-language (2026-09-23): the
- *  inspector said brokerage is not computed here at the moment an analyst
- *  arrived from a table ranking this actor first for it, and gave no way
- *  back. */
+ *  the Analysis pane, and the way there. */
 function renderInspectorAnalysis(nodeId) {
   const box = $('insp-an-brief');
   if (!box) return;
@@ -20118,11 +18290,11 @@ function renderInspectorAnalysis(nodeId) {
       text += ' The graph has changed since that run.';
     }
   }
-  /* The Roles card's position, when it placed this entity (F1, 2026-09-24). */
+  /* The Roles card's position, when it placed this entity. */
   const roles = state.analyticsConcor;
   const placed = roles && !roles.error && (roles.nodes || []).find((n) => n.id === nodeId);
   if (placed) text += ' Position ' + placed.position + ' in the role analysis.';
-  /* And its regular role, when that run placed it (REGE, 2026-10-02). */
+  /* And its regular role, when that run placed it. */
   const regular = state.analyticsRege;
   const cast = regular && !regular.error
     && (regular.nodes || []).find((n) => n.id === nodeId);
@@ -20134,14 +18306,11 @@ function renderInspectorAnalysis(nodeId) {
   box.appendChild(b);
 }
 
-/* ── FEEDS and LIFECYCLE (Phases 9, 4, 6) ─────────────────────────────────
+/* ── FEEDS and LIFECYCLE ─────────────────────────────────────────────────
  *
- * Two panes over four routers. What they have in common is that everything
- * they show is a QUEUE somebody has to work, and every one of those queues
- * fails the same way: it fills up, nobody can tell what matters, and it
- * stops being read. docs/12 says it outright — "volume is the enemy".
- *
- * So each list leads with the thing that decides whether to look:
+ * Two panes over four routers. Everything they show is a queue somebody has to work, and a
+ * queue nobody can rank stops being read (docs/12: "volume is the enemy"). So each list
+ * leads with the thing that decides whether to look:
  *
  *   ingest queue   → the triage score, and WHY it scored that
  *   dead letters   → the error class, because a run of identical ones is a
@@ -20151,10 +18320,9 @@ function renderInspectorAnalysis(nodeId) {
  *   retention      → days remaining, signed, so overdue reads as overdue
  *   break-glass    → how long the grant has been waiting for review
  *
- * Nothing here renders a payload, a fragment or a credential as HTML.
- * Everything is `textContent` through `el()`. Invariant 10's reasoning is
- * about samples, but the argument — attacker-controlled bytes must not be
- * interpreted — applies to every one of these.
+ * Nothing here renders a payload, a fragment or a credential as HTML: everything is
+ * `textContent` through `el()`, because attacker-controlled bytes must not be interpreted
+ * (invariant 10).
  */
 
 /** A subtab group: `.subtabs > .subtab[data-subtab]` over `.subpane`s. */
@@ -20175,7 +18343,7 @@ function initSubtabs(paneId, onSelect) {
     t.addEventListener('keydown', (e) => {
       let next = null;
       // A hidden subtab (an Admin section the account may not open) is
-      // skipped, so the arrow keys never reach it (F8 G1, 2026-09-24).
+      // skipped, so the arrow keys never reach it.
       const live = tabs.filter((x) => !x.hidden);
       const at = live.indexOf(t);
       if (e.key === 'ArrowRight') next = live[(at + 1) % live.length];
@@ -20188,26 +18356,14 @@ function initSubtabs(paneId, onSelect) {
 
 /** What to put on screen when a request was refused.
  *
- *  The server's `detail` FIRST, always. Three of the strings in this file
- *  used to assert a role fact instead — "Key administration needs
- *  ingest.manage" — and told the holder of that permission they did not
- *  hold it, because `ingest.manage` is step-up gated and a stale step-up
- *  also 403s. The response said "re-authentication required" and the UI
- *  threw it away in favour of a guess.
- *
- *  The written explanation is kept as context after it: "you need to sign
- *  in again" is actionable, and "this queue exists because a record with
- *  no case cannot be reached by a case assignment" is why the queue is
- *  there at all. Both are worth having; only one of them is a fact about
- *  this caller.
+ *  The server's `detail` first, always: a step-up gated permission also 403s on a stale
+ *  step-up, so a guessed "needs ingest.manage" would tell its holder they lack it. The
+ *  console's own explanation follows as context; only the detail is a fact about this caller.
  */
 function refusalText(err, context) {
   const said = (err instanceof ApiError && err.detail) ? err.detail : '';
-  /* Roles, not permission codes (ux19-copy developer-speak-in-copy,
-     2026-09-23): "Approvals need case.read on this case." named a code an
-     analyst has no use for and nobody who could help. The server's
-     "missing permission X" is said as the roles that hold X and who can
-     give one; codes and role keys in the context become role names. */
+  /* Roles, not permission codes: the server's "missing permission X" is said as the roles
+     that hold X and who can give one; codes and role keys in the context become role names. */
   const refused = permissionRefusal(said, context);
   context = roleWords(context);
   if (!said) return context;
@@ -20219,9 +18375,7 @@ function refusalText(err, context) {
     return refused.detail + (context ? ' ' + context : '') + ' ' + refused.ask;
   }
   /* The server writes most details as clauses ("missing global permission
-     break_glass.review"), and the context after it is a sentence, so the
-     two ran together as one: "... break_glass.review The review belongs
-     to ..." (README screenshot review, 2026-09-23). A detail that is
+     break_glass.review") and the context after it is a sentence, so a detail that is
      followed by something is closed as a sentence first. */
   const detail = context ? closeClause(said) : said;
   return detail + (context ? ' ' + context : '');
@@ -20230,10 +18384,9 @@ function refusalText(err, context) {
 /* Which roles hold each permission, and each role's name, read from the
    server once a session exists (`GET /roles/holders`, which any signed-in
    account may read: the grant table is how the deployment is configured,
-   not case content). Never a copy here: role names come from iam.role,
-   the owner's rule since 0062 (test_role_names_ui). Null until the read
-   has answered, and then every sentence keeps the codes it was written
-   with, which is what it said before 2026-09-23. */
+   not case content). Never a copy here: role names come from iam.role (migration 0062,
+   test_role_names_ui). Null until the read has answered; until then every sentence keeps
+   the codes it was written with. */
 let permissionRoles = null;
 
 async function loadPermissionRoles() {
@@ -20261,18 +18414,11 @@ function rolesFor(permission) {
     'or') + ' role';
 }
 
-/** Permission codes and role keys in a sentence written for an analyst,
- *  replaced by role names: "needs case.read" and "needs the case.read
- *  permission" both become "needs the Analyst, ... or Reviewer role", and
- *  "MALWARE_ANALYST" becomes "Malware analyst". A code the table does not
- *  know is left as written.
- *
- *  A code that opens a sentence opens it with a capital. The Audit chain
- *  refusal most accounts see was "Refused. the Security officer role is
- *  granted to Security officer alone", lower-case and saying the role is
- *  granted to itself (verifier of developer-speak-in-copy, 2026-09-23):
- *  its context now says what needs the code instead, and every context is
- *  rendered against the real grant table in test_search_columns_pg. */
+/** Permission codes and role keys in a sentence written for an analyst, turned into role
+ *  names: "needs case.read" and "needs the case.read permission" both become "needs the
+ *  Analyst, ... or Reviewer role", and "MALWARE_ANALYST" becomes "Malware analyst". A code
+ *  the table does not know is left as written. A code that opens a sentence opens it with a
+ *  capital. test_search_columns_pg renders every context against the real grant table. */
 function roleWords(text) {
   return String(text || '')
     .replace(/\b([Tt]he )?([a-z_]+(?:\.[a-z_]+)+)( permission)?\b/g,
@@ -20329,8 +18475,7 @@ function daysFromNow(iso) {
 }
 
 /** A deadline as days from now. A missing one is a deadline nobody set,
- *  so it says that rather than printing a dash (README screenshot
- *  review, 2026-09-23). */
+ *  so it says that rather than printing a dash. */
 function whenText(iso) {
   if (!iso) return 'not set';
   const d = daysFromNow(iso);
@@ -20350,7 +18495,7 @@ function fact(label, value, cls) {
 }
 
 /** "compartment X" or "compartments X, Y": the keys a capture or a
- *  document is stored under, agreed with their number (L1, 2026-09-24). */
+ *  document is stored under, agreed with their number. */
 function compartmentWords(keys) {
   const list = (keys || []).map((k) => visibleText(k));
   return agree(list.length, 'compartment', 'compartments') + ' '
@@ -20373,31 +18518,22 @@ function labelChips(row) {
 function renderList(listId, emptyId, rows, build) {
   const box = $(listId);
   clear(box);
-  /* A render is an answer, so any "could not be loaded" notice from an
-     earlier failed read goes (ux17-failure, 2026-09-22). */
+  /* A render is an answer, so any "could not be loaded" notice from an earlier failed read
+     goes. */
   clearLoadFailure(emptyId);
   for (const row of rows) box.appendChild(build(row));
-  /* And the line's own words come back, whatever a refusal or a pending
-     read wrote there (ux17-failure:sticky-error-text-in-empty-slot,
-     2026-09-23). A caller with a more precise empty sentence writes it
-     AFTER this call. */
+  /* And the line's own words come back, whatever a refusal or a pending read wrote there. A
+     caller with a more precise empty sentence writes it after this call. */
   showEmptyState(emptyId, rows.length === 0);
   return rows.length > 0;
 }
 
 /* --- ingest queue ------------------------------------------------------ */
 
-/* The Feeds review of 2026-09-22 (ux12-feeds) found this pane could be
-   looked at and not worked: rows named no selector for their score,
-   counted copies as corroboration, could not be opened, dismissed or
-   attached, and the Category filter shrank to itself and followed the
-   analyst into the next case. The queue below answers each of those; the
-   comments name the finding they answer. */
-
 /** How the classifier arrived at a category, in words. The raw enum
  *  (STRUCTURE_NESTED) is the classifier's vocabulary, and under a bare
- *  "confidence" label the percentage read as confidence in the
- *  intelligence (ux12-feeds:confidence-label-ambiguous, 2026-09-23). */
+ *  "confidence" label the percentage reads as confidence in the
+ *  intelligence. */
 const CATEGORY_SOURCE_WORDS = {
   DECLARED: 'as the feed declared it',
   STRUCTURE: 'from its structure',
@@ -20427,13 +18563,9 @@ function selectOption(value, label) {
   return o;
 }
 
-/* The queue is filtered to ONE case (`case_id` below), so it goes on the
-   switch like the other case-scoped lists (ux17-failure:stale-previous-
-   case-data, 2026-09-22). So do its FILTERS since 2026-09-23: a Category
-   chosen on one case carried into the next, which then said "Nothing in
-   the queue for this case." about a queue holding other categories
-   (ux12-feeds:category-filter-collapses-and-sticks). And the rail badge,
-   which counts the previous case. */
+/* The queue is filtered to one case (`case_id` below), so it goes on the switch like the
+   other case-scoped lists, and so do its filters and the rail badge: a Category chosen on one
+   case would empty the next case's queue. */
 onCaseSwitch(() => {
   clear($('ing-list'));
   $('ing-counts').textContent = '';
@@ -20455,11 +18587,9 @@ function resetIngestFilters() {
   $('ing-dupes').checked = false;
 }
 
-/** The Category options, from counts over the WHOLE queue rather than
- *  from the page the filter just narrowed: choosing STEALER_LOG used to
- *  leave STEALER_LOG as the only choice, so moving to another category
- *  meant going back to All first. The chosen one is kept even at zero, so
- *  a filter never vanishes from its own select. */
+/** The Category options, from counts over the whole queue rather than from the page the
+ *  filter just narrowed, so choosing one leaves the others available. The chosen one is kept
+ *  even at zero, so a filter never vanishes from its own select. */
 function paintCategoryOptions(facets) {
   const sel = $('ing-category');
   const keep = sel.value;
@@ -20476,13 +18606,11 @@ function paintCategoryOptions(facets) {
 }
 
 /** The Feeds rail badge: this case's records that match a watched
- *  selector and nobody has triaged (ux12-feeds:feeds-badge-never-set,
- *  2026-09-23). The badge existed in the markup and nothing ever set it,
- *  so a hit surfaced only for somebody who happened to open Feeds. */
+ *  selector and nobody has triaged, so a hit surfaces without opening Feeds. */
 function paintFeedsBadge(facets) {
   const badge = $('feeds-badge');
-  /* Not on a read-only case (2026-09-24): record
-     triage refuses there, so the badge was a count nobody could clear. */
+  /* Not on a read-only case: record triage refuses there, so the badge would be a count
+     nobody could clear. */
   const n = facets && !caseReadOnly()
     ? Number(facets.watched_untriaged || 0) : 0;
   badge.textContent = n > 99 ? '99+' : String(n);
@@ -20493,12 +18621,10 @@ function paintFeedsBadge(facets) {
   show(badge, n > 0);
 }
 
-/** Counted on case open, as the triage and sample badges are. One small
- *  read (`limit=1`: the facets carry the count). A caller without
- *  `ingest.read` is refused once and not asked again this session: the
- *  refusal writes an AUTHZ_DENIED row, and a hum of those from ordinary
- *  case switching is how the probing signal stops being read (the reason
- *  `loadQuarantine` latches too). */
+/** Counted on case open, as the triage and sample badges are, with one small read
+ *  (`limit=1`: the facets carry the count). A caller without `ingest.read` is refused once and
+ *  not asked again this session: each refusal writes an AUTHZ_DENIED row, and a hum of those
+ *  from ordinary case switching drowns the probing signal (`loadQuarantine` latches too). */
 async function refreshFeedsBadge() {
   if (!state.caseId) return;
   if (ING.badgeRefusedFor && ING.badgeRefusedFor === state.userId) return;
@@ -20517,9 +18643,8 @@ async function refreshFeedsBadge() {
   }
 }
 
-/** What the empty queue says, in terms of the filters that emptied it.
- *  "Nothing in the queue for this case." under a STEALER_LOG filter was a
- *  claim about the whole queue that the filter had made false. */
+/** What the empty queue says, in terms of the filters that emptied it: "Nothing in the queue
+ *  for this case." under a filter would be a claim about the whole queue. */
 function ingestEmptyText(total) {
   const cat = $('ing-category').value;
   const tri = $('ing-triage').value;
@@ -20562,11 +18687,8 @@ function ingestCountText(count, rows, total, cat, tri) {
     : '');
 }
 
-/** Folded copies directly under the record they fold into, when both are
- *  on the page. They were sorted by score like everything else, so a 0.0
- *  copy landed ABOVE its 0.0 primary (created_at descending) and nothing
- *  said which original it belonged to (ux12-feeds:also-sent-by-false-
- *  corroboration). A copy whose primary is not listed stays where the
+/** Folded copies directly under the record they fold into, when both are on the page, rather
+ *  than wherever the score sort puts them. A copy whose primary is not listed stays where the
  *  score put it, and says what it is a copy of. */
 function foldUnderPrimaries(records) {
   const ids = new Set(records.map((r) => r.id));
@@ -20631,28 +18753,22 @@ async function loadIngestQueue() {
         err, 'Reading a case queue needs ingest.read on this case.'));
       return;
     }
-    /* Not "Nothing in the queue for this case." (ux17-failure). */
+    /* Not "Nothing in the queue for this case." */
     renderList('ing-list', 'ing-empty', [], ingestRow);
     $('ing-counts').textContent = '';
     showLoadFailure('ing-empty', "This case's ingest queue", err,
       loadIngestQueue);
     fail(err);
   }
-  /* Probed ONCE per session, not on every queue load. `ingest.manage` is
-     SYS_ADMIN-only, so for every other role this 403s — and deps.py writes
-     an AUTHZ_DENIED audit row BEFORE raising. Invariant 6 makes that row
-     permanent, and AUTHZ_DENIED is the signal a security officer watches
-     for probing: a continuous hum generated by ordinary tab-switching is
-     how that signal stops being read. It also spent a search-metered
-     request on a response the pane discarded. */
+  /* Probed once per session, not on every queue load. `ingest.manage` is SYS_ADMIN-only, so
+     for every other role this 403s, and deps.py writes a permanent AUTHZ_DENIED audit row
+     (invariant 6) before raising: a hum of those from tab switching drowns the probing signal
+     a security officer watches. */
   if (state.quarantineVisible !== false) loadQuarantine();
 }
 
 /** The result of the last action, on the row it was about when the row
- *  is still listed, otherwise above the list. Rescore used to reload the
- *  queue and say nothing, so an unchanged score looked like a click that
- *  did not work, and a changed one jumped the row away from the cursor
- *  (ux12-feeds:rescore-silent, 2026-09-23). */
+ *  is still listed, otherwise above the list, so a rescore that changes nothing still answers. */
 function showIngestFlash(final) {
   const f = ING.flash;
   if (!f) return;
@@ -20675,10 +18791,7 @@ function showIngestFlash(final) {
 
 /** Every term of a record's score, in words: "+10 selector
  *  northgate.example (watch demo-selectors)", "+2 high-risk category
- *  STEALER_LOG". The row used to print "1 watched selector hit", which
- *  named no selector and no watch, and left two rows with one reason and
- *  two scores because the category term was never said
- *  (ux12-feeds:watched-hit-unnamed-and-contradicted, 2026-09-23). */
+ *  STEALER_LOG", so every point of the score has a named reason. */
 function scoreTerms(detail, recordCase) {
   const d = detail || {};
   /* A watch that is not the record's own case's is flagged with the case
@@ -20706,20 +18819,13 @@ function scoreTerms(detail, recordCase) {
   });
 }
 
-/** How many copies were folded into a record and WHO sent them. "ALSO
- *  SENT BY 1 other" read as a second feed corroborating the item when the
- *  same partner had resent it through a mirror; corroboration is what an
- *  analyst grades on, and a resend is not one (ux12-feeds:also-sent-by-
- *  false-corroboration, 2026-09-23).
+/** How many copies were folded into a record and who sent them. Corroboration is what an
+ *  analyst grades on, and a resend through a mirror is not one.
  *
- *  Counted per feed from `duplicate_sources`, and "not a second source"
- *  is said ONLY when every copy is a readable resend. The first fix said
- *  it whenever the readable copies shared the row's feed, so "2 copies,
- *  all from this feed: a resend, not a second source; 1 copy you cannot
- *  see" denied corroboration about a copy the reader could not see, and
- *  near-duplicate matching runs across the whole deployment, so unseen
- *  copies are the ordinary case (fix round, 2026-09-23). Resends, other
- *  feeds and unseen copies are now said apart. */
+ *  Counted per feed from `duplicate_sources`; resends, other feeds and unseen copies are said
+ *  apart, and "not a second source" only when every copy is a readable resend.
+ *  Near-duplicate matching runs across the whole deployment, so unseen copies are the
+ *  ordinary case. */
 function copiesText(r) {
   const n = Number(r.duplicate_count || 0);
   const sources = Array.isArray(r.duplicate_sources) ? r.duplicate_sources : [];
@@ -20846,13 +18952,10 @@ function ingestRow(r) {
     actions.appendChild(b);
     return b;
   };
-  /* `case-write` on what a read-only case refuses: triage and a category
-     correction on a record in the case's own queue (2026-09-24). They
-     stayed live under a strip saying such controls were off, and failed
-     only with the 409. Only a record in a case: a quarantined one belongs
-     to none, and its row stays live whatever the open case's state. Open,
-     Rescore and Credentials are reads, or a score the server recomputes on
-     a closed case too. */
+  /* `case-write` on what a read-only case refuses: triage and a category correction on a
+     record in the case's own queue. A quarantined record belongs to no case, so its row stays
+     live whatever the open case's state. Open, Rescore and Credentials are reads, or a score
+     the server recomputes on a closed case too. */
   const write = r.case_id ? ' case-write' : '';
   const verb = (label, title, handler) => button(label, title, handler, write);
   const open = button('Open', 'The record’s metadata, its custody and '
@@ -20860,9 +18963,8 @@ function ingestRow(r) {
     (b) => toggleRecordDetail(r, card, b));
   open.setAttribute('aria-expanded', 'false');
 
-  /* The triage verbs (ux12-feeds:queue-is-a-dead-end, 2026-09-23): a
-     record that surfaced on a watched selector could not be marked dealt
-     with, so it stayed at the top and the next analyst re-read it. */
+  /* The triage verbs: a record that surfaced on a watched selector can be marked dealt with,
+     so it leaves the top and the next analyst does not re-read it. */
   if (r.triage_state !== 'TRIAGED') {
     verb('Mark triaged', 'Looked at, nothing to do yet. It leaves Needs '
       + 'triage.', () => setRecordTriage(r, 'TRIAGED'));
@@ -20917,8 +19019,8 @@ function ingestRow(r) {
         ING.flash = { id: r.id, text: 'Category corrected to ' + c
           + '. The classifier’s ' + r.category + ' is kept on the row. '
           + (out.retain_until === null
-            /* A record with no expiry keeps none: a date on it would be a
-               destruction decision, retention's (2026-10-03). */
+            /* A record with no expiry keeps none: a date on it would be a destruction
+               decision, which is retention's to make. */
             ? 'This record has no expiry, and a correction does not give '
               + 'it one.'
             : out.retain_until_kept ? 'The expiry stays '
@@ -20969,11 +19071,9 @@ function ingestRow(r) {
   return card;
 }
 
-/** The cases a quarantined record may be attached to: every case this
- *  viewer was given whose content is not read-only. The picker compared
- *  the status with CLOSED and ARCHIVED, a second copy of the rule that
- *  missed PURGED, which it offered and the server then refused (2026-09-24). `caseReadOnly`
- *  reads each case's own `read_only`. */
+/** The cases a quarantined record may be attached to: every case this viewer was given whose
+ *  content is not read-only. `caseReadOnly` reads each case's own `read_only`, so there is no
+ *  second copy of the status rule here. */
 function attachTargets() {
   return (state.cases || []).filter((c) => !caseReadOnly(c));
 }
@@ -21250,18 +19350,11 @@ async function loadQuarantine() {
     showIngestFlash(true);
   } catch (err) {
     showIngestFlash(true);
-    /* Latch ONLY on the refusal this was written for.
-       `ingest.manage` is SYS_ADMIN-only, so for every other role this 403s
-       for the whole session, and re-probing would hum AUTHZ_DENIED into the
-       one signal a security officer reads for probing. That is a DURABLE
-       fact about the caller, so remembering it is right.
-
-       Nothing else is durable. The predicate used to be "anything that is
-       not a step-up expiry", which swept in a network drop (ApiError with
-       status 0), a 502, a 503 and a 429 — one blip and the section was gone
-       for the rest of the session, with `show(box, false)` as the only
-       trace. That reports a transport failure as a permission fact, and it
-       reports it by making the evidence disappear. */
+    /* Latch only on the refusal this was written for. `ingest.manage` is SYS_ADMIN-only, so
+       for every other role this 403s for the whole session, and re-probing would hum
+       AUTHZ_DENIED into the signal a security officer reads for probing. Nothing else is
+       durable: a network drop, a 502, a 503 or a 429 must not hide the section as if it were a
+       permission fact. */
     if (err instanceof ApiError && err.status === 403
         && !/re-authentication/i.test(err.detail || '')) {
       show(box, false);
@@ -21281,9 +19374,8 @@ async function loadQuarantine() {
        data we are in no position to make. */
     show(box, true);
     renderList('ing-quarantine-list', 'ing-quarantine-empty', [], ingestRow);
-    /* The shared notice, with a Retry, rather than the failure written
-       into the empty line where the next answer could not reach it
-       (ux17-failure:sticky-error-text-in-empty-slot, 2026-09-23). */
+    /* The shared notice, with a Retry, rather than the failure written into the empty line,
+       where the next answer could not reach it. */
     showLoadFailure('ing-quarantine-empty', 'The unattached queue', err,
       loadQuarantine);
   }
@@ -21291,15 +19383,10 @@ async function loadQuarantine() {
 
 /* --- dead letters ------------------------------------------------------ */
 
-/* ux12-feeds:dead-letters-no-feed-no-scope (2026-09-23). The tab exists
-   to spot a partner that changed its schema, and no row said which
-   partner; inside a case it showed the deployment's list under a count
-   that read as the case's failures; a lapsed step-up hid the unattached
-   rows and the list still looked complete; and a fragment could not be
-   repaired. So: this case's feeds by default, every feed on request, the
-   feed and key on each row, grouped by feed and error, filterable by
-   feed with that feed's 24-hour rate, the withheld rows said out loud,
-   and Repair and replay. */
+/* The tab exists to spot a partner that changed its schema. So: this case's feeds by default,
+   every feed on request, the feed and key on each row, grouped by feed and error, filterable
+   by feed with that feed's 24-hour rate, the withheld rows said out loud, and Repair and
+   replay. */
 
 /** Every feed seen on this case's dead letters, so the Feed filter keeps
  *  its other choices while it narrows the list (the Category filter's
@@ -21307,7 +19394,7 @@ async function loadQuarantine() {
 /* `intoCase`: whether this reader's replay may name a case at all
    (the listing's scope.replay_into_case). An operator without the
    analyst's replay verb replays an unattached fragment into quarantine
-   only (fix round, 2026-09-23). */
+   only. */
 const DL = { feeds: new Map(), flash: null, intoCase: false };
 
 onCaseSwitch(() => {
@@ -21398,8 +19485,8 @@ async function loadDeadLetters() {
     show($('dl-withheld'), false);
     $('dl-counts').textContent = '';
     if (err instanceof ApiError && err.status === 403) {
-      /* Either verb opens the listing since 2026-09-09: ingest.read for the
-         caller's own scope, ingest.manage for the quarantine rows too. */
+      /* Either verb opens the listing: ingest.read for the caller's own scope, ingest.manage
+         for the quarantine rows too. */
       listRefused('dl-empty', refusalText(err,
         'This needs ingest.read, or ingest.manage for the quarantine.'));
       return;
@@ -21411,18 +19498,16 @@ async function loadDeadLetters() {
         : 'You do not read this case’s ingest queue, so its dead letters are not listed.';
       return;
     }
-    /* A failed read left the last list standing, or "Nothing has failed
-       to parse." (ux17-failure, 2026-09-22). */
+    /* A failed read must not leave the last list standing, or say "Nothing has failed to
+       parse." */
     showLoadFailure('dl-empty', 'The dead-letter list', err, loadDeadLetters);
     fail(err);
   }
 }
 
-/** Say what the listing left out. The server sets `unattached_withheld`
- *  when the caller holds the operator verb and their sign-in is older than
- *  the step-up window, precisely so they are "not handed a listing that
- *  looks complete"; the pane ignored it. A fresh sign-in is offered in
- *  place. */
+/** Say what the listing left out. The server sets `unattached_withheld` when the caller holds
+ *  the operator verb and their sign-in is older than the step-up window, so they are not
+ *  handed a listing that looks complete. A fresh sign-in is offered in place. */
 function paintDlWithheld(scope) {
   const box = $('dl-withheld');
   clear(box);
@@ -21478,17 +19563,13 @@ function showDlFlash() {
   }
 }
 
-/** Where a repaired dead letter may go: the "Put it in" options and the
- *  one selected first (final review r2 c19, 2026-09-24). A row that
- *  belongs to a case goes back into ITS case or into quarantine, never
- *  into whichever case happens to be open: the server refuses a move
- *  between cases, as attach does, and with "All my feeds" ticked the open
- *  case is often not the row's. The form offered "This case" for every
- *  row and chose it, so the ordinary submit was that move. An unattached
- *  row has no case to leave and may go into the open one, as before.
- *  Pure, so the test runs it: `open` is { id, code } of the open case,
- *  `intoCase` whether this reader may name a case at all, and `codeOf`
- *  names any other case. */
+/** Where a repaired dead letter may go: the "Put it in" options and the one selected first.
+ *  A row that belongs to a case goes back into its case or into quarantine, never into
+ *  whichever case happens to be open: the server refuses a move between cases, as attach
+ *  does, and with "All my feeds" ticked the open case is often not the row's. An unattached
+ *  row has no case to leave and may go into the open one. Pure, so the test runs it: `open`
+ *  is { id, code } of the open case, `intoCase` whether this reader may name a case at all,
+ *  and `codeOf` names any other case. */
 function replayTargets(d, open, intoCase, codeOf) {
   const openId = open && open.id;
   const own = !intoCase ? []
@@ -21535,23 +19616,19 @@ function deadLetterRow(d) {
       + 'and is withheld. scripts/redact_dead_letters.py --apply is the '
       + 'repair.'));
   } else if (d.fragment) {
-    /* textContent, never innerHTML: this is attacker-supplied input that
-       failed to parse, which is the least trustworthy string in the system.
-       `visibleText` on top, because textContent stops it EXECUTING and
-       does nothing about it LYING — a bidi override reorders the fragment
-       on screen, and the whole reason to show a fragment is that somebody
-       reads it to work out what the feed sent. */
+    /* textContent, never innerHTML: this is attacker-supplied input that failed to parse, the
+       least trustworthy string in the system. `visibleText` on top, because textContent stops
+       it executing but not lying: a bidi override would reorder the fragment on screen, and
+       somebody reads it to work out what the feed sent. */
     const pre = el('pre', 'fragment mono-sm', visibleText(d.fragment));
     pre.title = 'Structurally redacted: keys, types and lengths only.';
     card.appendChild(pre);
   }
 
-  /* Repair and replay, offered only where the server would take it
-     (`can_replay`: ingest.replay, or the operator on an unattached row).
-     Every reader was offered it and a REVIEWER met a 403 inside the form
-     (ux12-feeds:dead-letters-no-feed-no-scope fix round, 2026-09-23).
-     The ORIGINAL stays on the card above the repair and in the table:
-     what arrived and what was made of it are different facts. */
+  /* Repair and replay, offered only where the server would take it (`can_replay`:
+     ingest.replay, or the operator on an unattached row). The original stays on the card
+     above the repair and in the table: what arrived and what was made of it are different
+     facts. */
   if (d.can_replay && !d.replayed_at && !d.fragment_withheld) {
     const actions = el('div', 'row-actions');
     const replay = el('button', 'btn small', 'Repair and replay…');
@@ -21597,15 +19674,10 @@ function deadLetterRow(d) {
 
 /** One section of a tab, loaded independently.
  *
- *  Independently is the point. These four sections need three different
- *  permissions — `collection.read` for sources and runs,
- *  `collection_account.manage` for personas — and gathering them with
- *  `Promise.all` meant the FIRST 403 rejected the lot: a CASE_OWNER, who
- *  holds `collection.read`, saw an empty Sources tab claiming they did
- *  not, because personas (which they genuinely may not see) failed first.
- *
- *  A section the caller may not read says so where that section is,
- *  rather than blanking its neighbours.
+ *  The sections need different permissions (`collection.read` for sources and runs,
+ *  `collection_account.manage` for personas), and in a `Promise.all` the first 403 would
+ *  reject the lot. A section the caller may not read says so where that section is, rather
+ *  than blanking its neighbours.
  */
 async function section(path, listId, emptyId, pick, build, missing, retry) {
   listPending(listId, emptyId);
@@ -21618,16 +19690,15 @@ async function section(path, listId, emptyId, pick, build, missing, retry) {
     if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
       listRefused(emptyId, refusalText(err, missing));
     } else {
-      /* The shared notice rather than the error written INTO the empty
-         element: written there, it outlived the failure and captioned the
-         next genuinely empty read (ux17-failure, 2026-09-22). */
+      /* The shared notice rather than the error written into the empty element, where it
+         would outlive the failure and caption the next genuinely empty read. */
       showLoadFailure(emptyId, 'This list', err, retry);
     }
     return null;
   }
 }
 
-/* --- persona acts (A collector process, 2026-10-02) -------------------
+/* --- persona acts -----------------------------------------------------
    A persona act runs in the collector, the one process that holds the
    persona key. Its route answers 202 with the act while the collector has
    not finished it; `actCall` then follows it on /collection/acts/{id} the
@@ -21699,8 +19770,7 @@ function loadPersonaActs() {
 }
 
 /** Whether Poll now would be refused for this analyst, and why, from the
- *  due list's `run` block (ux12-feeds:poll-now-one-click-and-blocked,
- *  2026-09-23). Read before the rows are built, so each button is drawn
+ *  due list's `run` block. Read before the rows are built, so each button is drawn
  *  in the state the server would answer it with. */
 let srcRun = null;
 
@@ -21709,12 +19779,11 @@ async function loadSources() {
      nothing about whether a poll would run now. */
   srcRun = null;
   paintRunState(null);
-  /* The never-polled line comes with the health read, so it waits with it
-     (ux17-failure:loading-shows-empty-claims, 2026-09-23). */
+  /* The never-polled line comes with the health read, so it waits with it. */
   listPending('src-never', 'src-never-empty');
-  // 2026-09-24: the held list comes with the due read,
-  // the exit listing is asked afresh on each visit, and the source listing
-  // is read before the authorities, whose rows offer the sources that fit.
+  // The held list comes with the due read, the exit listing is asked afresh on each visit,
+  // and the source listing is read before the authorities, whose rows offer the sources that
+  // fit.
   listPending('src-held', 'src-held-empty');
   SRC.egress = null;
   SRC.personas = [];
@@ -21727,10 +19796,9 @@ async function loadSources() {
       'src-unhealthy-empty', (b) => b.sources, unhealthyRow,
       'Source health needs collection.read.', loadSources)
       .then((body) => {
-        /* Same response, second list. Never-polled is not an alert and
-           must not pad one. When that response did not arrive the list is
-           unknown: this used to render from `[]` and announce "Every
-           source has been polled." (ux17-failure, 2026-09-22). */
+        /* Same response, second list. Never-polled is not an alert and must not pad one.
+           When that response did not arrive the list is unknown, not "Every source has been
+           polled." */
         if (!body) {
           renderList('src-never', 'src-never-empty', [], neverPolledRow);
           showLoadFailure('src-never-empty', 'The never-polled list',
@@ -21762,10 +19830,9 @@ async function loadSources() {
   paintSourceForms(sources);
   paintPersonaForm(Boolean(personas));
   paintAuthorityForm(Boolean(authorities));
-  // F5.3 (2026-09-24). After the personas, whose Telegram rows the
-  // Add a chat form offers.
+  // After the personas, whose Telegram rows the Add a chat form offers.
   loadTelegramChats();
-  loadPersonaActs();  // A collector process (2026-10-02)
+  loadPersonaActs();
   $('src-counts').textContent = (due && unhealthy)
     ? ((due.due || []).length + ' due · '
        + (unhealthy.sources || []).length + ' unhealthy')
@@ -21777,11 +19844,9 @@ async function loadSources() {
  *  The analyst learnt this from an error banner after pressing Poll now. */
 function paintRunState(run) {
   const box = $('src-run-state');
-  /* A reader who does not hold the collector's verb is told so here, in
-     the pane: the reason used to be only the title of a disabled button,
-     which a keyboard never reaches and a touch screen never shows (fix
-     round, 2026-09-23). Not a warning: nothing is wrong, polling is
-     simply another role's job. */
+  /* A reader who does not hold the collector's verb is told so here, in the pane: the title
+     of a disabled button is never reached by a keyboard or shown on a touch screen. Not a
+     warning: nothing is wrong, polling is simply another role's job. */
   const notTheirs = Boolean(run && run.allowed === false);
   const blocked = Boolean(run && run.allowed && run.ready === false);
   show(box, notTheirs || blocked);
@@ -21832,10 +19897,8 @@ function neverPolledRow(s) {
   return card;
 }
 
-/** How long ago a due time passed. Everything on the due list is due by
- *  definition, and "2026-09-22 17:55 UTC" alone still left the reader to
- *  do the zone arithmetic to see it was three hours ago
- *  (ux12-feeds:mixed-unlabelled-timezones, 2026-09-23). */
+/** How long ago a due time passed. Everything on the due list is due by definition, and a
+ *  UTC timestamp alone leaves the reader to do the zone arithmetic. */
 function dueAgo(iso) {
   const t = iso ? new Date(iso).getTime() : NaN;
   if (Number.isNaN(t)) return '';
@@ -21867,8 +19930,8 @@ function dueRow(s) {
   card.appendChild(head);
   const facts = el('div', 'facts');
   facts.appendChild(fact('due', fmtTime(s.due_at) + dueAgo(s.due_at)));
-  // F5.3 (2026-09-24). A Telegram chat has no host: its chat, the
-  // persona that reads it and that persona's exit instead.
+  // A Telegram chat has no host: its chat, the persona that reads it and that persona's exit
+  // instead.
   const tgDue = s.kind === 'TELEGRAM' && s.telegram ? s.telegram : null;
   if (tgDue) {
     facts.appendChild(fact('chat', visibleText(tgDue.chat)));
@@ -21895,14 +19958,11 @@ function dueRow(s) {
       + 'the list.';
   }
   run.addEventListener('click', async () => {
-    /* A covert, externally visible act, so it is confirmed, and the
-       confirm says exactly what will happen: which host is touched, from
-       where, as whom, and how fast. One unconfirmed click beside other
-       sources' buttons was the finding. */
+    /* A covert, externally visible act, so it is confirmed, and the confirm says exactly what
+       will happen: which host is touched, from where, as whom, and how fast. */
     const host = urlHost(s.base_url);
-    // An authority source says who reads it, through which exit and
-    // what the site sees (2026-09-24).
-    if (!window.confirm(tgDue ? telegramPollText(s, tgDue)   // F5.3
+    // An authority source says who reads it, through which exit and what the site sees.
+    if (!window.confirm(tgDue ? telegramPollText(s, tgDue)
         : s.requires_authority ? authorityPollText(s, host)
         : 'Poll ' + s.name + ' now?\n\n'
         + 'This fetches ' + host + ' once, from this server’s own network '
@@ -21915,16 +19975,14 @@ function dueRow(s) {
     try {
       const body = await actCall('/collection/sources/' + s.id + '/run',
         { method: 'POST', json: {} });
-      // A source a persona reads is polled by the collector (2026-10-02);
-      // one it has not finished yet says so rather than a count.
+      // A source a persona reads is polled by the collector; one it has not finished yet says
+      // so rather than a count.
       const said = body.queued ? body.notice
         : (body.error || (body.items_new + ' new of ' + body.items_seen + ' seen'));
       card.appendChild(el('p', body.error ? 'form-error' : 'form-ok', said));
-      /* A poll can succeed and still not have done everything it was asked
-         to. A watch whose regex will not compile matches nothing, for
-         ever, and reads exactly like a watch that has not fired — so the
-         one moment somebody is looking at this source is the moment to
-         say so. */
+      /* A poll can succeed and still not have done everything it was asked to: a watch whose
+         regex will not compile matches nothing, for ever, and reads like a watch that has not
+         fired, so it is said while somebody is looking at this source. */
       for (const w of (body.warnings || [])) {
         card.appendChild(el('p', 'why bad', w));
       }
@@ -21959,8 +20017,8 @@ function personaRow(p) {
   if (p.cooldown_until) {
     facts.appendChild(fact('cooling until', fmtTime(p.cooldown_until), 'warn'));
   }
-  // Personas (2026-09-24). What the persona is on its platform, where it
-  // reads from, when, and whether its platform has paused or locked it.
+  // What the persona is on its platform, where it reads from, when, and whether its platform
+  // has paused or locked it.
   if (p.platform_uid) facts.appendChild(fact('account', visibleText(p.platform_uid)));
   if (p.egress_profile_name) {
     facts.appendChild(fact('egress', visibleText(p.egress_profile_name)));
@@ -21980,7 +20038,7 @@ function personaRow(p) {
     facts.appendChild(fact('paused by its platform until',
       fmtTime(p.machine_hold_until), 'warn'));
   }
-  // F5.2 (2026-09-24). A Telegram persona's session and chats.
+  // A Telegram persona's session and chats.
   const tg = p.telegram || null;
   if (tg) {
     facts.appendChild(fact('session', tg.session_enrolled_at
@@ -22011,7 +20069,7 @@ function personaRow(p) {
 
 /** A run's status chip. PARTIAL and RATE_LIMITED are warnings (the run
  *  did what it could and will be tried again); BLOCKED and FAILED are not
- *  (2026-09-24: BLOCKED is a poll that could not run at all). */
+ *  (BLOCKED is a poll that could not run at all). */
 const RUN_STATUS_CLASS = {
   OK: 'ok', PARTIAL: 'warn', RATE_LIMITED: 'warn', BLOCKED: 'bad', FAILED: 'bad',
 };
@@ -22020,16 +20078,14 @@ function runRow(r) {
   const card = el('div', 'card row-card compact');
   const head = el('div', 'row-head');
   head.appendChild(el('span', 'row-title', r.source_name || r.source_id));
-  /* PARTIAL is neither. The run fetched and stored everything it found
-     and could not evaluate something — a dead watch pattern. Painting it
-     'bad' alongside genuine failures buries it; painting it 'ok' is what
-     the code did before PARTIAL was ever written, and is how a dead watch
-     stayed invisible. `error_detail` below carries the reason. */
+  /* PARTIAL is neither: the run stored everything it found but could not evaluate something,
+     such as a dead watch pattern. 'bad' would bury it among real failures and 'ok' would hide
+     the dead watch. `error_detail` below carries the reason. */
   head.appendChild(el('span', 'chip ' + (RUN_STATUS_CLASS[r.status] || 'bad'),
     r.status));
   card.appendChild(head);
   const facts = el('div', 'facts');
-  // A run whose start was never recorded says so (2026-09-24).
+  // A run whose start was never recorded says so.
   facts.appendChild(fact('started', r.started_at ? fmtTime(r.started_at) : NO_VALUE));
   if (r.items_seen !== undefined) {
     facts.appendChild(fact('items', r.items_new + ' new / ' + r.items_seen
@@ -22048,13 +20104,12 @@ function runRow(r) {
 
 /* --- sources, personas, bindings and authorities -----------------------
  *
- * 2026-09-24 (docs/00 decision 69). Every forum and Telegram source needs a
- * declared ceiling, an exit or a persona, and a written authority recorded
- * by one person and confirmed, with each source, by another, before
- * anything is read from it. These regions show what waits on a person,
- * every source with who reads it and through which exit, and the forms to
- * add a source, create a persona (with no credential: an operator enrols
- * it on the server), change who reads a source, and record an authority.
+ * Every forum and Telegram source needs a declared ceiling, an exit or a persona, and a
+ * written authority recorded by one person and confirmed, with each source, by another,
+ * before anything is read from it (docs/00 decision 69). These regions show what waits on a
+ * person, every source with who reads it and through which exit, and the forms to add a
+ * source, create a persona (with no credential: an operator enrols it on the server), change
+ * who reads a source, and record an authority.
  */
 
 /** What the last Sources, Personas and Authorities reads said, for the
@@ -22289,7 +20344,7 @@ function paintSourceKinds() {
   for (const k of kinds) kind.appendChild(selectOption(k, SOURCE_KIND_WORDS[k] || k));
   if (kinds.includes(keepKind)) kind.value = keepKind;
   paintSourceLabels();
-  paintForumFields(a);  // F3 and F4 (2026-09-24)
+  paintForumFields(a);
   const withPersona = Boolean(a && a.persona_platform);
   const withExit = Boolean(a && a.requires_authority && !a.persona_platform);
   show($('src-add-persona-field'), withPersona);
@@ -22352,7 +20407,7 @@ async function addSource(e) {
   if (a.requires_authority && !a.persona_platform) {
     json.egress_profile_id = $('src-add-egress').value || null;
   }
-  // F3 and F4 (2026-09-24). A forum parser's settings.
+  // A forum parser's settings.
   const forum = forumConfig(a);
   if (forum.error) { setMsg(err, forum.error); return; }
   if (forum.config) json.parser_config = forum.config;
@@ -22381,12 +20436,10 @@ async function addSource(e) {
   }
 }
 
-/* F3 and F4 (2026-09-24). The two forum parsers, the
-   words for their source kinds, and the date and time formats the MyBB
-   parser reads: exactly forum_parse.DATE_FORMATS and TIME_FORMATS on the
-   server (test_forum_ui holds the lists equal). A MyBB board prints its
-   own zone with no offset, so without the zone and both formats no
-   posting time is stored rather than a guessed one. */
+/* The two forum parsers, the words for their source kinds, and the date and time formats the
+   MyBB parser reads: exactly forum_parse.DATE_FORMATS and TIME_FORMATS on the server
+   (test_forum_ui holds the lists equal). A MyBB board prints its own zone with no offset, so
+   without the zone and both formats no posting time is stored rather than a guessed one. */
 const FORUM_PARSERS = ['xenforo', 'mybb'];
 const SOURCE_KIND_WORDS = { XENFORO: 'XenForo forum', MYBB: 'MyBB forum' };
 const MYBB_DATE_FORMATS = ['m-d-Y', 'd-m-Y', 'Y-m-d', 'm/d/Y', 'd/m/Y', 'Y/m/d',
@@ -22466,8 +20519,8 @@ async function paintPersonaForm(visible) {
   clear(ex);
   /* One persona, one exit, and never an exit a persona-less source reads
      through (docs/04): two identities seen from one address are linked. */
-  /* collection-shared-exit (2026-10-03): `persona_available` also counts a
-     source the listing may not name, which `sources` cannot. */
+  /* `persona_available` also counts a source the listing may not name, which `sources`
+     cannot. */
   for (const e of exits.filter((x) => x.available && !x.sources
       && x.persona_available !== false)) {
     ex.appendChild(selectOption(e.id, visibleText(e.name)));
@@ -22479,11 +20532,11 @@ function paintPersonaIdentity() {
   const platform = $('sp-platform').value;
   show($('sp-ua-field'), ((SRC.form && SRC.form.adapters) || [])
     .some((a) => a.persona_platform === platform && a.persona_http));
-  show($('sp-tg-device'), platform === 'TELEGRAM');   // F5.2
+  show($('sp-tg-device'), platform === 'TELEGRAM');
 }
 
-/* F5.2 (2026-09-24). A Telegram persona's device, field by field:
-   what Telegram is told instead of this server's platform string. */
+/* A Telegram persona's device, field by field: what Telegram is told instead of this server's
+   platform string. */
 const TG_DEVICE_FIELDS = [
   ['device_model', 'sp-tg-model', 'device model', 1, 64],
   ['system_version', 'sp-tg-system', 'system version', 1, 64],
@@ -22529,7 +20582,7 @@ async function createPersona(e) {
     return;
   }
   if (from && to) fingerprint.active_window_utc = from + '-' + to;
-  // F5.2 (2026-09-24). A Telegram persona's device.
+  // A Telegram persona's device.
   if ($('sp-platform').value === 'TELEGRAM') {
     const problem = telegramDevice(fingerprint);
     if (problem) { setMsg(err, problem); return; }
@@ -22560,7 +20613,7 @@ async function createPersona(e) {
   }
 }
 
-/* --- the authority form and rows (2026-09-24) ------------------------- */
+/* --- the authority form and rows -------------------------------------- */
 
 /** YYYY-MM-DD for a date input, in UTC. */
 function isoDay(d) {
@@ -22704,8 +20757,8 @@ async function recordAuthority(e) {
 /** One source under an authority: its name, kind and the host it was
  *  recorded for, and the binding. Shared with the Oversight review. */
 function authorityTargetText(t) {
-  // F5.3 (2026-09-24). A Telegram target has no host: the confirmer
-  // is shown which chat it is and how it is read, never only a typed name.
+  // A Telegram target has no host: the confirmer is shown which chat it is and how it is
+  // read, never only a typed name.
   const where = t.chat
     ? ', chat ' + visibleText(t.chat.durable_id)
       + (t.chat.username_at_resolve ? ' @' + visibleText(t.chat.username_at_resolve) : '')
@@ -22887,10 +20940,9 @@ function srcExitWords(s) {
   return 'its bound egress profile';
 }
 
-/** Poll now's confirmation for a source an authority covers
- *  (2026-09-24): who reads it, through which exit, what the site sees,
- *  and how long and how fast. A persona-less read names the honest agent
- *  the site will log. */
+/** Poll now's confirmation for a source an authority covers: who reads it, through which
+ *  exit, what the site sees, and how long and how fast. A persona-less read names the honest
+ *  agent the site will log. */
 function authorityPollText(s, host) {
   if (s.persona) {
     return 'Poll ' + s.name + ' now?\n\n'
@@ -22898,9 +20950,8 @@ function authorityPollText(s, host) {
       + ', over ' + srcExitWords(s) + '. The site sees that account read it. '
       + 'Nothing is posted or sent.';
   }
-  // F3 and F4 (2026-09-24). With no egress proxy (development, and
-  // only with NOCTORNAL_FORUM_ALLOW_DIRECT set) a forum read leaves from
-  // this server, and the confirmation must not name an exit it skips.
+  // With no egress proxy (development, and only with NOCTORNAL_FORUM_ALLOW_DIRECT set) a
+  // forum read leaves from this server, and the confirmation must not name an exit it skips.
   const direct = (s.parser_key === 'xenforo' || s.parser_key === 'mybb')
     && Boolean(SRC.form && SRC.form.forum_reads_direct);
   return 'Poll ' + s.name + ' now?\n\n'
@@ -22912,7 +20963,7 @@ function authorityPollText(s, host) {
     + 'Whoever runs ' + host + ' can see the requests.';
 }
 
-/* --- Telegram chats (F5.2 and F5.3, 2026-09-24) ------------------------
+/* --- Telegram chats ----------------------------------------------------
  *
  * A chat is looked up as its persona (an act Telegram sees) and added as a
  * source that persona reads; nothing is read until a second person has
@@ -23273,11 +21324,8 @@ function telegramWindowAction(card, p) {
 
 /* --- ingest keys ------------------------------------------------------- */
 
-/* ux12-feeds:keys-tab-read-only (2026-09-23). The tab warned that a key
-   might be "somebody else's" and offered nothing to do about it: revoking
-   one, or issuing one for a new partner, meant a shell or a raw API call.
-   Both are here now, both step-up gated (ingest.manage requires a sign-in
-   from the last 15 minutes, and the console asks for it BEFORE the
+/* Revoking a key and issuing one for a new partner are both step-up gated (ingest.manage
+   requires a sign-in from the last 15 minutes, and the console asks for it before the
    request, as the recovery codes do), and the secret shows once. */
 
 /** The Issue form's choices, from the last key listing. */
@@ -23300,8 +21348,7 @@ async function loadKeys() {
         'Key administration needs ingest.manage.'));
       return;
     }
-    /* The previous list is not this read's answer (ux17-failure:stale-
-       previous-case-data, 2026-09-22). */
+    /* The previous list is not this read's answer. */
     renderList('key-list', 'key-empty', [], keyRow);
     $('key-counts').textContent = '';
     showLoadFailure('key-empty', 'The ingest keys', err, loadKeys);
@@ -23347,11 +21394,9 @@ async function withStepUp(why, call) {
   }
 }
 
-/** The issue form, blank for the next key. `form.reset()` alone put the
- *  category select, whose options are built at run time and so have no
- *  default in the markup, back on its FIRST option: the next key was
- *  offered as STEALER_LOG (ux12-feeds:keys-tab-read-only fix round,
- *  2026-09-23). UNKNOWN is what paintKeyForm starts on. */
+/** The issue form, blank for the next key. `form.reset()` alone puts the category select,
+ *  whose options are built at run time and so have no default in the markup, on its first
+ *  option; UNKNOWN is what paintKeyForm starts on. */
 function resetKeyForm() {
   $('key-issue-form').reset();
   const cat = $('key-category');
@@ -23433,12 +21478,10 @@ function renderKeySecret(out, name) {
   box.appendChild(card);
 }
 
-/** The issued secret leaves with the Keys tab, the Feeds pane and the
- *  case, as the Admin card's one-time credentials do (final review r2
- *  u25, 2026-09-24). It stayed under Feeds > Keys through a case switch
- *  or a visit to the Graph, a deployment-wide credential waiting on the
- *  screen of whoever the analyst handed over to, until the session
- *  ended. `selectTab` and the Feeds subtabs call this on the way out. */
+/** The issued secret leaves with the Keys tab, the Feeds pane and the case, as the Admin
+ *  card's one-time credentials do, so a deployment-wide credential never waits on screen for
+ *  whoever the analyst hands over to. `selectTab` and the Feeds subtabs call this on the way
+ *  out. */
 function clearKeySecret() {
   clear($('key-secret-out'));
 }
@@ -23512,17 +21555,11 @@ function keyRow(k) {
 
 /* --- the custody chain -------------------------------------------------
  *
- * `core.evidence_custody` is the second tamper-evident ledger, hash-chained
- * by migration 0024 under a docstring that invokes FRE 902(13)-(14). Until
- * 2026-09-02 nothing recomputed it: the record actually produced to a court
- * was the one nobody verified, while `audit.event` -- an internal log -- had
- * both a verifier and a CI step.
- *
- * It is ONE chain across every exhibit, so `evidence_id` narrows what is
- * REPORTED and not what is checked. The server sends that sentence in
- * `caveat` and this renders it verbatim rather than paraphrasing: a scoped
- * pass that reads like a completeness pass is precisely the wrong answer to
- * "has anything been removed from this exhibit's history".
+ * `core.evidence_custody` is the second tamper-evident ledger, hash-chained by migration 0024
+ * (FRE 902(13)-(14)), and it is the record produced to a court. It is one chain across every
+ * exhibit, so `evidence_id` narrows what is reported, not what is checked. The server says so
+ * in `caveat` and this renders it verbatim: a scoped pass must not read like a completeness
+ * pass.
  */
 function wireCustodyVerify() {
   const btn = $('btn-custody-verify');
@@ -23561,14 +21598,10 @@ function wireCustodyVerify() {
 
 /** Render one custody report.
  *
- *  `intact && checked > 0`, exactly as the audit verdict computes it: an
- *  exhibit with no custody rows answers "intact, 0 checked", and a green
- *  tick on that would report an absence of history as a clean history.
- *
- *  Forks and the genesis count are NOT folded into the verdict chip. The
- *  server keeps them separate because they mean different things -- a fork
- *  means the chain cannot be linearised, a second genesis row means the
- *  trigger was bypassed -- and flattening them here would undo that.
+ *  `intact && checked > 0`, exactly as the audit verdict computes it: an exhibit with no
+ *  custody rows answers "intact, 0 checked", which is an absence of history, not a clean one.
+ *  Forks and the genesis count stay out of the verdict chip, as the server keeps them: a fork
+ *  means the chain cannot be linearised, a second genesis row means the trigger was bypassed.
  */
 function custodyVerdict(r) {
   const ok = r.intact && r.checked > 0;
@@ -23582,8 +21615,7 @@ function custodyVerdict(r) {
     + agree(r.checked, 'row', 'rows') + ' checked' + span
     + (r.scoped ? ' · scoped to one exhibit' : ' · whole ledger')));
   if (r.caveat) card.appendChild(el('p', 'help warn', r.caveat));
-  /* The newest row of the whole ledger, to record out of band and hand back
-     as an anchor (2026-10-03). */
+  /* The newest row of the whole ledger, to record out of band and hand back as an anchor. */
   if (r.tail_row_hash) {
     card.appendChild(el('p', 'help',
       'Newest row to record: id ' + r.tail_id + ', hash ' + r.tail_row_hash));
@@ -23600,10 +21632,8 @@ function custodyVerdict(r) {
 
 /* --- confirming a retention rule ---------------------------------------
  *
- * The point of a confirmation is not the number, it is that somebody's id
- * is attached to it: an unconfirmed rule is a period the build chose, and
- * it becomes policy by default if nobody ever looks. The console listed
- * the unconfirmed ones and offered no way to confirm one.
+ * The point of a confirmation is that somebody's id is attached to the period: an unconfirmed
+ * rule is a period the build chose, and it becomes policy by default if nobody ever looks.
  */
 function wireRetentionConfirm() {
   const form = $('ret-confirm');
@@ -23627,9 +21657,8 @@ function wireRetentionConfirm() {
         + 'somebody who was not in the room: at least 10 characters.');
       return;
     }
-    /* Replacing a colleague's confirmed decision is its own step. The
-       upsert overwrote one silently and the form never said whose it was
-       (ux15 rule-confirm-misstates-effect, 2026-09-22). */
+    /* Replacing a colleague's confirmed decision is its own step, and the confirm says whose
+       it is. */
     const current = retRules.get(cat);
     if (current && !current.is_placeholder && !window.confirm(
         'Replace the confirmed period for ' + cat + '?\n\n'
@@ -23655,10 +21684,8 @@ function wireRetentionConfirm() {
       return;
     }
     btn.disabled = false;
-    /* The server's sentence, because it is the one that knows how many
-       records the new period does NOT reach. "Now retains for N days" was
-       true of the rule row and false of every record already ingested,
-       which keeps the deadline it was stamped with at arrival. */
+    /* The server's sentence, because it knows how many records the new period does not reach:
+       a record already ingested keeps the deadline it was stamped with at arrival. */
     setMsg(msg, 'Confirmed against your name. ' + (body.notice || ''));
     $('ret-rationale').value = '';
     await loadRetention();
@@ -23671,9 +21698,7 @@ function dayCount(n) {
 }
 
 /** A count and its noun in agreement: "1 item of evidence", "3 items of
- *  evidence". The number is known when the line is written, so hedging
- *  with "item(s)" only makes the reader do the agreement (README
- *  screenshot review, 2026-09-23). */
+ *  evidence". The number is known when the line is written, so the noun is chosen for it. */
 function countOf(n, one, many) {
   return n + ' ' + (Number(n) === 1 ? one : many);
 }
@@ -23682,7 +21707,7 @@ function countOf(n, one, many) {
  *  ("1 check needs", "3 checks need"), or for a noun whose count is
  *  printed some other way (grouped by toLocaleString, where "1.000" would
  *  read as one). countOf keeps its own copy of the rule because tests run
- *  it standalone (README screenshot set review, 2026-09-23). */
+ *  it standalone. */
 function agree(n, one, many) {
   return Number(n) === 1 ? one : many;
 }
@@ -23695,19 +21720,17 @@ let retUnruled = new Map();
 
 /** Fill the category picker from the rules actually loaded.
  *
- *  Not a fixed list: the categories come from `core.retention_rule`, and a
- *  picker that offered a category the deployment does not have would send
- *  a confirmation the server has nothing to attach to. Unconfirmed ones
- *  are marked, because they are the ones that need the attention.
+ *  The categories come from `core.retention_rule`, not a fixed list, so the picker never
+ *  sends a confirmation the server has nothing to attach to. Unconfirmed ones are marked,
+ *  because they are the ones that need the attention.
  */
 function fillRetentionCategories(rules, unruled) {
   const sel = $('ret-cat');
   if (!sel) return;
   const keep = sel.value;
   retRules = new Map(rules.map((r) => [r.category, r]));
-  /* And every category in live use with no rule, which the form could
-     neither confirm nor shorten (ux15-report:unruled-categories-invisible,
-     2026-09-23). The server's upsert always accepted them. */
+  /* And every category in live use with no rule, so the form can confirm or shorten it too;
+     the server's upsert accepts them. */
   retUnruled = new Map((unruled || []).map((c) => [c.category, c]));
   opts(sel, rules.map((r) => [r.category,
     r.category + (r.is_placeholder ? ' (unconfirmed)' : ' (confirmed)')])
@@ -23718,10 +21741,8 @@ function fillRetentionCategories(rules, unruled) {
 
 /** Prefill the period in force and say whose decision the form replaces.
  *
- *  The days box started empty, so the form never said what was in force,
- *  and a category a colleague had confirmed looked exactly like one nobody
- *  had (ux15, 2026-09-22). `force` on a category change; on a reload only
- *  an empty box is filled, so a number being typed is not overwritten. */
+ *  `force` on a category change; on a reload only an empty box is filled, so a number being
+ *  typed is not overwritten. */
 function syncRuleForm(force) {
   const cat = $('ret-cat').value;
   const r = retRules.get(cat);
@@ -23738,8 +21759,6 @@ function syncRuleForm(force) {
   }
   if (!r) { note.textContent = ''; return; }
   if (force || !$('ret-days').value) $('ret-days').value = String(r.retain_days);
-  /* "730 day(s)" was on screen in the README capture; the count is known,
-     so the word is chosen (README screenshot review, 2026-09-23). */
   note.textContent = r.is_placeholder
     ? cat + ' runs on ' + dayCount(r.retain_days) + ', a placeholder shipped '
       + 'with the build that nobody has confirmed.'
@@ -23751,16 +21770,11 @@ function syncRuleForm(force) {
 
 /* --- the delivery ledger ------------------------------------------------
  *
- * `notify.delivery` has recorded every refusal with a reason since 0029 and
- * every destination since 0044, and nothing rendered it: the one table that
- * answers "did the summary leave the building, and where did it go" was
- * write-only.
- *
- * F8 (2026-09-24): the ledger lives in Administration, Integrations,
- * its ids unchanged, with the channel, outcome and time filters, a cursor
- * ("Show older") and Retry on a failed or backing-off row. Every row says
- * why in the server's own sentence (`cause_text`), so no cause wording is
- * kept here.
+ * `notify.delivery` records every refusal with a reason and every destination: the table
+ * that answers "did the summary leave the building, and where did it go". It lives in
+ * Administration, Integrations, with the channel, outcome and time filters, "Show older" and
+ * Retry on a failed or backing-off row. Every row says why in the server's own sentence
+ * (`cause_text`), so no cause wording is kept here.
  */
 const DLV = { next: null };
 
@@ -23810,11 +21824,9 @@ async function loadDeliveries(more) {
   } catch (err) {
     clear($('dlv-list'));
     show($('dlv-more'), false);
-    /* The empty line carries the refusal, rather than a banner: "no
-       deliveries" and "you may not read the ledger" are different facts and
-       an empty list must never stand in for the second. Only a refusal,
-       though: a 503 is not "needs integration.manage" (ux17-failure:
-       sticky-error-text-in-empty-slot, 2026-09-23). */
+    /* The empty line carries the refusal, rather than a banner: "no deliveries" and "you may
+       not read the ledger" are different facts. Only a refusal, though: a 503 is not "needs
+       integration.manage". */
     if (err instanceof ApiError && err.status === 403) {
       listRefused('dlv-empty', refusalText(err,
         'The delivery ledger needs integration.manage.'));
@@ -23831,10 +21843,9 @@ async function loadDeliveries(more) {
  *  the server's sentence (`cause_text`), rendered as sent.
  *
  *  The address is the server's stored form: an email address, a Jira
- *  browse URL, or a webhook endpoint with its path WITHHELD behind a
+ *  browse URL, or a webhook endpoint with its path withheld behind a
  *  fingerprint (migration 0096), because incoming-webhook paths carry the
- *  hook's secret. Until 2026-09-24 this comment claimed the server
- *  redacted it, and the server stored the URL verbatim.
+ *  hook's secret.
  */
 function deliveryRow(d) {
   const LEFT = { SUMMARY: 'Summary left', SUBJECT: 'Subject line left',
@@ -23865,9 +21876,7 @@ function deliveryRow(d) {
     facts.appendChild(el('span', 'muted small',
       countOf(d.attempts, 'attempt', 'attempts')));
   }
-  /* Through fmtTime like the console's other times, so it says UTC: the
-     subtab appended the raw ISO string (README screenshot set review,
-     2026-09-23). */
+  /* Through fmtTime like the console's other times, so it says UTC. */
   const when = d.attempted_at || d.raised_at;
   if (when) facts.appendChild(el('span', 'muted small', fmtTime(when)));
   if (d.next_attempt_at && d.attempts) {
@@ -23906,7 +21915,7 @@ async function requeueDelivery(d, btn, card) {
   }
 }
 
-/* --- Administration, Integrations (F8 and F7, 2026-09-24) --------------
+/* --- Administration, Integrations --------------------------------------
  *
  * One administrator surface that answers "what tried to leave, where did
  * it go, why did it not, and is anything draining". Every write goes
@@ -24077,7 +22086,7 @@ async function retryFailed() {
   }
 }
 
-/* --- Jira (F7) ------------------------------------------------------------- */
+/* --- Jira ------------------------------------------------------------------ */
 
 function jiraAuthUserShown() {
   const pat = $('jira-auth-kind').value === 'DC_PAT';
@@ -24322,7 +22331,7 @@ function jiraLinkRow(l) {
   return row;
 }
 
-/* --- Administration, Providers (F15.2, 2026-09-24) ------------------------- */
+/* --- Administration, Providers --------------------------------------------- */
 
 const PRV = { catalogue: [] };
 
@@ -24423,8 +22432,8 @@ function providerChangeCard(p) {
       : 'lowering this provider from ' + c.from_level + ' to ' + c.to_level)
     + '. Asked by ' + c.requested_by_name + ' on ' + fmtTime(c.requested_at)
     + ', lapses ' + fmtTime(c.expires_at) + '.'));
-  /* What is approved is this destination and no other: moving the provider
-     afterwards asks again (2026-09-25). */
+  /* What is approved is this destination and no other: moving the provider afterwards asks
+     again. */
   box.appendChild(el('p', 'mono small', 'For ' + c.origin
     + (c.private_cidr ? ', answering from ' + c.private_cidr : '')));
   box.appendChild(el('p', 'why', c.basis));
@@ -24554,7 +22563,7 @@ async function createProvider(e) {
   }
 }
 
-/* --- a case's lookups (F15.3 and F15.4, 2026-09-24) ------------------------
+/* --- a case's lookups -------------------------------------------------------
  *
  * Vendor text is attacker-influenced (a Shodan banner is whatever a scanned
  * server said): every answer renders through el() and visibleText, and
@@ -24705,8 +22714,7 @@ function renderLookupAnswer(box, got) {
 /** One stored answer (GET .../lookups/results/{id}): its outcome and
  *  summary through el() and visibleText only (a vendor's text is whatever
  *  a scanned server said), what it raised in Triage, and File as exhibit
- *  for a caller who may upload (F15.3; 2026-09-25: the requester of a
- *  signed-off lookup had no way to read the answer in the console). */
+ *  for a caller who may upload. */
 function renderLookupResult(box, r) {
   clear(box);
   if (r.purged) {
@@ -24843,7 +22851,7 @@ function lookupRow(l) {
   if (l.state === 'QUEUED' && l.not_before) {
     row.appendChild(el('p', 'muted small', 'Queued: sends after ' + fmtTime(l.not_before)));
   }
-  // 2026-09-25: the answer, for whoever may read it.
+  // The answer, for whoever may read it.
   if (l.result_id && !l.withheld) row.appendChild(lookupAnswerToggle(l.result_id));
   if (l.yours && (l.state === 'AWAITING_SIGNOFF' || l.state === 'QUEUED')) {
     const b = el('button', 'btn ghost small', 'Cancel');
@@ -24906,9 +22914,8 @@ function batchRow(b) {
   row.appendChild(el('p', 'muted small', 'asked by ' + b.requested_by + ' '
     + fmtTime(b.requested_at) + ': ' + states.join(', ')));
   if (b.note) row.appendChild(el('p', 'why', b.note));
-  /* Cancel stops the sends still queued; what was sent stays sent. Offered
-     where the server takes it: the requester or a lead investigator
-     (2026-09-25). */
+  /* Cancel stops the sends still queued; what was sent stays sent. Offered where the server
+     takes it: the requester or a lead investigator. */
   if (b.can_cancel) {
     const cancel = el('button', 'btn ghost small', 'Cancel the queued sends');
     cancel.type = 'button';
@@ -24934,7 +22941,7 @@ function batchRow(b) {
 
 /** The plan, in words and numbers, before anything is queued: what would
  *  go, what is already answered, what is refused and why, when the sends
- *  start and end, and what the provider's exposure means (F15.4).
+ *  start and end, and what the provider's exposure means.
  *  Queue posts the digest this card rendered, so a plan that changed since
  *  is refused rather than sent. `ask` is {provider_id, operation,
  *  selection}. Shared by Records, Lookups and the inspector's Look up all. */
@@ -25008,7 +23015,7 @@ async function planLookups(e) {
                                  selection: { selector_type: type } });
 }
 
-/** "Look up all" beside an entity's selectors (F15.4): every
+/** "Look up all" beside an entity's selectors: every
  *  selector of that entity, planned against one of your own instances
  *  (NONE), since a batch never goes to a vendor or the public. Offered
  *  only when such a provider looks up one of its types. */
@@ -25052,7 +23059,7 @@ function lookupAllButton(box, list) {
   box.appendChild(b);
 }
 
-/* --- the case record: keep this case out of Jira (F7, 2026-09-24) --------- */
+/* --- the case record: keep this case out of Jira ---------------------------- */
 
 async function renderCaseRouting(rec) {
   const box = $('case-routing');
@@ -25104,12 +23111,11 @@ function initCaseRouting() {
   }
 }
 
-/* --- the Admin sections an account may open (F8 G1) -----------------------
+/* --- the Admin sections an account may open ---------------------------------
  *
  * A subtab that names a flag in `data-needs` is shown only when the caller's
- * /admin/access answer holds it true. Subtabs without one keep the rules they
- * had, so an account holding neither verb still gets Accounts, which explains
- * its own refusal.
+ * /admin/access answer holds it true. Subtabs without one follow their own rules, so an
+ * account holding neither verb still gets Accounts, which explains its own refusal.
  */
 function adminSubtabAllowed(btn) {
   const needs = btn.dataset.needs;
@@ -25121,10 +23127,10 @@ function adminAnyAllowed() {
 }
 
 /** The section the pane opens on when nothing blocks and nothing was
- *  chosen: Accounts for an account administrator, as before; otherwise the
+ *  chosen: Accounts for an account administrator; otherwise the
  *  first data-needs section the account may open, so an account holding
  *  only integration.manage lands on Integrations rather than on the
- *  Accounts refusal (F8 G1, 2026-09-25). */
+ *  Accounts refusal. */
 function adminFirstSub() {
   if (canAdmin) return 'accounts';
   for (const btn of Array.from(document.querySelectorAll('#pane-admin .subtab'))) {
@@ -25151,43 +23157,29 @@ function applyAdminGates() {
  * passing check would be noise, so the server sends none and this renders
  * none).
  *
- * Four of the checks carry `blocking: true` (readiness.BLOCKING_CHECKS) and
- * the collection run route refuses while any of them fails. Until
- * 2026-09-10 this pane rendered all of them identically, which made the
- * register a list rather than a control: an operator could read "4 of 11
- * check(s) need attention", learn nothing about which four stopped the
- * product from being usable, and close the tab. The failing blockers now
- * get a banner above the list, with each one's own evidence and action,
- * and it has no dismiss control.
+ * Four of the checks carry `blocking: true` (readiness.BLOCKING_CHECKS) and the collection
+ * run route refuses while any of them fails, so failing blockers get a banner above the
+ * list, with each one's own evidence and action, and no dismiss control.
  *
- * The report is deliberately NOT kept on `state`. It was for a day, for a
- * second pane that would explain a collection run's 409 from the last
- * report rather than ask again -- and that pane cannot be written
- * honestly. The Feeds operator holds `collection.run` and generally not
- * `user.manage`, so the copy is null in exactly the session that wanted
- * it; where it is not null it is a snapshot taken BEFORE the refusal it
- * would be shown beside, which is the stale-report defect the catch below
- * exists to prevent. The 409 names the failing checks in its own detail,
- * so there is nothing a copy here would add that the refusal has not
- * already said. Recorded because an absent field reads as an oversight
- * until somebody has worked out why it is absent.
+ * The report is deliberately not kept on `state`: a copy would be a snapshot taken before
+ * the refusal it was shown beside, and is null in the Feeds operator's session anyway (they
+ * hold `collection.run`, not `user.manage`). The 409 names the failing checks in its own
+ * detail.
  */
 async function loadReadiness() {
   const list = $('rdy-list');
   if (!list) return;
-  /* Only the latest request draws (2026-09-23). The register re-runs on
-     every visit to its section and on "Check readiness", and a slow reply
-     from before a fix must not land over the fresh one after it. Kept on
-     the function so nothing outside it can move the count. */
+  /* Only the latest request draws. The register re-runs on every visit to its section and on
+     "Check readiness", and a slow reply from before a fix must not land over the fresh one
+     after it. Kept on the function so nothing outside it can move the count. */
   const gen = loadReadiness.gen = (loadReadiness.gen || 0) + 1;
   const summary = $('rdy-summary');
   summary.textContent = 'checking…';
   let body;
   let refused = null;
   try {
-    /* Step-up gated like the rest of the pane: the sign-in is asked for
-       here, and a stale step-up is never said as a missing role (final
-       review u20, 2026-09-24). Null is a sign-in cancelled. */
+    /* Step-up gated like the rest of the pane: the sign-in is asked for here, and a stale
+       step-up is never said as a missing role. Null is a sign-in cancelled. */
     body = await admStepUp(() => api('/admin/readiness'));
     if (!body) refused = admStepUpWords('The readiness register is', 'Check readiness');
   } catch (err) {
@@ -25209,14 +23201,11 @@ async function loadReadiness() {
   const failed = body.checks.filter((c) => !c.ok).length;
   const caveated = body.checks.filter((c) => c.ok && c.caveat);
   const k = caveated.length;
-  /* "Every check in this register passes", never "the deployment is
-     ready": the legal register's own items are decisions people make, and
-     this endpoint cannot see them. The time is the server's, in UTC, so a
-     report from before a fix or a restart can be told from a fresh one
-     (ux16-admin readiness-stale-after-fix, 2026-09-23). A pass with a
-     caveat is counted in the same line, so "every check passes" is never
-     the whole of what the summary says while one of them has a warning
-     on it (security-officer-false-green, 2026-09-23). */
+  /* "Every check in this register passes", never "the deployment is ready": the legal
+     register's own items are decisions people make, and this endpoint cannot see them. The
+     time is the server's, in UTC, so a stale report can be told from a fresh one. A pass with
+     a caveat is counted in the same line, so "every check passes" is never the whole summary
+     while one of them carries a warning. */
   summary.textContent = (body.ready
     ? 'Every check in this register passes'
       + (k ? ', and ' + k + ' ' + agree(k, 'carries', 'carry') + ' a caveat.' : '.')
@@ -25226,18 +23215,9 @@ async function loadReadiness() {
         + ' a caveat.' : ''))
     + (body.checked_at ? ' Checked ' + fmtTime(body.checked_at, true) + '.' : '');
   renderBlockingBanner(body);
-  /* Failed rows first, in register order, and the passing ones folded
-     under one line (ux16-admin register-long-duplicated-unsorted,
-     2026-09-23). The list was 1,452px of server order, the four blockers
-     printed twice, once in the banner and again in full here, and the
-     non-blocking failures sat between passes.
-
-     A pass with a caveat stays OUT of the fold, after the failures. The
-     lone officer who can invoke break-glass passes on purpose and has no
-     emergency access at all, and the first fix wrote that into a passing
-     row's evidence, inside a fold nothing opens: on a fresh install the
-     one operator holds every role, and would never have read it (the
-     2026-09-23 verifier's correction to security-officer-false-green). */
+  /* Failed rows first, in register order, and the passing ones folded under one line. A pass
+     with a caveat stays out of the fold, after the failures: a lone officer who can invoke
+     break-glass passes on purpose yet has no emergency access, and a fold is never opened. */
   for (const c of body.checks) {
     if (!c.ok) list.appendChild(readinessRow(c));
   }
@@ -25255,28 +23235,14 @@ async function loadReadiness() {
 
 /** The banner that cannot be missed while a blocking check fails.
  *
- *  Built from the CHECK ROWS rather than from `blocking_failures` alone,
- *  because the rows are what carry the evidence and the action and a
- *  banner that named a check without saying what to do about it would send
- *  the operator hunting down the same list it sits on top of. The server's
- *  own summary is still read: any name in `blocking_failures` that no row
- *  explained is listed too, bare. The two are the same fact counted twice
- *  and they cannot be allowed to disagree silently -- the failure to avoid
- *  is a blocking failure that appears in neither.
+ *  Built from the check rows, which carry the evidence and the action, and then from
+ *  `blocking_failures`: any name there that no row explained is listed too, bare, so a
+ *  blocking failure can never appear in neither. The headline also comes from the failing
+ *  rows: what is refused (each check's `consequence`), and which failures are settled in the
+ *  console and which need the API's configuration changed and a restart.
  *
- *  The headline is built from the failing rows too (ux16-admin
- *  blocking-headline-understates-impact, 2026-09-23). It was hard-coded
- *  to "the collection poll route is refused", with the design rationale
- *  for naming a route, while the items under it said sample ingest, every
- *  download and break-glass were refused as well: an operator who read
- *  the headline alone, and ran no covert polling yet, reasonably decided
- *  the box could wait. It now says what is refused, from each check's
- *  `consequence`, and which failures are settled here in the console and
- *  which need the API's configuration changed and a restart. The route and
- *  CollectionService rationale lives in readiness.py, where it belongs.
- *
- *  `null` clears it. There is deliberately no close button: this is the
- *  one notice on the pane whose entire job is to still be there.
+ *  `null` clears it. There is deliberately no close button: this notice's job is to still be
+ *  there.
  */
 function renderBlockingBanner(body) {
   const box = $('rdy-blocking');
@@ -25294,14 +23260,9 @@ function renderBlockingBanner(body) {
       .map((c) => c.check));
   if (!total) { show(box, false); return; }
 
-  /* Unhidden BEFORE anything is appended, and that ordering is the whole
-     of what `role="alert"` buys. `hidden` is `display: none`, which takes
-     the element out of the accessibility tree, and a live region that is
-     not in the tree does not observe the insertions made into it: build
-     first and reveal afterwards and a screen reader announces nothing at
-     all. The operator this banner was written for would then open the
-     admin pane, be told nothing, and read on. Revealed first, every
-     append below is a mutation inside a region already being watched. */
+  /* Unhidden before anything is appended: `hidden` is `display: none`, which takes the
+     element out of the accessibility tree, and a live region outside the tree does not
+     observe insertions, so a banner built first and revealed after is never announced. */
   show(box, true);
 
   const refused = ['Collection polling is refused until '
@@ -25350,14 +23311,10 @@ function renderBlockingBanner(body) {
   box.appendChild(items);
 }
 
-/** A way to where a check is settled, from its `ui_target` ("tab/subtab",
- *  the console's own data-tab and data-subtab values). ux16-admin
- *  readiness-actions-speak-api (2026-09-23): the two checks the console
- *  can settle sent operators to curl, while Lifecycle, Retention has a
- *  Confirm rule form and the Grant role control was on this very pane.
- *  The words come from the console's own tab and subtab labels. A case
- *  pane cannot be reached from Administration without a case, so there it
- *  says which to open instead. Null when the target is unknown. */
+/** A way to where a check is settled, from its `ui_target` ("tab/subtab", the console's own
+ *  data-tab and data-subtab values), in the words of the console's own tab and subtab
+ *  labels. A case pane cannot be reached from Administration without a case, so there it says
+ *  which to open instead. Null when the target is unknown. */
 function readinessGoTo(target) {
   const m = /^([a-z]+)\/([a-z]+)$/.exec(target || '');
   if (!m) return null;
@@ -25397,31 +23354,19 @@ function readinessRow(c) {
     + (caveat ? ' rdy-row-caveat' : ''));
   const head = el('div', 'row-head');
   head.appendChild(el('span', 'row-title', c.check));
-  /* ATTENTION is amber for an ordinary failure and red only on a failing
-     blocker (ux16-admin register-long-duplicated-unsorted, 2026-09-23):
-     every failure wore `chip bad`, so an unset SMTP host was dressed as
-     the thing that stops collection, which app.css reserves red for. */
+  /* ATTENTION is amber for an ordinary failure and red only on a failing blocker: app.css
+     reserves red for what stops collection. */
   head.appendChild(el('span', 'chip ' + (c.ok ? 'good' : (c.blocking ? 'bad' : 'warn')),
     c.ok ? 'PASS' : 'ATTENTION'));
-  /* A pass with a caveat keeps its green verdict and gains an amber one
-     beside it (security-officer-false-green, 2026-09-23): the verdict is
-     right, and what the operator must read is next to it. Amber, never
-     red: nothing is refused on this row's account. */
+  /* A pass with a caveat keeps its green verdict and gains an amber one beside it: the
+     verdict is right, and what the operator must read is next to it. Amber, never red:
+     nothing is refused on this row's account. */
   if (caveat) head.appendChild(el('span', 'chip warn', 'CAVEAT'));
-  /* Marked on the PASSING blockers too, quietly. Which four are the gate
-     is a standing fact about the register, and an operator who only ever
-     sees the chip on a red row learns that "blocking" is a synonym for
-     "failed" -- then reads a green pane and does not know what would have
-     stopped the product had it gone the other way.
-
-     `subtle` while it passes, because a standing fact is not a warning,
-     and `bad` (--danger: the banner's red, and this card's own left
-     rule) the moment it does not. Never the ordinary failure's amber on
-     this chip: that says "untidy" about the one thing that makes the poll
-     route answer 409. The `help warn` action line below is the one amber
-     that crosses the line, in the banner as well as here -- it is the
-     instruction, not the verdict. app.css argues the same from its end,
-     above `.rdy-blocking` and `.rdy-row-blocking`. */
+  /* Marked on the passing blockers too, quietly: which four are the gate is a standing fact,
+     and a chip seen only on red rows would make "blocking" read as "failed". `subtle` while it
+     passes and `bad` (the banner's red) once it fails, never amber, which would call the
+     thing that makes the poll route answer 409 untidy. app.css keeps the same rule above
+     `.rdy-blocking` and `.rdy-row-blocking`. */
   if (c.blocking) {
     head.appendChild(el('span', 'chip ' + (c.ok ? 'subtle' : 'bad'),
       'BLOCKING'));
@@ -25443,35 +23388,29 @@ function readinessRow(c) {
 
 /* --- the last completed analysis ---------------------------------------
  *
- * Opening the pane used to show an empty scoreboard whether the case had
- * never been analysed or had been analysed an hour ago, and the only way to
- * tell was to pay for a fresh run. `/analytics/latest` reads the stored run
- * for this exact projection -- same parameters, because they are what names
- * the projection row -- and 404s when there is none.
+ * Opening the pane shows the stored run, so telling an analysed case from an unanalysed one
+ * costs no fresh run. `/analytics/latest` reads the stored run for this exact projection
+ * (the parameters name the projection row) and 404s when there is none.
  */
 async function loadLatestAnalysis() {
   /* Not while a Run is out either: the fresh answer is on its way, and a
      stored one drawn first would put "Showing the run of ..." over
      "computing...". */
   if (!state.caseId || state.analyticsRunning) return;
-  /* A result computed under another projection (the as-of time moved while
-     this pane was hidden) is cleared before anything is asked; one for
-     THIS projection stays, since it is what this read would return
-     (ux10-analytics:analysis-survives-graph-changes, 2026-09-23). */
+  /* A result computed under another projection (the as-of time moved while this pane was
+     hidden) is cleared before anything is asked; one for this projection stays, since it is
+     what this read would return. */
   if (state.analytics) {
     if (state.analyticsQuery === anQuery().toString()) return;
     blankAnalytics(AN_PROJECTION_CHANGED);
   }
-  /* final review C3, 2026-09-23: a stored run is one case's and one
-     projection's. A reply that a switch, a Run or a changed projection
-     has overtaken is dropped, never drawn under the new header. */
+  /* A stored run is one case's and one projection's. A reply that a switch, a Run or a
+     changed projection has overtaken is dropped, never drawn under the new header. */
   const token = caseToken();
   const gen = state.analyticsGen || 0;
-  /* And a projection moved while the read was out, which bumped nothing
-     because nothing was on screen to blank (release review c17,
-     2026-09-24): the stored run of the old instant was drawn beside the
-     graph at the new one. Dropped, the pane keeps its empty note, which
-     is true of the new projection too. */
+  /* And a projection moved while the read was out, which bumps nothing because nothing is on
+     screen to blank: dropped, the pane keeps its empty note, which is true of the new
+     projection too. */
   const q = anQuery();
   const stale = () => caseChanged(token) || gen !== (state.analyticsGen || 0)
     || anQuery().toString() !== q.toString();
@@ -25495,9 +23434,8 @@ async function loadLatestAnalysis() {
   state.analytics = safeLabelsDeep(suite);
   state.analyticsQuery = q.toString();
   state.analyticsAt = suite.computed_at || null;
-  /* `current` is checked by the server since 2026-09-23, so the status
-     line can say whether the numbers still hold instead of "not
-     recomputed" (ux10-analytics:stored-run-currency-and-timestamp). */
+  /* `current` is checked by the server, so the status line can say whether the numbers still
+     hold. */
   state.analyticsCurrency = {
     current: suite.current === true ? true : (suite.current === false ? false : null),
     checkedAt: new Date().toISOString(), note: '' };
@@ -25507,15 +23445,13 @@ async function loadLatestAnalysis() {
   renderAnalytics();
   setMsg($('an-status'), storedRunStatus(suite));
   loadKeyPlayer(true);
-  /* And the stored role analysis after it, on its own, for the same reason
-     (F1, 2026-09-24): a stored read never computes. */
+  /* And the stored role analysis after it, on its own, for the same reason: a stored read
+     never computes. */
   loadConcor(true);
-  /* The stored regular roles too (REGE, 2026-10-02), read and never
-     computed on opening. */
+  /* The stored regular roles too, read and never computed on opening. */
   loadRege(true);
-  /* The open trend is fetched again, as after a Run (2026-09-24):
-     the stored run may be one computed since Trend was pressed, by this
-     analyst under another view or by a colleague. */
+  /* The open trend is fetched again, as after a Run: the stored run may be one computed since
+     Trend was pressed, by this analyst under another view or by a colleague. */
   if (state.analyticsHistoryNode) {
     loadMetricHistory(state.analyticsHistoryNode, state.analyticsHistoryLabel);
   }
@@ -25523,15 +23459,10 @@ async function loadLatestAnalysis() {
 
 /* --- the assumptions register ------------------------------------------
  *
- * Migration 0056. An assumption is a claim the analysis rests on that
- * nobody has evidenced, and the reason to write it down is that it becomes
- * reviewable: the register turns "we all sort of assumed that" into a row
- * with a name, a date and a status somebody can argue with.
- *
- * Only OPEN and CONFIRMED reach the report (`REPORTABLE_STATUSES` in
- * assumptions.py). This says so on the panel, because an analyst who thinks
- * a withdrawn assumption still appears will leave it withdrawn rather than
- * deleting it, and one who thinks the opposite will do the reverse.
+ * Migration 0056. An assumption is a claim the analysis rests on that nobody has evidenced;
+ * written down, it becomes a row with a name, a date and a status somebody can argue with.
+ * Only OPEN and CONFIRMED reach the report (`REPORTABLE_STATUSES` in assumptions.py), and the
+ * panel says so, so nobody guesses whether a withdrawn one still appears.
  */
 function wireAssumptions() {
   const form = $('asm-create');
@@ -25571,11 +23502,9 @@ async function loadAssumptions() {
     renderList('asm-list', 'asm-empty', body.assumptions, assumptionRow);
   } catch (err) {
     clear($('asm-list'));
-    /* The empty line carries the refusal rather than a banner: "no
-       assumptions recorded" and "you may not read them" are different
-       facts, and on this panel the first one is an accusation. A failure
-       that is not a refusal gets the shared notice (ux17-failure:
-       sticky-error-text-in-empty-slot, 2026-09-23). */
+    /* The empty line carries the refusal rather than a banner: "no assumptions recorded" and
+       "you may not read them" are different facts, and on this panel the first one is an
+       accusation. A failure that is not a refusal gets the shared notice. */
     if (err instanceof ApiError && err.status === 403) {
       listRefused('asm-empty', refusalText(err, 'Assumptions need case.read.'));
     } else {
@@ -25586,11 +23515,9 @@ async function loadAssumptions() {
 
 /** One assumption, with the two review verbs beside it.
  *
- *  CONFIRMED is not styled as a pass and REFUTED is not styled as a
- *  failure. A refuted assumption is a GOOD outcome — the register worked,
- *  somebody checked, and the analysis can be corrected while it still can
- *  be. What deserves the warning colour is an OPEN one, because that is
- *  the question still owed an answer.
+ *  CONFIRMED is not styled as a pass and REFUTED is not styled as a failure: a refuted
+ *  assumption is a good outcome, since somebody checked and the analysis can still be
+ *  corrected. The warning colour is for an OPEN one, the question still owed an answer.
  */
 function assumptionRow(a) {
   const card = el('div', 'card row-card'
@@ -25611,9 +23538,8 @@ function assumptionRow(a) {
      re-reviewing it would be a status change with no meaning, so the verbs
      are not offered. */
   if (a.status === 'WITHDRAWN') return card;
-  /* The row's own message line: a refusal is said beside the row that was
-     acted on, not in the form at the top of the card
-     (ux11-ach:refuted-assumption-cannot-be-confirmed, 2026-09-23). */
+  /* The row's own message line: a refusal is said beside the row that was acted on, not in
+     the form at the top of the card. */
   const msg = el('p', 'msg');
   msg.hidden = true;
   const actions = el('div', 'row-actions');
@@ -25630,8 +23556,7 @@ function assumptionRow(a) {
 }
 
 /** The verbs a row offers, from its status. Reopen puts a confirmed or
- *  refuted assumption back to OPEN, "a question still owed an answer",
- *  which the service always accepted and the console never offered. */
+ *  refuted assumption back to OPEN, "a question still owed an answer". */
 function assumptionVerbs(status) {
   const verbs = [];
   if (status !== 'CONFIRMED') {
@@ -25648,14 +23573,7 @@ function assumptionVerbs(status) {
  *  Confirming an open assumption is one click. Everything else opens the
  *  decision sheet, which says what the change does and asks for the note
  *  the service will demand: a refutation, and any move off REFUTED
- *  (assumptions.py: "un-refuting it in silence erases one"). Confirm on a
- *  refuted row sent no note and always failed with a sentence that read as
- *  a missing permission (ux11-ach:refuted-assumption-cannot-be-confirmed,
- *  2026-09-23).
- *
- *  Withdrawing went through window.prompt, whose Cancel returned null and
- *  withdrew the assumption anyway, for good (ux11-ach:withdraw-cancel-
- *  still-withdraws, 2026-09-23). Cancel on the sheet does nothing.
+ *  (assumptions.py: "un-refuting it in silence erases one"). Cancel on the sheet does nothing.
  */
 function reviewAssumption(a, status, button, rowMsg) {
   const needs = 'Reviewing an assumption needs case.update.';
@@ -25703,8 +23621,7 @@ function reviewAssumption(a, status, button, rowMsg) {
 
 /* --- retention --------------------------------------------------------- */
 
-/** How far ahead the due list looks, in days: 0 is "past its deadline
- *  now", the only window the list used to have. */
+/** How far ahead the due list looks, in days: 0 is "past its deadline now". */
 function retWindowDays() {
   const v = parseInt($('ret-window').value, 10);
   return Number.isFinite(v) && v > 0 ? v : 0;
@@ -25718,19 +23635,14 @@ function untilWords(iso) {
   return d > 0 ? 'in ' + dayCount(d) : 'passed ' + dayCount(-d) + ' ago';
 }
 
-/** The case's own two clocks, first in the section. The console showed
- *  `retention_until` nowhere but the creation form, so the date on which
- *  every exhibit in the case falls due was on no screen (ux15-report:
- *  due-list-no-forward-view-no-names, 2026-09-23).
+/** The case's own two clocks, first in the section: `retention_until` is the date on which
+ *  every exhibit in the case falls due.
  *
  *  The ingest sentence says what the code does, not what
- *  `RetentionService.effective_deadline` intends. `ingest._retain_until`
- *  stamps ingest time plus the category's days and never reads the case's
- *  `retention_until`, so a CHAT_EXPORT record on a case kept for one more
- *  year runs for 730 days: it can fall due after the case does. The first
- *  wording ("which can only be shorter") told the analyst otherwise
- *  (verifier, 2026-09-23); test_ui_failure_states.py fails if ingest starts
- *  reading the case clock, so the two change together. */
+ *  `RetentionService.effective_deadline` intends: `ingest._retain_until` stamps ingest time
+ *  plus the category's days and never reads the case's `retention_until`, so a record can
+ *  fall due after the case does. test_ui_failure_states.py fails if ingest starts reading the
+ *  case clock, so the two change together. */
 function renderCaseClocks() {
   const box = $('ret-case-clocks');
   const rec = state.caseRec;
@@ -25746,9 +23658,8 @@ function renderCaseClocks() {
 async function loadRetention() {
   try {
     const rules = await api('/retention/rules');
-    /* The categories in live use, ruled or not: a category with no rule
-       ran on a fallback nobody chose and was on no screen (ux15-report:
-       unruled-categories-invisible, 2026-09-23). */
+    /* The categories in live use, ruled or not: a category with no rule runs on a fallback
+       nobody chose, and must be on screen. */
     const inUse = new Map((rules.in_use || []).map((c) => [c.category, c]));
     const unruled = (rules.in_use || []).filter((c) => !c.has_rule);
     renderList('ret-rules', 'ret-rules-notice', rules.rules,
@@ -25756,12 +23667,8 @@ async function loadRetention() {
     for (const c of unruled) $('ret-rules').appendChild(unruledRow(c));
     fillRetentionCategories(rules.rules, unruled);
     const notice = $('ret-rules-notice');
-    /* `.length`, not the array. `unconfirmed` is a LIST and `[] ? a : b`
-       takes `a`, so the alert-coloured banner was permanently lit — reading
-       "every rule has been confirmed" in the same red as the real warning.
-       An alarm that is always on carries no information, and this is the
-       one signal separating a jurisdictional retention period from a
-       number somebody typed. */
+    /* `.length`, not the array: `unconfirmed` is a list, and `[] ? a : b` takes `a`, which
+       would keep the warning lit for good. */
     const pending = (rules.unconfirmed || []).length;
     const said = [pending ? (rules.notice || '') : '', rules.unruled_notice || '']
       .filter(Boolean);
@@ -25769,12 +23676,10 @@ async function loadRetention() {
     show(notice, said.length > 0);
   } catch (err) {
     clear($('ret-rules'));
-    /* Saying nothing was the bug. Leaving the pane blank asserts "there are
-       no retention rules"; the truth was "you may not see them", and the
-       purge control sits directly beneath. 0039's own docstring says the
-       failure mode of hiding a deadline is that somebody discovers it by
-       missing it. A failure that is not a refusal is not "needs
-       retention.read" (ux17-failure:sticky-error-text-in-empty-slot). */
+    /* A blank pane would assert "there are no retention rules" when the truth is "you may not
+       see them", with the purge control directly beneath: a hidden deadline is discovered by
+       missing it (migration 0039). A failure that is not a refusal is not "needs
+       retention.read". */
     if (err instanceof ApiError && err.status === 403) {
       listRefused('ret-rules-notice',
         refusalText(err, 'Retention rules need retention.read.'));
@@ -25849,7 +23754,7 @@ function ruleRow(r, use) {
 }
 
 /** A category with live records and no rule: the fallback it runs on, said
- *  as what it is (ux15-report:unruled-categories-invisible, 2026-09-23). */
+ *  as what it is. */
 function unruledRow(c) {
   const card = el('div', 'card row-card compact');
   const head = el('div', 'row-head');
@@ -25872,9 +23777,7 @@ function unruledRow(c) {
 }
 
 /** What a due item is, in words a person recognises: an exhibit by its
- *  title, a record by its category. The list printed "evidence" and an
- *  eight-character id (ux15-report:due-list-no-forward-view-no-names,
- *  2026-09-23). */
+ *  title, a record by its category. */
 function dueItemName(d) {
   if (d.object_type === 'evidence') {
     if (d.title) return 'Exhibit "' + visibleText(d.title) + '"';
@@ -25888,14 +23791,9 @@ function dueItemName(d) {
 
 /** One item due for destruction, now or within the window.
  *
- *  The field names are `object_type` / `object_id` / `deadline` — NOT
- *  `category` / `id` / `retain_until`, which is what this read at first.
- *  Every row rendered "exhibit", an empty id and an em dash for the date,
- *  so an item ninety days overdue was pixel-identical to one due next
- *  year. `daysFromNow(undefined)` is null and `null < 0` is false, so the
- *  overdue styling could never fire either — the one thing this list is
- *  for. Its own comment says "negative reads as overdue, which is the
- *  point".
+ *  The server's field names are `object_type`, `object_id` and `deadline`, not `category`,
+ *  `id` and `retain_until`: with the wrong names `daysFromNow(undefined)` is null, `null < 0`
+ *  is false, and the overdue styling this list exists for never fires.
  */
 function dueExhibitRow(d) {
   const card = el('div', 'card row-card');
@@ -25938,31 +23836,19 @@ function dueExhibitRow(d) {
 
 /* --- purge: a preview, then a confirmation -----------------------------
  *
- * ux15 purge-one-click-destroy-with-carried-state and ux17
- * purge-no-confirmation (2026-09-22). A real purge was one click on a
- * neutral "Run", identical to the dry run but for a checkbox far above
- * it, and the unticked box and the authority text survived a case switch:
- * a preview meant for case B could destroy B's expired material under the
- * authority typed for case A. What holds now:
- *
  *   - the button says what it will do, and is --danger when it destroys;
  *   - a real run needs a dry run of THIS case under THIS authority first,
  *     and its confirmation repeats that dry run's counts and asks for the
  *     case code to be typed;
  *   - the dry run is re-ticked whenever the pane opens; the authority, the
  *     preview and the result are cleared on every case switch, and the
- *     authority after every real run.
+ *     authority after every real run;
+ *   - the dry run's `preview` digest rides on the real run, and the server refuses (409)
+ *     unless what is due is still exactly what was counted, so a hold lifted in between
+ *     cannot turn "Destroy 3 exhibits" into 14; a preview lapses after
+ *     PURGE_PREVIEW_TTL_MS, so the time the confirmation quotes is never hours old.
  *
  * The server's `dry_run` still defaults to true; none of this replaces it.
- *
- * 2026-09-23: the confirmation repeated a dry run's
- * counts, but the real run sent only the case and the authority and the
- * server read what was due afresh. A preview of any age was kept, so a
- * hold lifted in between turned "Destroy 3 exhibits" into 14 destroyed.
- * Now the dry run's `preview` digest rides on the real run and the server
- * refuses (409) unless what is due is still exactly what was counted; the
- * console also lets a preview lapse after PURGE_PREVIEW_TTL_MS, so the
- * time the confirmation quotes is never hours old.
  */
 let purgePreview = null;
 const PURGE_PREVIEW_TTL_MS = 10 * 60 * 1000;
@@ -25973,8 +23859,8 @@ function purgeCounts(body) {
     [body.documents_purged || 0, 'document'],
     [body.records_purged || 0, 'ingest record'],
     [body.dead_letters_purged || 0, 'dead letter'],
-    /* Lab samples of the expired case (lab-4, 2026-10-03): disposed of as
-       a rejection is, which the server's warnings say in full. */
+    /* Lab samples of the expired case: disposed of as a rejection is, which the server's
+       warnings say in full. */
     [body.samples_purged || 0, 'sample'],
   ].filter(([n]) => n > 0)
     .map(([n, noun]) => n + ' ' + noun + (n === 1 ? '' : 's'));
@@ -26009,8 +23895,7 @@ onCaseSwitch(() => {
   $('ret-purge-box').open = false;
   clear($('ret-due'));
   $('ret-counts').textContent = '';
-  /* The previous case's clocks and its answer are not this case's
-     (ux15-report:due-list-no-forward-view-no-names, 2026-09-23). */
+  /* The previous case's clocks and its answer are not this case's. */
   show($('ret-case-clocks'), false);
   showEmptyState('ret-due-empty', false);
   clearLoadFailure('ret-due-empty');
@@ -26111,7 +23996,7 @@ async function doPurge(authority, dry) {
   $('ret-destroy-go').disabled = true;
   const json = { case_id: caseId, authority, dry_run: dry };
   /* A real run names the dry run it confirms, and the server destroys only
-     if what is due still matches it (2026-09-23). */
+     if what is due still matches it. */
   if (!dry) json.preview = purgePreview ? purgePreview.preview : null;
   let body;
   try {
@@ -26135,15 +24020,10 @@ async function doPurge(authority, dry) {
   /* A result for a case that is no longer open is not drawn under the new
      one. A real run's record is its tombstone, listed on its own case. */
   if (caseChanged(token)) return;
-  /* The field names are the server's: `evidence_purged`,
-     `documents_purged`, `held_back`, `storage_locked`. This read
-     `body.purged` and `body.refused`, neither of which is ever sent -- so
-     a real, irreversible purge reported "0 object(s) destroyed" and the
-     storage-refusal warning could not fire, because the key it tested
-     did not exist. decision 50 requires `storage_locked` to be REPORTED:
-     object lock can refuse a delete even to satisfy a deletion order,
-     and a tombstone recording a purge that did not happen is a false
-     record. */
+  /* The field names are the server's: `evidence_purged`, `documents_purged`, `held_back`,
+     `storage_locked`. docs/00 decision 50 requires `storage_locked` to be reported: object
+     lock can refuse a delete even to satisfy a deletion order, and a tombstone recording a
+     purge that did not happen is a false record. */
   out.appendChild(el('p', body.dry_run ? 'form-ok' : 'form-error',
     body.notice || ''));
   const verb = body.dry_run ? 'would be destroyed' : 'destroyed';
@@ -26156,9 +24036,8 @@ async function doPurge(authority, dry) {
       body.held_back + ' skipped under a legal hold. A hold outranks the '
       + 'retention clock.'));
   }
-  /* WHAT, not only how many (ux15-report:due-list-no-forward-view-no-names,
-     2026-09-23): a count of "3 exhibits" cannot tell anyone whether the one
-     their accepted assertion rests on is among them. */
+  /* What, not only how many: a count of "3 exhibits" cannot tell anyone whether the one their
+     accepted assertion rests on is among them. */
   if (body.dry_run && (body.items || []).length) {
     const list = el('ul', 'purge-items');
     for (const item of body.items) {
@@ -26206,10 +24085,9 @@ async function doPurge(authority, dry) {
   loadRetention();
 }
 
-/* The tombstone register is the legal record of what was destroyed, and
- * it is read for ONE case. ux17-failure (2026-09-22): a failed read left
- * the markup's "Nothing has been destroyed." standing, and a case switch
- * left the previous case's destructions under the new header. */
+/* The tombstone register is the legal record of what was destroyed, and it is read for one
+ * case, so a case switch clears it: the previous case's destructions never stand under the
+ * new header. */
 onCaseSwitch(() => {
   clear($('tomb-list'));
   $('tomb-counts').textContent = '';
@@ -26229,8 +24107,7 @@ async function loadTombstones() {
       'record', 'records');
   } catch (err) {
     if (caseChanged(token)) return;
-    /* Cleared, then explained. The 403 branch used to return with the
-       previous case's rows still listed under the refusal. */
+    /* Cleared, then explained, so no earlier rows stand under the refusal. */
     renderList('tomb-list', 'tomb-empty', [], tombRow);
     $('tomb-counts').textContent = '';
     if (err instanceof ApiError && err.status === 403) {
@@ -26261,12 +24138,9 @@ const TOMB_RULE = {
  *  completed destruction (decision 50). */
 function tombStorage(t) {
   const evidence = t.object_type === 'evidence';
-  /* An out-of-schedule purge (four-eyes, before retention expires) has NO
-     next sweep: `due()` returns only exhibits whose retention has expired,
-     so a refused exhibit never comes back due (retention.py
-     purge_out_of_schedule). Saying "stays due until the lock expires" or
-     "before the next sweep retries" on that record described a court-ordered
-     early destruction refused by object lock as self-healing (2026-09-23). */
+  /* An out-of-schedule purge (four-eyes, before retention expires) has no next sweep: `due()`
+     returns only exhibits whose retention has expired, so a refused exhibit never comes back
+     due (retention.py purge_out_of_schedule), and its row must not read as self-healing. */
   const early = t.rule === 'out-of-schedule';
   const noRetry = (lock) => ' Nothing will retry them: this was an '
     + 'out-of-schedule purge and those exhibits are not due'
@@ -26305,12 +24179,9 @@ function tombStorage(t) {
 
 /** One destruction, as the record a disclosure request reads.
  *
- *  ux15 tombstone-rows-blank (2026-09-22): this read `object_id` and
- *  `sha256`, neither of which a tombstone carries (one row is one BATCH),
- *  so every row showed an empty id, and the count, the actor, the rule and
- *  the storage outcome were never drawn. A purge of 37 exhibits looked
- *  like a purge of one, nothing said who ran it, and a batch whose bytes
- *  the object lock refused was listed as destroyed. */
+ *  One tombstone row is one batch, with no `object_id` or `sha256`: the row shows the count,
+ *  the actor, the rule and the storage outcome, so a batch whose bytes the object lock
+ *  refused is never listed as destroyed. */
 function tombRow(t) {
   const card = el('div', 'card row-card');
   const head = el('div', 'row-head');
@@ -26338,33 +24209,20 @@ function tombRow(t) {
 
 /* --- break-glass -------------------------------------------------------
  *
- * ux15 breakglass-grant-raises-nothing and
- * glass-review-queue-uninformative-irreversibl (2026-09-22).
+ * A grant with no classification is read by no access decision. So the form names all three
+ * (case, level, hours), will not send a grant that would raise nothing, says what the grant
+ * will do before it is invoked, and shows the server's own sentence afterwards. A header
+ * chip says so on every screen while any grant is live.
  *
- * The console posted a justification alone and said "Granted. It is short,
- * counted and will be reviewed." A grant with no classification is read by
- * no access decision, so the analyst was told they had emergency access,
- * every officer was paged past quiet hours, and the exhibit still 403'd.
- * The grant was also deployment-wide rather than scoped to the case it was
- * invoked from, and it lasted whatever the router defaulted to.
- *
- * So the form names all three (case, level, hours), will not send a grant
- * that would raise nothing, says what the grant will do before it is
- * invoked, and shows the server's own sentence afterwards. A header chip
- * says so on every screen while any grant is live.
- *
- * The review queue names the person, says whether the grant is live,
- * expired or ended early, and confirms a verdict before recording it: the
- * server refuses to revisit a review, so a mis-click was permanent.
+ * The review queue names the person, says whether the grant is live, expired or ended early,
+ * and confirms a verdict before recording it: the server refuses to revisit a review, so a
+ * mis-click would be permanent.
  */
 const GLASS_HOURS = [1, 2, 3, 4, 6, 8];   // InvokeBody caps at 8
 /* What a grant's use count covers, word for word the server's `_COUNTED`
    (governance.py), so the invoke pane, the analyst's own card and the
-   officer's card cannot describe three different counts. They said "each
-   exhibit it opens" while captures, messages and entity changes were
-   counted too, and on a case classified above the invoker every request
-   was (2026-09-23). test_ui_governance_invariants holds
-   the two to each other. */
+   officer's card cannot describe three different counts. test_ui_governance_invariants
+   holds the two to each other. */
 const GLASS_COUNTED = 'It counts each exhibit, capture or message you open '
   + 'above your own clearance and each change you make to an entity above '
   + 'it. Nothing else it widens is counted (the graph, the inspector, lists '
@@ -26378,9 +24236,7 @@ function tlpRank(name) { return TLP.indexOf(name); }
 
 /** A clock time alone, in UTC and labelled: "15:18 UTC". For a deadline
  *  within the day (a grant's end, a session's end), where the date would
- *  be noise. The review card sliced ISO strings, which printed UTC with no
- *  zone (ux15, 2026-09-22); it now uses fmtTime like every other screen,
- *  since the console shows one zone and names it (fmtTime above). */
+ *  be noise. The console shows one zone and names it (fmtTime above). */
 function fmtClock(iso) {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? String(iso)
@@ -26413,24 +24269,13 @@ function describeGrant(g, clearance) {
 /** The header chip. Every live grant, whatever case is open, but it names
  *  a level only where that level is in force.
  *
- *  It read "BREAK-GLASS RED" on any case while a RED grant was live
- *  anywhere, so an analyst under a grant scoped to OP-KESTREL-26 who had
- *  moved to OP-NIGHTJAR-26 was told RED was in force where it was not
- *  (verifier follow-up to ux15 breakglass-grant-raises-nothing,
- *  2026-09-23). On a case it now names the level only for a grant that
- *  applies to that case, and otherwise says where the grant is. With no
- *  case open it names the level and where it applies. */
-/* Which live grant, if any, raises the open case: its id, or ''. When that
- * changes, the lists on screen were read under the other ceiling.
- *
- * The verifier of 2026-09-23 invoked a RED grant for the open case and was
- * told the lists 'now include material up to RED' while the Entities pane
- * still showed three of three: every list had been read before the grant,
- * and nothing re-read them until the case was reopened. The mirror held
- * when a grant ended. The chip is re-rendered after every invoke and on its
- * own expiry timer, so this is where both edges are seen. `null` means
- * nothing is known yet (sign-in, or a case just opened, which loads fresh
- * anyway), so the first render never triggers a reload. */
+ *  On a case it names the level only for a grant that applies to that case, and otherwise
+ *  says where the grant is. With no case open it names the level and where it applies. */
+/* Which live grant, if any, raises the open case: its id, or ''. When that changes, the
+ * lists on screen were read under the other ceiling and are read again. The chip is
+ * re-rendered after every invoke and on its own expiry timer, so this is where both edges
+ * are seen. `null` means nothing is known yet (sign-in, or a case just opened, which loads
+ * fresh anyway), so the first render never triggers a reload. */
 let glassHereKey = null;
 onCaseSwitch(() => { glassHereKey = null; });
 
@@ -26450,13 +24295,9 @@ function noteGlassChange(grants, clearance) {
 
 /* The Search pane, and the palette's selector lookup, read under the
  * ceiling too: /search/nodes, /search/evidence and /search/selectors all
- * honour a grant on their case. So when the grant changed, the pane kept
- * the RED labels, the selector values and "Showing 50 of 73" read under a
- * grant that had ended, with no time limit, and a click on a stale hit met
- * a refusal; after a grant began it went on saying "No entities match"
- * for material the header now said was included (final review C13,
- * 2026-09-23). A search still in flight is retired, the one on screen is
- * asked again under the new ceiling, and the palette's short cache goes. */
+ * honour a grant on their case. So when the grant changes, a search still in flight is
+ * retired, the one on screen is asked again under the new ceiling, and the palette's short
+ * cache goes. */
 function refreshSearchForGlass() {
   searchSeq += 1;
   resetPalSel();
@@ -26471,19 +24312,11 @@ function refreshSearchForGlass() {
   setMsg($('search-scope'), '');
 }
 
-/* final review C17, 2026-09-23. The chip saw a grant end through one
- * timer, set for just after expires_at by THIS computer's clock, and never
- * set again. A workstation clock a few seconds fast asked while the server
- * still listed the grant, got the same answer, computed a wait below zero
- * and set nothing; a refresh that failed set nothing either. The header
- * went on saying "BREAK-GLASS RED until 15:18 UTC" long after 15:18, and
- * noteGlassChange never re-read the lists at the analyst's own clearance.
- * An officer's "End it now" was never seen at all.
- *
- * It still does not poll on a plain timer. Every answered request slides
- * the idle window (the session region: "The client never polls"), so a
- * check every minute while a grant is live would keep an unattended
- * console signed in for as long as the grant lasts. Instead:
+/* How the chip sees a grant end. A single timer set by this computer's clock misses a grant
+ * the server still lists (clock skew), a failed refresh and an officer's "End it now". It
+ * does not poll on a plain timer either: every answered request slides the idle window (the
+ * session region: "The client never polls"), so a check every minute would keep an
+ * unattended console signed in for as long as the grant lasts. Instead:
  *  - a grant the server still lists after this clock says it ended, and a
  *    refresh that failed, are asked about again on a short backoff that
  *    stops (GLASS_RETRY_MS), which covers ordinary clock skew;
@@ -26572,7 +24405,7 @@ function renderGlassChip(body) {
   /* Asked again just after the soonest expiry, so the chip goes dark when
      the grant does rather than on the next navigation. A wait at or below
      zero (or NaN) means the server still lists a grant this clock says has
-     ended: asked again on the backoff rather than never (C17). */
+     ended: asked again on the backoff rather than never. */
   const soonest = Math.min(...grants.map((x) => new Date(x.expires_at).getTime()));
   const wait = soonest - Date.now() + 1000;
   if (wait > 0) {
@@ -26589,11 +24422,9 @@ async function refreshGlassChip() {
   try {
     renderGlassChip(await api('/break-glass/mine'));
   } catch (err) {
-    /* Left as it was rather than hidden: going dark is the one wrong
-       answer for a grant that may still be live. But asked again (C17):
-       a failed read used to be the last word until the analyst changed
-       case. Not when the session itself ended: that failure is handled,
-       and sessionRenewed asks once the analyst has signed in again. */
+    /* Left as it is rather than hidden: going dark is the one wrong answer for a grant that
+       may still be live. Asked again on the backoff, except when the session itself ended:
+       that failure is handled, and sessionRenewed asks once the analyst has signed in again. */
     if (!(err && err.handled)) armGlassRetry();
   }
 }
@@ -26602,9 +24433,8 @@ function renderGlassMine(body) {
   const mine = $('glass-mine');
   clear(mine);
   if (!body) {
-    /* "No grant" is a 200 with live:false, so only a real failure lands
-       here, and swallowing it hid the one warning this card exists for
-       (ux17, 2026-09-22). */
+    /* "No grant" is a 200 with live:false, so only a real failure lands here, and swallowing
+       it would hide the one warning this card exists for. */
     show(mine, true);
     mine.appendChild(el('p', 'help warn',
       'Could not check whether you are operating under break-glass. Refresh '
@@ -26752,8 +24582,7 @@ async function loadGlassQueue(token) {
         ''));
       return;
     }
-    /* "Nothing awaiting review." must not stand for a queue nobody could
-       read (ux17-failure:loading-shows-empty-claims, 2026-09-23). */
+    /* "Nothing awaiting review." must not stand for a queue nobody could read. */
     renderList('glass-queue', 'glass-empty', [], glassRow);
     $('glass-counts').textContent = '';
     showLoadFailure('glass-empty', 'The break-glass review queue', err,
@@ -26779,11 +24608,9 @@ function glassRow(g) {
      The card labelled every end time "expired", live grants included. */
   const status = g.revoked_at ? 'ENDED EARLY' : (g.is_live ? 'LIVE' : 'EXPIRED');
   head.appendChild(el('span', 'chip' + (g.is_live ? ' bad' : ''), status));
-  /* "raised to RED" only when it did. A grant naming a level the invoker
-     already held raised nothing, and the card said otherwise (2026-09-23).
-     `raised` compares with their clearance AT INVOKE; it is null for a
-     grant from before that was recorded, and then the card says only
-     which level was named. */
+  /* "raised to RED" only when it did: a grant naming a level the invoker already held raises
+     nothing. `raised` compares with their clearance at invoke; it is null on a grant made
+     before that was recorded, and then the card says only which level was named. */
   const level = g.granted_classification;
   let raise;
   if (!level) raise = 'raised nothing';
@@ -26806,12 +24633,9 @@ function glassRow(g) {
   card.appendChild(facts);
   if (g.justification) card.appendChild(el('p', 'why', g.justification));
   if (!n) {
-    /* Not "never used". The count covers what GLASS_COUNTED says; the
-       grant also widens the graph, the inspector, lists and search, and
-       those reads are not counted. Telling the officer "nothing they
-       opened needed it" when the analyst had in fact seen material above
-       their clearance through a list is the one sentence this card must
-       not say (verifier, g06, 2026-09-23; wording final review U19). */
+    /* Not "never used". The count covers what GLASS_COUNTED says; the grant also widens the
+       graph, the inspector, lists and search, and those reads are not counted, so the card
+       must never tell the officer that nothing above the analyst's clearance was seen. */
     card.appendChild(el('p', 'help',
       'No access was recorded through it. The count covers each exhibit, '
       + 'capture or message opened above their clearance and each change to '
@@ -26831,11 +24655,9 @@ function glassRow(g) {
   const actions = el('div', 'row-actions');
   const msg = el('p', 'msg');
   msg.hidden = true;
-  /* A live grant cannot be reviewed: the server refuses the verdict,
-     because a review judges everything done under the grant and while it
-     is live that is still growing. Before, a verdict took a live grant
-     out of the only list and away from the only End it now (2026-09-23). So the card offers
-     the one thing that can be done. */
+  /* A live grant cannot be reviewed: the server refuses the verdict, because a review judges
+     everything done under the grant and while it is live that is still growing. So the card
+     offers the one thing that can be done. */
   if (g.is_live) {
     card.appendChild(el('p', 'help',
       'Still live, so it cannot be reviewed yet. End it now, or review it '
@@ -26863,9 +24685,8 @@ function glassRow(g) {
   }
   const note = el('textarea', 'glass-note');
   note.rows = 2;
-  /* Required. A permanent finding about a named colleague, written by one
-     click with no reasoning, cannot be defended later (ux15 and ux17,
-     2026-09-22). The server takes the note; only the console asks for it. */
+  /* Required: a permanent verdict about a named colleague, written with no reasoning, cannot
+     be defended later. The server takes the note; only the console asks for it. */
   note.placeholder = 'Why: the reasoning behind your verdict (required)';
   note.setAttribute('aria-label', 'Review note for ' + name);
   card.appendChild(note);
@@ -26922,8 +24743,8 @@ async function invokeBreakGlass() {
   const classification = $('glass-level').value;
   const hours = parseInt($('glass-hours').value, 10);
   const scope = $('glass-scope').value;
-  /* Never sent without a level. A grant naming none raises nothing and
-     still pages every officer, which is the defect this form replaced. */
+  /* Never sent without a level: a grant naming none raises nothing and still pages every
+     officer. */
   if (!classification) {
     setMsg(msg, 'Choose a level. A grant that names none raises nothing, so '
       + 'the console does not send one.');
@@ -26988,25 +24809,19 @@ function wireGovernanceControls() {
   $('glass-why').addEventListener('input', updateGlassEffect);
 }
 
-/* --- ACH (Phase 6, docs/13 tier 2) -------------------------------------
+/* --- ACH (docs/13 tier 2) ----------------------------------------------
  *
  * The ranking is by INCONSISTENCY, ascending. That is the whole method and
  * it is counter-intuitive enough that the UI has to say so before it shows
  * a number: the hypothesis that survives is the one with the least
  * evidence AGAINST it, not the most for it. Ranking by support ranks
  * whichever theory the team has been collecting for longest, which is the
- * bias ACH exists to defeat.
+ * bias ACH exists to defeat. So `refute_first` is given equal billing with
+ * `least_inconsistent`: a matrix that only says which hypothesis is winning
+ * gets read as a scoreboard.
  *
- * So `refute_first` is given equal billing with `least_inconsistent`. An
- * ACH matrix that only tells you which hypothesis is winning has been read
- * as a scoreboard, which is the failure mode.
- *
- * Usability review, 2026-09-23 (ux11-ach): the pane now numbers each
- * hypothesis by the order it was written, never by rank, so "H2" means the
- * same theory before and after a save; each row says what its evidence
- * CLAIMS and how it is graded; each cell keeps its note; and a hypothesis
- * can be accepted, rejected, disputed, superseded or reworded, and a cell
- * cleared, from here rather than with curl.
+ * Each hypothesis is numbered by the order it was written, never by rank, so "H2" means the
+ * same theory before and after a save.
  */
 
 const STANCE_CLASS = {
@@ -27023,9 +24838,7 @@ const ACH_STANCES = [-2, -1, 0, 1, 2];
 /* The statuses the router's `set_status` accepts, with what each one
    does to the matrix and the report. REJECTED and SUPERSEDED leave the
    ranking; REJECTED stays in the report, SUPERSEDED does not (reports.py
-   prints every status but SUPERSEDED). The API existed and the console
-   never called it (ux11-ach:no-hypothesis-lifecycle-in-console,
-   2026-09-23). */
+   prints every status but SUPERSEDED). */
 const ACH_STATUS = [
   ['PROPOSED', 'Proposed', 'Put it back in play',
    'A live competitor with no verdict on it.'],
@@ -27055,7 +24868,7 @@ async function loadAch() {
   try {
     body = await api(cpath('/ach') + q);
   } catch (err) {
-    if (caseChanged(token)) return;          // ux17-failure, 2026-09-22
+    if (caseChanged(token)) return;
     if (err instanceof ApiError && err.status === 403) {
       clear($('ach-ranking'));
       listRefused('ach-empty', roleWords(
@@ -27076,8 +24889,7 @@ async function loadAch() {
   }
   if (caseChanged(token)) return;
   clearLoadFailure('ach-empty');
-  /* The line's own words, not the refusal an earlier read left in it
-     (ux17-failure:sticky-error-text-in-empty-slot, 2026-09-23). */
+  /* The line's own words, not the refusal an earlier read left in it. */
   showEmptyState('ach-empty', body.hypotheses.length === 0);
   state.ach = body;
   rememberAchEvidence(body);
@@ -27105,13 +24917,11 @@ function renderAchWarnings(body) {
 }
 
 /** What the matrix left out for this reader, in words, or '' when nothing
- *  was or the case says nothing about it (x-ach-withheld, 2026-09-24).
+ *  was or the case says nothing about it.
  *
- *  The server dropped every stance on material above the reader without a
- *  word, so a blank cell read the same as a withheld one, and a hypothesis
- *  could look least inconsistent because the evidence against it is above
- *  the reader. The server decides what may be said, as it does for the
- *  graph's INCOMPLETE chip: nothing (no key), that something was, or how
+ *  Without it a withheld cell reads as blank, and a hypothesis can look least inconsistent
+ *  because the evidence against it is above the reader. The server decides what may be said,
+ *  as it does for the graph's INCOMPLETE chip: nothing (no key), that something was, or how
  *  many items. Never which, never where. Pure. */
 function achWithheldText(w) {
   if (!w || !w.incomplete) return '';
@@ -27128,9 +24938,8 @@ function achWithheldText(w) {
 }
 
 /** A hypothesis's key: "H" and the number the router gives it from the
- *  order the case's hypotheses were written. Never the rank: a save that
- *  moved the order renumbered every column under the analyst scoring it
- *  (ux11-ach:h-numbers-unstable-and-unlabelled, 2026-09-23). */
+ *  order the case's hypotheses were written. Never the rank, which a save can reorder under
+ *  the analyst scoring it. */
 function achKey(h) {
   return 'H' + h.number;
 }
@@ -27142,10 +24951,9 @@ function achColumns(body) {
     .sort((a, b) => (a.number || 0) - (b.number || 0));
 }
 
-/** A weighted score as the ranking prints it. Two decimals, because one
- *  printed a C3 stance's 0.49 as "0.5" and an F6 one's 0.04 as "0.0", the
- *  same mark as a hypothesis with nothing against it
- *  (ux11-ach:grading-weight-unexplained, 2026-09-23). */
+/** A weighted score as the ranking prints it. Two decimals, because at one a C3 stance's 0.49
+ *  reads "0.5" and an F6 one's 0.04 reads "0.0", the same mark as a hypothesis with nothing
+ *  against it. */
 function achNum(x) {
   const n = Number(x) || 0;
   if (n > 0 && n < 0.005) return 'under 0.01';
@@ -27168,30 +24976,21 @@ function renderAchRanking(body) {
     box.appendChild(achCard(h, body));
   }
 
-  /* `refute_first` is an ASSERTION id (ach.py: "the most diagnostic item
-     that some live hypothesis has not yet been scored against"). This pane
-     compared it with each HYPOTHESIS id, so it never matched and the half of
-     the method the header comment gives equal billing never rendered
-     (README screenshot review, 2026-09-23). It is said here, under the
+  /* `refute_first` is an assertion id, not a hypothesis id (ach.py: "the most diagnostic item
+     that some live hypothesis has not yet been scored against"). It is said here, under the
      ranking it could change, and marked on its row in the matrix. */
   const next = achNextTest(body);
   if (next) {
     const line = el('p', 'help ach-next');
     line.appendChild(el('span', 'chip warn', 'next test'));
-    /* Read as English for both kinds of row (README screenshot set review,
-       2026-09-23): "against H2, H3" became "H2 and H3", "not a neutral"
-       lacked its noun, and an unfinished row's diagnosticity is unknown,
-       so calling it "the most diagnostic item" claimed what the matrix
-       beside it says nobody knows yet. */
+    /* An unfinished row's diagnosticity is unknown, so it is not called "the most diagnostic
+       item". */
     line.appendChild(document.createTextNode(' Score ' + next.label
       + ' against ' + achAnd(next.missing) + '. ' + (next.is_incomplete
         ? 'Its row is unfinished.'
         : 'It is the most diagnostic item with a blank cell.')));
-    /* One click to the first blank cell (ux11-ach:refute-first-never-
-       rendered, 2026-09-23): the line named the test and left the analyst
-       to find the cell. `case-write`: it opens the stance chooser for a
-       write a read-only case refuses, and stayed live beside cells that
-       were off (2026-09-24). The line itself stays: it is analysis. */
+    /* One click to the first blank cell. `case-write`: it opens the stance chooser for a write
+       a read-only case refuses. The line itself stays: it is analysis. */
     const go = el('button', 'btn small ach-next-go case-write', 'Score it now');
     go.type = 'button';
     go.addEventListener('click', () => openStanceChooser(
@@ -27215,24 +25014,18 @@ function achAnd(keys) {
 function achCard(h, body) {
   const card = el('div', 'card row-card' + (h.retired ? ' ach-retired' : ''));
   const head = el('div', 'row-head');
-  /* Inconsistency first and in the score slot, because that is what the
-     list is ordered by. Putting support there would be showing the
-     number the method deliberately does not rank on.
-     `against`, not the shared `hot`: `hot` is the accent, which drew the
-     losing hypotheses in the colour of the "least inconsistent" chip and
-     the "strongly consistent" cells. Evidence against is the matrix's
-     red (README screenshot review, 2026-09-23). And it says so in a word:
-     a bare "1.0" in red still read as a score to beat
-     (ux11-ach:inconsistency-score-coloured-as-good, 2026-09-23). */
+  /* Inconsistency first and in the score slot, because that is what the list is ordered by.
+     `against`, not the shared `hot`: `hot` is the accent of the "least inconsistent" chip and
+     the "strongly consistent" cells, while evidence against is the matrix's red. And it says
+     so in a word, since a bare number in red still reads as a score to beat. */
   const score = el('span', 'score ach-score'
     + (h.inconsistency > 0 ? ' against' : ''),
   'against ' + achNum(h.inconsistency));
   score.title = 'Inconsistency: the weighted evidence AGAINST this '
     + 'hypothesis. Lower survives. This is what the ranking uses.';
   head.appendChild(score);
-  /* The matrix heads its columns with the same key, and a column
-     header's statement was only in its tooltip, which a printed or
-     captured page never shows (README screenshot review, 2026-09-23). */
+  /* The matrix heads its columns with the same key, and a column header's statement is only
+     in its tooltip, which a printed or captured page never shows. */
   const key = el('span', 'ach-hkey', achKey(h));
   key.setAttribute('aria-label', 'Column ' + achKey(h) + ' in the matrix');
   head.appendChild(key);
@@ -27257,7 +25050,6 @@ function achCard(h, body) {
       + 'hypothesis. An unassessed cell is not a neutral one.';
     facts.appendChild(f);
   }
-  /* Sent with every new hypothesis and never shown until 2026-09-23. */
   if (h.confidence) facts.appendChild(fact('confidence', h.confidence));
   card.appendChild(facts);
   if (h.status_note) {
@@ -27268,8 +25060,8 @@ function achCard(h, body) {
   }
 
   const actions = el('div', 'row-actions');
-  /* `case-write`: both change the hypothesis, which a read-only case
-     refuses (gap-closed-case-writes), so applyCaseReadOnly turns them off. */
+  /* `case-write`: both change the hypothesis, which a read-only case refuses, so
+     applyCaseReadOnly turns them off. */
   const change = el('button', 'btn small case-write', 'Status…');
   change.type = 'button';
   change.setAttribute('aria-label', 'Change the status of ' + achKey(h));
@@ -27309,12 +25101,9 @@ function achNextTest(body) {
   });
 }
 
-/** What a row is ABOUT, as a reader would say it: the entity, or both ends
- *  of the tie and its type. The matrix named a tie by its type alone
- *  ("leads", one of six such ties on NIGHTJAR), so identical rows could
- *  not be told apart (ux11-ach:evidence-row-is-a-name-not-a-claim,
- *  2026-09-23). Every part is made visible, since a label is a handle an
- *  attacker chose. */
+/** What a row is about, as a reader would say it: the entity, or both ends of the tie and its
+ *  type, since a tie's type alone does not tell identical rows apart. Every part is made
+ *  visible, since a label is a handle an attacker chose. */
 function achSubject(e) {
   if (e.kind === 'edge' && (e.src_label || e.dst_label)) {
     return visibleText(e.src_label) + ' → '
@@ -27375,12 +25164,8 @@ function achCell(body, assertionId, hypothesisId) {
 
 /** The grid. Evidence down, hypotheses across.
  *
- *  Every evidence x hypothesis cell is a BUTTON that opens the stance
- *  chooser. Until 2026-09-09 each cell was a `<td>` with a tooltip: the
- *  router had accepted `PUT .../hypotheses/{hid}/stance` since Phase 6 and
- *  the console never called it, so a matrix could be read here and only
- *  ever written with curl -- a pane that looked finished and could not be
- *  driven, which is the shape of defect the Alpha 4 review kept finding.
+ *  Every evidence x hypothesis cell is a button that opens the stance chooser, which writes
+ *  through `PUT .../hypotheses/{hid}/stance`.
  */
 function renderAchMatrix(body) {
   const box = $('ach-matrix');
@@ -27432,11 +25217,9 @@ function renderAchMatrix(body) {
      picked for the row -- attacker-chosen in the IDENTITY case -- so it
      goes through the same boundary sanitiser as every other label. */
   for (const e of body.evidence.map(withSafeLabel)) {
-    /* Three states, not two. "Settles nothing" and "we have not finished
-       entering this row" both render 0.00 and mean opposite things: one is
-       a judgement about the evidence, the other is a gap in the matrix.
-       Showing them identically told an analyst their evidence was
-       worthless when it was merely half-entered (docs/17 F20). */
+    /* Three states, not two. "Settles nothing" and "we have not finished entering this row"
+       both compute 0.00 and mean opposite things: one is a judgement about the evidence, the
+       other is a gap in the matrix. */
     const tr = el('tr', e.is_incomplete ? 'row-incomplete'
       : (e.is_diagnostic ? '' : 'not-diagnostic'));
     tr.appendChild(achEvidenceCell(e));
@@ -27475,10 +25258,8 @@ function renderAchMatrix(body) {
       td.appendChild(btn);
       tr.appendChild(td);
     }
-    /* A word, not a dash: the warning above counts these rows as
-       "unfinished", and a lone glyph in a numeric column read as "no
-       value" rather than "not finished" (README screenshot review,
-       2026-09-23). */
+    /* A word, not a dash: the warning above counts these rows as "unfinished", and a lone
+       glyph in a numeric column reads as "no value" rather than "not finished". */
     const diag = el('td', 'ach-diag',
       e.is_incomplete ? 'unfinished' : achNum(e.diagnosticity));
     if (e.is_incomplete) {
@@ -27494,8 +25275,7 @@ function renderAchMatrix(body) {
     }
     if (isNext) {
       const chip = el('span', 'chip warn small', 'next test');
-      /* An unfinished row is not "the most diagnostic": its diagnosticity
-         is unknown (README screenshot set review, 2026-09-23). */
+      /* An unfinished row is not "the most diagnostic": its diagnosticity is unknown. */
       chip.title = (e.is_incomplete
         ? 'An unfinished evidence row with a blank cell: '
         : 'The most diagnostic evidence row with a blank cell: ')
@@ -27550,20 +25330,17 @@ function achEvidenceCell(e) {
   return td;
 }
 
-/** Why a row's diagnosticity reads "unfinished". Two cases since ach.py stopped
- *  treating two agreeing cells as a finished row (README screenshot review,
- *  2026-09-23): too few cells to compare, or agreement so far with a
- *  hypothesis still blank, which could be the one it separates. `blanks`
- *  names the blank columns, so the row says WHICH hypothesis is owed a
- *  score (ux11-ach:half-scored-row-called-undiagnostic, 2026-09-23). */
+/** Why a row's diagnosticity reads "unfinished": too few cells to compare, or agreement so
+ *  far with a hypothesis still blank, which could be the one it separates (ach.py does not
+ *  treat two agreeing cells as a finished row). `blanks` names the blank columns, so the row
+ *  says which hypothesis is owed a score. */
 function achUnknownWhy(e, live, blanks) {
   const n = e.assessed_against || 0;
   const owed = blanks && blanks.length
     ? ' Still to score: ' + achAnd(blanks) + '.' : '';
-  /* Every hypothesis ruled out: the rows are still sent, so the record of
-     what ruled each one out stays on the grid (release review c18,
-     2026-09-24), and "scored against no hypotheses" would deny the
-     stances in its own row. */
+  /* Every hypothesis ruled out: the rows are still sent, so the record of what ruled each one
+     out stays on the grid, and "scored against no hypotheses" would deny the stances in its
+     own row. */
   if (!live) {
     return 'UNKNOWN, not zero. No live hypothesis is left to score this item '
       + 'against: every one in the matrix has been ruled out, and its stances '
@@ -27591,13 +25368,11 @@ function stanceText(s, body) {
 
 /* --- what a cell rests on ----------------------------------------------
  *
- * routers/ach.py: "Evidence in an ACH matrix is an ASSERTION, not free
- * text" -- every cell inherits the Admiralty grading and the retraction
- * status of the claim behind it. The matrix response carries each row's
- * basis, grading and rationale since 2026-09-23 (`rememberAchEvidence`),
- * and the `/assertions` reads (inspector and scorer) add to the same
- * memory. Where it is still missing, the chooser SAYS so rather than
- * showing nothing: "grading unknown" and "ungraded" are different facts.
+ * Evidence in an ACH matrix is an assertion, not free text (routers/ach.py): every cell
+ * inherits the Admiralty grading and the retraction status of the claim behind it. The
+ * matrix response carries each row's basis, grading and rationale (`rememberAchEvidence`),
+ * and the `/assertions` reads (inspector and scorer) add to the same memory. Where it is
+ * still missing, the chooser says so: "grading unknown" and "ungraded" are different facts.
  */
 
 function rememberAssertion(a, ownerLabel) {
@@ -27654,13 +25429,10 @@ function renderStanceBasis(box, assertionId) {
  * it, and a client that refuses what the server accepts is inventing a
  * rule the audit trail cannot see.
  *
- * The note is SHOWN and KEPT (ux11-ach:stance-note-erased-on-rescore,
- * 2026-09-23). The box opened empty on every cell and Save sent that
- * emptiness, so re-saving a stance erased the reasoning behind it. It now
- * opens holding the cell's note with who wrote it and when, and a save
- * sends a note only when it was edited; the router keeps the old text in
- * the audit trail whenever one is replaced. "Clear" puts the cell back to
- * not assessed, which "neutral" never did.
+ * The box opens holding the cell's note with who wrote it and when, and a save sends a note
+ * only when it was edited, so re-saving a stance never erases its reasoning; the router keeps
+ * the old text in the audit trail whenever one is replaced. "Clear" puts the cell back to
+ * not assessed, which "neutral" does not.
  */
 
 let _stanceCtx = null;   // {assertionId, label, hypothesis, current, back, note}
@@ -27823,12 +25595,9 @@ async function clearStance() {
   }
 }
 
-/** A refused write, said where it was attempted and said once. A 403
- *  carries what it needs; a 400 or 409 is a RULE, and its own sentence says
- *  which. Appending "needs case.update" to a rule turned "a refuted
- *  assumption cannot be re-opened without a review note" into what read as
- *  a missing permission (ux11-ach:refuted-assumption-cannot-be-confirmed,
- *  2026-09-23). Anything else is a banner. */
+/** A refused write, said where it was attempted and said once. A 403 carries what it needs; a
+ *  400 or 409 is a rule, and its own sentence says which, with no permission appended to it.
+ *  Anything else is a banner. */
 function showAchRefusal(box, err, needs) {
   if (err instanceof ApiError && err.status === 403) {
     setMsg(box, refusalText(err, needs));
@@ -27844,10 +25613,7 @@ function showAchRefusal(box, err, needs) {
  *
  * One sheet for every judgement on this pane that deserves a sentence:
  * rejecting or reopening a hypothesis, rewording one, refuting, reopening
- * or withdrawing an assumption. They were a window.prompt, whose Cancel
- * still withdrew an assumption for good (ux11-ach:withdraw-cancel-still-
- * withdraws, 2026-09-23), or absent. Cancel, Escape and a click outside
- * close it and do nothing.
+ * or withdrawing an assumption. Cancel, Escape and a click outside close it and do nothing.
  *
  * spec: { title, subject, options?: [[value, label, help]], what(v),
  *         noteLabel(v), noteRequired(v), note?, go(v), danger(v),
@@ -27950,7 +25716,7 @@ function achDecisionKeys(e) {
 }
 
 /** Accept, reject, dispute, supersede, or back to proposed: the router's
- *  `set_status`, with the reason it now asks for. */
+ *  `set_status`, with the reason it asks for. */
 function openHypothesisStatus(h, back) {
   const was = h.status || 'PROPOSED';
   const status = (v) => ACH_STATUS.find((s) => s[0] === v) || [v, v, v, ''];
@@ -27960,11 +25726,8 @@ function openHypothesisStatus(h, back) {
     options: ACH_STATUS.filter((s) => s[0] !== was)
       .map((s) => [s[0], s[1], s[3]]),
     what: () => '',
-    /* Where the note goes, said as the server does it: the report prints
-       the reason recorded with each hypothesis's current status, and
-       leaves a SUPERSEDED one out altogether. The label promised the
-       report before the report printed it (verifier of ux11-ach:no-
-       hypothesis-lifecycle-in-console, 2026-09-23). */
+    /* Where the note goes, said as the server does it: the report prints the reason recorded
+       with each hypothesis's current status, and leaves a SUPERSEDED one out altogether. */
     noteLabel: (v) => {
       const kept = v === 'SUPERSEDED'
         ? 'kept in the record.' : 'kept with it and printed in the report.';
@@ -28059,9 +25822,8 @@ async function loadAchEvidenceOfSelection() {
     return;
   }
   const base = cpath((sel.kind === 'node' ? '/nodes/' : '/edges/') + sel.id);
-  /* One case's assertions, offered only in that case (release review u13,
-     2026-09-24): a reply landing after a switch filled the picker with the
-     case left behind. */
+  /* One case's assertions, offered only in that case: a reply landing after a switch would
+     fill the picker with the case left behind. */
   const token = caseToken();
   let list;
   try {
@@ -28117,14 +25879,9 @@ async function addHypothesis() {
 
 /** The scorer as the markup ships it: nothing loaded, nothing to score.
  *
- *  Release review u13 (2026-09-24). The case-switch reset emptied the
- *  matrix, the ranking and `state.achPick` and left these controls alone,
- *  so NIGHTJAR's "Direct observation · C3 · handle umbra_shrike posting in
- *  Bastion crew threads" stayed in the picker under WHEATEAR's header and
- *  its TLP chip, Score stayed enabled against WHEATEAR's H1, and the save
- *  was refused in words that suggested a retraction. The hypothesis picker
- *  goes too, since loadAch refills it only when the new case's matrix
- *  arrives, and a failed read would leave the old case's hypotheses. */
+ *  Run on a case switch, so one case's assertions never stay in the picker under the next
+ *  case's header. The hypothesis picker goes too, since loadAch refills it only when the new
+ *  case's matrix arrives, and a failed read would leave the old case's hypotheses. */
 function resetAchScorer() {
   const pick = $('ach-evidence-pick');
   opts(pick, [['', 'Load the selected element\'s assertions first']], '');
@@ -28146,47 +25903,41 @@ onCaseSwitch(() => {
   resetAchScorer();
 });
 
-/* --- PGP verification and co-participation (Phase 7) --------------------
+/* --- PGP verification and co-participation ------------------------------
  *
- * PGP is the one path in this phase that produces a CONFIRMATION rather
- * than a claim, so it is the one place where being wrong is worst —
- * docs/10 says a CONFIRMED binding may carry weight in automatic identity
- * resolution.
+ * PGP is the one path here that produces a confirmation rather than a claim, so it is where
+ * being wrong is worst: docs/10 says a CONFIRMED binding may carry weight in automatic
+ * identity resolution. The outcomes are three visually distinct classes, not pass/fail:
  *
- * The outcomes are therefore rendered as three visually distinct classes,
- * not as pass/fail:
- *
- *   VERIFIED             — cryptographic evidence of control
+ *   VERIFIED              cryptographic evidence of control
  *   BAD_SIGNATURE,
  *   KEY_MISMATCH,
- *   VALUE_NOT_IN_PAYLOAD — checked, and it did not hold
- *   NO_VERIFIER          — NOBODY CHECKED
+ *   VALUE_NOT_IN_PAYLOAD  checked, and it did not hold
+ *   NO_VERIFIER           nobody checked
  *
- * That last one is the reason this is not a boolean. "Nobody checked" and
- * "checked and failed" must never look the same, or an unchecked claim
- * reads as a checked-and-rejected one and an analyst discounts a real
- * lead — or, worse, treats an unavailable verifier as a refutation.
+ * "Nobody checked" and "checked and failed" must never look the same, or an unavailable
+ * verifier reads as a refutation and an analyst discounts a real lead.
  */
 
 const PGP_GOOD = 'VERIFIED';
 const PGP_UNCHECKED = new Set(['NO_VERIFIER', 'KEY_UNAVAILABLE', 'MALFORMED']);
-/* Outcomes shown amber rather than red (F10, 2026-09-24): a failure to
-   look, and UNATTRIBUTED, a good signature with a missing link (F10b). */
+/* Outcomes shown amber rather than red: a failure to look, and UNATTRIBUTED, a good signature
+   with a missing link. */
 const PGP_WARN = new Set(['NO_VERIFIER', 'KEY_UNAVAILABLE', 'MALFORMED',
                           'UNATTRIBUTED']);
-/* The browser refuses these before sending, in the server's own words
-   (F10a): the data cap is MAX_MESSAGE_BYTES, the signature cap
-   MAX_SIGNATURE_BYTES, and a key file is at most MAX_KEY_BYTES. */
+/* The browser refuses these before sending, in the server's own words: the data cap is
+   MAX_MESSAGE_BYTES, the signature cap MAX_SIGNATURE_BYTES, and a key file is at most
+   MAX_KEY_BYTES. */
 const PGP_DATA_MAX = 1000000;
 const PGP_SIG_MAX = 65536;
 const PGP_KEY_MAX = 1000000;
 /* What the Key select offers for a key pasted for one check only. */
 const PGP_PASTE = '';
 
-/** Bytes to base64: ONE binary string built in 0x8000-byte slices, then
- *  ONE btoa over the whole. A btoa per slice puts padding in the middle
+/** Bytes to base64: one binary string built in 0x8000-byte slices, then
+ *  one btoa over the whole. A btoa per slice puts padding in the middle
  *  of the stream whenever a slice is not a multiple of three bytes, which
- *  the server rightly refuses as not base64 (F10a). */
+ *  the server rightly refuses as not base64. */
 function bytesToBase64(buf) {
   const bytes = new Uint8Array(buf);
   let binary = '';
@@ -28222,7 +25973,7 @@ async function readPgpFile(input, limit, what) {
   return new Uint8Array(await file.arrayBuffer());
 }
 
-/* ── which claim a check confirms (F10) ─────────────────────────────── */
+/* ── which claim a check confirms ───────────────────────────────────── */
 
 /** Choose the claim a check will confirm, from the queue. The identifier
  *  field takes the binding's durable value and is read-only: the server
@@ -28452,7 +26203,7 @@ function pgpOutcome(body) {
   return card;
 }
 
-/* ── the recorded checks (F10b) ─────────────────────────────────────── */
+/* ── the recorded checks ────────────────────────────────────────────── */
 
 async function loadPgpLedger() {
   if (!state.caseId) return;
@@ -28496,7 +26247,7 @@ async function loadPgpLedger() {
   }
 }
 
-/* ── the case key registry (F10b) ───────────────────────────────────── */
+/* ── the case key registry ──────────────────────────────────────────── */
 
 function pgpKeySource() {
   if ($('comms-pgpkey-src-wkd').checked) return 'WKD';
@@ -28802,7 +26553,7 @@ async function importPgpKey(e) {
   }
 }
 
-/* ── Web Key Directory lookups (F10c) ──────────────────────────────── */
+/* ── Web Key Directory lookups ─────────────────────────────────────── */
 
 const WKD_STATE_WORDS = {
   REQUESTED: 'waiting for a second person',
@@ -28963,10 +26714,9 @@ async function approveKeyLookup(l, card) {
   }
 }
 
-/* Declining needs comms.key.lookup.approve, which 0090 marks step-up, so
- * a plain api() call answered a sign-in older than the window with a bare
- * "re-authentication required" and no identity prompt. It goes through
- * withStepUp like approving does (F10c, 2026-09-24). */
+/* Declining needs comms.key.lookup.approve, which migration 0090 marks step-up, so it goes
+ * through withStepUp like approving does: a plain api() call would meet a sign-in older than
+ * the window with a bare "re-authentication required" and no identity prompt. */
 async function declineKeyLookup(l, reason, card) {
   const token = caseToken();
   try {
@@ -28982,13 +26732,9 @@ async function declineKeyLookup(l, reason, card) {
   }
 }
 
-/* Every comms result on this pane was read from, or written into, ONE
- * case: the correlation says "binding(s) in this case", the contact block
- * and the PGP verdict were posted to it, and the co-participation network
- * is the case's own. case-switch-carries-previous-case-results
- * (2026-09-22) named the co-participation and PGP output; the rest share
- * the fault and go with them. The empties return to their markup wording
- * so a refusal read in the previous case does not stand in this one. */
+/* Every comms result on this pane was read from, or written into, one case, so all of them
+ * go on a switch. The empties return to their markup wording so a refusal read in the
+ * previous case does not stand in this one. */
 /* Id, markup wording, and whether it may show before the read: the
    unverified queue loads with the pane, so "Nothing awaiting
    verification." would be a claim made before asking; co-participation
@@ -28996,7 +26742,7 @@ async function declineKeyLookup(l, reason, card) {
 const COMMS_EMPTY_TEXT = [
   ['comms-unverified-empty', 'Nothing awaiting verification.', false],
   ['comms-copart-empty', 'No co-participation computed for this case.', true],
-  // The key registry, the lookups and the recorded checks (F10b, F10c).
+  // The key registry, the lookups and the recorded checks.
   ['comms-pgpkey-empty', 'No vendor keys in this case yet.', false],
   ['comms-pgpkey-lookups-empty', 'No key lookups in this case.', false],
   ['comms-pgp-ledger-empty', 'Recorded checks load when you ask for them.', true],
@@ -29006,7 +26752,6 @@ onCaseSwitch(() => {
   for (const id of ['comms-pgp-out', 'comms-correlate-out', 'comms-block-out',
                     'comms-unverified', 'comms-copart',
                     'comms-copart-coverage',
-                    // F10b and F10c lists
                     'comms-pgpkey-list', 'comms-pgpkey-lookups',
                     'comms-pgp-ledger']) {
     clear($(id));
@@ -29014,7 +26759,6 @@ onCaseSwitch(() => {
   setMsg($('comms-pgp-msg'), '');
   setMsg($('comms-block-msg'), '');
   setMsg($('comms-bind-msg'), '');
-  // F10b and F10c messages and notes
   setMsg($('comms-pgpkey-msg'), '');
   setMsg($('comms-pgpkey-wkd-msg'), '');
   setMsg($('comms-pgpkey-note'), '');
@@ -29027,16 +26771,13 @@ onCaseSwitch(() => {
     show($(id), before);
     clearLoadFailure(id);
   }
-  /* What was typed or pasted belongs to the case it was typed in. A
-     contact block pasted on NIGHTJAR and submitted after a switch would be
-     parsed into KESTREL, and its proposals raised there (verifier, fix
-     round of 2026-09-22). The platform pickers stay: they are a global
-     list, not case material. */
+  /* What was typed or pasted belongs to the case it was typed in: a contact block submitted
+     after a switch would be parsed into the other case and raise its proposals there. The
+     platform pickers stay: they are a global list, not case material. */
   for (const id of ['comms-observed', 'comms-codecl', 'comms-corr-observed',
                     'comms-block-source', 'comms-block-handle',
                     'comms-block-text', 'comms-pgp-message', 'comms-pgp-key',
                     'comms-pgp-fpr', 'comms-pgp-confirms',
-                    // F10a, F10b and F10c inputs
                     'comms-pgp-sig', 'comms-pgp-sig-file', 'comms-pgp-data',
                     'comms-pgp-data-file', 'comms-pgp-fpr-ref',
                     'comms-pgpkey-armor', 'comms-pgpkey-file',
@@ -29045,8 +26786,7 @@ onCaseSwitch(() => {
     $(id).value = '';
   }
   show($('comms-preview'), false);
-  // The claim a check was about to confirm, the forms' choices and the
-  // registry's selects (F10, F10a, F10b, F10c).
+  // The claim a check was about to confirm, the forms' choices and the registry's selects.
   clearPgpBinding();
   $('comms-pgp-kind-clear').checked = true;
   setPgpFormKind();
@@ -29082,14 +26822,12 @@ async function loadUnverified() {
       (c) => {
         const card = el('div', 'card row-card compact');
         const head = el('div', 'row-head');
-        /* The observed value is attacker text (F10, 2026-09-24): it was
-           drawn raw, and fell back to an id key the API never sends. */
+        /* The observed value is attacker text, so it goes through visibleText. */
         head.appendChild(el('span', 'row-title',
           visibleText(c.observed_value || c.durable_value || NO_VALUE)));
         head.appendChild(el('span', 'chip', c.platform_key || 'unknown'));
-        /* The split the endpoint exists for. Without it, "not confirmed"
-           and "not checked" look identical. It read a flag name the API
-           never sent, so every claim said "never checked" (F10). */
+        /* The split the endpoint exists for: without it, "not confirmed" and "not checked"
+           look identical. */
         head.appendChild(c.verification_attempted
           ? el('span', 'chip ' + (c.last_outcome === PGP_GOOD ? 'ok'
             : (PGP_WARN.has(c.last_outcome) ? 'warn' : 'bad')), c.last_outcome)
@@ -29121,8 +26859,8 @@ async function loadUnverified() {
         err, 'This needs comms.read on the case.'));
       return;
     }
-    /* Not "Nothing awaiting verification.": that is a finding about the
-       claims, and this read produced none (ux17-failure, 2026-09-22). */
+    /* Not "Nothing awaiting verification.": that is a statement about the claims, and this
+       read produced none. */
     renderList('comms-unverified', 'comms-unverified-empty', [], () => el('div'));
     $('comms-unverified-count').textContent = '';
     showLoadFailure('comms-unverified-empty', 'The unverified claims', err,
@@ -29131,17 +26869,12 @@ async function loadUnverified() {
   }
 }
 
-/* Co-participation coverage: what was left OUT of the network.
+/* Co-participation coverage: what was left out of the network.
  *
- * `coparticipation.py` states the rule this renders — "a cap that silently
- * drops data is worse than no cap, because the output looks complete" —
- * and then reports every exclusion so the analyst can tell a sparse network
- * from a filtered one. The browser dropped all of it: it read
- * `body.warnings`, a key the service has never emitted. So the one cap the
- * module refuses to apply silently was, on screen, silent.
- *
- * Rendered even when nothing was excluded. "Nothing was excluded" is a
- * finding about the network; a blank space is not.
+ * coparticipation.py reports every exclusion, because a cap that silently drops data makes
+ * the output look complete; this renders them so the analyst can tell a sparse network from
+ * a filtered one. Rendered even when nothing was excluded: "nothing was excluded" is a fact
+ * about the network, and a blank space is not.
  */
 function renderCoParticipationCoverage(body) {
   const host = $('comms-copart-coverage');
@@ -29159,11 +26892,9 @@ function renderCoParticipationCoverage(body) {
     cov.participants_excluded_incidental));
   facts.appendChild(fact('excluded: unresolved',
     cov.participants_excluded_unresolved));
-  /* Not-visible is a CLEARANCE fact, not a data-quality one: the network is
-     smaller because of who is asking. Kept distinct for that reason. Said
-     only as the case allows (2026-10-03): the number under COUNT, whether
-     under PRESENCE, and nothing at all under NONE, so the fact is drawn only
-     when the server sent something to draw. */
+  /* Not-visible is a clearance fact, not a data-quality one: the network is smaller because
+     of who is asking, so it is kept distinct. Said only as the case allows: the number under
+     COUNT, whether under PRESENCE, and nothing at all under NONE. */
   const hiddenWhy = cov.withheld;
   if (typeof cov.participants_excluded_not_visible === 'number') {
     facts.appendChild(fact('excluded: not visible to you',
@@ -29197,15 +26928,10 @@ async function loadCoParticipation() {
     const body = await api(cpath('/comms/co-participation'));
     if (caseChanged(token)) return;
     const ties = body.edges || [];
-    /* An edge carries vertex KEYS (`node:<uuid>` / `handle:<h>`), never a
-       label — so the map is not decoration. Without it this pane cannot
-       name anybody, which is how it came to render "undefined — undefined"
-       on every row while looking populated.
-
-       `visibleText` is mandatory and not defensive habit: a HANDLE vertex's
-       label is a string the subject chose on a forum. A right-to-left
-       override in it reorders the two names either side of the dash, so the
-       tie reads backwards while the DOM says otherwise. */
+    /* An edge carries vertex keys (`node:<uuid>` or `handle:<h>`), never a label, so this map
+       is how the pane names anybody. `visibleText` is mandatory: a HANDLE vertex's label is a
+       string the subject chose on a forum, and a right-to-left override in it would reorder
+       the two names either side of the dash, so the tie reads backwards. */
     const labels = new Map();
     for (const n of body.nodes || []) {
       labels.set(n.key, visibleText(n.label || n.key));
@@ -29252,8 +26978,7 @@ async function loadCoParticipation() {
         err, 'Co-participation needs comms.read on the case.'));
       return;
     }
-    /* Any other failure: the same reasoning as the refusal above, which
-       only ever cleared on 403 and 400 (ux17-failure, 2026-09-22). */
+    /* Any other failure is cleared and said too, for the same reason as the refusal above. */
     renderList('comms-copart', 'comms-copart-empty', [], () => el('div'));
     $('comms-copart-count').textContent = '';
     clear($('comms-copart-coverage'));
@@ -29263,7 +26988,7 @@ async function loadCoParticipation() {
   }
 }
 
-/* --- Report (Phase 6, docs/08) -----------------------------------------
+/* --- Report (docs/08) ---------------------------------------------------
  *
  * Build and release are two controls because they are two decisions, and
  * one control that did both would be a single click between a case file
@@ -29273,25 +26998,13 @@ async function loadCoParticipation() {
  * document. A report that quietly omitted eleven nodes and said so in a
  * footer is a report somebody quotes as complete.
  *
- * Three rules added by the review of 2026-09-22 (ux15-report and
- * ux02-cases), each of which the pane used to break:
- *
- *  - The preview IS the document. It printed every relationship as
- *    "undefined -> undefined" (it read field names the server has never
- *    sent) and left out the legal basis, the assumptions with their
- *    authors' names and the hypothesis statements, all of which were in
- *    the file. It now lists those, and shows the exact text beneath.
- *  - A file comes out of the egress decision and nothing else. "Download
- *    markdown" fetched its own build, with no step-up and no gate, so a
- *    RED document went to disk one click after Prepare; the check beside
- *    it judged a third build, with hypotheses on regardless. Now the only
- *    Save is the document the gate just cleared, offered only when its
- *    digest matches the preview's.
- *  - Nothing survives a change of case, or of the choices it was made
- *    with. A NIGHTJAR preview and a "May leave" line stood under a KESTREL
- *    header while Check egress acted on KESTREL. Any change to the target,
- *    hypotheses, destination, ceiling or note now withdraws what depended
- *    on it, as the target select alone used to.
+ *  - The preview is the document: it lists the relationships, the legal basis, the
+ *    assumptions with their authors' names and the hypothesis statements, and shows the
+ *    exact text beneath.
+ *  - A file comes out of the egress decision and nothing else: the only Save is the document
+ *    the gate just cleared, offered only when its digest matches the preview's.
+ *  - Nothing survives a change of case, or of the choices it was made with: any change to
+ *    the target, hypotheses, destination, ceiling or note withdraws what depended on it.
  */
 
 /** The /release answer the Save button would write, or null. Held apart
@@ -29299,15 +27012,10 @@ async function loadCoParticipation() {
  *  voids the verdict without voiding what was prepared. */
 let reportCleared = null;
 
-/* Generation counters for the two requests this pane makes. A reset
-   withdraws what is on screen, but a Prepare or Check egress still in
-   flight used to land afterwards and put back the very thing the reset
-   removed: an AMBER preview under a control that now said GREEN, or a
-   "May leave ... to smtp" verdict, with its Save, under a destination
-   that now said in_app (verifier, ux15-report fix round, 2026-09-22).
-   Every reset bumps its counter, and a reply whose counter has moved on
-   is dropped. The case token cannot do this job: the case did not
-   change, the choices did. */
+/* Generation counters for the two requests this pane makes. A reset withdraws what is on
+   screen, and a Prepare or Check egress still in flight must not put it back afterwards, so
+   every reset bumps its counter and a reply whose counter has moved on is dropped. The case
+   token cannot do this job: the case did not change, the choices did. */
 let reportGen = 0;
 let verdictGen = 0;
 /* Whether a Prepare or a Check egress is in flight, so the control that
@@ -29362,10 +27070,9 @@ function withdrawReportVerdict() {
   }
 }
 
-/* The preview, the verdict and the controls all belong to the case they
-   were set in. The controls go back to their markup defaults as well: a
-   target of GREEN chosen on NIGHTJAR stayed GREEN on KESTREL in the ux15
-   capture, which is a choice nobody made for KESTREL. */
+/* The preview, the verdict and the controls all belong to the case they were set in. The
+   controls go back to their markup defaults as well: a target chosen on one case is a choice
+   nobody made for the next. */
 onCaseSwitch(() => {
   resetReport();
   $('rep-tlp').value = 'AMBER';
@@ -29418,13 +27125,10 @@ async function buildReport() {
   }
 }
 
-/** Save the document the egress gate cleared: the same bytes, the name
- *  the server gave them (classification included, because a file saved
- *  out of a browser loses everything that was only on the page).
- *
- *  The anchor is appended before the click and the object URL revoked a
- *  moment later rather than at once: a detached anchor or a URL revoked
- *  in the same turn is a download that silently never starts in some
+/** Save the document the egress gate cleared: the same bytes, under the name the server gave
+ *  them (classification included, since a saved file loses everything that was only on the
+ *  page). The anchor is appended before the click and the object URL revoked a moment later:
+ *  a detached anchor, or a URL revoked in the same turn, silently never downloads in some
  *  browsers. */
 function saveClearedReport() {
   const cleared = reportCleared;
@@ -29459,16 +27163,13 @@ function renderRedaction(prepared) {
   const made = el('div', 'facts');
   made.appendChild(fact('case', prepared.caseCode));
   made.appendChild(fact('prepared', fmtTime(body.generated_at)));
-  /* What the builder reads: the case as it stands now (no as-of), its
-     asserted social ties only (preset 'all', include_inferred=False in
-     reports.py). "The whole case" was false beside a relationship count
-     smaller than the case's own: inferred ties and non-social types such
-     as CONTROLS and USED are in the case and never in a report (README
-     screenshot set review, 11-report). */
+  /* What the builder reads: the case as it stands now (no as-of), its asserted social ties
+     only (preset 'all', include_inferred=False in reports.py). Inferred ties and non-social
+     types such as CONTROLS and USED are in the case and never in a report. */
   made.appendChild(fact('built from',
     'the case as it stands now, asserted social ties only'));
-  /* Asked for is not the same as in the document: a case whose header is
-     above the target keeps its hypotheses with it (final review C2). */
+  /* Asked for is not the same as in the document: a case whose header is above the target
+     keeps its hypotheses with it. */
   made.appendChild(fact('hypotheses',
     !prepared.params.include_hypotheses ? 'left out'
       : (r.hypotheses_withheld ? 'withheld with the case header'
@@ -29485,11 +27186,10 @@ function renderRedaction(prepared) {
   const facts = el('div', 'facts');
   const withheld = (r.nodes_withheld || 0) + (r.edges_withheld || 0)
     + (r.evidence_withheld || 0);
-  /* The case's disclosure setting decides all three figures (decision 179,
-     and 2026-10-08 for the entities and relationships): the number under
-     COUNT, whether there are some under PRESENCE, and under NONE nothing,
-     because a "0" there would say what the case chose not to. An older
-     server sent no setting and always counted. */
+  /* The case's disclosure setting decides all three figures (docs/00 decision 179): the
+     number under COUNT, whether there are some under PRESENCE, and under NONE nothing,
+     because a "0" there would say what the case chose not to. A server that sends no setting
+     counts. */
   const mode = r.disclosure || 'COUNT';
   if (mode !== 'NONE') {
     for (const [label, count, some] of [
@@ -29502,7 +27202,7 @@ function renderRedaction(prepared) {
         count || some ? 'warn' : ''));
     }
   }
-  /* Only when there is some: the matrix's scores leave these out (C2). */
+  /* Only when there is some: the matrix's scores leave these out. */
   if (r.hypothesis_evidence_withheld || r.hypothesis_evidence_some_withheld) {
     facts.appendChild(fact('hypothesis evidence withheld',
       r.hypothesis_evidence_withheld || 'some', 'warn'));
@@ -29513,10 +27213,9 @@ function renderRedaction(prepared) {
     || r.nodes_some_withheld || r.edges_some_withheld || r.header_withheld
     || r.assumptions_withheld || r.hypotheses_withheld
     || r.hypothesis_evidence_withheld || r.hypothesis_evidence_some_withheld;
-  /* The statement is the document's own Markdown sentence, which bolds
-     "Every figure below is computed over the redacted graph" with `**`.
-     Printed through textContent, the card showed the asterisks the moment
-     anything was withheld (README screenshot review, 2026-09-23). */
+  /* The statement is the document's own Markdown sentence, which bolds "Every figure below is
+     computed over the redacted graph" with `**`, so it goes through withStrongRuns rather
+     than showing the asterisks. */
   card.appendChild(withStrongRuns(el('p', anything ? 'why prose' : 'help'),
     r.statement || (withheld
       ? withheld + ' element(s) were withheld from this document.'
@@ -29610,23 +27309,19 @@ function renderReportBody(body) {
   const auth = el('div', 'facts');
   auth.appendChild(fact('legal basis', c.legal_basis));
   auth.appendChild(fact('authority', c.authority_ref || 'not recorded'));
-  /* A withheld header sends its dates as null, and "not recorded" would
-     say the case has none. The markdown prints the withheld mark for them
-     (reports.WITHHELD_MARK), and so does this preview: the server already
-     put that mark in legal_basis, so the two cannot drift (README
-     screenshot review, 2026-09-23). */
+  /* A withheld header sends its dates as null, and "not recorded" would say the case has
+     none. The markdown prints the withheld mark for them (reports.WITHHELD_MARK), and so does
+     this preview: the server already put that mark in legal_basis, so the two cannot drift. */
   const headerOut = !!(body.redaction && body.redaction.header_withheld);
   const headerDate = (v) => (headerOut && !v ? c.legal_basis : fmtDate(v));
   auth.appendChild(fact('retention until', headerDate(c.retention_until)));
   auth.appendChild(fact('next review', headerDate(c.review_due)));
   box.appendChild(auth);
 
-  /* Named lists, so an analyst can see WHAT survived the redaction rather
-     than only how much was removed. `textContent` throughout: these are
-     labels that came from a forum. The server sends `type`, `src` and
-     `dst`; a relationship names its ends through the actor list, which
-     always holds both (the projection admits a tie only when both ends
-     are visible at this classification). */
+  /* Named lists, so an analyst can see what survived the redaction, not only how much was
+     removed; `textContent` throughout, since these labels came from a forum. A relationship
+     (`type`, `src`, `dst`) names its ends through the actor list, which always holds both:
+     the projection admits a tie only when both ends are visible at this classification. */
   const labelOf = new Map((body.actors || []).map((a) => [a.id, a.label]));
   const unevidenced = ['not evidenced', 'warn'];
 
@@ -29657,10 +27352,8 @@ function renderReportBody(body) {
   reportList(box, 'Exhibits', body.evidence || [], (e) => reportRow(
     (e.title || e.id) + (e.sha256 ? ' · sha256 ' + String(e.sha256).slice(0, 12) : '')));
   if (body.hypotheses && body.hypotheses.hypotheses) {
-    /* The statements, not a count: they often name suspects, and they
-       are in the file. With the status the document now prints, so a
-       ruled-out alternative reads as one (README screenshot review,
-       2026-09-23). */
+    /* The statements, not a count: they often name suspects, and they are in the file. With
+       the status the document prints, so a ruled-out alternative reads as one. */
     const statuses = body.hypotheses.statuses || {};
     reportList(box, 'Competing hypotheses', hyp, (h) => reportRow(
       h.statement + ' (' + (statuses[String(h.id)] || 'status not recorded')
@@ -29670,12 +27363,11 @@ function renderReportBody(body) {
       box.appendChild(el('p', 'help warn', w));
     }
   } else if ((body.redaction || {}).hypotheses_withheld) {
-    /* Said, as the document says it: a missing section reads as "no
-       alternatives were considered" (final review C2). */
+    /* Said, as the document says it: a missing section reads as "no alternatives were
+       considered". */
     box.appendChild(el('h2', 'h-sm', 'Competing hypotheses'));
-    /* Agreed as the document's own line agrees ("_1 competing hypothesis
-       withheld with the case header"), not a bracketed plural (README
-       screenshot set review, 2026-09-23). */
+    /* Agreed as the document's own line agrees ("_1 competing hypothesis withheld with the
+       case header"). */
     box.appendChild(el('p', 'help warn',
       countOf(body.redaction.hypotheses_withheld, 'competing hypothesis',
         'competing hypotheses') + ' withheld with the case header.'));
@@ -29683,10 +27375,9 @@ function renderReportBody(body) {
 
   if (typeof body.document === 'string') {
     const full = el('details', 'card rep-document');
-    /* Exact apart from one line, and it says which: a saved copy is built
-       again when it is cleared, so its "Generated" line carries that time.
-       The digest leaves the line out, which is how Save knows the rest is
-       unchanged (verifier, ux15 fix round, 2026-09-22). */
+    /* Exact apart from one line, and it says which: a saved copy is built again when it is
+       cleared, so its "Generated" line carries that time. The digest leaves the line out,
+       which is how Save knows the rest is unchanged. */
     full.appendChild(el('summary', null,
       'The full text as it would be saved (a saved copy\'s "Generated" line '
       + 'gives the time it was cleared)'));
@@ -29695,15 +27386,10 @@ function renderReportBody(body) {
   }
 }
 
-/* Check egress is the one path to a file, and `/report/release` is
-   step-up gated: it needs a sign-in from the last 15 minutes. Until final
-   review C15 (2026-09-23) nothing here knew that. Every check more than 15
-   minutes into a session came back "missing permission report.export",
-   shown as an egress refusal "audited as loudly as a permission", to a
-   Lead investigator who holds it, and the only way out was signing out
-   and preparing again. The sign-in is now asked for in place, first when
-   this tab knows the gate is shut and once more if the server says so,
-   and the three kinds of 403 are told apart. */
+/* Check egress is the one path to a file, and `/report/release` is step-up gated: it needs a
+   sign-in from the last 15 minutes. The sign-in is asked for in place, first when this tab
+   knows the gate is shut and once more if the server says so, and the three kinds of 403
+   (stale sign-in, missing role, egress refused) are told apart. */
 
 /** True when `err` is the server asking for a fresh sign-in rather than
  *  judging the document or the caller's role. The route says this only
@@ -29821,7 +27507,7 @@ async function releaseReport() {
        control is rather than as a banner, and the server's explanation
        is shown verbatim, because it names which rule stopped it. Only
        the gate's own verdict is an egress refusal: a stale sign-in or a
-       role without report.export never reached the document (C15). */
+       role without report.export never reached the document. */
     if (err instanceof ApiError && err.status === 403
         && err.title === 'Egress refused') {
       out.appendChild(el('p', 'form-error', err.detail || err.title));
@@ -29846,9 +27532,6 @@ async function releaseReport() {
  * SHOW WHAT THE ATTACKER CHOSE, MARKED AS SUCH, NEXT TO WHAT THE
  * INFRASTRUCTURE PROVED.
  *
- * Concretely, and each of these is a real failure mode rather than a
- * stylistic preference:
- *
  *  - Every URL is defanged and rendered as text, never as an anchor. A
  *    live href is one mis-click from fetching attacker infrastructure
  *    from this machine, which is a drive-by surface AND tells the actor
@@ -29860,15 +27543,12 @@ async function releaseReport() {
  *  - The Received chain is drawn recipient-first with the trust boundary
  *    marked, and every hop below it (further from the recipient) is
  *    greyed and labelled "claimed".
- *  - A screenshot's <img> src is built from an /api/v1/ path and never
- *    from a value in the response -- enforced by a test, because the UI
- *    invariant suite did not police `.src` until this pane needed one.
+ *  - A screenshot's <img> src is built from an /api/v1/ path and never from a value in the
+ *    response; a test enforces it.
  */
 
 function dcpUrl(value) {
-  /* No URL is said in words and offers nothing to copy. It was a dash
-     in the defanged style beside a copy button that copied the dash
-     (README screenshot review, 2026-09-23). */
+  /* No URL is said in words and offers nothing to copy. */
   if (!value) return el('span', 'muted', NO_VALUE);
   /* Defanged, monospaced, and deliberately NOT an anchor. */
   const shown = visibleText(value);
@@ -29883,19 +27563,10 @@ function dcpUrl(value) {
 
 /* The two detail cards, and which row each one is showing.
  *
- * ux14-deception:detail-cards-invisible (2026-09-22). Both cards sat at
- * opacity 0 from the day they shipped: app.css held `.detail-card`
- * invisible until an `is-in` class arrived, and only the Lab's openSample
- * ever added it. Open appeared to do nothing, while the invisible Close
- * and copy buttons still took keyboard focus and a screen reader still
- * read the redirect chain and the Received chain aloud. The resting state
- * is visible in app.css now, and this is the one way either card opens, so
- * a third open path cannot forget to scroll it into view or to move focus
- * to its heading.
- *
- * `seq` is per open, so a slow reply for the capture opened first cannot
- * land on top of the one opened second; `token` is the case-switch token,
- * so it cannot land under another case's header either. */
+ * This is the one way either card opens, so no open path can forget to scroll it into view
+ * or to move focus to its heading. `seq` is per open, so a slow reply for the capture opened
+ * first cannot land on top of the one opened second; `token` is the case-switch token, so it
+ * cannot land under another case's header either. */
 const DCP_DETAIL = {
   cap: { box: 'dcp-cap-detail', body: 'dcp-cap-body',
     title: 'dcp-cap-title', blank: 'Capture' },
@@ -29916,11 +27587,10 @@ function dcpDetailOpen(kind, id, opener) {
   heading.textContent = d.blank;
   show(box, true);
   body.appendChild(el('p', 'muted', 'Loading…'));
-  /* Focus without letting it scroll, then scroll on purpose. The card
-     opens BELOW the list, usually under the fold, and a focus-driven
-     scroll puts the heading wherever the browser likes. `nearest` now,
-     because a card holding only "Loading" is too short to bring to the
-     top; dcpDetailSettle brings it up once its content has arrived. */
+  /* Focus without letting it scroll, then scroll on purpose: the card opens below the list,
+     usually under the fold, and a focus-driven scroll puts the heading wherever the browser
+     likes. `nearest`, because a card holding only "Loading" is too short to bring to the top;
+     dcpDetailSettle brings it up once its content has arrived. */
   heading.focus({ preventScroll: true });
   box.scrollIntoView({ block: 'nearest', behavior: reduceMotion ? 'auto' : 'smooth' });
   return { token: caseToken(), seq: dcpOpenSeq };
@@ -29963,9 +27633,8 @@ function dcpDetailKeepIfListed(kind, rows) {
    index.html's own text (a test holds the two equal): a refusal writes
    over that line, and the next case's successful load has to put it back
    or a case with no captures would go on saying "needs evidence.read". */
-/* Each empty state says how records arrive (ux14-deception:no-deception-
-   ingest-ui, 2026-09-23): "No captures recorded." with no next step made
-   a new case's pane look broken rather than empty. */
+/* Each empty state says how records arrive, so a new case's pane looks empty rather than
+   broken. */
 const DCP_LISTS = {
   cap: { list: 'dcp-cap-list', empty: 'dcp-cap-empty',
     counts: 'dcp-cap-counts', blank: 'No captures recorded. Record one above, or send one to the ingest API.',
@@ -29999,14 +27668,9 @@ function dcpListRender(kind, rows, build) {
   renderList(d.list, d.empty, rows, build);
 }
 
-/* ux14-deception:stale-detail-on-case-switch (2026-09-22). openCase reset
-   the graph and nothing here, so an open capture or message from case A
-   sat under case B's header and TLP chip: NIGHTJAR's AMBER redirect chain
-   presented as KESTREL's evidence. Cleared on every switch, both ways.
-   The LISTS too: selecting Deception on case B reloads only the subtab on
-   screen, so until B's read returned (and on the other two subtabs until
-   they were opened) A's rows, notes included, sat under B's header. The
-   fix's verifier caught that one. */
+/* An open capture or message, and all three lists, are cleared on every switch: selecting
+   Deception on a case reloads only the subtab on screen, and one case's records must never
+   sit under another's header and TLP chip. */
 onCaseSwitch(() => {
   dcpDetailClose('cap');
   dcpDetailClose('eml');
@@ -30014,7 +27678,7 @@ onCaseSwitch(() => {
   dcpListReset('eml');
   dcpListReset('call');
   /* The three record forms too: a URL, a file or a caller's number typed
-     on one case must not be recorded on the next (2026-09-23). */
+     on one case must not be recorded on the next. */
   dcpResetForm('dcp-cap-new');
   dcpResetForm('dcp-eml-new');
   dcpResetForm('dcp-call-new');
@@ -30047,20 +27711,11 @@ function dcpRuns(parent, runs, room) {
   return cut;
 }
 
-/* An analyst's note on a capture or a call.
+/* An analyst's note on a capture or a call, labelled and attributed: a note is a person's
+ * statement, not the system's, so it is drawn apart from the `.why` lines.
  *
- * ux14-deception:notes-never-rendered (2026-09-22). The API returned
- * `note` on both and nothing read it, so the only record that the victim
- * had already entered credentials was invisible, and a capture row with
- * no input chip read as if nobody had typed anything into the kit.
- * Labelled and attributed, because a note is a person's statement and
- * not the system's finding, and drawn apart from the `.why` lines, which
- * are the system talking.
- *
- * Drawn from `note_segments` and never from `note`. The fix's verifier
- * showed a note reading "Victim clicked https://..." put that link on
- * screen live, under the capture pane's promise that every URL in it is
- * defanged: an analyst recording what the victim clicked pastes the link. */
+ * Drawn from `note_segments` and never from `note`: an analyst recording what the victim
+ * clicked pastes the link, and every URL in this pane is defanged. */
 function dcpNote(runs, author, when) {
   if (!runs || !runs.length) return null;
   const box = el('div', 'analyst-note');
@@ -30078,15 +27733,11 @@ function dcpNote(runs, author, when) {
 
 /* ── across the three channels ────────────────────────────────────────────
  *
- * ux14-deception:ecrime-no-cross-channel-pivot (2026-09-23). The case this
- * pane was built for is one actor running a phishing kit, a BEC mail and a
- * spoofed call from one VPS within an hour, and the three sub-tabs were
- * silos: 203.0.113.44 was the capture's last hop, the message's trusted
- * sending address and the call's source, and nothing said so. Each record
- * now carries `also_seen` from the server (computed over what this reader
- * may see), drawn as "also seen in" lines whose buttons open the other
- * record, and `proposable`, the INFRA and LURE entities its durable fields
- * can propose into Triage. A value the sender typed is marked as such. */
+ * One actor can run a phishing kit, a BEC mail and a spoofed call from one VPS. Each record
+ * carries `also_seen` from the server (computed over what this reader may see), drawn as
+ * "also seen in" lines whose buttons open the other record, and `proposable`, the INFRA and
+ * LURE entities its durable fields can propose into Triage. A value the sender typed is
+ * marked as such. */
 const DCP_SUBTAB = { capture: 'captures', email: 'emails', call: 'calls' };
 let dcpPendingCall = null;
 
@@ -30105,14 +27756,10 @@ function dcpJump(channel, id) {
 
 /* ── deception records in case search ────────────────────────────────────
  *
- * The finding's last part (ux14-deception:ecrime-no-cross-channel-pivot,
- * 2026-09-23): "index deception hosts, IPs and URLs in case search". An
- * address pasted into Search found the entity and the exhibit that named
- * it and never the phishing page, the message or the call it sat on. The
- * Search pane now asks `/deception/search` beside its own columns and
- * lists those records under them; a click opens the record here. It keeps
- * its own sequence number and case token, so a reply for a search the
- * analyst replaced, or a case they left, is dropped as the columns' are. */
+ * The Search pane asks `/deception/search` beside its own columns, so an address finds the
+ * phishing page, the message or the call it sat on, and lists those records under them; a
+ * click opens the record here. It keeps its own sequence number and case token, so a reply
+ * for a search the analyst replaced, or a case they left, is dropped as the columns' are. */
 let dcpSearchSeq = 0;
 
 const DCP_SEARCH_TITLE = { capture: 'Web capture', email: 'Email', call: 'Call' };
@@ -30231,8 +27878,7 @@ function dcpProposeBar(kind, row) {
     line.appendChild(el('span', 'mono', visibleText(c.label_defanged || c.label)));
     line.appendChild(el('span', 'muted small', c.why));
     const out = el('span', 'muted small');
-    /* `case-write`: a proposal is case content, refused on a read-only
-       case (gap-closed-case-writes). */
+    /* `case-write`: a proposal is case content, refused on a read-only case. */
     const go = el('button', 'btn small case-write', 'Propose');
     go.type = 'button';
     go.addEventListener('click', async () => {
@@ -30262,19 +27908,10 @@ function dcpProposeBar(kind, row) {
   return box;
 }
 
-/* A failed deception load must not leave the previous case's rows on
- * screen.
- *
- * All three of these panes reported the error into the COUNTS span and
- * returned before the render, so the list kept whatever it last held. Open
- * Deception on case A, switch to case B, get a 403 — and case A's defanged
- * attacker URLs, BEC subject lines and spoofed caller IDs sit under case
- * B's header and its TLP chip. The 403 is the likely path, not the rare
- * one: all three endpoints gate on `evidence.read`.
- *
- * There is no third state to invent here, unlike the graph's UNKNOWN: an
- * empty list plus a named refusal already says "not known", whereas the
- * previous case's rows say "these are case B's captures".
+/* A failed deception load must not leave the previous case's rows on screen, under the new
+ * case's header and TLP chip. A 403 is the likely path, not the rare one: all three
+ * endpoints gate on `evidence.read`. No third state is needed, unlike the graph's UNKNOWN: an
+ * empty list plus a named refusal already says "not known".
  */
 function deceptionLoadFailed(err, kind, rowFn, need, retry) {
   const d = DCP_LISTS[kind];
@@ -30286,10 +27923,7 @@ function deceptionLoadFailed(err, kind, rowFn, need, retry) {
   /* The open detail card belongs to a row that is no longer on screen.
      Calls have no detail card. */
   if (DCP_DETAIL[kind]) dcpDetailClose(kind);
-  /* "needs evidence.read" only for a refusal. Every failure used to get
-     it, so a 503 read as a permission the analyst did not hold, and the
-     sentence stayed under the next case's "0 captures" (ux17-failure:
-     sticky-error-text-in-empty-slot, 2026-09-23). */
+  /* "needs evidence.read" only for a refusal: a 503 is not a permission the analyst lacks. */
   if (err instanceof ApiError && err.status === 403) {
     listRefused(d.empty, refusalText(err, need));
     return;
@@ -30297,12 +27931,9 @@ function deceptionLoadFailed(err, kind, rowFn, need, retry) {
   showLoadFailure(d.empty, 'The ' + d.noun[1] + ' list', err, retry);
 }
 
-/* Each loader drops a reply that a case switch overtook: A's rows landing
-   after the switch to B would be the stale-detail defect again, one level
-   up (ux14-deception:stale-detail-on-case-switch). "Loading" goes in the
-   count first, because after a switch the list is empty on purpose
-   (dcpListReset) and an empty list with no word beside it reads as a case
-   with nothing in it. */
+/* Each loader drops a reply that a case switch overtook. "Loading" goes in the count first,
+   because after a switch the list is empty on purpose (dcpListReset) and an empty list with
+   no word beside it reads as a case with nothing in it. */
 async function loadCaptures() {
   if (!state.caseId) return;
   const token = caseToken();
@@ -30337,10 +27968,8 @@ function captureRow(c) {
   if (c.is_live === false) head.appendChild(el('span', 'chip', 'dead'));
   if (c.is_live === true) head.appendChild(el('span', 'chip bad', 'live'));
   if (c.submitted_input) {
-    /* Named for WHO submitted. "input submitted" alone read as a statement
-       about the victim, so its absence read as "the victim typed nothing",
-       and the demo's note says the opposite (ux14-deception:
-       notes-never-rendered). */
+    /* Named for who submitted: "input submitted" alone reads as a statement about the victim,
+       and its absence as "the victim typed nothing". */
     const chip = el('span', 'chip bad', 'analyst submitted input');
     chip.title = 'An analyst entered credentials or other input into this '
       + 'page under a recorded authority (legal item L5). It says nothing '
@@ -30362,10 +27991,8 @@ function captureRow(c) {
       + 'domain and is the durable identifier for pivoting.';
     facts.appendChild(f);
   }
-  /* Where the page was served from, and in which network: the address the
-     three channels share in the demo, and the hosting ASN docs/19 names as
-     a durable web identifier (ux14-deception:web-durable-ids-missing,
-     2026-09-23). */
+  /* Where the page was served from, and in which network: the hosting ASN is a durable web
+     identifier (docs/19). */
   const end = lastHop(c);
   if (end && end.resolved_ip) {
     facts.appendChild(fact('served from', end.resolved_ip
@@ -30456,13 +28083,10 @@ async function openCapture(id, opener) {
     visibleText(c.page_title_defanged || 'not recorded')));
   body.appendChild(facts);
 
-  /* The certificate and the other identifiers that outlive the domain
-     (ux14-deception:web-durable-ids-missing, 2026-09-23). The issue date
-     was never shown, and read against the case's first lure it is one of
-     the two strongest phishing signals docs/19 names: a certificate issued
-     days before the first message is infrastructure built for the job.
-     The favicon hash is the standard clustering pivot for phishing kits
-     and sat in the record unseen. */
+  /* The certificate and the other identifiers that outlive the domain. The issue date, read
+     against the case's first lure, is one of the two strongest phishing signals docs/19
+     names: a certificate issued days before the first message is infrastructure built for
+     the job. The favicon hash is the standard clustering pivot for phishing kits. */
   if (c.tls_subject || c.tls_spki_sha256 || c.tls_not_before || c.favicon_hash) {
     const tls = el('div', 'card sub-card');
     tls.appendChild(el('h3', 'h-xs', 'TLS certificate and page identifiers'));
@@ -30567,8 +28191,8 @@ function certificateAge(c) {
   const lure = c.first_lure;
   if (lure) {
     const d = daysBetween(c.tls_not_before, lure.at);
-    /* Dated by what infrastructure recorded, never by the sender's Date
-       header (2026-09-23), and the words say which time it was. */
+    /* Dated by what infrastructure recorded, never by the sender's Date header, and the words
+       say which time it was. */
     const how = LURE_BASIS_WORDS[lure.basis] || 'of';
     const when = 'the first lure in this case (the ' + lure.channel_words
       + ' ' + how + ' ' + fmtDate(lure.at) + ')';
@@ -30605,17 +28229,10 @@ async function loadDeceptionEmails() {
   dcpDetailKeepIfListed('eml', rows);
 }
 
-/* A message, split the way a call is split.
- *
- * ux14-deception:email-durable-origin-missing (2026-09-22). The row showed
- * the display name, From and Reply-To in the same neutral style, every one
- * of them typed by the sender, while the pane's rule is to show what the
- * attacker chose MARKED AS SUCH next to what the infrastructure proved.
- * The call row did that and the email row did not, so the spoofed CFO
- * address sat unmarked and the host the recipient's own relay saw connect
- * (docs/19's "first trusted Received hop") lived only in the detail card.
- * The same three builders draw the row and the top of the detail card, so
- * the two cannot drift apart. */
+/* A message, split the way a call is split: what the sender typed (display name, From,
+ * Reply-To) marked as such, next to what the infrastructure proved, such as the host the
+ * recipient's own relay saw connect (docs/19's "first trusted Received hop"). The same three
+ * builders draw the row and the top of the detail card, so the two cannot drift apart. */
 function emailSignalChips(m) {
   const chips = [];
   if (m.from_replyto_divergent) {
@@ -30677,7 +28294,7 @@ function emailSaw(m) {
   }
   /* The defanged form only. The kit writes the Message-ID, and
      `<a@pay.evil.example/verify>` gives a "host" with a path, which every
-     chat client links (2026-09-23). */
+     chat client links. */
   if (m.message_id_domain_defanged) {
     const k = fact('message-id host', visibleText(m.message_id_domain_defanged));
     k.title = 'The domain in the Message-ID. Generated by the sending kit, '
@@ -30698,15 +28315,13 @@ function emailProved(m) {
   const f = el('div', 'facts');
   const origin = m.sending_host;
   if (origin) {
-    /* The HELO name is the sender's choice, recorded as given, so it is
-       read in its defanged form like every other string the sender wrote:
-       EHLO `pay.evil.example/verify` was drawn live here (2026-09-23). */
+    /* The HELO name is the sender's choice, recorded as given, so it is read in its defanged
+       form like every other string the sender wrote: an EHLO name can carry a path. */
     const where = [origin.host_defanged ? visibleText(origin.host_defanged)
       : null, origin.ip].filter(Boolean).join(' ');
     const host = fact('sending host', where || 'not recorded');
-    /* "Below it, further from the recipient": the chain is drawn hop 0
-       first, and "above" pointed at the organisation's own hops (README
-       screenshot review, 2026-09-23). */
+    /* "Below it, further from the recipient": the chain is drawn hop 0 first, so "above"
+       would point at the organisation's own hops. */
     host.title = 'Received hop ' + origin.seq + ': the host that connected to '
       + visibleText(origin.observed_by_defanged || 'the recipient’s relay')
       + ', written by that relay. Every hop below it in the chain, further '
@@ -30740,12 +28355,9 @@ function emailProved(m) {
     f.appendChild(rp);
   }
   if ((m.envelope_from || m.header_return_path) && m.spf_result !== 'PASS') {
-    /* The relay recorded the envelope sender faithfully, but the sender
-       chose it, and only a passing SPF check ties it to its domain. Said
-       on the face of the block, because in a block headed "proved" a
-       bounce domain that failed SPF read as proven, with the one sentence
-       saying otherwise hidden in a tooltip (the verifier of the 2026-09-22
-       email-durable-origin-missing fix). */
+    /* The relay recorded the envelope sender faithfully, but the sender chose it, and only a
+       passing SPF check ties it to its domain. Said on the face of the block, because in a
+       block headed "proved" a bounce domain that failed SPF would read as proven. */
     const spf = m.spf_result || 'not checked';
     const chip = el('span', 'chip warn', 'envelope unauthenticated: SPF '
       + spf);
@@ -30812,23 +28424,18 @@ function authChip(name, result) {
     /* Invariant 12 on screen: "nobody checked" and "it failed" must not
        look the same. */
     const chip = el('span', 'chip subtle', 'not checked');
-    /* http_ui-007 (2026-10-03): a header the sender may have written is
-       not a verdict, so it is kept and not read; the parse gaps say so. */
+    /* A header the sender may have written is not a verdict, so it is kept and not read; the
+       parse gaps say so. */
     chip.title = 'No Authentication-Results header from one of this '
       + 'deployment\'s own mail servers said anything about '
       + name + '. That is an absence, not a failure.';
     wrap.appendChild(chip);
     return wrap;
   }
-  /* "Not PASS" is three different facts and this painted all of them red.
-     TEMPERROR means the receiving MTA could not COMPLETE the check — a DNS
-     timeout at delivery time. PERMERROR means the published record is
-     malformed. NONE means the domain publishes no policy at all. None of
-     those is the mail failing authentication, and showing them as FAIL is
-     the same error the gaps mechanism exists to prevent, made on screen:
-     an inconclusive check reported as an adverse finding. An analyst who
-     believes DKIM failed has an attribution; the truth is that nobody
-     knows. Only FAIL and SOFTFAIL are adverse. */
+  /* Only FAIL and SOFTFAIL are adverse. TEMPERROR means the receiving MTA could not complete
+     the check (a DNS timeout at delivery), PERMERROR that the published record is malformed,
+     NONE that the domain publishes no policy: none is the mail failing authentication, and
+     painting them red would report an inconclusive check as an adverse result. */
   const adverse = result === 'FAIL' || result === 'SOFTFAIL';
   const inconclusive = result === 'TEMPERROR' || result === 'PERMERROR';
   const chip = el('span',
@@ -30881,19 +28488,15 @@ async function openDeceptionEmail(id, opener) {
     const chain = el('div', 'card sub-card');
     chain.appendChild(el('h3', 'h-xs', 'Received chain'));
     const note = el('p', 'help');
-    /* The chain is drawn recipient-first, hop 0 at the top, so the hops
-       written outside the organisation are drawn BELOW the boundary row.
-       This note and the chip's title said "above", which is docs/19's word
-       for a higher `seq` and pointed the wrong way on screen (README
-       screenshot review, 2026-09-23). "Further from the recipient" reads
-       the same in any orientation, so it is said as well. */
+    /* The chain is drawn recipient-first, hop 0 at the top, so the hops written outside the
+       organisation are drawn below the boundary row, although docs/19 calls a higher `seq`
+       "above". "Further from the recipient" reads the same in any orientation, so it is said
+       as well. */
     const confirmed = !!(m.sending_host && m.sending_host.boundary_confirmed);
     const anyClaimed = hops.some((x) => x.is_attacker_writable);
-    /* The note points at the line only when the line is drawn, and says
-       "assumed" when the boundary is (the verifier, 2026-09-23): it named
-       a "trust ends here" line on a chain with no hop below the boundary,
-       where none is drawn, and on an assumed boundary, where it reads
-       "Trust is assumed to end here". */
+    /* The note points at the line only when the line is drawn (a chain with a hop below the
+       boundary), and says "assumed" when the boundary is, where the line reads "Trust is
+       assumed to end here". */
     note.textContent = 'Read from the top: hop 0 is the receiving organisation’s own server. '
       + (!anyClaimed
         ? 'No hop here sits below the trust boundary.'
@@ -30902,18 +28505,13 @@ async function openDeceptionEmail(id, opener) {
           : 'Nobody named this organisation’s mail servers, so the trust '
             + 'boundary is assumed to be hop 0.'));
     chain.appendChild(note);
-    /* ux14-deception:received-chain-above-below (2026-09-23). The boundary
-       hop carried a green "trust boundary" chip, which on the attacker's
-       own VPS read as "trusted host", and what it meant was only in a
-       hover title. It now states the finding in a neutral chip (this is
-       the true sending host, as the recipient's relay observed it), and a
-       labelled rule under it says where trust ends. With the boundary only
-       assumed at hop 0 (nobody named the recipient's mail servers) the
-       chip and the rule say "assumed", because that host can be the
-       recipient's own relay. */
+    /* The boundary hop's chip is neutral, not green, since on the attacker's own VPS green
+       would read as "trusted host": it says this is the true sending host, as the recipient's
+       relay observed it, and a labelled rule under it says where trust ends. With the
+       boundary only assumed at hop 0 (nobody named the recipient's mail servers) the chip and
+       the rule say "assumed", because that host can be the recipient's own relay. */
     /* Hosts in their defanged forms: below the boundary every word of a
-       line is the sender's, and a `from` or `by` with a path is a URL
-       (2026-09-23). */
+       line is the sender's, and a `from` or `by` with a path is a URL. */
     for (const h of hops) {
       const row = el('p',
         'hop-row' + (h.is_attacker_writable ? ' claimed' : ''));
@@ -30960,13 +28558,10 @@ async function openDeceptionEmail(id, opener) {
       + 'remote images and fire their tracking pixel from this network.';
     body.appendChild(warn);
   }
-  /* The body, from the server's defanged runs and never from `body_text`.
-     ux14-deception:body-url-not-defanged (2026-09-22): the <pre> held the
-     sender's working URL directly above a list showing it defanged, in
-     the one block an analyst selects and pastes into a ticket, where it
-     is auto-linked one click from attacker infrastructure. Each URL run
-     carries the same `.defanged` mark as the list. A payload without runs
-     shows no body at all rather than falling back to the live text. */
+  /* The body, from the server's defanged runs and never from `body_text`: this is the block
+     an analyst selects and pastes into a ticket, where a live URL is auto-linked one click
+     from attacker infrastructure. Each URL run carries the same `.defanged` mark as the list.
+     A payload without runs shows no body at all rather than falling back to the live text. */
   const runs = m.body_segments || [];
   if (runs.length) {
     const pre = el('pre', 'body-text mono');
@@ -31062,12 +28657,8 @@ async function loadDeceptionCalls() {
   }
 }
 
-/* What each STIR/SHAKEN level lets a reader conclude, in plain words
-   (ux14-deception:calls-vouched-and-tooltip-only, 2026-09-23). "C
-   unverified" was explained nowhere, next to a green block headed "what
-   the network vouched for": with attestation C the originating carrier
-   vouches for nothing about the caller, which is the opposite of what a
-   skimming analyst took from it. */
+/* What each STIR/SHAKEN level lets a reader conclude, in plain words: with attestation C the
+   originating carrier vouches for nothing about the caller. */
 const ATTESTATION_WORDS = {
   A: 'Attestation A: the originating carrier knows the caller and vouches '
     + 'that they may use this number.',
@@ -31144,12 +28735,9 @@ function callRow(c) {
   shown.appendChild(sf);
   card.appendChild(shown);
 
-  /* "What the network recorded", neutral: the carrier's words are
-     observations of what it did, and how far it vouches for the caller
-     is the attestation, said in words beneath (ux14-deception:
-     calls-vouched-and-tooltip-only). The call's source address, called
-     number, length and outcome were returned and never drawn, and the
-     source address is the one the three channels share. */
+  /* "What the network recorded", neutral: the carrier's words are observations of what it
+     did, and how far it vouches for the caller is the attestation, said in words beneath.
+     The call's source address is the one a case's three channels can share. */
   const d = c.durable || {};
   const real = el('div', 'card sub-card recorded-block');
   real.appendChild(el('h3', 'h-xs', 'What the network recorded'));
@@ -31209,14 +28797,10 @@ function callRow(c) {
 
 /* ── recording deception evidence from the console ───────────────────────
  *
- * ux14-deception:no-deception-ingest-ui (2026-09-23). The pane listed
- * captures, messages and calls and could record none of them: the usual
- * intake (a staff member forwards the phishing mail, a victim reports the
- * spoofed call) needed API tooling or somebody who had it. Three forms
- * now post to the routes that already existed. The legal fields are
- * enforced here as the table's CHECKs enforce them: input entered into a
- * phishing page needs its written authority (L5), and a call recording
- * needs its lawful basis (L4), so neither is sent without the other. */
+ * Three forms post captures, messages and calls, for the usual intake (a forwarded phishing
+ * mail, a reported spoofed call). The legal fields are enforced here as the table's CHECKs
+ * enforce them: input entered into a phishing page needs its written authority (L5), and a
+ * call recording needs its lawful basis (L4), so neither is sent without the other. */
 
 /** A new record's classification: from the case's floor up. The server
  *  refuses one above the analyst's clearance, with a sentence. */
@@ -31234,8 +28818,7 @@ async function dcpExhibitOptions(selectId, prefix, noneWords) {
   opts(select, [['', 'Loading the exhibits…']], '');
   let list;
   try {
-    /* The attach pickers' own index (ux07-evidence:evidence-list-
-       silently-capped): the capped list stopped at 200 exhibits. */
+    /* The attach pickers' own index, not the capped list, which stops at 200 exhibits. */
     const index = await api(cpath('/evidence/index'));
     list = (index && index.items) || [];
   } catch (_e) {
@@ -31495,27 +29078,18 @@ function wireDeceptionForms() {
 
 /* --- wiring ------------------------------------------------------------ */
 
-/* --- Collected: the Phase 4 read path ----------------------------------
+/* --- Collected: what the collector wrote --------------------------------
  *
- * The collector wrote `collect.document` and `collect.watch_hit` from the
- * day the phase landed, and nothing read them: no endpoint, no UI, no
- * search reach. The only trace of a poll an analyst could see was three
- * integers on a run card, so a watch that fired four hundred times showed
- * the number 400 and nothing to open.
- *
- * Two lists, loaded independently and never in one `Promise.all`: hits are
- * case-scoped behind `collection.read` ON THE CASE, documents are global
- * behind the same permission GLOBALLY. Those are different checks and one
- * can be refused while the other succeeds.
+ * `collect.document` and `collect.watch_hit`, so a watch that fired is something to open,
+ * not a count on a run card. Two lists, loaded independently and never in one
+ * `Promise.all`: hits are case-scoped behind `collection.read` on the case, documents are
+ * global behind the same permission globally. Those are different checks and one can be
+ * refused while the other succeeds.
  */
-/* ux12-feeds:collected-stale-across-case-switch (2026-09-22). Nothing
- * cleared this list on a case switch, so KESTREL's Collected tab showed
- * "No watch has matched anything on this case yet." from a read of
- * NIGHTJAR that KESTREL was never asked, and with hits it would have shown
- * NIGHTJAR's AMBER excerpts and handles under a TLP:GREEN header, with an
- * Acknowledge that posted NIGHTJAR's hit id to KESTREL's path. The hits
- * now go on the switch and load when the sub-tab is entered; the global
- * documents list below is not case-scoped and keeps its own Load. */
+/* The hits go on a case switch and load when the sub-tab is entered, so one case's excerpts
+ * never show under another's header and an Acknowledge never posts one case's hit id to
+ * another's path. The global documents list below is not case-scoped and keeps its own
+ * Load. */
 const COL_HITS_NOT_LOADED = 'Not loaded for this case yet.';
 
 onCaseSwitch(() => {
@@ -31541,11 +29115,9 @@ async function loadWatchHits() {
       ? countOf(hits.length, 'hit', 'hits') + ', ' + (body.unacknowledged || 0)
         + ' unread'
       : '';
-    /* Said as the POLLS' matches, because the Ingest queue beside this
-       tab scores partner feed records on the same watches' selectors,
-       and "no watch has matched anything" contradicted a queue row saying
-       one had (ux12-feeds:watched-hit-unnamed-and-contradicted,
-       2026-09-23). */
+    /* Said as the polls' matches, because the Ingest queue beside this tab scores partner
+       feed records on the same watches' selectors, and "no watch has matched anything" would
+       contradict a queue row saying one had. */
     if (!hits.length) {
       $('col-hits-empty').textContent = unack
         ? 'Nothing unacknowledged on this case.'
@@ -31592,12 +29164,8 @@ function watchHitRow(h) {
   facts.appendChild(fact('watch', visibleText(h.watch_name)));
   facts.appendChild(fact('author', visibleText(h.author_handle)));
   facts.appendChild(fact('posted', fmtTime(h.posted_at)));
-  // The collector writes matched_on as a LIST of reasons ("regex:...",
-  // "selector:..."). This rendered Object.keys() of it, which on a list is
-  // its indices -- so every real hit said it fired on "0" or "0, 1". The
-  // read-path test fixture had fabricated a dict, and both sides were
-  // green. A dict is still accepted for any legacy row; a list renders as
-  // the reasons themselves.
+  // The collector writes matched_on as a list of reasons ("regex:...", "selector:..."),
+  // which renders as the reasons themselves; a dict is still accepted for any legacy row.
   const why = Array.isArray(h.matched_on)
     ? h.matched_on : Object.keys(h.matched_on || {});
   facts.appendChild(fact('matched', why.join(', ')));
@@ -31614,11 +29182,9 @@ function watchHitRow(h) {
     card.appendChild(el('p', 'help', 'Suppressed: ' + h.suppress_reason));
   }
 
-  /* The two responses the help says a drowned watch and a quiet one need
-     (ux12-feeds:suppressed-hits-no-response, 2026-09-23): the pane showed
-     a suppressed hit and its reason and offered neither. Unsuppress puts
-     one alert hygiene hid wrongly back; Suppress takes a noisy thread out
-     with the reason the next analyst reads. */
+  /* The two responses the help says a drowned watch and a quiet one need: Unsuppress puts
+     back a hit alert hygiene hid wrongly; Suppress takes a noisy thread out with the reason
+     the next analyst reads. */
   const hygiene = el('div', 'row-actions');
   if (h.suppressed) {
     const back = el('button', 'btn ghost small', 'Unsuppress');
@@ -31680,16 +29246,12 @@ function watchHitRow(h) {
   return card;
 }
 
-/* --- Watches (F53, 2026-10-08) -----------------------------------------
+/* --- Watches -----------------------------------------------------------
  *
- * Only a seeding script wrote a watch until now, so this tab listed what
- * watches had matched and offered no way to make one, and a watch of kind
- * TELEGRAM_CHAT could be written only by hand. The list is case-scoped
- * behind `collection.read` on the case, like the hits; the form is drawn
- * only for a caller who holds `watch.manage` (the listing says so), and
- * the server refuses it for anyone else and on a read-only case. The
- * Add a watch box is one of CASE_CONTENT_CONTROLS, so a closed case turns
- * it off as it does every other write.
+ * The list is case-scoped behind `collection.read` on the case, like the hits; the form is
+ * drawn only for a caller who holds `watch.manage` (the listing says so), and the server
+ * refuses it for anyone else and on a read-only case. The Add a watch box is one of
+ * CASE_CONTENT_CONTROLS, so a closed case turns it off as it does every other write.
  *
  * What a watch looks at is a note for the people reading the list; the
  * collector reads the SOURCE's address. A Telegram chat is the exception:
@@ -31937,7 +29499,7 @@ async function addWatch(e) {
 
 async function loadCollectedDocuments() {
   const triage = $('col-doc-triage').value;
-  // Whether a row can offer Similar (F6.3); read once, cached.
+  // Whether a row can offer Similar; read once, cached.
   await loadEmbeddingStatus();
   try {
     const q = new URLSearchParams({ limit: '100' });
@@ -31947,7 +29509,7 @@ async function loadCollectedDocuments() {
     // Whether the caller may place a legal hold (docs/00 decision 74).
     const canHold = Boolean(body.can_hold);
     renderList('col-doc-list', 'col-doc-empty', docs,
-      (d) => collectedDocRowWithSimilar(d, canHold));   // F6.3
+      (d) => collectedDocRowWithSimilar(d, canHold));
     $('col-doc-counts').textContent = docs.length
       ? countOf(docs.length, 'document', 'documents') : '';
     if (!docs.length) {
@@ -31967,10 +29529,10 @@ async function loadCollectedDocuments() {
   }
 }
 
-function collectedDocRow(d, canHold) {   // canHold: docs/00 decision 74
+function collectedDocRow(d, canHold) {
   const card = el('div', 'card row-card compact');
   const head = el('div', 'row-head');
-  const tgm = d.telegram || null;   // F5.3, a Telegram message's capture record
+  const tgm = d.telegram || null;   // a Telegram message's capture record
   head.appendChild(el('span', 'row-title', visibleText(d.title
     || (tgm ? 'Telegram message' : '(untitled)'))));
   head.appendChild(el('span', 'chip small', d.triage_state));
@@ -31982,7 +29544,7 @@ function collectedDocRow(d, canHold) {   // canHold: docs/00 decision 74
     head.appendChild(media);
   }
   head.appendChild(el('span', 'chip small', d.classification));
-  // A captured document's compartments (L1, 2026-09-24).
+  // A captured document's compartments.
   for (const c of d.compartments || []) {
     head.appendChild(el('span', 'chip small compartment', visibleText(c)));
   }
@@ -31992,7 +29554,7 @@ function collectedDocRow(d, canHold) {   // canHold: docs/00 decision 74
                + 'collection persists what it reads.';
     head.appendChild(chip);
   }
-  // A person's hold on it and its earlier versions (docs/00 decision 74).
+  // A person's hold on it and its earlier versions.
   if (d.legal_hold) {
     const hold = el('span', 'chip warn', 'on legal hold');
     hold.title = 'A legal hold stops every deletion of this document and its '
@@ -32002,7 +29564,7 @@ function collectedDocRow(d, canHold) {   // canHold: docs/00 decision 74
   card.appendChild(head);
   const facts = el('div', 'facts');
   facts.appendChild(fact('source', visibleText(d.source_name)));
-  // F5.3. A Telegram author is the name at capture and the typed id.
+  // A Telegram author is the name at capture and the typed id.
   facts.appendChild(fact('author', tgm && tgm.sender_uid
     ? visibleText([tgm.sender_handle || d.author_handle, tgm.sender_uid]
       .filter(Boolean).join(', '))
@@ -32027,20 +29589,20 @@ function collectedDocRow(d, canHold) {   // canHold: docs/00 decision 74
   if (d.external_url) {
     card.appendChild(el('p', 'mono small', visibleText(d.external_url)));
   }
-  // The hold's reason, when the server sent it (2026-09-24).
+  // The hold's reason, when the server sent it.
   if (d.legal_hold && d.legal_hold_reason) {
     card.appendChild(el('p', 'help', 'Held: ' + visibleText(d.legal_hold_reason)));
   }
   if (canHold) card.appendChild(documentHoldActions(card, d));
-  // F3 and F4 (2026-09-24). A forum post's signature, quotes and
-  // reactions, or a member's profile, kept beside the text.
+  // A forum post's signature, quotes and reactions, or a member's profile, kept beside the
+  // text.
   if (d.source_kind === 'XENFORO' || d.source_kind === 'MYBB') {
     card.appendChild(forumDetailsControl(d));
   }
   return card;
 }
 
-/** F3 and F4 (2026-09-24). "Forum details" under a collected forum
+/** "Forum details" under a collected forum
  *  document: read on request, under the same labels as the document, and
  *  drawn as facts. The signature is said to describe the author, because
  *  it is repeated on every post the author writes. */
@@ -32105,7 +29667,7 @@ function forumDetailFacts(f) {
 }
 
 /** Place or lift a hold on a collected document, with a reason either way,
- *  behind the step-up gate (docs/00 decision 74, 2026-09-24). */
+ *  behind the step-up gate (docs/00 decision 74). */
 function documentHoldActions(card, d) {
   const actions = el('div', 'row-actions');
   const verb = d.legal_hold ? 'Lift the legal hold' : 'Place a legal hold';
@@ -32133,23 +29695,17 @@ function documentHoldActions(card, d) {
   return actions;
 }
 
-/** A collected document's row with its Similar control (F6.3,
- *  2026-09-24): documents like this one, opened under the row. */
+/** A collected document's row with its Similar control: documents like this one, opened
+ *  under the row. */
 function collectedDocRowWithSimilar(d, canHold) {
   const card = collectedDocRow(d, canHold);
   card.appendChild(similarControl('document', d.id));
   return card;
 }
 
-/** The roles this panel may grant — the SAME set as
- *  `iam_admin.GRANTABLE_ROLES`, which the server enforces.
- *
- *  Named once because it is a contract, not a menu: the server widened
- *  its allowlist to ten and the two pickers here still offered six, so a
- *  deployment could not staff its own collection surface from the panel
- *  that exists so nobody has to shell into the server. SERVICE is
- *  deliberately absent on both sides — it is a machine identity.
- *  Asserted against the Python set by `test_ui_invariants.py`.
+/** The roles this panel may grant: the same set as `iam_admin.GRANTABLE_ROLES`, which the
+ *  server enforces, asserted against it by `test_ui_invariants.py`. SERVICE is deliberately
+ *  absent on both sides: it is a machine identity.
  */
 const GRANTABLE_ROLES = ['ANALYST', 'CASE_OWNER', 'COLLECTOR', 'CONTRIBUTOR',
                          'LIAISON', 'MALWARE_ANALYST', 'READ_ONLY',
@@ -32157,19 +29713,13 @@ const GRANTABLE_ROLES = ['ANALYST', 'CASE_OWNER', 'COLLECTOR', 'CONTRIBUTOR',
 
 /* --- Admin: role names --------------------------------------------------
  *
- * The owner's decision of 2026-09-22 (migration 0062): CASE_OWNER is shown
- * by the name Lead investigator. The KEY is unchanged, so nothing that checks a
- * permission moves; what moves is every place this pane shows a role to a
- * person, which until then was the raw key in all four (the account card,
- * the grant picker, the revoke buttons and the create form).
- *
- * The names come from `GET /admin/roles`, which reads `iam.role`, and are
- * not written down here: a label table in the console is a second copy of
- * the server's, and the copy is the one that goes stale. The key stays in
- * each option's value and in a tooltip, because the readiness register and
- * the docs speak keys. If the names cannot be read, the keys stand in, so
- * the pane degrades to what it showed before rather than to blanks. The
- * descriptions come the same way, for the create form's role list.
+ * A role is shown to a person by its name (CASE_OWNER is Lead investigator, migration 0062)
+ * on the account card, the grant picker, the revoke buttons and the create form; the key is
+ * unchanged, so nothing that checks a permission moves. The names and descriptions come from
+ * `GET /admin/roles`, which reads `iam.role`, and are not written down here: a copy in the
+ * console is the one that goes stale. The key stays in each option's value and in a tooltip,
+ * because the readiness register and the docs speak keys. If the names cannot be read, the
+ * keys stand in rather than blanks.
  */
 const roleNames = new Map();
 const roleDescs = new Map();
@@ -32224,26 +29774,17 @@ function labelRoleChecks() {
  * only explains. Two rules carried from the rest of the console: a 403 is
  * not an empty state, and credentials render exactly once.
  *
- * The ux16-admin review of 2026-09-22, closed 2026-09-23:
- *  - a refusal or a success is said ON the card that was acted on, not in
- *    muted text over the account count at the top of a long list
- *    (refusals-land-far-from-row);
- *  - deactivating, revoking an administrator or officer role, resetting a
- *    password and any change to your own account ask first, by name; the
- *    removals are styled as the danger they are, apart from Grant; and the
- *    last administrator's and the last officer's removals are disabled
- *    with the reason, as Deactivate always was for yourself
- *    (authz-changes-one-click);
- *  - the clearance and grant pickers are labelled, sized to their content
- *    and paired with their verbs, and the grant picker starts on "Choose a
- *    role" instead of on a role the user does not hold
- *    (account-row-selects-read-as-values);
- *  - read-ins are shown and set on the card (no-compartment-readins-in-ui);
- *  - "never" is no longer said of an account in use through a minted
- *    session (last-login-never-misleads);
- *  - one-time credentials render in the card they belong to, named,
- *    scrolled to and focused, with a way to clear them
- *    (one-time-creds-card-unanchored).
+ *  - a refusal or a success is said on the card that was acted on;
+ *  - deactivating, revoking an administrator or officer role, resetting a password and any
+ *    change to your own account ask first, by name; the removals are styled as the danger
+ *    they are, apart from Grant; and the last administrator's and the last officer's
+ *    removals are disabled with the reason, as Deactivate is for yourself;
+ *  - the clearance and grant pickers are labelled and paired with their verbs, and the grant
+ *    picker starts on "Choose a role";
+ *  - read-ins are shown and set on the card;
+ *  - an account in use through a minted session is never said to have never signed in;
+ *  - one-time credentials render in the card they belong to, named, scrolled to and
+ *    focused, with a way to clear them.
  */
 const ADM = {
   users: [],          // the last listing, for the last-holder rules
@@ -32259,24 +29800,19 @@ const ADM = {
 
 async function loadAdminUsers() {
   listPending('adm-list', 'adm-empty');
-  /* The registry on the Compartments subpane is read here too, and its
-     empty line made its claim while that read was in flight
-     (ux17-failure:loading-shows-empty-claims; merged 2026-09-24). */
+  /* The registry on the Compartments subpane is read here too, so its empty line waits for
+     that read as well. */
   listPending('adm-comp-list', 'adm-comp-empty');
-  /* The registry is read BESIDE the step-up gate, not behind it: GET
-     /compartments is not a step-up route, and read behind the gate a
-     cancelled sign-in left the Compartments subpane saying the registry
-     "could not be read", with the reason written only into the hidden
-     Accounts section (verifier, final review u20, 2026-09-24). It never
-     throws, and it is awaited before any card is drawn, so a card still
-     has the registry to draw its read-ins with. */
+  /* The registry is read beside the step-up gate, not behind it: GET /compartments is not a
+     step-up route, and a cancelled sign-in must not leave the Compartments subpane saying the
+     registry could not be read. It never throws, and it is awaited before any card is drawn,
+     so a card still has the registry to draw its read-ins with. */
   const registry = loadAdminCompartments();
   let got = null;
   let failure = null;
   try {
-    /* The role names are user.manage, so they wait behind the gate with
-       the accounts; a lapsed step-up asks for the sign-in here (final
-       review u20). */
+    /* The role names are user.manage, so they wait behind the gate with the accounts; a
+       lapsed step-up asks for the sign-in here. */
     got = await admStepUp(() => Promise.all([api('/admin/users'), loadRoleNames()]));
   } catch (err) {
     failure = err;
@@ -32310,8 +29846,7 @@ async function loadAdminUsers() {
     parkAdminCreds();
     renderList('adm-list', 'adm-empty', [], adminUserRow);
     $('adm-counts').textContent = '';
-    /* Beside the line with a Retry, not in it (ux17-failure:
-       sticky-error-text-in-empty-slot, 2026-09-23). */
+    /* Beside the line with a Retry, not in it. */
     showLoadFailure('adm-empty', 'The accounts', failure, loadAdminUsers);
   }
   if (refused !== null) {
@@ -32326,16 +29861,12 @@ async function loadAdminUsers() {
 
 /* --- Admin: the step-up gate ----------------------------------------------
  *
- * Final review u20 (2026-09-24). Every route on this pane is user.manage,
- * and user.manage is step-up: fifteen minutes after a sign-in the whole
- * pane was refused, and the refusal told a System administrator that the
- * register "needs the System administrator role" and to sign out, which
- * throws the page away. Rename and Retire already asked for the sign-in in
- * place (`compartmentStepUp`); the reads, the account actions, Create and
- * Register now do the same through `withStepUp`: the sign-in is asked for
- * first when this tab knows the gate is shut, and once more if the server
- * says so. Only for an account that holds user.manage (`canAdmin`): anyone
- * else is refused on the permission, which no sign-in changes.
+ * Every route on this pane is user.manage, and user.manage is step-up. Rename and Retire ask
+ * for the sign-in in place (`compartmentStepUp`); the reads, the account actions, Create and
+ * Register do the same through `withStepUp`: the sign-in is asked for first when this tab
+ * knows the gate is shut, and once more if the server says so. Only for an account that
+ * holds user.manage (`canAdmin`): anyone else is refused on the permission, which no sign-in
+ * changes.
  */
 const ADM_STEP_UP_WHY = 'Administration needs a sign-in from the last 15 '
   + 'minutes. Nothing on screen changes.';
@@ -32364,16 +29895,15 @@ function admStepUpWords(what, press) {
  *  SYS_ADMIN", "own account", "stranded owner". `affectsRegister` is for
  *  the changes the readiness register counts (roles and activation): the
  *  badges are re-asked at once, and the register itself re-runs whenever
- *  its section is opened (readiness-stale-after-fix). */
+ *  its section is opened. */
 async function adminAct(path, options, btn, u, done, affectsRegister) {
   if (btn) btn.disabled = true;
   const label = btn ? btn.textContent : '';
   let said;
   let kind = 'bad';
   try {
-    /* Behind the step-up gate (final review u20, 2026-09-24). Never null
-       on success (a 204 would be), so null is the sign-in the gate asked
-       for and the administrator cancelled. */
+    /* Behind the step-up gate. Never null on success (a 204 would be), so null is the sign-in
+       the gate asked for and the administrator cancelled. */
     const body = await admStepUp(() => api(path, options).then((b) => b || {}));
     if (body) {
       const text = done(body);
@@ -32406,8 +29936,8 @@ async function adminAct(path, options, btn, u, done, affectsRegister) {
   return null;
 }
 
-/** The sentence for an action the step-up stopped (final review u20):
- *  never "sign out", which throws the page away. */
+/** The sentence for an action the step-up stopped: never "sign out", which throws the page
+ *  away. */
 function admStepUpAgain(label) {
   return 'It needs a sign-in from the last 15 minutes: press '
     + (label || 'it') + ' again and confirm it is you.';
@@ -32415,10 +29945,9 @@ function admStepUpAgain(label) {
 
 /** After a success the list is drawn again, so the button that was pressed
  *  is gone and the focus with it, to <body>, and the new card's note
- *  arrives already written, which a screen reader does not announce (final
- *  review u19, 2026-09-24). The focus goes back into the account's new
- *  card, to the button of the same name, or to its note when that button
- *  is gone (a Revoke, an Unlock); the outcome is said through `#adm-say`,
+ *  arrives already written, which a screen reader does not announce. The focus goes back
+ *  into the account's new card, to the button of the same name, or to its note when that
+ *  button is gone (a Revoke, an Unlock); the outcome is said through `#adm-say`,
  *  a status region that stays on the page. A focus the administrator has
  *  put somewhere else meanwhile is left where it is. */
 function admAfterRedraw(u, label, said) {
@@ -32432,10 +29961,8 @@ function admAfterRedraw(u, label, said) {
     const same = [...card.querySelectorAll('button')]
       .find((b) => !b.disabled && b.textContent === label);
     if (same) {
-      /* Save read-ins sits in a <details> the redraw builds closed, and a
-         button in a closed <details> cannot take the focus: it stayed on
-         <body> (verifier, final review u19, 2026-09-24). The fold it was
-         pressed in is opened again, as it was when it was pressed. */
+      /* Save read-ins sits in a <details> the redraw builds closed, and a button in a closed
+         <details> cannot take the focus, so the fold it was pressed in is opened again. */
       const fold = same.closest('details');
       if (fold) fold.open = true;
       same.focus();
@@ -32521,9 +30048,8 @@ function adminUserRow(u) {
     ? fmtTime(u.last_active_at) : 'no session recorded'));
   facts.appendChild(fact('created', fmtTime(u.created_at)));
   card.appendChild(facts);
-  /* The account id, copyable. Sharing a case asked for exactly this id and
-     no screen showed it (ux16 no-user-id-for-share, 2026-09-22). Share now
-     takes an email; the id stays here for the API and for support. */
+  /* The account id, copyable. Share takes an email; the id is here for the API and for
+     support. */
   const idLine = el('p', 'help adm-id');
   idLine.appendChild(el('span', 'fact-k', 'account id'));
   idLine.appendChild(copyable(el('code', 'mono', u.id), u.id, 'account id'));
@@ -32629,10 +30155,8 @@ function clearancePair(u, you) {
   return pair;
 }
 
-/** "Role to grant [Choose a role] Grant role". The picker opens on a
- *  placeholder: it used to open on the first role the user did NOT hold,
- *  in a box that read like a field, so "ANALYST" was the largest text on
- *  a card for someone who was not one. */
+/** "Role to grant [Choose a role] Grant role". The picker opens on a placeholder, so it never
+ *  shows a role the user does not hold as if it were a value of the card. */
 function grantPair(u, you) {
   const missing = GRANTABLE_ROLES.filter((r) => !(u.roles || []).includes(r));
   if (!missing.length) return null;
@@ -32734,7 +30258,7 @@ function removalRow(u, you, who) {
   return row;
 }
 
-/** Reset password (gap-password-reset, 2026-09-23): a one-time password,
+/** Reset password: a one-time password,
  *  shown once in this card, which opens no session: the account chooses
  *  its own at its next sign-in. Not for yourself, which Account does. */
 function resetPasswordButton(u, you, who) {
@@ -32792,18 +30316,13 @@ function noteOn(btn, text, kind) {
 
 /* --- Admin: one-time credentials, in the card they belong to -----------
  *
- * ux16-admin one-time-creds-card-unanchored (2026-09-23). The card rendered
- * at the top of the pane, unnamed, not scrolled to, and was never cleared:
- * an administrator who re-enrolled the twelfth analyst saw nothing change
- * where they were looking, and the live secret stayed on screen through
- * tab and case changes. There is still ONE box, `#adm-creds`, so the
- * session teardown that empties it (`clearSessionSecrets`) keeps working;
- * it is MOVED into the card of the account it names (`dataset.for`), and
- * parked at its home above the list while no card can hold it, which is
- * also where it shows if the list failed to load. It is named, scrolled
- * into view and focused, it has its own "clear them" control, and it is
- * emptied on leaving the pane (`selectTab`), on a case switch and with
- * the session.
+ * There is one box, `#adm-creds`, so the session teardown that empties it
+ * (`clearSessionSecrets`) works; it is moved into the card of the account it names
+ * (`dataset.for`), and parked at its home above the list while no card can hold it, which
+ * is also where it shows if the list failed to load. It is named, scrolled into view and
+ * focused, it has its own "clear them" control, and it is emptied on leaving the pane
+ * (`selectTab`), on a case switch and with the session, so a live secret never stays on
+ * screen.
  */
 function showAdminCreds(creds, heading) {
   const box = $('adm-creds');
@@ -32860,15 +30379,12 @@ function clearAdminCreds() {
 
 /* --- Admin: compartments ------------------------------------------------
  *
- * ux16-admin no-compartment-readins-in-ui (2026-09-23), high. Read-ins could
- * be neither seen nor set here, so "why can't Alice open OP-CORVID-26?" was
- * answered from her clearance and role, and the fix was curl. The registry
- * is `GET /compartments` (the whole of it, `scope: "all"`, for an account
- * holding user.manage), a key is registered with `POST /compartments`, and
- * a user's COMPLETE set is written with `PUT /compartments/users/{id}`:
- * a set, not a delta, so a stale card cannot add or drop a read-in it did
- * not show. The server's refusals (an unregistered key, a compartment a
- * case they lead still needs) land on the card like every other refusal.
+ * The registry is `GET /compartments` (the whole of it, `scope: "all"`, for an account
+ * holding user.manage), a key is registered with `POST /compartments`, and a user's complete
+ * set of read-ins is written with `PUT /compartments/users/{id}`: a set, not a delta, so a
+ * stale card cannot add or drop a read-in it did not show. The server's refusals (an
+ * unregistered key, a compartment a case they lead still needs) land on the card like every
+ * other refusal.
  */
 async function loadAdminCompartments() {
   try {
@@ -32950,10 +30466,8 @@ function renderCompartmentRegistry() {
     $('adm-comp-empty').textContent = 'The compartment registry could not be '
       + 'read. It is not known to be empty.';
   } else if (ADM.usersStepUp && rows.length) {
-    /* The registry answered and the accounts wait on the sign-in, so this
-       subpane says so itself: the Accounts section that also says it is
-       hidden while this one is open (verifier, final review u20,
-       2026-09-24). */
+    /* The registry answered and the accounts wait on the sign-in, so this subpane says so
+       itself: the Accounts section that also says it is hidden while this one is open. */
     listRefused('adm-comp-empty', 'Who is read into each is shown only after '
       + 'a sign-in from the last 15 minutes. Open Accounts, press Refresh and '
       + 'confirm it is you; nothing else on screen changes.');
@@ -32970,10 +30484,9 @@ function compartmentRow(x) {
   card.appendChild(head);
   const holders = ADM.users.filter((u) => (u.compartments || []).includes(x.key));
   const facts = el('div', 'facts');
-  /* Only a listing that was read can say "nobody": an unread one is an
-     empty array too, and with the registry now read beside the step-up
-     gate every key would have claimed no holder while the accounts waited
-     on the sign-in (verifier, final review u20, 2026-09-24). */
+  /* Only a listing that was read can say "nobody": an unread one is an empty array too, and
+     with the registry read beside the step-up gate every key would claim no holder while the
+     accounts wait on the sign-in. */
   facts.appendChild(fact('read in', !ADM.usersRead ? 'not known: the accounts were not read'
     : holders.length
       ? countOf(holders.length, 'account', 'accounts') + ': '
@@ -33000,8 +30513,7 @@ async function registerCompartment(event) {
   const btn = $('adm-comp-btn');
   btn.disabled = true;
   try {
-    /* Step-up gated (final review u20, 2026-09-24): null is the sign-in
-       it asked for, cancelled. */
+    /* Step-up gated: null is the sign-in it asked for, cancelled. */
     const out = await admStepUp(
       () => api('/compartments', { method: 'POST', json: { key, label } })
         .then((b) => b || {}));
@@ -33015,10 +30527,8 @@ async function registerCompartment(event) {
       + 'under Accounts.');
     $('adm-comp-key').value = '';
     $('adm-comp-label').value = '';
-    /* And the Rename or retire list below, which only its own loader fills:
-       the key just registered is the one most likely to be a typo, and it
-       was missing there until that section's Refresh (final review u21,
-       2026-09-24). What a rename or retire already reloads. */
+    /* And the Rename or retire list below, which only its own loader fills: the key just
+       registered is the one most likely to be a typo. A rename or retire reloads the same. */
     await Promise.all([loadAdminUsers(), loadCompartmentKeys()]);
   } catch (err) {
     if (admStepUpRefused(err)) setMsg(msg, 'Not registered. ' + admStepUpAgain('Register'));
@@ -33066,10 +30576,9 @@ function resetCreateForm() {
   summariseCreate();
 }
 
-/** "Add to a case" from the account card, so creating an analyst and
- *  putting them on a case is one loop in one place (ux16
- *  no-user-id-for-share, 2026-09-22). Offers the cases THIS administrator
- *  can open; the server still requires case.grant on the one picked. */
+/** "Add to a case" from the account card, so creating an analyst and putting them on a case
+ *  is one loop in one place. Offers the cases this administrator can open; the server still
+ *  requires case.grant on the one picked. */
 function adminAssignBox(u) {
   const det = el('details', 'adm-assign');
   det.appendChild(el('summary', null, 'Add to a case'));
@@ -33112,21 +30621,18 @@ function adminAssignBox(u) {
 
 /* --- Admin: sections and the count of what is blocking -----------------
  *
- * ux16-admin blocking-banner-buried-under-account-list (2026-09-23). The
- * pane is three sections, and opens on Readiness while any blocking check
- * fails; otherwise on whichever section the administrator last chose,
- * Accounts at first. The count of failing blocking checks is on the rail
- * tab, on the Readiness section and beside the Administration button on
- * the case list, from `GET /admin/access` (four cheap probes) and, when
- * the register itself has run, from its own rows. With nothing failing,
- * a blocking check that passes with a caveat marks Readiness alone, in
- * amber (security-officer-false-green, 2026-09-23).
+ * The pane opens on Readiness while any blocking check fails; otherwise on whichever section
+ * the administrator last chose, Accounts at first. The count of failing blocking checks is
+ * on the rail tab, on the Readiness section and beside the Administration button on the
+ * case list, from `GET /admin/access` (four cheap probes) and, when the register itself has
+ * run, from its own rows. With nothing failing, a blocking check that passes with a caveat
+ * marks Readiness alone, in amber.
  */
 let selectAdminSub = null;
 
 function enterAdminPane() {
   const sub = ADM.blocking.length ? 'readiness'
-    : (ADM.userSub || adminFirstSub());   // F8 G1, the first section it may open
+    : (ADM.userSub || adminFirstSub());   // the first section it may open
   ADM.auto = true;
   try { selectAdminSub(sub); } finally { ADM.auto = false; }
 }
@@ -33145,14 +30651,11 @@ function paintAdminBlocking(names, caveats) {
     badge.title = title;
     show(badge, n > 0);
   }
-  /* With nothing failing, Readiness is still marked, in amber, while a
-     blocking check passes with a caveat (security-officer-false-green,
-     2026-09-23): the register folds its passing rows away, and the pane
-     opens on Accounts when nothing blocks, so a lone officer who can
-     invoke break-glass would otherwise never be told that break-glass is
-     refused to them. Only here, never on the rail or the case list: those
-     say what is refusing work, and a single-operator install that chose
-     to be one is not refusing anything. */
+  /* With nothing failing, Readiness is still marked, in amber, while a blocking check passes
+     with a caveat: the register folds its passing rows away and the pane opens on Accounts,
+     so a lone officer would otherwise never be told that break-glass is refused to them.
+     Only here, never on the rail or the case list: those say what is refusing work, and a
+     single-operator install that chose to be one is not refusing anything. */
   const k = ADM.caveats.length;
   if (!n && k) {
     const sub = $('adm-sub-badge');
@@ -33178,11 +30681,6 @@ async function refreshAdminBlocking() {
 function initAdmin() {
   $('btn-admin').addEventListener('click', showAdmin);
   $('adm-refresh').addEventListener('click', loadAdminUsers);
-  /* The button has been in the markup since the register shipped and was
-     wired to nothing: `selectTab('admin')` called loadReadiness once and
-     the control that says "Check readiness" did nothing at all when
-     pressed. An operator who had just changed a variable and restarted the
-     API had no way to re-ask short of reloading the console. */
   $('btn-readiness').addEventListener('click', loadReadiness);
   selectAdminSub = initSubtabs('pane-admin', (name) => {
     if (!ADM.auto) ADM.userSub = name;
@@ -33192,10 +30690,10 @@ function initAdmin() {
        subpane too, so their list loads with it. */
     if (name === 'compartments') loadCompartmentKeys();
     if (name === 'dual') loadDualControl();   // two-person controls
-    if (name === 'egress') loadEgress();      // egress (S2)
-    if (name === 'embeddings') loadEmbeddingsAdmin();   // F6.3
-    if (name === 'integrations') loadIntegrations();   // F8 and F7
-    if (name === 'providers') loadProviders();         // F15.2
+    if (name === 'egress') loadEgress();
+    if (name === 'embeddings') loadEmbeddingsAdmin();
+    if (name === 'integrations') loadIntegrations();
+    if (name === 'providers') loadProviders();
   });
   initDualControl();
   initEgress();
@@ -33214,8 +30712,8 @@ function initAdmin() {
     $('adm-create-btn').disabled = true;
     const name = $('adm-name').value.trim();
     try {
-      /* Step-up gated (final review u20, 2026-09-24): null is the sign-in
-         it asked for, cancelled, and the form keeps what was typed. */
+      /* Step-up gated: null is the sign-in it asked for, cancelled, and the form keeps what
+         was typed. */
       const creds = await admStepUp(() => api('/admin/users', {
         method: 'POST',
         json: { email: $('adm-email').value.trim(), display_name: name,
@@ -33226,9 +30724,8 @@ function initAdmin() {
         setMsg($('adm-create-error'), 'Not created. ' + admStepUpAgain('Create'));
         return;
       }
-      /* The password opens no session: it is the administrator's as much
-         as theirs, so they replace it at their first sign-in (final review
-         c8, 2026-09-24). Said here, where it is handed over. */
+      /* The password opens no session: it is the administrator's as much as theirs, so they
+         replace it at their first sign-in. Said here, where it is handed over. */
       ADM.notes.set(creds.user_id, { text: 'Created. Their credentials are '
         + 'below, shown once. At their first sign-in they choose their own '
         + 'password.', kind: 'ok' });
@@ -33260,30 +30757,23 @@ onCaseSwitch(() => {
 
 /* --- Administration without a case ------------------------------------
  *
- * ux16 admin-unreachable-without-a-case (2026-09-22). The accounts panel
- * and the readiness register are deployment-wide, and the only way in was
- * a rail tab inside a case. 0021 gives SYS_ADMIN user.manage and no
- * case.read on purpose (the administrator configures, nobody reads case
- * content by default), so an administrator created the way the model
- * intends signed in to "No cases are open to you yet" with no way in, and
- * a first administrator had to invent a case, lawful basis and all, before
- * they could add a colleague.
- *
- * The pane is not duplicated. `showAdmin` moves #pane-admin into
- * #view-admin and the case-switch reset moves it home, so the in-case tab,
- * its ids and its loaders are the same ones.
+ * The accounts panel and the readiness register are deployment-wide, and migration 0021
+ * gives SYS_ADMIN user.manage and no case.read on purpose, so administration is reachable
+ * with no case open. The pane is not duplicated: `showAdmin` moves #pane-admin into
+ * #view-admin and the case-switch reset moves it home, so the in-case tab, its ids and its
+ * loaders are the same ones.
  */
 let canAdmin = false;       // user.manage: accounts and readiness
 let canReview = false;      // break_glass.review: the officer's queue
 let canDualManage = false;  // dual_control.manage: proposes a change
 let canCountersign = false; // dual_control.countersign: signs one
-// F12. sample.yara.activate: the YARA rule sets awaiting activation.
+// sample.yara.activate: the YARA rule sets awaiting activation.
 let canYaraReview = false;
 let canConfirmAuthority = false;  // collection.authority.confirm: confirms an authority
 let canEgressManage = false; // egress.manage: changes where anything leaves
 let canEgressRead = false;   // egress.log.read: reads the connection log
 let canEmbeddings = false;  // embedding.manage: the similarity indexes
-// F13. sample.screening.review: the prohibited-content screening record.
+// sample.screening.review: the prohibited-content screening record.
 let canScreenReview = false;
 let canScreenManage = false;
 let adminView = false;
@@ -33291,27 +30781,26 @@ let adminHome = null;
 let reviewHome = null;
 
 /** The deployment view's name, by what the account may do there. An
- *  officer-only account's view holds the break-glass review queue AND the
- *  preserved-sample authorisations, so it is not named for one of them
- *  (2026-09-23). */
+ *  officer-only account's view holds the break-glass review queue and the
+ *  preserved-sample authorisations, so it is not named for one of them. */
 function adminViewName() {
-  // An officer who may countersign two-person changes is one too.
-  // And one who confirms collection authorities (2026-09-24).
+  // An officer who may countersign two-person changes is one too, and so is one who
+  // confirms collection authorities.
   return (canReview || canCountersign || canConfirmAuthority) && !canAdmin
     ? 'Oversight' : 'Administration';
 }
 
 /** The entry button's tooltip, for the same two kinds of account. */
 function adminViewTitle() {
-  // F8 G1 (2026-09-25): an account whose only way in is a data-needs
-  // section is told what is there, not "Accounts".
+  // An account whose only way in is a data-needs section is told what is there, not
+  // "Accounts".
   if (!canAdmin && !canReview && !canCountersign && !canConfirmAuthority
       && adminAnyAllowed()) {
     return 'Outbound integrations and lookup providers. They cover the whole '
       + 'deployment, so no case is needed.';
   }
-  /* F13. The officer's view also holds the screening record; the
-     screening verbs are the Security Officer's, who reviews break-glass. */
+  /* The officer's view also holds the screening record; the screening verbs are the Security
+     Officer's, who reviews break-glass. */
   return (canReview || canCountersign || canConfirmAuthority) && !canAdmin
     ? 'The break-glass review queue, the preserved-sample authorisations, '
       + 'the collection authorities that wait for a second person, '
@@ -33334,46 +30823,42 @@ async function loadAdminAccess() {
      case by design: reachable only through a case's Lifecycle pane, it
      was unreachable for exactly the account whose job it is. */
   canReview = !!access.break_glass_review;
-  // F12 J.
   canYaraReview = !!access.sample_yara_activate;
-  // F13.
   canScreenReview = !!access.sample_screening_review;
   canScreenManage = !!access.sample_screening_manage;
-  /* The failing blocking checks, for an administrator (2026-09-23): the
-     badges on the way in, and the section the pane opens on. */
+  /* The failing blocking checks, for an administrator: the badges on the way in, and the
+     section the pane opens on. */
   ADM.blocking = canAdmin && Array.isArray(access.blocking_failures)
     ? access.blocking_failures : [];
   /* And the ones that pass with a caveat, from the same run
      (security-officer-false-green): they mark Readiness in amber. */
   ADM.caveats = canAdmin && Array.isArray(access.readiness_caveats)
     ? access.readiness_caveats : [];
-  /* F9 (2026-09-24): the two-person policy, and how many changes wait
-     for this account's countersignature (the subtab's badge). */
+  /* The two-person policy, and how many changes wait for this account's countersignature
+     (the subtab's badge). */
   canDualManage = !!access.dual_control_manage;
   canCountersign = !!access.dual_control_countersign;
   ADM.dualAwaiting = Number(access.dual_control_awaiting) || 0;
   paintDualBadge();
-  // 2026-09-24: the officer who confirms collection authorities.
+  // The officer who confirms collection authorities.
   canConfirmAuthority = !!access.collection_authority_confirm;
-  // S2 (2026-09-24): the Egress section, for whoever may change or
-  // read where anything leaves this deployment.
+  // The Egress section, for whoever may change or read where anything leaves this
+  // deployment.
   canEgressManage = !!access.egress_manage;
   canEgressRead = !!access.egress_log_read;
   show($('adm-sub-egress'), canEgressManage || canEgressRead);
-  // F6.3 (2026-09-24): Administration, Embeddings, for an account
-  // holding embedding.manage. Not a gate: every route runs its own.
+  // Administration, Embeddings, for an account holding embedding.manage. Not a gate: every
+  // route runs its own.
   canEmbeddings = !!access.embedding_manage;
   const embTab = document.querySelector(
     '#pane-admin .subtab[data-subtab="embeddings"]');
   if (embTab) show(embTab, canEmbeddings);
-  ADM.access = access;   // the data-needs flags (F8 G1)
+  ADM.access = access;   // the data-needs flags
   applyAdminGates();
 }
 
-/** The way in, and the count of what is blocking on it. Asked on every
- *  switch, inside a case too, since 2026-09-23: the rail's Admin tab
- *  carries the count, and before that nothing outside the pane said that
- *  checks were failing (blocking-banner-buried-under-account-list). */
+/** The way in, and the count of what is blocking on it. Asked on every switch, inside a case
+ *  too, because the rail's Admin tab carries the count. */
 async function refreshAdminEntry() {
   const btn = $('btn-admin');
   const token = caseToken();
@@ -33386,9 +30871,9 @@ async function refreshAdminEntry() {
   show(btn, (canAdmin || canReview || canCountersign || canConfirmAuthority
              || adminAnyAllowed())
     && !state.caseId && !adminView);
-  // F12 J. An officer who may activate rule sets has a way in too.
+  // An officer who may activate rule sets has a way in too.
   if (canYaraReview && !state.caseId && !adminView) show(btn, true);
-  // F13. So does an officer who reviews screening matches.
+  // So does an officer who reviews screening matches.
   if (canScreenReview && !state.caseId && !adminView) show(btn, true);
 }
 
@@ -33406,7 +30891,7 @@ async function showAdmin() {
   adminView = true;
   /* An account holding neither verb still gets the accounts pane, which
      explains its own refusal: the honest answer to a hand-typed link. */
-  const accounts = canAdmin || adminAnyAllowed()   // data-needs (F8 G1)
+  const accounts = canAdmin || adminAnyAllowed()   // data-needs
     || !(canReview || canCountersign || canConfirmAuthority);
   if (accounts) {
     $('view-admin').appendChild(pane);
@@ -33416,20 +30901,17 @@ async function showAdmin() {
     $('view-admin').appendChild(review);
     loadGlassQueue();
   }
-  /* The officer's preserved samples (2026-09-23), built
-     and loaded by the Lab code; hidden for an account that is not one. */
+  /* The officer's preserved samples, built and loaded by the Lab code; hidden for an account
+     that is not one. */
   showPreservedReview(canReview);
-  /* 2026-09-24: the collection authorities waiting for a second person,
-     after the preserved samples. */
+  /* The collection authorities waiting for a second person, after the preserved samples. */
   showAuthorityReview(canConfirmAuthority);
-  /* F9 (2026-09-24): the two-person changes waiting, for an officer
-     who may countersign and administers nothing; an administrator reads
-     them under Administration, Two-person controls. */
+  /* The two-person changes waiting, for an officer who may countersign and administers
+     nothing; an administrator reads them under Administration, Two-person controls. */
   showDualReview(canCountersign && !canAdmin);
-  // F13. Prohibited-content screening, after the two-person changes and
-  // before the YARA section.
+  // Prohibited-content screening, after the two-person changes and before the YARA section.
   showScreeningReview(canScreenReview);
-  // F12 J. The YARA rule sets awaiting activation, also the Lab's.
+  // The YARA rule sets awaiting activation, also the Lab's.
   showYaraReview(canYaraReview);
   show($('view-cases'), false);
   show($('view-admin'), true);
@@ -33474,15 +30956,12 @@ onCaseSwitch(() => {
 
 /* --- Admin: renaming and retiring a compartment ------------------------
  *
- * sec-compartment-retirement (2026-09-23). The database refuses to drop or
- * rename a registered key while any row carries it (0059), so a mistyped
- * key was permanent short of a hand-written UPDATE on eighteen columns.
- * `POST /compartments/{key}/rename` moves a key everywhere it is used in
- * one step and changes nobody's access; `POST /compartments/{key}/retire`
- * drops a key nothing carries and otherwise says what still carries it.
- * Both are user.manage and step-up, so the sign-in is asked for FIRST when
- * this tab knows it has lapsed, as recovery codes do, rather than spending
- * a request (and a token of the merge limit) on a refusal.
+ * The database refuses to drop or rename a registered key while any row carries it
+ * (migration 0059). `POST /compartments/{key}/rename` moves a key everywhere it is used in
+ * one step and changes nobody's access; `POST /compartments/{key}/retire` drops a key nothing
+ * carries and otherwise says what still carries it. Both are user.manage and step-up, so the
+ * sign-in is asked for first when this tab knows it has lapsed, as recovery codes do, rather
+ * than spending a request (and a token of the merge limit) on a refusal.
  *
  * `compartmentLifecycleControls` is the whole of it for one key, so it can
  * sit on any card that shows a registered compartment; the list under
@@ -33490,8 +30969,7 @@ onCaseSwitch(() => {
  */
 async function loadCompartmentKeys() {
   const empty = 'adm-cmp-life-empty';
-  /* Its line ships hidden and says "Loading…" until the read answers
-     (ux17-failure:loading-shows-empty-claims; merged 2026-09-24). */
+  /* Its line ships hidden and says "Loading…" until the read answers. */
   listPending('adm-cmp-life', 'adm-cmp-life-empty');
   try {
     const body = await api('/compartments');
@@ -33521,12 +30999,10 @@ function compartmentKeyRow(x) {
     facts.appendChild(fact('registered', fmtTime(x.created_at)));
     card.appendChild(facts);
   }
-  /* A rename rewrites the key on every account read into it, so the
-     account cards on this pane are redrawn with the list, not left showing
-     the old key until the next visit (verifier, sec-compartment-retirement,
-     2026-09-23). Everything else that shows a key (the chips on ingest,
-     sample and deception rows) is fetched afresh whenever its pane or
-     subtab is opened (selectTab), so it cannot outlive the rename. */
+  /* A rename rewrites the key on every account read into it, so the account cards on this
+     pane are redrawn with the list. Everything else that shows a key (the chips on ingest,
+     sample and deception rows) is fetched afresh whenever its pane or subtab is opened
+     (selectTab), so it cannot outlive the rename. */
   card.appendChild(compartmentLifecycleControls(x, (said) => {
     const msg = $('adm-cmp-life-msg');
     msg.className = 'msg ok';
@@ -33655,20 +31131,16 @@ function initCompartmentKeys() {
 
 /* --- Admin: two-person controls ------------------------------------------
  *
- * F9 (2026-09-24). Which acts take two different people
- * was two places nobody could see: `approvals.OPERATIONS` in code and
- * `iam.separated_duty` in the database, and the one switch there was (a
- * case's merges) could be turned off by one person. This section shows
- * both, the changes waiting and the history, and changing any of it takes
- * two people as well: an administrator proposes, a Security officer who is
- * not an administrator countersigns (GET /approvals, POST
- * /approvals/{id}/decide), and the administrator applies it.
+ * Which acts take two different people, from `approvals.OPERATIONS` in code and
+ * `iam.separated_duty` in the database, with the changes waiting and the history. Changing
+ * any of it takes two people as well: an administrator proposes, a Security officer who is
+ * not an administrator countersigns (GET /approvals, POST /approvals/{id}/decide), and the
+ * administrator applies it.
  *
- * Nobody sees a button the server would refuse them: the proposer's Apply
- * appears once the change is countersigned, unspent and still applies to
- * the policy as it stands; a countersigner the seven-day rule blocks sees
- * why, and Refuse, never Countersign (2026-09-24: the person best placed
- * to say no must be able to).
+ * Nobody sees a button the server would refuse them: the proposer's Apply appears once the
+ * change is countersigned, unspent and still applies to the policy as it stands; a
+ * countersigner the seven-day rule blocks sees why, and Refuse, never Countersign: the
+ * person best placed to say no must be able to.
  *
  * The body is one piece of markup (#dual-body), moved into the Oversight
  * view for an officer who administers nothing (`showDualReview`) and back
@@ -33824,8 +31296,8 @@ function dualOperationCard(op, you) {
   facts.appendChild(fact('asks', dualRoleNames(op.asks)));
   facts.appendChild(fact('signs second', dualRoleNames(op.signs)));
   facts.appendChild(fact('a signature lasts', dualDuration(op.ttl_seconds)));
-  /* F39 (2026-10-02): the second person on a case's merge switch must have
-     held the permission on the case for a window the deployment sets. */
+  /* The second person on a case's merge switch must have held the permission on the case for
+     a window the deployment sets. */
   if (op.signer_seasoning) {
     const s = op.signer_seasoning;
     facts.appendChild(fact('second person must have held '
@@ -33837,8 +31309,7 @@ function dualOperationCard(op, you) {
     card.appendChild(el('p', 'help', visibleText(op.signer_seasoning.problem)));
   }
   if (!op.configurable) return card;
-  /* Over the viewer's own cases only, and not said at all to someone who
-     holds none (2026-09-24). */
+  /* Over the viewer's own cases only, and not said at all to someone who holds none. */
   if (typeof op.cases_requiring === 'number') {
     card.appendChild(el('p', 'help', countOf(op.cases_requiring,
       'of the cases you are assigned to asks', 'of the cases you are assigned '
@@ -34223,13 +31694,12 @@ function paintDualBadge() {
 
 /* ── Administration, Embeddings ──────────────────────────────────────────
  *
- * F6.3 (embeddings, 2026-09-24). Each index, where the model is, and
- * the documents not in an index, for an account holding embedding.manage.
- * The figures come only to an account that also reads collected documents,
- * at its own labels; the server sends none otherwise, and the pane says
- * so. Every action names what it will do before it is done, a rebuild of
- * similar meaning the most plainly, because it sends every eligible text
- * to the model endpoint again. Times are UTC, as everywhere here.
+ * Each index, where the model is, and the documents not in an index, for an account holding
+ * embedding.manage. The figures come only to an account that also reads collected
+ * documents, at its own labels; the server sends none otherwise, and the pane says so. Every
+ * action names what it will do before it is done, a rebuild of similar meaning the most
+ * plainly, because it sends every eligible text to the model endpoint again. Times are UTC,
+ * as everywhere here.
  */
 const EMB_ADM = { data: null, next: null };
 const EMB_STEP_UP_WHY = 'The similarity indexes need a sign-in from the last 15 '
@@ -34333,7 +31803,7 @@ function renderEmbeddingCard(role, box, body) {
 }
 
 /** Why a role has no index. Only a role's first index is started by the
- *  embedding pass; after a retire only Rebuild starts one (2026-09-25),
+ *  embedding pass; after a retire only Rebuild starts one,
  *  so "the pass builds the first one" would be untrue. */
 function noIndexText(role, body) {
   const retired = (body.spaces || []).some((s) => s.role === role
@@ -34589,8 +32059,7 @@ const EMB_GAP_NONE = {
 /** What an empty gap list means, and no more. The list holds failed,
  *  withheld, excluded and empty documents only: a document the pass has not
  *  reached yet has no row and is never in it, and a status filter narrows
- *  it further. "Every document you can read is in this index" was shown in
- *  both cases and was untrue in both (2026-09-25).
+ *  it further, so an empty list never means every readable document is in the index.
  *  `cov` is the index's coverage at the reader's labels, or null. */
 function embGapsEmptyText(status, cov) {
   const pending = cov && cov.pending ? cov.pending : 0;
@@ -34647,7 +32116,7 @@ function focusDualTarget() {
   card.focus({ preventScroll: true });
 }
 
-/* The officer's view (F9, 2026-09-24). A Security officer who administers
+/* The officer's view. A Security officer who administers
    nothing reads the Oversight view, which has no Administration pane, so
    #dual-body is moved into a section of its own there, after break-glass,
    the preserved samples and the collection authorities. */
@@ -34696,13 +32165,12 @@ function initDualControl() {
 
 /* --- the collection authorities waiting for a second person -------------
  *
- * 2026-09-24 (docs/00 decision 69). A collection manager records a written
- * authority and the sources under it; a security officer confirms it, and
- * each source, as the second person, and nothing is read from a source
- * before that. The officer's section is built here and mounted on the
- * deployment view only, as the preserved samples are, so it never lands in
- * a case pane. The listing needs a fresh second factor, so the sign-in is
- * asked for BEFORE the read, as it is before every confirm.
+ * A collection manager records a written authority and the sources under it; a security
+ * officer confirms it, and each source, as the second person, and nothing is read from a
+ * source before that (docs/00 decision 69). The officer's section is built here and mounted
+ * on the deployment view only, as the preserved samples are, so it never lands in a case
+ * pane. The listing needs a fresh second factor, so the sign-in is asked for before the
+ * read, as it is before every confirm.
  */
 let authorityReview = null;
 let authorityReviewGen = 0;
@@ -34937,13 +32405,12 @@ function authorityReviewRow(a, pendingList) {
 
 /* --- Admin: egress ---------------------------------------------------------
  *
- * S2 (2026-09-24; docs/00 decision 68). Where anything may
- * leave this deployment, made visible and changeable in one place: the
- * egress proxy's state, the egress profiles persona traffic leaves through
- * (their policy and their sealed exit), the integration routes and the
- * exact destinations each may reach, and the connection log the proxy
- * writes. GET /admin/egress needs egress.log.read; every write needs
- * egress.manage and a sign-in from the last 15 minutes (withStepUp).
+ * Where anything may leave this deployment, made visible and changeable in one place
+ * (docs/00 decision 68): the egress proxy's state, the egress profiles persona traffic
+ * leaves through (their policy and their sealed exit), the integration routes and the exact
+ * destinations each may reach, and the connection log the proxy writes. GET /admin/egress
+ * needs egress.log.read; every write needs egress.manage and a sign-in from the last 15
+ * minutes (withStepUp).
  *
  * An exit's address and credentials go to the server once and are sealed
  * for the proxy, which alone can open them: no field here is ever filled
@@ -35746,10 +33213,8 @@ async function loadEgressLog() {
   }
   renderList('egr-log', 'egr-log-empty', body.rows || [], egressLogRow);
   const hidden = $('egr-log-hidden');
-  /* egress-ledger-withheld-oracle (2026-10-03): the server counts the hidden
-     rows over the WHOLE log, whatever route, event or window is chosen, so the
-     sentence says so; "and N rows" under a filtered list read as hidden rows
-     that match the filter. */
+  /* The server counts the hidden rows over the whole log, whatever route, event or window is
+     chosen, so the sentence says so rather than reading as hidden rows that match the filter. */
   hidden.textContent = body.withheld
     ? 'The whole log also holds ' + countOf(body.withheld, 'row', 'rows')
       + ' you are not cleared to see. That count ignores the route and event '
@@ -35834,18 +33299,10 @@ function initEgress() {
 
 /* --- Share: who is on this case ----------------------------------------
  *
- * ux02 share-needs-raw-uuid-and-hides-result, ux16 no-user-id-for-share
- * and ux19 raw-ids-instead-of-names (2026-09-22). Share was two
- * window.prompt calls: an `iam.app_user.id` that no screen available to a
- * case owner ever showed, then a free-text role. The server's answer (who
- * it was, what it replaced, what it confers) was thrown away for
- * "Assigned", the roster endpoint had no caller, and there was no way to
- * take anyone off again.
- *
  * The panel shows the roster by name, with whether each assignment
  * actually opens the case and why not; adds a colleague by work email,
  * which the server resolves to their account id one address at a time
- * (the stored grant is still by id, so it follows the person, not the
+ * (the stored grant is by id, so it follows the person, not the
  * mailbox); names what a regrade replaced; and removes.
  */
 const CASE_ROLES = ['ANALYST', 'REVIEWER', 'CONTRIBUTOR', 'READ_ONLY', 'LIAISON'];
@@ -35854,8 +33311,7 @@ let shareReturn = null;
 /** The name a person reads for a role on this panel: the server's
  *  `*_name` beside each key, so CASE_OWNER reads as Lead investigator for
  *  every case worker and not only for an administrator, whose
- *  `/admin/roles` is the only other source (2026-09-23). The key stands in when no name
- *  came back. */
+ *  `/admin/roles` is the only other source. The key stands in when no name came back. */
 function shareRoleName(name, key) {
   return visibleText(name || key || '');
 }
@@ -35907,10 +33363,8 @@ function openShare() {
 }
 
 /** Offer Add and Remove only to a caller whose case role carries
- *  case.grant (the roster's `you_can_grant`). Every roster reader was
- *  offered both, LIAISON and READ_ONLY included, and every click ended in a
- *  403 (2026-09-23). The server still decides; this only stops the console
- *  offering what it knows will be refused. `pending` hides both without
+ *  case.grant (the roster's `you_can_grant`). The server still decides; this only stops the
+ *  console offering what it knows will be refused. `pending` hides both without
  *  the read-only line while the roster is in flight. */
 function shareCanGrant(can, pending) {
   show($('share-add-box'), can);
@@ -35987,7 +33441,7 @@ function shareRow(u, canGrant) {
   /* Sent only to a caller who can manage the roster, and only while this
      colleague opens the case through a break-glass grant rather than
      their own clearance: at that instant they drop back to "cannot open",
-     and a clearance change, not a re-share, is what fixes it (2026-09-23). */
+     and a clearance change, not a re-share, is what fixes it. */
   if (u.emergency_access_until) {
     facts.appendChild(fact('emergency access ends',
       fmtTime(u.emergency_access_until), 'warn'));
@@ -36039,12 +33493,9 @@ async function submitShare(e) {
   const payload = { email, role_key: $('share-role').value };
   const ends = $('share-expires').value;
   if (ends) {
-    /* Labelled UTC and read as UTC, as every other time typed into this
-       console is (`observedAtUtc`, Acquired at): a datetime-local carries
-       no zone, and `new Date(value)` read it in the browser's, so an owner
-       in Halifax typed 17:00 and the confirmation and the roster said
-       20:00 UTC (final review u26, 2026-09-24). toISOString keeps the
-       offset the server insists on. */
+    /* Labelled UTC and read as UTC, as every other time typed into this console is
+       (`observedAtUtc`, Acquired at): a datetime-local carries no zone, and `new Date(value)`
+       would read it in the browser's. toISOString keeps the offset the server insists on. */
     const at = new Date(ends + 'Z');
     if (Number.isNaN(at.getTime())) {
       setMsg(msg, 'That end time is not a date the browser can read.');
@@ -36084,29 +33535,25 @@ function initOpsPanes() {
     if (name === 'queue') loadIngestQueue();
     if (name === 'dead') loadDeadLetters();
     if (name === 'sources') loadSources();
-    /* Watch hits load on entry: they are case-scoped and cheap, and a
-       list that waited for Load was the one that showed the previous
-       case's answer (ux12-feeds, 2026-09-22). Documents are NOT loaded on
-       entry: that list is global rather than case-scoped and can be long,
-       so it sits behind its own Load, the way co-participation and the
-       report do. */
-    if (name === 'collected') { loadWatchHits(); loadWatches(); }   // F53
+    /* Watch hits load on entry: they are case-scoped and cheap. Documents are not loaded on
+       entry: that list is global rather than case-scoped and can be long, so it sits behind
+       its own Load, the way co-participation and the report do. */
+    if (name === 'collected') { loadWatchHits(); loadWatches(); }
     if (name === 'keys') loadKeys();
     /* The issued key's secret leaves with the Keys tab (r2 u25). */
     else clearKeySecret();
   });
   $('col-hits-refresh').addEventListener('click', loadWatchHits);
   $('col-hits-unack').addEventListener('change', loadWatchHits);
-  // F53 (2026-10-08). The watches, and the form that adds one.
+  // The watches, and the form that adds one.
   $('col-watch-refresh').addEventListener('click', loadWatches);
   $('col-watch-form').addEventListener('submit', addWatch);
   $('col-watch-kind').addEventListener('change', paintWatchSources);
   $('col-watch-source').addEventListener('change', paintWatchRef);
   $('col-doc-refresh').addEventListener('click', loadCollectedDocuments);
   $('col-doc-triage').addEventListener('change', loadCollectedDocuments);
-  /* The delivery ledger moved to Administration, Integrations (F8,
-     2026-09-24), where it is fetched on selection: it needs
-     integration.manage, which most accounts do not hold. */
+  /* The delivery ledger lives in Administration, Integrations, where it is fetched on
+     selection: it needs integration.manage, which most accounts do not hold. */
   initSubtabs('pane-ach', (name) => {
     if (name === 'assumptions') loadAssumptions();
   });
@@ -36114,12 +33561,12 @@ function initOpsPanes() {
     if (name === 'retention') { purgeDefaults(); loadRetention(); }
     if (name === 'tombstones') loadTombstones();
     if (name === 'glass') loadBreakGlass();
-    if (name === 'lookups') loadCaseLookups();   // F15.3
+    if (name === 'lookups') loadCaseLookups();
   });
   selectSamplesSub = initSubtabs('pane-samples', (name) => {
     if (name === 'queue') loadSamples();
     if (name === 'submit') fillSampleCase();
-    // F12 J. The rule sets, loaded when the subtab is opened.
+    // The rule sets, loaded when the subtab is opened.
     if (name === 'rules') loadRules();
   });
   selectDeceptionSub = initSubtabs('pane-deception', (name) => {
@@ -36143,7 +33590,7 @@ function initOpsPanes() {
     loadSamples();
   });
   $('smp-submit').addEventListener('click', submitSample);
-  // F11 M. The queue's search by hash, and the Rules subtab's refresh.
+  // The queue's search by hash, and the Rules subtab's refresh.
   wireHashSearch();
   $('rul-refresh').addEventListener('click', loadRules);
   /* Focus goes back to the Open button of the row the card was under. */
@@ -36164,13 +33611,13 @@ function initOpsPanes() {
   $('dl-feed').addEventListener('change', loadDeadLetters);
   $('src-refresh').addEventListener('click', loadSources);
   $('src-run-readiness').addEventListener('click', openReadinessFromFeeds);
-  // The Sources forms (2026-09-24).
+  // The Sources forms.
   $('src-add-form').addEventListener('submit', addSource);
   $('src-add-parser').addEventListener('change', paintSourceKinds);
   $('src-add-kind').addEventListener('change', paintSourceLabels);
   $('src-persona-form').addEventListener('submit', createPersona);
   $('sp-platform').addEventListener('change', paintPersonaIdentity);
-  $('src-tg-form').addEventListener('submit', addTelegramChat);   // F5.3
+  $('src-tg-form').addEventListener('submit', addTelegramChat);
   $('src-auth-form').addEventListener('submit', recordAuthority);
   $('sa-persona').addEventListener('change', paintAuthoritySources);
   $('sa-scope-public').addEventListener('change', paintAuthoritySources);
@@ -36184,9 +33631,9 @@ function initOpsPanes() {
   $('tomb-refresh').addEventListener('click', loadTombstones);
   $('glass-refresh').addEventListener('click', reloadGlass);
   $('glass-invoke').addEventListener('click', invokeBreakGlass);
-  /* The header chip is asked again on the analyst's own activity while a
-     grant is listed, never on a bare timer (final review C17). Capture
-     phase, so a handler that stops propagation cannot hide the press. */
+  /* The header chip is asked again on the analyst's own activity while a grant is listed,
+     never on a bare timer. Capture phase, so a handler that stops propagation cannot hide the
+     press. */
   document.addEventListener('pointerdown', recheckGlassOnActivity, true);
   document.addEventListener('keydown', recheckGlassOnActivity, true);
   wireGovernanceControls();
@@ -36194,8 +33641,8 @@ function initOpsPanes() {
   $('ach-refresh').addEventListener('click', loadAch);
   $('ach-rejected').addEventListener('change', loadAch);
   $('ach-add').addEventListener('click', addHypothesis);
-  /* Scoring (2026-09-09): the matrix cells open the chooser themselves;
-     these wire the first-row scorer and the chooser's own controls. */
+  /* Scoring: the matrix cells open the chooser themselves; these wire the first-row scorer
+     and the chooser's own controls. */
   $('ach-evidence-load').addEventListener('click', loadAchEvidenceOfSelection);
   $('ach-evidence-pick').addEventListener('change', updateAchScoreControls);
   $('ach-evidence-hyp').addEventListener('change', updateAchScoreControls);
@@ -36207,8 +33654,8 @@ function initOpsPanes() {
   $('ach-stance-scrim').addEventListener('click', (e) => {
     if (e.target === e.currentTarget) closeStanceChooser();
   });
-  /* The decision sheet (2026-09-23): hypothesis status and wording, and
-     every assumption review but a plain confirm. */
+  /* The decision sheet: hypothesis status and wording, and every assumption review but a
+     plain confirm. */
   $('ach-decide-form').addEventListener('submit', submitAchDecision);
   $('ach-decide-form').addEventListener('keydown', achDecisionKeys);
   $('ach-decide-cancel').addEventListener('click', closeAchDecision);
@@ -36218,20 +33665,16 @@ function initOpsPanes() {
 
   $('comms-pgp-form').addEventListener('submit', verifyPgp);
   $('comms-unverified-refresh').addEventListener('click', loadUnverified);
-  // comms F10, F10a, F10b and F10c.
   initCommsPgp();
   $('comms-copart-refresh').addEventListener('click', loadCoParticipation);
 
   $('rep-build').addEventListener('click', buildReport);
   $('rep-download').addEventListener('click', saveClearedReport);
   $('rep-release').addEventListener('click', releaseReport);
-  /* Changing the target invalidates what is on screen: a redaction
-     statement for AMBER next to a control set to GREEN is the shape of a
-     mistake somebody makes once. The hypotheses box is the same kind of
-     choice (it decides whether ACH statements, which often name suspects,
-     are in the file), and it had no listener, so a preview made with them
-     off could be followed by a file with them on (ux15-report,
-     2026-09-22). */
+  /* Changing the target invalidates what is on screen: a redaction statement for AMBER next
+     to a control set to GREEN is the shape of a mistake somebody makes once. The hypotheses
+     box is the same kind of choice: it decides whether ACH statements, which often name
+     suspects, are in the file. */
   $('rep-tlp').addEventListener('change', withdrawReport);
   $('rep-hypotheses').addEventListener('change', withdrawReport);
   /* The verdict was about THIS destination, ceiling and note; a changed
@@ -36243,15 +33686,14 @@ function initOpsPanes() {
   $('rep-note').addEventListener('input', withdrawReportVerdict);
 }
 
-/* ── LAB: malware samples (Phase 8, invariant 10) ─────────────────────────
+/* ── LAB: malware samples (invariant 10) ──────────────────────────────────
  *
  * "Samples never render, never execute. The binary is only ever an
  *  encrypted archive download from a SEPARATE ORIGIN."
  *
- * Everything below renders metadata through `textContent`. There is no
- * innerHTML anywhere in this section, no preview, no hex view, and no
- * iframe — so the question of which `sandbox` attributes are safe to
- * combine never arises, which is the only reliable way to answer it.
+ * Everything below renders metadata through `textContent`. There is no innerHTML anywhere in
+ * this section, no preview, no hex view and no iframe, so no `sandbox` attribute choice ever
+ * arises.
  *
  * The attacker controls `original_filename`, `source_note` and every
  * string inside `findings`. They are displayed because an analyst needs
@@ -36262,9 +33704,7 @@ let smpPolicy = null;             // cached /samples/policy
 
 /* Whether the queue spans every case this viewer can see or only the open
    case. The Lab sits in the case rail under a case header, so it lists
-   THAT case's samples unless somebody asks for more; until 2026-09-22 it
-   listed every case's and named them by a uuid prefix
-   (ux13-lab:lab-not-case-scoped, ux19-copy:lab-shows-other-case-samples). */
+   that case's samples unless somebody asks for more. */
 let smpAllCases = false;
 
 /* Everything the Lab shows is scoped to the open case now, so a case
@@ -36281,10 +33721,9 @@ onCaseSwitch(() => {
   $('smp-counts').textContent = '';
   show($('smp-empty'), false);
   show($('samples-badge'), false);
-  /* And the submit form (2026-09-23): a file, and the
-     note on where it came from, chosen on one case were sent from the
-     next case's Lab. The case choice is rebuilt for the new case when the
-     Submit tab is next opened. */
+  /* And the submit form: a file, and the note on where it came from, chosen on one case must
+     not be sent from the next case's Lab. The case choice is rebuilt for the new case when
+     the Submit tab is next opened. */
   $('smp-file').value = '';
   $('smp-note').value = '';
   clear($('smp-case'));
@@ -36296,13 +33735,8 @@ onCaseSwitch(() => {
 
 /* ── the open sample: under its row, focused, and marked ─────────────────
  *
- * ux13-lab:detail-opens-offscreen (2026-09-23). The card sat after the
- * whole queue, so with six samples it opened 400px below the fold and
- * with the server's hundred it opened thousands of pixels down; Open
- * looked like it did nothing, every further click silently replaced the
- * card, and the row it belonged to was never marked. It now opens directly
- * under the clicked row, takes focus on its heading, and the row says it
- * is the open one. Close puts focus back on that row's Open button.
+ * The card opens directly under the clicked row, takes focus on its heading, and the row
+ * says it is the open one. Close puts focus back on that row's Open button.
  *
  * The card is ONE element that moves: into the list after its row, and
  * back to its place after the list (`smpParkDetail`) before anything
@@ -36333,10 +33767,9 @@ function smpPlaceDetail() {
   }
   if (row) row.after($('smp-detail'));
   else smpParkDetail();
-  /* The list is redrawn after every action on the card (assign, record,
-     reject), and the Open button the card remembered went with the old
-     rows, so Close had nowhere to put focus and it fell to the page (the
-     verifier, 2026-09-23). The redrawn row's own button takes its place. */
+  /* The list is redrawn after every action on the card (assign, record, reject), and the
+     Open button the card remembered goes with the old rows, so the redrawn row's own button
+     takes its place as where Close puts focus. */
   if (smpOpen && row && !(smpOpen.opener && smpOpen.opener.isConnected)) {
     smpOpen.opener = row.querySelector('.smp-open') || null;
   }
@@ -36363,17 +33796,13 @@ function smpCloseDetail(restoreFocus) {
   else $('pane-samples').focus({ preventScroll: true });
 }
 
-/** The submit form's case: the open case by default, or no case at all,
- *  said in words. It was a free-text uuid field, blank by default, and a
- *  blank submit landed a sample with no case, which the case-scoped queue
- *  (ux13-lab:lab-not-case-scoped) does not list: "Quarantined as 3f9a..."
- *  and then an empty queue (2026-09-23). */
+/** The submit form's case: the open case by default, or no case at all, said in words. A
+ *  sample with no case is not listed by the case-scoped queue. */
 function fillSampleCase() {
   const select = $('smp-case');
-  /* A read-only case cannot take a sample (the server answers 409), so
-     it is not offered as the place to put one (gap-closed-case-writes,
-     2026-09-23). The record's own `read_only`, which is what
-     `caseReadOnly` trusts; every record this server sends carries it. */
+  /* A read-only case cannot take a sample (the server answers 409), so it is not offered as
+     the place to put one. The record's own `read_only`, which is what `caseReadOnly` trusts;
+     every record this server sends carries it. */
   const rec = state.caseRec;
   const code = rec && rec.read_only !== true ? rec.code : null;
   const keep = select.value;
@@ -36383,15 +33812,11 @@ function fillSampleCase() {
   opts(select, pairs, code && keep !== 'none' ? 'case' : 'none');
 }
 
-/** The rail badge counts what is WAITING on the open case: quarantined or
- *  triaged, the work nobody has picked up. A badge that counted every
- *  case's samples told an analyst on one case that another case's six
- *  samples were theirs (ux19-copy:lab-shows-other-case-samples), so it
- *  says in its title what it counts. Silent on failure, like the inbox
- *  counter: an analyst without `sample.read` gets no badge, not an error.
- *  Refused once, it is not asked again this session: `sample.read` is a
- *  global grant, and each refusal is an AUTHZ_DENIED row (2026-10-07,
- *  as `refreshFeedsBadge`).
+/** The rail badge counts what is waiting on the open case: quarantined or triaged, the work
+ *  nobody has picked up, and it says in its title what it counts. Silent on failure, like
+ *  the inbox counter: an analyst without `sample.read` gets no badge, not an error. Refused
+ *  once, it is not asked again this session: `sample.read` is a global grant, and each
+ *  refusal is an AUTHZ_DENIED row (as `refreshFeedsBadge`).
  */
 const SAMPLE_BADGE = { refusedFor: null };
 
@@ -36428,10 +33853,8 @@ function paintSampleBadge(rows) {
   show(badge, waiting > 0);
 }
 
-/* The words for each queue filter, used in the count line and in the
-   empty state. "Nothing in the queue." under a Rejected filter read as
-   "nothing was ever rejected", which is the one question the rejected
-   path exists to answer (ux13-lab:rejected-filter-always-empty). */
+/* The words for each queue filter, used in the count line and in the empty state: "Nothing
+   in the queue." under a Rejected filter would read as "nothing was ever rejected". */
 const SAMPLE_STATE_WORDS = {
   QUARANTINED: 'quarantined',
   TRIAGED: 'triaged',
@@ -36459,11 +33882,9 @@ function sampleEmptyText(wanted) {
     + ' that you are cleared to see.';
 }
 
-/** The queue. The state and the case go to the SERVER since 2026-09-22:
- *  it used to be fetched as the working set and filtered here, so three
- *  of the six filters could never show a row and a rejected sample, with
- *  the reason somebody was made to type, vanished from the console the
- *  moment it was rejected. Empty `state` means the working set. */
+/** The queue. The state and the case go to the server, which filters, so every filter can
+ *  show rows, rejected samples with their reasons included. Empty `state` means the working
+ *  set. */
 async function loadSamples() {
   const wanted = $('smp-state').value;
   const token = caseToken();
@@ -36480,8 +33901,8 @@ async function loadSamples() {
     if (caseChanged(token)) return;
     smpParkDetail();
     renderList('smp-list', 'smp-empty', [], sampleRow);
-    /* A refusal in the line, anything else beside it with a Retry: a 503
-       printed there read as the queue's answer (ux17-failure, 2026-09-23). */
+    /* A refusal in the line, anything else beside it with a Retry: a 503 printed there would
+       read as the queue's answer. */
     if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
       listRefused('smp-empty', refusalText(err, 'The sample queue needs '
         + 'sample.read. The MALWARE_ANALYST role has it with no case access '
@@ -36545,9 +33966,7 @@ function stateChip(s) {
 
 /** The case a sample belongs to, named the way the rest of the console
  *  names cases: by CODE, from the case list this viewer was given. A case
- *  missing from that list is one they cannot open, and it says so. The
- *  uuid prefix this used to print mapped to nothing anybody could read
- *  (ux19-copy:lab-shows-other-case-samples, 2026-09-22). */
+ *  missing from that list is one they cannot open, and it says so. */
 function sampleCaseFact(caseId) {
   if (!caseId) {
     const f = fact('case', 'unattached', 'muted');
@@ -36586,13 +34005,10 @@ function personFact(label, name, email) {
 
 /** The attacker's filename, boxed and escaped.
  *
- *  The bidi override is SUBSTITUTED, not merely isolated. `dir="ltr"` and
+ *  The bidi override is substituted, not merely isolated: `dir="ltr"` and
  *  `unicode-bidi: isolate` set the base direction and leave an explicit
- *  U+202E doing its job, so the first version of this rendered
- *  "harmless<RLO>fdp.exe" on screen as "harmlessexe.pdf": the CSS looked
- *  like the defence and was not one. Found by taking a screenshot and
- *  reading it. Shared by the queue row and the detail card since
- *  2026-09-22, so the card can say which file it is. */
+ *  U+202E doing its job, so "harmless<RLO>fdp.exe" would still render as "harmlessexe.pdf".
+ *  Shared by the queue row and the detail card, so the card can say which file it is. */
 function quarantinedFilename(name) {
   const shown = visibleText(name);
   const fn = el('p', 'filename-quarantine');
@@ -36613,11 +34029,8 @@ function quarantinedFilename(name) {
   return fn;
 }
 
-/* Triage gaps by the name of the check that never ran. The service writes
-   {step, reason}, and the card read `g.what || g.kind`, so every gap was
-   headed with the literal word "gap": two rows read identically and the
-   one that matters most, prohibited-content screening, was anonymous
-   (ux13-lab:triage-gap-names-dropped, 2026-09-22). */
+/* Triage gaps by the name of the check that never ran, keyed by the `step` of the
+   {step, reason} the service writes. */
 const TRIAGE_GAP_NAMES = {
   prohibited_content_screening: 'Prohibited-content screening',
   imphash: 'imphash',
@@ -36626,15 +34039,14 @@ const TRIAGE_GAP_NAMES = {
   tlsh: 'TLSH',
   yara: 'YARA',
   archive_expansion: 'Archive expansion',
-  // F13. Screened samples carry these two instead.
+  // Screened samples carry these two instead.
   prohibited_content_perceptual: 'Perceptual matching',
   prohibited_content_archive_members: 'Archive members',
 };
 const PROHIBITED_GAP = 'prohibited_content_screening';
 
-/* F13 (2026-09-24). What exact-hash screening did for this sample, on
-   its Identity card, with the sentence that stops "no match" reading as
-   "clean". */
+/* What exact-hash screening did for this sample, on its Identity card, with the sentence
+   that stops "no match" reading as "clean". */
 const EXACT_HASH_SENTENCE = 'Screening compares exact hashes against the '
   + 'lists this deployment imported. No match does not mean the material is '
   + 'lawful to hold.';
@@ -36653,10 +34065,9 @@ function screeningLine(s) {
   return line;
 }
 
-/* What each gap status means, in the card's words (F11-core G,
-   2026-09-24). A check that does not apply to this sample (not a PE, no
-   Rich header) is listed apart, under "Does not apply", and never counted
-   as a check not done. */
+/* What each gap status means, in the card's words. A check that does not apply to this
+   sample (not a PE, no Rich header) is listed apart, under "Does not apply", and never
+   counted as a check not done. */
 const GAP_STATUS_WORDS = {
   pending: 'waiting for static triage',
   skipped: 'skipped',
@@ -36689,7 +34100,7 @@ function orderedGaps(gaps) {
 }
 
 function gapSummary(gaps) {
-  /* A check that does not apply is not a check left undone (F11-core G). */
+  /* A check that does not apply is not a check left undone. */
   const list = gapsNotDone(gaps);
   const unscreened = list.some((g) => gapStep(g) === PROHIBITED_GAP);
   const others = list.length - (unscreened ? 1 : 0);
@@ -36722,16 +34133,13 @@ function dispositionChip(s) {
   return chip;
 }
 
-/** The labels a sample is HANDLED at, and where each came from.
+/** The labels a sample is handled at, and where each came from.
  *
- *  ux13-lab:label-chip-understates-handling (2026-09-23). The chip showed
- *  the sample's own classification and no compartments at all, while the
- *  queue gates on the sample's labels composed with its case's. The
- *  malware analyst holds no case access, so this chip is the only marking
- *  they see: a sample from a compartmented case read as plain AMBER, and
- *  its hash could be pasted into a vendor lookup by somebody who believed
- *  it carried no restriction. Inherited labels say so in the chip's own
- *  text, not only on hover, so a keyboard or touch reader gets it too. */
+ *  The queue gates on the sample's labels composed with its case's, and the malware analyst
+ *  holds no case access, so this chip is the only marking they see: without the case's
+ *  compartments a sample's hash could go into a vendor lookup as if unrestricted. Inherited
+ *  labels say so in the chip's own text, not only on hover, so a keyboard or touch reader
+ *  gets it too. */
 function sampleLabelChips(s) {
   const chips = el('span', 'chips');
   const tlp = s.effective_classification || s.classification;
@@ -36774,7 +34182,7 @@ function sampleRow(s) {
   head.appendChild(stateChip(s.state));
   const disposed = dispositionChip(s);
   if (disposed) head.appendChild(disposed);
-  // F11 M. Where static triage stands, on the row.
+  // Where static triage stands, on the row.
   const triaged = triageRowChip(s);
   if (triaged) head.appendChild(triaged);
   head.appendChild(sampleLabelChips(s));
@@ -36795,9 +34203,7 @@ function sampleRow(s) {
   card.appendChild(facts);
 
   if (s.original_filename) card.appendChild(quarantinedFilename(s.original_filename));
-  /* Where it came from, truncated: the full note is on the card. It was
-     collected at submission and then shown nowhere
-     (ux13-lab:provenance-never-shown). Quoted, because it is the
+  /* Where it came from, truncated: the full note is on the card. Quoted, because it is the
      submitter's text and sometimes the attacker's. */
   if (s.source_note) {
     const note = s.source_note.length > 140
@@ -36837,16 +34243,12 @@ function sampleRow(s) {
 
 function humanBytes(n) {
   if (n === null || n === undefined) return 'unknown';
-  /* One unit rule across the console: this divided by 1024 and printed KB
-     while the Evidence pane printed KiB for the same arithmetic (README
-     screenshot set review, 2026-09-23). */
+  /* One unit rule across the console: fmtBytes, as the Evidence pane uses. */
   return fmtBytes(n);
 }
 
-/** Which file, whose, from where, and in what state: the header the
- *  detail card lacked. It opened as "SAMPLE 38A19C5F4753…" and went
- *  straight to hashes, so once it was open nothing confirmed which sample
- *  an analyst was about to reject (ux13-lab:provenance-never-shown). */
+/** Which file, whose, from where, and in what state: the detail card's header, so an
+ *  analyst can confirm which sample they are about to reject. */
 function sampleProvenance(s) {
   const box = el('div', 'card sub provenance');
   box.appendChild(el('h3', 'h-xs', 'Provenance'));
@@ -36903,9 +34305,7 @@ function sampleProvenance(s) {
 /* The access ledger's rows in words. `lab.sample_access.action` is a
    closed set of seven, and VIEWED_META covers a submission, a look and a
    failed integrity check alike, so the label comes from the action AND
-   `detail.event`. The failed check is styled as the alarm it is: it
-   used to read as another harmless "VIEWED_META"
-   (ux13-lab:custody-ledger-hides-who-and-what, 2026-09-22). */
+   `detail.event`. The failed check is styled as the alarm it is. */
 const ARCHIVE_WORDS = { ZIP_INFECTED: 'password-protected ZIP' };
 
 function custodyLine(c) {
@@ -36917,7 +34317,7 @@ function custodyLine(c) {
     case 'VIEWED_META':
       if (d.event === 'submitted') return ['Submitted into quarantine', null];
       if (d.event === 'viewed') return ['Opened this record', null];
-      // F13 and F14. What screening and the sandbox worker recorded.
+      // What screening and the sandbox worker recorded.
       if (d.event === 'preserved_after_screening') {
         return ['Moved into the preservation store under a legal hold after '
           + 'a screening match', 'notable'];
@@ -36959,7 +34359,7 @@ function custodyLine(c) {
       return ['Downloaded as a ' + archiveWords
         + (d.via === 'ticket' ? ', on a one-shot ticket' : ''), 'notable'];
     case 'REJECTED': {
-      // F13. A screening match isolates; it names no reason here.
+      // A screening match isolates; it names no reason here.
       if (d.by === 'screening') {
         return ['Withdrawn by prohibited-content screening', 'alarm'];
       }
@@ -36978,7 +34378,7 @@ function custodyLine(c) {
       return ['Recorded an analysis' + (d.kind
         ? ' (' + analysisKindWords(d.kind).toLowerCase() + ')' : ''), null];
     case 'DETONATED':
-      // F14. A request to the configured sandbox names its route.
+      // A request to the configured sandbox names its route.
       if (d.mode === 'submit') {
         return ['Asked for a send to ' + (d.target || 'the sandbox')
           + (d.network_route ? ', network route ' + d.network_route : ''),
@@ -36988,13 +34388,13 @@ function custodyLine(c) {
         + (d.exposure_level ? ', exposure ' + d.exposure_level.toLowerCase() : ''),
       'notable'];
     case 'SHARED':
-      // F14. The record of a copy leaving, written before it could.
+      // The record of a copy leaving, written before it could.
       if (d.event === 'sandbox_submission') {
         return ['Sent to ' + (d.target || 'the sandbox') + ' as a '
           + archiveWords + (d.confirmed ? '' : ', not yet confirmed'), 'notable'];
       }
       return ['Shared', 'notable'];
-    // F11-core E. The product read the bytes for machine analysis.
+    // The product read the bytes for machine analysis.
     case 'SCANNED':
       return ['Read in memory by static triage, SHA-256 verified; nothing '
         + 'was written to disk or served', null];
@@ -37006,9 +34406,7 @@ function custodyLine(c) {
 function custodyPanel(rows) {
   const cust = el('div', 'card sub');
   cust.appendChild(el('h3', 'h-xs', 'Access ledger'));
-  /* Says what IS recorded. It used to promise "every look is a row" while
-     opening a sample recorded nothing; opening one now writes a row, once
-     per person per five minutes, and this names that limit. */
+  /* Says what is recorded: opening a sample writes a row once per person per five minutes. */
   cust.appendChild(el('p', 'help',
     'Append-only, and it outlives the sample. It includes each time the product read the '
       + 'bytes for automated analysis.'));
@@ -37024,8 +34422,8 @@ function custodyPanel(rows) {
     const t = el('div', 'timeline-body');
     t.appendChild(el('span', 'custody-when muted small',
       fmtTime(c.at || c.occurred_at)));
-    /* F11-core E. A row the product wrote on nobody's request names
-       nobody, and says so; a person's row still names the person. */
+    /* A row the product wrote on nobody's request names nobody, and says so; a person's row
+       still names the person. */
     if (c.actor_kind === 'SYSTEM') {
       t.appendChild(el('span', 'person is-automated', 'NocTORnal (automated)'));
     } else {
@@ -37099,9 +34497,9 @@ async function openSample(id, opener) {
     line.appendChild(copy);
     hashes.appendChild(line);
   }
-  // F11 M. What static triage computed, each copyable.
+  // What static triage computed, each copyable.
   for (const line of fuzzyHashLines(s)) hashes.appendChild(line);
-  hashes.appendChild(screeningLine(s));   // F13
+  hashes.appendChild(screeningLine(s));
   body.appendChild(hashes);
 
   /* --- what triage could not do, by the name of each check. Listed
@@ -37118,7 +34516,7 @@ async function openSample(id, opener) {
     for (const g of gaps) {
       const li = el('li', gapStep(g) === PROHIBITED_GAP ? 'gap-unscreened' : null);
       li.appendChild(el('strong', null, gapName(g)));
-      // F11-core G. The status in words, before the reason.
+      // The status in words, before the reason.
       if (GAP_STATUS_WORDS[gapStatus(g)]) {
         li.appendChild(el('span', 'gap-status gap-' + gapStatus(g),
           GAP_STATUS_WORDS[gapStatus(g)]));
@@ -37134,7 +34532,7 @@ async function openSample(id, opener) {
         + 'offence. Treat it as unscreened before you download or share it.'));
     }
   }
-  // F11-core G. What does not apply to this sample, listed last.
+  // What does not apply to this sample, listed last.
   const moot = (s.triage_gaps || []).filter((g) => gapStatus(g) === 'not_applicable');
   if (moot.length) {
     gapBox.appendChild(el('p', 'fact-k gap-na-head', 'Does not apply'));
@@ -37150,11 +34548,10 @@ async function openSample(id, opener) {
   }
   body.appendChild(gapBox);
 
-  // F11 M and F12 J. The static-triage run, its findings, YARA, and
-  // the samples like this one.
+  // The static-triage run, its findings, YARA, and the samples like this one.
   body.appendChild(sampleTriagePanel(s, data, you));
-  // Phase 8 (2026-10-02). The archive this sample was cut from, or the
-  // members cut from it, and what the expansion refused.
+  // The archive this sample was cut from, or the members cut from it, and what the expansion
+  // refused.
   const tree = archivePanel(s, data);
   if (tree) body.appendChild(tree);
   body.appendChild(similarPanel(s));
@@ -37168,9 +34565,8 @@ async function openSample(id, opener) {
   /* --- findings */
   const anal = el('div', 'card sub');
   anal.appendChild(el('h3', 'h-xs', 'Analysis'));
-  /* F11-core F. The static triage panel draws the machine STATIC and
-     YARA rows; any other machine row (a sandbox run, F14) stays here,
-     named by what produced it. */
+  /* The static triage panel draws the machine STATIC and YARA rows; any other machine row (a
+     sandbox run) stays here, named by what produced it. */
   const listed = (data.analyses || []).filter((a) => !(a.origin === 'machine'
     && (a.kind === 'STATIC' || a.kind === 'YARA' || a.kind === 'ARCHIVE')));
   if (!listed.length) {
@@ -37181,7 +34577,7 @@ async function openSample(id, opener) {
   body.appendChild(anal);
 
   body.appendChild(detonationPanel(s, data.detonations || [], you, people,
-    data.sandbox));   // F14, whether this sample may be sent
+    data.sandbox));   // whether this sample may be sent
 
   if (s.bytes_disposition === 'preserved') {
     body.appendChild(preservationPanel(s, data.preservation || {}));
@@ -37232,19 +34628,11 @@ function analysisKindWords(kind) {
 
 /* ── the lab's own work ──────────────────────────────────────────────────
  *
- * ux13-lab:no-assign-or-record-analysis (2026-09-23). The queue's filter
- * advertised Quarantined, Triaged, Assigned, In analysis and Reported, and
- * nothing in the console could move a sample along it: the card let an
- * analyst look, request a detonation that sends nothing, and reject, and
- * not do the reverse engineering the pane exists for. Recorded findings
- * came back half-hidden: the extracted C2 domains, addresses and wallets
- * (the selectors that tie a sample to actors) and the analyst's name were
- * returned and never drawn, so findings would have been kept outside the
- * system, breaking "every claim traces to evidence".
- *
- * Assign offers a list of the people who can take it (a picker, never a
- * uuid box). Record an analysis takes kind, tool, version, narrative,
- * YARA hits, a family with its required confidence, key and value
+ * Moving a sample along the queue, and recording what the analysis found, so findings stay
+ * in the system where every claim traces to evidence; the extracted C2 domains, addresses
+ * and wallets are the selectors that tie a sample to actors. Assign offers a list of the
+ * people who can take it (a picker, never a uuid box). Record an analysis takes kind, tool,
+ * version, narrative, YARA hits, a family with its required confidence, key and value
  * findings, and selectors, each with a type. */
 function sampleWorkPanel(s, you, people) {
   const box = el('div', 'card sub');
@@ -37374,7 +34762,7 @@ function parseFindingLines(text) {
 function analysisForm(s, people, msg) {
   const box = el('details', 'analysis-form');
   box.appendChild(el('summary', null, 'Record an analysis'));
-  // F12 G. "Use as family assessment" fills this form (analysisPrefill).
+  // "Use as family assessment" fills this form (analysisPrefill).
   box.dataset.derivedFrom = '';
   const form = el('div', 'stack');
   const labelled = (label, input, help) => {
@@ -37484,7 +34872,7 @@ function analysisForm(s, people, msg) {
           confidence: confidence.value || null,
           findings: parsed.findings,
           extracted_selectors: selectors,
-          // F12 G. The rule set version the assessment came from.
+          // The rule set version the assessment came from.
           derived_from_version_id: box.dataset.derivedFrom || null,
         },
       });
@@ -37502,10 +34890,9 @@ function analysisForm(s, people, msg) {
   });
   form.appendChild(save);
   box.appendChild(form);
-  /* F12 G. What "Use as family assessment" fills in: kind YARA, the
-     engine, the family the rule's metadata names, the version it came
-     from, and the confidence left EMPTY, because it is the analyst's
-     judgement and the form refuses a family without one. */
+  /* What "Use as family assessment" fills in: kind YARA, the engine, the family the rule's
+     metadata names, the version it came from, and the confidence left empty, because it is
+     the analyst's judgement and the form refuses a family without one. */
   box.prefill = (p) => {
     kind.value = 'YARA';
     tool.value = p.tool || '';
@@ -37544,7 +34931,7 @@ function analysisRow(s, a, you) {
     h.appendChild(el('span', 'chip conf-' + (a.confidence || 'LOW'),
       (a.confidence || 'LOW').toLowerCase() + ' confidence'));
   }
-  // F12 G. An assessment taken from a rule set's finding says which.
+  // An assessment taken from a rule set's finding says which.
   if (a.ruleset) {
     const from = el('span', 'chip', 'from ' + a.ruleset.key + ' v'
       + a.ruleset.version);
@@ -37554,7 +34941,7 @@ function analysisRow(s, a, you) {
   }
   row.appendChild(h);
   const f = el('div', 'facts');
-  /* F11-core F. A machine row names what produced it and no person. */
+  /* A machine row names what produced it and no person. */
   if (a.origin === 'machine') {
     f.appendChild(fact('produced by', a.produced_by || 'NocTORnal (automated)'));
   } else {
@@ -37565,7 +34952,7 @@ function analysisRow(s, a, you) {
     ? ' ' + a.tool_version : '')));
   row.appendChild(f);
   if (a.narrative) row.appendChild(el('p', 'why', visibleText(a.narrative)));
-  // F14. A sandbox row says which CAPE task and network route.
+  // A sandbox row says which CAPE task and network route.
   if (a.origin === 'machine' && a.kind === 'SANDBOX' && a.findings) {
     row.appendChild(el('p', 'help', 'CAPE task ' + findingText(a.findings.task_id)
       + ', network route ' + findingText(a.findings.network_route)));
@@ -37626,10 +35013,9 @@ function extractedSelector(s, a, x, index, you) {
         go.disabled = false;
         return;
       }
-      /* One answer whatever became of it (2026-09-23): a lab analyst holds
-         no case access, and "already an entity" or "already proposed
-         (rejected)" told them what the case held, value by value. The case
-         is named only when this viewer can open it anyway. */
+      /* One answer whatever became of it: a lab analyst holds no case access, and "already an
+         entity" or "already proposed (rejected)" would tell them what the case holds, value
+         by value. The case is named only when this viewer can open it anyway. */
       if (!r || !r.sent) {
         out.textContent = 'The server did not say it was sent.';
         go.disabled = false;
@@ -37645,9 +35031,9 @@ function extractedSelector(s, a, x, index, you) {
   return line;
 }
 
-/* ── static triage, similar samples and YARA (F11 and F12) ───────────────
+/* ── static triage, similar samples and YARA ────────────────────────────
  *
- * 2026-09-24. Static triage runs after submission, in bounded child
+ * Static triage runs after submission, in bounded child
  * processes, and records what it computed as a machine finding: the fuzzy
  * hashes on the Identity card, the run and its findings in the Static
  * triage panel, and each YARA rule set the reader may see with what it
@@ -37802,7 +35188,7 @@ function sampleTriagePanel(s, data, you) {
   return box;
 }
 
-/* Phase 8 (2026-10-02). A sample's place in an archive tree: the archive
+/* A sample's place in an archive tree: the archive
    it was cut from (or that it came from one the reader cannot see), the
    members cut from it, each opening as a sample of its own, and every
    entry the expansion refused with its reason, from the machine ARCHIVE
@@ -38202,7 +35588,7 @@ function wireHashSearch() {
   });
 }
 
-/* ── the Lab's Rules subtab (F12 J) ─────────────────────────────────── */
+/* ── the Lab's Rules subtab ────────────────────────────────────────── */
 
 let rulesGen = 0;
 
@@ -38344,8 +35730,8 @@ const BUILD_WORDS = {
   FAILED: ['did not compile', 'chip bad'],
   compiling: ['compiling', 'chip'],
   compile_failed: ['compiling failed', 'chip bad'],
-  // F12 (2026-09-24): this host's build did not verify; the listing
-  // never rebuilds from a read, the next activation or scan does.
+  // This host's build did not verify; the listing never rebuilds from a read, the next
+  // activation or scan does.
   rebuild_needed: ['needs rebuilding', 'chip warn'],
   engine_absent: ['no engine', 'chip'],
 };
@@ -38578,7 +35964,7 @@ function rulesetUploadForm(rs) {
   return box;
 }
 
-/* ── Oversight: YARA rule sets to activate (F12 J) ──────────────────────
+/* ── Oversight: YARA rule sets to activate ──────────────────────────────
  *
  * The Security Officer activates a version somebody else sponsored, and
  * writes down the licence clearance when the source asks for review. The
@@ -38804,25 +36190,21 @@ function yaraActiveRow(a) {
 
 /* ── detonation: the VM / sandbox surface ─────────────────────────────
  *
- * docs/11 is emphatic that you INTEGRATE with a sandbox rather than build
- * one, and no integration exists. So this panel records an authorisation
- * and submits nothing — and it says so on every row rather than once at
- * the top, because a reader scanning a column of "AUTHORISED" should not
- * have to remember that none of them went anywhere.
+ * docs/11: integrate with a sandbox rather than build one. A record-only request submits
+ * nothing, and says so on every row, so a reader scanning a column of "AUTHORISED" need not
+ * remember that none of them went anywhere.
  *
- * The exposure level is the decision the panel exists to slow down.
- * Submitting a sample to a public sandbox exposes the sample AND your
- * interest in it; operators watch public sandboxes for their own malware
- * and treat a hit as a signal they have been noticed, which can end an
- * operation that took months to build. That is why anything other than a
- * private instance needs a named authoriser and a written reason — a
- * database CHECK enforces it, and this form asks for it rather than
- * letting the server refuse after the fact.
+ * The exposure level is the decision the panel exists to slow down. Submitting a sample to a
+ * public sandbox exposes the sample and your interest in it: operators watch public
+ * sandboxes for their own malware, and a hit can end an operation that took months to
+ * build. So anything other than a private instance needs a named authoriser and a written
+ * reason; a database CHECK enforces it, and this form asks for it rather than letting the
+ * server refuse after the fact.
  */
 
 const EXPOSURE = [
-  // F14. A sandbox you run is still outside NocTORnal's labels, holds
-  // and retention, so the sentence no longer says nothing leaves.
+  // A sandbox you run is still outside NocTORnal's labels, holds and retention, so the
+  // sentence does not say that nothing leaves.
   ['NONE', 'Private instance: a sandbox you run',
     'A sandbox you run: the sample goes only to it, outside NocTORnal\'s '
     + 'labels, holds and retention. No authoriser required unless its network '
@@ -38844,9 +36226,8 @@ function detonationPanel(s, rows, you, people, sandboxState) {
     'Detonation / VM' + (rows.length ? ` (${rows.length})` : ''));
   box.appendChild(summary);
 
-  /* F14. With a sandbox configured, requests to it are sent by the
-     worker after any sign-off; a record-only request never is. Without
-     one, nothing here sends anything. */
+  /* With a sandbox configured, requests to it are sent by the worker after any sign-off; a
+     record-only request never is. Without one, nothing here sends anything. */
   const sb = (smpPolicy && smpPolicy.sandbox) || {};
   box.appendChild(el('p', 'help warn', sb.configured
     ? 'Requests to ' + sb.name + ' are sent by the sandbox worker, after '
@@ -38877,8 +36258,7 @@ function detonationPanel(s, rows, you, people, sandboxState) {
     return box;
   }
 
-  /* F14. The send first; recording one done elsewhere under its own
-     fold. */
+  /* The send first; recording one done elsewhere under its own fold. */
   let recordHolder = box;
   if (sb.configured) {
     box.appendChild(sandboxSendForm(s, people, sandboxState));
@@ -38923,12 +36303,9 @@ function detonationPanel(s, rows, you, people, sandboxState) {
     show(authWrap, exposure.value !== 'NONE');
   };
 
-  /* A picker of the people who can sign it off (ux13-lab:detonation-
-     authoriser-uuid, 2026-09-23): a lead investigator on the sample's case
-     who can see it, never the requester. It was a box for another
-     person's internal uuid, which no analyst has, and a mistyped but valid
-     one silently named the wrong human on the record whose whole point is
-     that a named human agreed. */
+  /* A picker of the people who can sign it off: a lead investigator on the sample's case who
+     can see it, never the requester, so the record names the human who agreed, never a
+     mistyped one. */
   const authWrap = el('div', 'stack');
   const auth = el('select', 'select');
   const signers = (people && people.detonation_authorisers) || [];
@@ -39014,9 +36391,9 @@ function detonationPanel(s, rows, you, people, sandboxState) {
       btn.disabled = false;
       return;
     }
-    /* The confirmation names the person, from the server's answer. lab-3
-       (2026-10-03): as named by the requester, not as a sign-off, because
-       the named person never acted in the product; they are told. */
+    /* The confirmation names the person, from the server's answer, as named by the requester
+       and not as a sign-off, because the named person never acted in the product; they are
+       told. */
     const signer = out.authorised_by_name || out.authorised_by_email;
     await openSample(s.id);
     banner('Detonation recorded', 'Recorded'
@@ -39026,7 +36403,7 @@ function detonationPanel(s, rows, you, people, sandboxState) {
   });
   form.appendChild(msg);
   form.appendChild(btn);
-  recordHolder.appendChild(form);   // F14
+  recordHolder.appendChild(form);
 
   exposure.addEventListener('change', paint);
   paint();
@@ -39039,7 +36416,7 @@ function detonationRow(d, after) {
   head.appendChild(el('span', 'row-title', d.target));
   head.appendChild(el('span', 'chip exposure-' + d.exposure_level,
     d.exposure_level.toLowerCase()));
-  /* F14. The status in words; "sent" names CAPE's task. */
+  /* The status in words; "sent" names CAPE's task. */
   const status = DETONATION_STATUS[d.status] || [d.status.toLowerCase(), 'chip'];
   head.appendChild(el('span', status[1], status[0]
     + (d.status === 'SUBMITTED' && d.external_ref ? ', task ' + d.external_ref : '')));
@@ -39084,7 +36461,7 @@ function detonationRow(d, after) {
   return card;
 }
 
-/* ── sending to the configured sandbox (F14, 2026-09-24) ────────────────
+/* ── sending to the configured sandbox ──────────────────────────────────
  *
  * A detonation can be SENT to one operator-configured CAPEv2. The send is
  * made by the sandbox worker, never by this page, and only the encrypted
@@ -39142,8 +36519,8 @@ function sandboxSendForm(s, people, state) {
   form.appendChild(routeField);
   const machines = sb.machines || [];
   const machine = el('select', 'select');
-  // lab-1 (2026-10-03): with a live machine listed, the API refuses a send
-  // that names none, since the sandbox could choose the live one unsigned.
+  // With a live machine listed, the API refuses a send that names none, since the sandbox
+  // could choose the live one unsigned.
   const hasLive = machines.some((m) => m.class === 'LIVE');
   const isolated = machines.find((m) => m.class !== 'LIVE');
   opts(machine, (hasLive ? [] : [['', 'the sandbox chooses']]).concat(machines.map((m) => [m.machine,
@@ -39359,13 +36736,11 @@ function signoffRow(d) {
 
 /* ── preserved samples: two people to get one back out ─────────────────
  *
- * F2, decided by the owner on 2026-09-22: a rejected sample is PRESERVED
- * under a legal hold rather than destroyed, and retrieving it needs a
- * Security Officer's written, time-boxed authorisation naming the person
- * who retrieves it. That person cannot be the Security Officer, and the
- * table refuses it as well as the server. The retrieval is the same
- * encrypted archive a download produces, fetched from the sample origin
- * on a one-shot ticket; nothing here can lift the hold.
+ * A rejected sample is preserved under a legal hold rather than destroyed, and retrieving it
+ * needs a Security Officer's written, time-boxed authorisation naming the person who
+ * retrieves it. That person cannot be the Security Officer, and the table refuses it as well
+ * as the server. The retrieval is the same encrypted archive a download produces, fetched
+ * from the sample origin on a one-shot ticket; nothing here can lift the hold.
  */
 /** The server's sentence, with the role hint only when the refusal WAS
  *  about a role. `refusalText` appends its context to every refusal, so a
@@ -39387,7 +36762,7 @@ function sampleCaseCode(caseId) {
 
 /** What the card says in place of the work a sample's read-only case
  *  refuses: assign, record an analysis, propose, request a detonation and
- *  reject (c21, 2026-09-24). Read from the row's own `case_read_only`,
+ *  reject. Read from the row's own `case_read_only`,
  *  never the open case's state: the Lab lists samples from every case, so
  *  a closed case's sample can sit under an open case and the other way
  *  round. The state is not named, because the reader may not be able to
@@ -39400,13 +36775,10 @@ function smpCaseShut() {
 
 /* ── step-up in the Lab ──────────────────────────────────────────────────
  *
- * gap-reject-step-up (owner decision, 2026-09-23). Rejecting, downloading,
- * retrieving and requesting a detonation are all gated on a sign-in from
- * the last 15 minutes. The Lab sent each request and printed the refusal,
- * which told the analyst to sign out and back in, losing the card and the
- * confirmation they had just read. It now asks for the sign-in over the
- * pane FIRST when this tab knows the gate is shut, and once more if the
- * server says so sooner, the way Account and the report pane do. */
+ * Rejecting, downloading, retrieving and requesting a detonation are all gated on a sign-in
+ * from the last 15 minutes. The Lab asks for the sign-in over the pane first when this tab
+ * knows the gate is shut, and once more if the server says so sooner, the way Account and
+ * the report pane do, so the card and its confirmation are never lost to a sign-out. */
 function smpNeedsSignIn(err) {
   return err instanceof ApiError && err.status === 403
     && /re-authenticat/i.test(err.detail || '');
@@ -39451,10 +36823,8 @@ function preservationPanel(s, p) {
     line.appendChild(el('code', 'mono selectable', s.preserved_key));
     box.appendChild(line);
   }
-  /* Where the officer does it, said here because this card is the only
-     place the lead investigator meets the control. The authorise form and
-     Revoke used to be on this card, which every reader of it was refused
-     and the officer could never open (2026-09-23). */
+  /* Where the officer does it, said here because this card is the only place the lead
+     investigator meets the control; the officer cannot open this card. */
   box.appendChild(el('p', 'help warn',
     'Retrieval needs a Security Officer\'s authorisation naming you. The '
     + 'officer grants it under Preserved samples, in Oversight beside the break-glass '
@@ -39505,14 +36875,13 @@ function preservationPanel(s, p) {
 
 /** One authorisation, as a record. `after` (the officer's list only) is
  *  what to reload once it is revoked; without it there is no Revoke,
- *  because nobody who can open the Lab card holds the verb that revokes
- *  (2026-09-23). */
+ *  because nobody who can open the Lab card holds the verb that revokes. */
 function authorisationRow(s, a, msg, after) {
   const card = el('div', 'card row-card compact');
   const head = el('div', 'row-head');
   head.appendChild(el('span', 'row-title', 'For '));
   head.lastChild.appendChild(smpPerson(a.granted_to_name, a.granted_to_email));
-  // F13. An authorisation on a matched sample is void, not expired.
+  // An authorisation on a matched sample is void, not expired.
   const status = a.live ? ['live', 'chip ok']
     : (a.void_reason ? ['void', 'chip bad']
       : (a.revoked_at ? ['revoked', 'chip bad'] : ['expired', 'chip']));
@@ -39555,11 +36924,9 @@ function authorisationRow(s, a, msg, after) {
   return card;
 }
 
-/** The Security Officer's half, drawn on the officer's own list
- *  (`preservedReviewRow`). It used to be drawn only on the Lab card, which
- *  needs sample.read, so the officer never saw it (2026-09-23). The server still refuses
- *  anybody without
- *  `sample.preserved.authorise`. `after` reloads the list. */
+/** The Security Officer's half, drawn on the officer's own list (`preservedReviewRow`),
+ *  since the Lab card needs sample.read, which the officer does not hold. The server still
+ *  refuses anybody without `sample.preserved.authorise`. `after` reloads the list. */
 function authoriseForm(s, msg, after) {
   const box = el('details', 'authorise-form');
   box.appendChild(el('summary', null, 'Authorise a retrieval (Security Officer)'));
@@ -39637,19 +37004,12 @@ function authoriseForm(s, msg, after) {
 
 /* ── the Security Officer's preserved samples ──────────────────────────
  *
- * 2026-09-23. The authorise form and Revoke were drawn
- * only on the Lab's sample card, which reads GET /samples/{id} under
- * sample.read. SECURITY_OFFICER holds no sample.read, because Security
- * Officers read no case content, and is assigned to no case, so the one
- * role allowed to authorise a retrieval got a 403 on the queue and on the
- * card and never saw the form. The two-person retrieval could not be
- * completed from the console at all.
- *
- * The officer's list lives on the deployment view `showAdmin` opens from
- * the case list, beside the break-glass review queue, and reads
- * GET /samples/preserved under the officer's own verb. It shows what an
- * authorisation is about (which sample, where it is held, which case code,
- * who has been authorised) and nothing of the sample's content.
+ * SECURITY_OFFICER holds no sample.read, because Security Officers read no case content, and
+ * is assigned to no case, so the officer's list lives on the deployment view `showAdmin`
+ * opens from the case list, beside the break-glass review queue, and reads
+ * GET /samples/preserved under the officer's own verb. It shows what an authorisation is
+ * about (which sample, where it is held, which case code, who has been authorised) and
+ * nothing of the sample's content.
  */
 let preservedReview = null;
 let preservedReviewGen = 0;
@@ -39762,9 +37122,9 @@ function preservedReviewRow(s) {
   const msg = el('p', 'msg');
   msg.hidden = true;
   const reload = () => loadPreservedReview();
-  /* F13. A sample that matched prohibited-content screening is released
-     only outside the product, on counsel's instruction: its authorisations
-     are void and nothing here authorises or revokes. */
+  /* A sample that matched prohibited-content screening is released only outside the product,
+     on counsel's instruction: its authorisations are void and nothing here authorises or
+     revokes. */
   if (s.screening_match) {
     card.appendChild(el('p', 'help warn', 'Void: matched prohibited-content '
       + 'screening. Released only outside this product, on counsel\'s '
@@ -39788,12 +37148,12 @@ function preservedReviewRow(s) {
 
 /* ── prohibited-content screening, the Security Officer's review ─────────
  *
- * F13, 2026-09-24. Every held and incoming sample is compared by exact
+ * Every held and incoming sample is compared by exact
  * md5, sha1 and sha256 with the hash lists an officer imported under a
  * recorded authority. A match leaves the Lab for everyone and for good,
  * its bytes are preserved under a legal hold, and the officer is alerted.
  * This section is the officer's record of it: the authorities, the lists,
- * and every match. The match list is label-free by an owner decision, so
+ * and every match. The match list is label-free by design, so
  * each row carries only a hash prefix, the time, the list names and what
  * happened; the full record opens only within the officer's own ceiling,
  * and it never shows a filename, a source note or anything of the case.
@@ -39816,8 +37176,8 @@ const SCREENING_NOW = {
   awaiting_preservation: ['bytes waiting to move', 'chip warn'],
   not_stored: ['nothing held', 'chip'],
   bytes_not_found: ['bytes not found, needs a review', 'chip bad'],
-  // F13 (2026-09-24). Only a review recorded after the absence ends
-  // the question, and the chip says so rather than asking again.
+  // Only a review recorded after the absence ends the question, and the chip says so rather
+  // than asking again.
   bytes_not_found_reviewed: ['bytes not found, reviewed', 'chip warn'],
 };
 const SCREENING_ALERT = {
@@ -40407,10 +37767,9 @@ function sampleActions(s) {
     + 'mail gateway, not confidentiality. It requires a fresh second '
     + 'factor, and the archive is fetched from the separate sample origin, '
     + 'never from the origin this page is served from.'));
-  /* The origin itself, not a boolean: this page is served from the
-     application origin and the bytes are not, so the button needs
-     somewhere to fetch FROM. Until 2026-09-09 it fetched this origin,
-     which the server refuses by design. */
+  /* The origin itself, not a boolean: this page is served from the application origin and
+     the bytes are not, and the server refuses a download from this origin by design, so the
+     button needs somewhere to fetch from. */
   const origin = (smpPolicy && smpPolicy.sample_origin) || null;
   const dlBtn = el('button', 'btn danger',
     origin ? 'Download encrypted archive' : 'Download: off on this deployment');
@@ -40418,10 +37777,9 @@ function sampleActions(s) {
   dlBtn.disabled = !origin;
   dlBtn.addEventListener('click', () => downloadSample(s, msg));
   dl.appendChild(dlBtn);
-  /* Said on the card, in words: a disabled button's hover text reaches
-     neither a keyboard nor a touch reader, and it named an environment
-     variable (ux13-lab:legal-banner-copy, 2026-09-23). The operator's
-     version is under Admin, Readiness and on the Handling tab. */
+  /* Said on the card, in words: a disabled button's hover text reaches neither a keyboard nor
+     a touch reader. The operator's version is under Admin, Readiness and on the Handling
+     tab. */
   if (!origin) {
     dl.appendChild(el('p', 'help', 'Downloads are off until an operator sets up a separate '
       + 'download origin. '
@@ -40430,7 +37788,7 @@ function sampleActions(s) {
   box.appendChild(dl);
 
   /* A rejection changes the sample, which its read-only case refuses; the
-     download above is a read and stays (c21, 2026-09-24). */
+     download above is a read and stays. */
   if (s.case_read_only) {
     const shut = el('div', 'stack');
     shut.appendChild(el('hr', 'rule'));
@@ -40443,13 +37801,9 @@ function sampleActions(s) {
 
   /* --- reject.
    *
-   * Until 2026-09-22 this sent `purge_bytes: true` on the first click,
-   * from an unlabelled field, under a card that did not name the sample,
-   * and the default destroyed the bytes and the key
-   * (ux13-lab:reject-one-click-destroy). Now the default preserves
-   * (F2), the field has a label, and the button opens a confirmation
-   * that names the sample and says which of preserve, destroy or record
-   * will happen. Nothing is sent until that is confirmed. */
+   * The default preserves, the field has a label, and the button opens a confirmation that
+   * names the sample and says which of preserve, destroy or record will happen. Nothing is
+   * sent until that is confirmed. */
   const rej = el('div', 'stack');
   rej.appendChild(el('hr', 'rule'));
   rej.appendChild(el('h3', 'h-xs', 'Reject'));
@@ -40544,12 +37898,10 @@ function sampleActions(s) {
     go.addEventListener('click', async () => {
       go.disabled = true;
       cancel.disabled = true;
-      /* Step-up (gap-reject-step-up, owner decision, 2026-09-23): the
-         server refuses a rejection without a sign-in from the last 15
-         minutes, because it moves the evidence into a store it cannot
-         leave without two people, or destroys it. The sign-in is asked
-         for FIRST when this tab knows the gate is shut, over the card,
-         which stays as it is; what is sent is still exactly what was
+      /* Step-up: the server refuses a rejection without a sign-in from the last 15 minutes,
+         because it moves the evidence into a store it cannot leave without two people, or
+         destroys it. The sign-in is asked for first when this tab knows the gate is shut,
+         over the card, which stays as it is; what is sent is still exactly what was
          confirmed. */
       const token = caseToken();
       let out;
@@ -40615,59 +37967,34 @@ async function copyText(text, btn) {
   }
 }
 
-/** The ONE call in this file that leaves the page's origin, on purpose.
+/** The one call in this file that leaves the page's origin, on purpose.
  *
- *  Every other request is fetch(API + ...) against the origin this page
- *  is served from, and the console's CSP was connect-src 'self' to hold
- *  exactly that. Sample bytes are the exception invariant 10 makes: they
- *  come from a separate origin or not at all, so the server names that
- *  origin in connect-src, answers this page's cross-origin request there
- *  (and only there, and only for this origin), and the URL fetched is the
- *  absolute one the ticket mint returned. Bound under its own name so the
- *  rule "fetch() is rooted at API" stays true of every call spelled
- *  fetch(, and the one deliberate exception is greppable.
+ *  Every other request is fetch(API + ...) against this page's origin, which the CSP's
+ *  connect-src holds. Sample bytes are the exception invariant 10 makes: they come from a
+ *  separate origin or not at all, so the server names that origin in connect-src, answers
+ *  this page's cross-origin request there (and only there, and only for this origin), and
+ *  the URL fetched is the absolute one the ticket mint returned. Bound under its own name so
+ *  "fetch() is rooted at API" stays true of every call spelled fetch(, and the one
+ *  deliberate exception is greppable.
  */
 const fetchFromSampleOrigin = window.fetch.bind(window);
 
-/** Mint a one-shot ticket HERE, spend it at the SAMPLE origin, then hand
- *  the browser a blob.
+/** Mint a one-shot ticket on this origin, spend it at the sample origin, then hand the
+ *  browser a blob.
  *
- *  A plain <a href> would be a GET, and both legs are POSTs on purpose: a
- *  GET that puts working malware on a disk is one a prefetcher, a link
- *  scanner or a chat unfurl can fire without a human, and the step-up
- *  this download is gated on is asked for at the mint.
- *
- *  TWO legs because no single credential can do both (2026-09-10). A
- *  `__Host-` cookie cannot reach the sample origin -- that is the POINT
- *  of the split, not a limitation of it -- so this request used to carry
- *  the login body's session token there as a Bearer, which was the whole
- *  reason a token had to sit in `state.token` where script can read it.
- *  Now `POST /samples/{id}/download-ticket` goes through `api()` on THIS
- *  origin, so it rides the cookie and the `x-csrf-token` double-submit
- *  like every other write, and what crosses is good for one sample, one
- *  redemption and sixty seconds.
- *
- *  The second leg sends NO header at all, which is not tidiness. Setting
- *  one the CORS safelist does not cover turns this into a preflighted
- *  request, and the sample process answers a preflight with
- *  `Access-Control-Allow-Headers: authorization` alone (`app.py`
- *  `_preflight`) -- so a ticket carried in a header of its own would be
- *  refused before the server ever saw the request, and would surface
- *  here as "did not complete", which is how the CSRF header did when the
- *  cookie session landed. With no header of ours and a form body
- *  (`application/x-www-form-urlencoded` is safelisted) this is a SIMPLE
- *  cross-origin request and is not preflighted at all. The ticket
- *  travels in that body for the same reason it never travels in the URL:
- *  a query string reaches the access log, the history and the Referer,
- *  and this one buys a live binary.
+ *  Both legs are POSTs: a GET that writes live malware to disk can be fired by a prefetcher,
+ *  a link scanner or a chat unfurl without a human. The mint rides the session cookie and the
+ *  CSRF header like any write (a `__Host-` cookie cannot reach the sample origin), and the
+ *  ticket is good for one sample, one redemption and sixty seconds. The second leg is a simple
+ *  request (no header of ours, a form body), because the sample process answers a preflight
+ *  with `Access-Control-Allow-Headers: authorization` alone (`app.py` `_preflight`). The
+ *  ticket travels in the body, never the URL, which reaches access logs, history and Referer.
  */
 async function downloadSample(s, msg, mint = '/download-ticket') {
-  /* `mint` is the one difference between a download and the retrieval of
-     a preserved sample (F2, 2026-09-22): the retrieval is minted at
-     '/preserved/retrieval-ticket', under `sample.preserved.retrieve` and a
-     live authorisation, and then spent at the SAME sample-origin download
-     path, because the sample process serves that path and nothing else.
-     Everything after the mint is one code path on purpose. */
+  /* `mint` is the one difference between a download and the retrieval of a preserved sample:
+     the retrieval is minted at '/preserved/retrieval-ticket', under `sample.preserved.retrieve`
+     and a live authorisation, then spent at the same sample-origin download path, the only one
+     the sample process serves. */
   const retrieval = mint !== '/download-ticket';
   /* The mint refuses an unusable split itself, with the reason. This
      asks first only so the analyst gets that reason without a round trip
@@ -40684,21 +38011,16 @@ async function downloadSample(s, msg, mint = '/download-ticket') {
   let minted;
   const token = caseToken();
   try {
-    /* Through `smpSend`: the mint is step-up gated, and the sign-in is
-       asked for over the card rather than as an instruction to sign out
-       (gap-reject-step-up, 2026-09-23). */
+    /* Through `smpSend`: the mint is step-up gated, and the sign-in is asked for over the card
+       rather than as an instruction to sign out. */
     minted = await smpSend(async () => await api('/samples/' + encodeURIComponent(s.id)
       + mint, { method: 'POST' }),
     retrieval ? 'Retrieving a preserved sample' : 'Downloading a sample',
     () => caseChanged(token));
   } catch (err) {
-    /* Through `refusalText`, so the SERVER's sentence arrives: this leg
-       carries the refusals an analyst is least able to guess at -- a
-       step-up that has expired, a clearance that does not reach this
-       sample, a split that is configured wrong -- and each of them is
-       written as a sentence there. The fallback is for a failure with no
-       `detail` at all, because an empty message box is the one answer
-       that is never right. */
+    /* The server's sentence, through `refusalText`: this leg carries the refusals an analyst
+       cannot guess (an expired step-up, a clearance that does not reach this sample, a
+       misconfigured split). The fallback is for a failure with no `detail` at all. */
     setMsg(msg, refusalText(err, '') || 'The ticket request was refused.');
     msg.className = 'msg bad';
     return;
@@ -40712,14 +38034,10 @@ async function downloadSample(s, msg, mint = '/download-ticket') {
   setMsg(msg, 'Fetching the archive…');
   let res;
   try {
-    /* `credentials: 'omit'`, spelled out: the sample origin reads no
-       cookie, the ticket is the entire credential, and this page has no
-       business offering one there. The URL is the server's own
-       (`download_url`), not one assembled here from `location.origin` --
-       assembling it is exactly how this pane came to fetch the
-       application origin, which every download refuses by design. What
-       bounds a URL taken from a response is the CSP: `connect-src` names
-       'self' and the configured sample origin and nothing else. */
+    /* `credentials: 'omit'`: the ticket is the entire credential and the sample origin reads no
+       cookie. The URL is the server's `download_url`, never assembled from `location.origin`
+       (the application origin refuses every download); the CSP `connect-src` bounds it to
+       'self' and the configured sample origin. */
     res = await fetchFromSampleOrigin(minted.download_url, {
       method: 'POST',
       body: new URLSearchParams({ ticket: minted.ticket }),
@@ -40731,10 +38049,8 @@ async function downloadSample(s, msg, mint = '/download-ticket') {
     return;
   }
   if (!res.ok) {
-    /* The sample origin's own sentence too, through the same
-       `refusalText` rather than a second spelling of "it was refused":
-       a spent or expired ticket says so and says to ask for another,
-       which is the one thing the analyst can act on. */
+    /* The sample origin's own sentence, through the same `refusalText`: a spent or expired
+       ticket says so and says to ask for another. */
     const p = await problemOf(res);
     const err = new ApiError(res.status, p.title, p.detail);
     setMsg(msg, refusalText(err, '') || p.title);
@@ -40761,19 +38077,10 @@ async function downloadSample(s, msg, mint = '/download-ticket') {
 
 /* ── the Lab's legal banner ──────────────────────────────────────────────
  *
- * ux13-lab:legal-banner-copy (2026-09-23). The banner printed its own
- * "Counsel must review this deployment." in front of the server's notice,
- * which begins with the same sentence, so it said it twice, followed by
- * "in any absolute sense" and by two environment variable names an
- * analyst can do nothing with. It could not be collapsed and took about a
- * third of a laptop screen on every visit.
- *
- * Now its summary line says what the analyst cannot do right now and who
- * to contact, the notice appears once, the settings are left to Admin,
- * Readiness (where an operator reads them), and once read the banner
- * folds to that one line and stays folded for this viewer. Browser
- * storage, because it is a per-viewer convenience: a blocked or cleared
- * store only means it opens again. */
+ * The summary line says what the analyst cannot do now and who to contact, the notice appears
+ * once, and the settings are left to Admin, Readiness. Once read, the banner folds to that line
+ * for this viewer. Browser storage, because it is a per-viewer convenience: a blocked or
+ * cleared store only means it opens again. */
 const SMP_BANNER_KEY = 'noctornal.lab.legal-banner.folded';
 
 function smpBannerFolded() {
@@ -40829,10 +38136,7 @@ async function loadSamplePolicy() {
   const fold = el('details', 'legal-fold');
   fold.open = !smpBannerFolded();
   const summary = el('summary', 'legal-summary');
-  /* A title that is not the notice's own first sentence: the banner read
-     "Counsel must review this deployment. Counsel must review this
-     deployment before it is used..." (ux19-copy raw-enums-and-polish,
-     2026-09-23). */
+  /* A title that is not the notice's own first sentence, or the banner says it twice. */
   summary.appendChild(ok ? el('strong', null, 'Sample handling')
     : el('strong', null, 'Restricted on this deployment'));
   summary.appendChild(document.createTextNode(' ' + smpStatusLine(smpPolicy)));
@@ -40847,7 +38151,7 @@ async function loadSamplePolicy() {
   facts.appendChild(fact('downloads',
     smpPolicy.sample_origin_configured ? 'from a separate origin' : 'off',
     smpPolicy.sample_origin_configured ? 'ok' : 'bad'));
-  /* F2 (2026-09-22): what a rejection does here, before anybody rejects. */
+  /* What a rejection does here, before anybody rejects. */
   const disposition = smpPolicy.rejected_sample_disposition;
   const rejectedFact = fact('rejected samples',
     disposition === 'preserve' ? 'preserved under a legal hold'
@@ -40883,14 +38187,9 @@ async function loadSamplePolicy() {
 
 /** The submit form as this deployment and this analyst allow it.
  *
- *  ux13-lab:submit-form-ignores-refusal-and-scope (2026-09-23). Submit
- *  stayed live while ingest was refused, so an analyst chose a file and
- *  uploaded up to the cap for a guaranteed refusal; the form offered no
- *  compartments, although the route takes them for exactly the sample
- *  that carries a source's fingerprints; and it offered labels the server
- *  refuses. Now: refused means disabled, with the reason and a contact in
- *  the form; the compartments offered are the analyst's own; and a label
- *  above their clearance cannot be chosen. The server still decides. */
+ *  Refused ingest disables it, with the reason and a contact in the form; the compartments
+ *  offered are the analyst's own; a label above their clearance cannot be chosen. The server
+ *  still decides. */
 function paintSubmitGate() {
   const p = smpPolicy;
   const refused = !!p && !p.policy_declared;
@@ -40990,8 +38289,8 @@ async function submitSample() {
     /* 451 is the legal refusal, and it must not read as an upload problem
        — that is the whole reason the status code is not a 400. */
     const legal = err instanceof ApiError && err.status === 451;
-    /* F13. A prohibited-content match is its own 451: the server's
-       sentence, as a refusal, and no card is opened. */
+    /* A prohibited-content match is its own 451: the server's sentence, as a refusal, and no
+       card is opened. */
     const matched = legal && /prohibited-content hash list/.test(err.detail || '');
     setMsg(msg, (legal ? 'Refused for legal reasons. ' : '')
       + refusalText(err, ''));
@@ -41008,45 +38307,28 @@ async function submitSample() {
 
 /* ── live change hints ────────────────────────────────────────────────
  *
- * Until this existed there was no timer anywhere in this file. Two
- * analysts on one case each saw the graph as it was when they opened it,
- * and a merge one of them performed was invisible to the other until a
- * manual refresh — in a tool whose entire premise is a shared picture.
- *
- * The socket carries NO case content. An event says "case X changed, kind
- * node" and the client refetches through the ordinary gated endpoints. So
- * nothing here has to reason about classifications or compartments, which
- * is the point: that filtering has been got wrong in five separate places
- * in this codebase already.
- *
- * It is also entirely optional. If the socket will not connect the console
- * behaves exactly as it did before — the analyst refreshes — and the
- * status dot says so rather than pretending to be live. A push UI that
- * silently stops pushing is worse than one that never pushed, because
- * people stop refreshing.
+ * The socket carries no case content: an event says "case X changed, kind node" and the client
+ * refetches through the ordinary gated endpoints, so nothing here reasons about classifications
+ * or compartments. It is optional: if the socket will not connect the analyst refreshes, and
+ * the status dot says so rather than pretending to be live.
  */
 
 let _ws = null;
 let _wsRetry = 0;
 let _wsTimer = null;
 
-/** Coalesce a burst. A bulk import fires one event per statement, and an
- *  import is many statements; refetching the projection per event would
- *  turn somebody else's write into our own denial of service.
+/** Coalesce a burst: a bulk import fires one event per statement, and refetching per event
+ *  would turn somebody else's write into our own denial of service.
  *
- *  Both refetches ask `signedIn()` when they fire, not only when they
- *  were scheduled. One that lands after a sign-out would 401 with no
- *  analyst in the tab, which `_fetch` answers with a "Session ended"
- *  banner over the sign-in form the analyst just asked for; one that
- *  lands under the lapsed sheet re-reports the lapse (final review C20,
- *  2026-09-23, which made a held refetch fire on the click of Sign out). */
+ *  Both refetches check `signedIn()` when they fire, not only when scheduled: one landing after
+ *  a sign-out would 401 into a "Session ended" banner over the sign-in form, and one under the
+ *  lapsed sheet would re-report the lapse. */
 const _refetchSoon = debounce(async () => {
   if (!state.caseId || !signedIn()) return;
   try {
     await loadCaseGraph();
     await refreshSociogram();
-    /* Another analyst's link or retraction changes what an exhibit backs
-       (c13, 2026-09-24). */
+    /* Another analyst's link or retraction changes what an exhibit backs. */
     await reloadRegisterIfShown();
   } catch (_e) {
     /* A failed refetch is not worth a banner: the next event or a manual
@@ -41054,42 +38336,29 @@ const _refetchSoon = debounce(async () => {
   }
 }, 900);
 
-/* A notification arriving refreshes the open list as well as the badge
-   (ux08-triage:stale-badges-and-list, 2026-09-23): the rail went to "1"
-   while the pane in front of the analyst still said "Nothing waiting." */
+/* A notification refreshes the open list as well as the badge, so the pane does not say
+   "Nothing waiting." under a badge that says otherwise. */
 const _badgeSoon = debounce(() => {
   if (!signedIn()) return;
   refreshInboxBadge();
   if (inboxOnScreen()) loadInbox();
 }, 400);
 
-/* The triage queue changed: a capture, a feed, a contact block, another
-   analyst's disposition (`proposals.announce`, ux08-triage:stale-badges-
-   and-list, 2026-09-23). The Triage badge is the one signal that work is
-   waiting, and until this it moved only when the case was reopened. */
+/* The triage queue changed: a capture, a feed, a contact block, another analyst's disposition
+   (`proposals.announce`). The Triage badge is the one signal that work is waiting. */
 const _triageSoon = debounce(() => {
   if (!state.caseId || !signedIn()) return;
   loadTriage();
   refreshWaiting();
 }, 400);
 
-/* Presence (final review C20, 2026-09-23). Every refetch above is a
- * request nobody at this desk asked for, and every request slides the
- * session's idle window: on the server, where `deps.current_user`
- * touches the session, and here, in `noteSessionActivity`. On a case
- * other analysts were editing, their changes alone kept an unattended
- * console signed in until the 12-hour limit, and the 30-minute idle
- * expiry and its warning never came.
+/* Presence. Every refetch above is a request nobody at this desk asked for, and every request
+ * slides the session's idle window (`deps.current_user` on the server, `noteSessionActivity`
+ * here), so other analysts' edits alone would keep an unattended console signed in.
  *
- * So the channel stops asking once nobody has touched this page for five
- * minutes. A change that arrives then is held, the dot says so, and the
- * next key, click, wheel or pointer movement loads it; a socket that
- * drops meanwhile is reopened then too, because its handshake slides the
- * session as well. The last request made without the analyst therefore
- * leaves at most five minutes after they did, and the idle expiry falls
- * at most 35 minutes after it. Pointer movement counts, as it does for
- * the operating system's own idle lock: an analyst reading the graph with
- * a hand on the mouse is at the desk. */
+ * After five minutes with no key, click, wheel or pointer movement, a change is held and the
+ * dot says so; the next input loads it and reopens a dropped socket, whose handshake slides
+ * the session too. The idle expiry falls at most 35 minutes after the analyst left. */
 const LIVE_AWAY_MS = 5 * 60 * 1000;
 let _lastPresence = Date.now();
 let _presenceWatched = false;
@@ -41147,18 +38416,12 @@ function onLiveChange(msg) {
   else _refetchSoon();
 }
 
-/* One sentence per state, and no per-call override: the only caller that
-   ever passed one was `connectLive` refusing to open a socket for a
-   cookie-only session, which it no longer does. A parameter kept for a
-   caller that has gone is a parameter the next person fills in with a
-   guess. */
 function liveStatus(state_) {
   const dot = $('live-dot');
   if (!dot) return;
-  /* 'away' is drawn as 'off' (final review C20, 2026-09-23): the socket
-     is up, but nothing on screen moves until the analyst is back, and a
-     dot that stays lit over a picture that has stopped is the silent
-     stop this dot exists to prevent. */
+  /* 'away' is drawn as 'off': the socket is up but nothing on screen moves until the analyst
+     is back, and a lit dot over a stopped picture is the silent stop this dot exists to
+     prevent. */
   dot.className = 'live-dot live-'
     + (state_ === 'away' || state_ === 'ended' ? 'off' : state_);
   dot.title = {
@@ -41171,46 +38434,25 @@ function liveStatus(state_) {
     away: 'Paused while nobody is using this console, so that it can still '
       + 'time out. Changes made meanwhile load on your next click, key press '
       + 'or mouse movement.',
-    /* The server closed the socket because the session behind it ended
-       (ux01-firstrun:live-dot-green-on-dead-session, 2026-09-23). */
+    /* The server closed the socket because the session behind it ended. */
     ended: 'Signed out. Your session has ended, so nothing arrives live '
       + 'until you sign in again.',
   }[state_] || '';
 }
 
-/** Open the socket. NOT gated on `state.token` (2026-09-10): the upgrade
- *  is an ordinary HTTP request until the server switches protocols, so
- *  the browser attaches `__Host-session` to it, and `_handshake` in
- *  `routers/live.py` now reads that cookie in preference to the frame.
- *  A session restored from the cookie after a reload therefore goes live
- *  like any other; the gate that used to stand here refused to open a
- *  socket the server would have accepted, and the reason it printed --
- *  "sign out and in again to go live" -- is now deleted rather than
- *  demoted, because a stale sentence that sounds informed is worse than
- *  the plain "not live" the dot already carries. */
 /** The close reason `routers/live.py` sends when the session behind a
  *  socket has ended (`SESSION_ENDED_REASON`, held equal by a test). */
 const LIVE_SESSION_ENDED = 'session ended';
 
-/** A policy close that says the SESSION behind the socket ended: the dot
- *  says signed out and the in-place sign-in is offered now, rather than a
- *  green "Live" standing until a colleague's edit fires a refetch into a
- *  401 at a moment of their choosing
- *  (ux01-firstrun:live-dot-green-on-dead-session, 2026-09-23).
+/** A policy close that says the session behind the socket ended: the dot says signed out and
+ *  the in-place sign-in is offered now, rather than a green "Live" lasting until a refetch 401s.
  *
- *  Which session ended is asked before anything is said. The socket
- *  authenticated with the cookie its upgrade carried, and a sign-in (a
- *  renewal, a step-up, another tab's) replaces that cookie while the old
- *  session lives on to its own timeout. `relinkLive` moves the socket
- *  across when this tab hears of the sign-in; when it did not, the close
- *  is about a session this tab no longer uses, and taking it at its word
- *  put an analyst whose session was alive under the sign-in sheet
- *  (verifier, 2026-09-23). So: this tab's own session is asked
- *  (`liveSessionStillOurs`), and only a session the server refuses, or
- *  one that is now another account's, is a lapse. One the server confirms
- *  gets the socket reopened on it, once a minute at most, so a server
- *  that says both things cannot make a loop of it. One the server could
- *  not be asked about leaves the dot off, and the next request finds out. */
+ *  The socket authenticated with the cookie its upgrade carried, and a sign-in (a renewal, a
+ *  step-up, another tab's) replaces that cookie while the old session lives on, so the close
+ *  may be about a session this tab no longer uses. This tab's own session is asked first
+ *  (`liveSessionStillOurs`): only a refused session, or one now another account's, is a lapse.
+ *  A confirmed one gets the socket reopened, at most once a minute so a server that says both
+ *  things cannot loop; one that could not be asked leaves the dot off. */
 async function noteLiveSessionEnded(event) {
   if (!event || event.code !== 1008 || event.reason !== LIVE_SESSION_ENDED) return;
   if (!signedIn()) return;
@@ -41240,13 +38482,9 @@ async function noteLiveSessionEnded(event) {
 const LIVE_RELINK_MS = 60 * 1000;
 let _liveRelinkedAt = 0;
 
-/** Whether the session this tab now holds still answers, and for the same
- *  analyst: true, false (refused, or someone else's), or null when the
- *  server could not be asked. Raw and bounded, because nothing waits on
- *  it but the dot and the busy bar has no business showing it; met with
- *  the session's bookkeeping like any raw request (`sessionRefusedRaw`):
- *  an answer slides this tab's idle clock as it slid the session, and a
- *  401 opens the in-place sign-in. */
+/** Whether the session this tab holds still answers, for the same analyst: true, false (refused,
+ *  or someone else's), or null when the server could not be asked. Raw and time-bounded, since
+ *  only the dot waits on it, with the usual session bookkeeping (`sessionRefusedRaw`). */
 async function liveSessionStillOurs(userId) {
   const signal = typeof AbortSignal === 'function'
     && typeof AbortSignal.timeout === 'function'
@@ -41265,14 +38503,10 @@ async function liveSessionStillOurs(userId) {
   }
 }
 
-/** A sign-in replaced the session cookie, and this tab is in a case with a
- *  socket open or on its way back: reopen it, so it rides the session in
- *  the cookie rather than the one it was opened on, which the server now
- *  checks on every ping and will close as ended within minutes of a
- *  renewal, or at its idle limit after a step-up (verifier of
- *  ux01-firstrun:live-dot-green-on-dead-session, 2026-09-23). A socket
- *  held for an absent analyst (`_liveHeld.reconnect`) is left alone: it
- *  reopens on whatever cookie is current when they are back. */
+/** A sign-in replaced the session cookie: reopen this case's socket so it rides the new
+ *  session, because the server checks the one it was opened on at every ping and closes it as
+ *  ended. A socket held for an absent analyst (`_liveHeld.reconnect`) is left alone: it reopens
+ *  on whatever cookie is current when they are back. */
 function relinkLive() {
   if (!state.caseId) return;
   if (_ws || _wsTimer) connectLive();
@@ -41293,19 +38527,12 @@ function connectLive() {
   _ws = ws;
 
   ws.addEventListener('open', () => {
-    /* The frame is REQUIRED of everyone, because the case id has nowhere
-       else to go: a hello without one subscribes to notifications alone.
-       The credential is the cookie the browser just attached to the
-       upgrade, so `token` is sent only when this tab actually holds one
-       -- a console the browser refused the Secure pair on (plain HTTP,
-       non-localhost), where there IS no cookie for `_handshake` to
-       prefer. Absent rather than null: a null would still be a token
-       field this page did not need to fill.
-
-       Never the URL, on any path. A URL lands in proxy logs, browser
-       history and Referer, and this one would carry a session token;
-       WebSocket has no header API in a browser, so the first frame is
-       the only place left. */
+    /* The hello frame is required because the case id has nowhere else to go (without one it
+       subscribes to notifications alone). The credential is the cookie the browser attached to
+       the upgrade, which `_handshake` in `routers/live.py` prefers to the frame; `token` is sent
+       only when this tab holds one, where the browser refused the Secure cookie pair (plain
+       HTTP, non-localhost). Never the URL, which lands in proxy logs, history and Referer: a
+       browser WebSocket has no header API, so the first frame is the only place left. */
     const hello = { case_id: state.caseId };
     if (state.token) hello.token = state.token;
     ws.send(JSON.stringify(hello));
@@ -41323,20 +38550,16 @@ function connectLive() {
     if (_ws !== ws) return;      // closed on purpose (`disconnectLive`)
     _ws = null;
     liveStatus('off');
-    /* `1008` is the policy close the server sends for a bad token, a
-       revoked assignment or a refused hello: the server has decided, and
-       retrying looks like an attack in the audit log. Until 2026-09-09
-       this comment said exactly that while the handler ignored the code
-       and retried anyway. Every other close (a dropped connection, a
-       restart, the pre-accept refusal a browser reports as 1006) is
-       reconnected with a backoff, and given up after a while rather than
-       hammering a server that may be down. */
+    /* `1008` is the policy close for a bad token, a revoked assignment or a refused hello: the
+       server has decided, and retrying looks like an attack in the audit log. Every other close
+       (a dropped connection, a restart, a pre-accept refusal reported as 1006) reconnects with a
+       backoff and gives up after a while. */
     if (event && event.code === 1008) return;
     /* The session, not the token: this asks whether there is still
        anything to reconnect FOR, and a null token stopped meaning "no
        session" when the socket started taking the cookie. */
     if (!signedIn() || _wsRetry >= 6) return;
-    if (liveAway()) { _liveHeld.reconnect = true; return; }   // C20
+    if (liveAway()) { _liveHeld.reconnect = true; return; }
     const delay = Math.min(30000, 1000 * Math.pow(2, _wsRetry));
     _wsRetry += 1;
     _wsTimer = setTimeout(connectLive, delay);
@@ -41350,18 +38573,11 @@ function connectLive() {
   ws.addEventListener('error', () => { /* `close` follows; handled there */ });
 }
 
-/** Close this tab's socket on purpose: a case switch (`connectLive`), a
- *  lapse, a sign-out. `_ws` is let go BEFORE the close, and the socket's
- *  close handler returns for any socket that is no longer `_ws`. It used
- *  to reconnect it: the close event arrives after this has cleared the
- *  retry timer, so every case switch after the first left a loop that
- *  closed the new socket and opened another about once a second, for as
- *  long as the tab lived: measured on 2026-09-23 at 23 sockets in the 23
- *  seconds after a second case was opened. Each handshake slides the
- *  session on the server, so a console that had opened two cases never
- *  reached its idle expiry at all (final review C20). The dot is set
- *  here for the same reason: the handler no longer does it for these
- *  sockets. */
+/** Close this tab's socket on purpose: a case switch (`connectLive`), a lapse, a sign-out.
+ *  `_ws` is let go before the close, and the close handler ignores any socket that is no longer
+ *  `_ws`: its close event arrives after the retry timer is cleared, and reconnecting it would
+ *  loop, each handshake sliding the session so the console never idles out. The dot is set
+ *  here because the handler skips these sockets. */
 function disconnectLive() {
   if (_wsTimer) { clearTimeout(_wsTimer); _wsTimer = null; }
   if (_ws) {
@@ -41374,16 +38590,13 @@ function disconnectLive() {
 
 async function boot() {
   wire();
-  /* A tab open across the 2026-09-09 upgrade still holds the previous
-     build's bearer token in sessionStorage, readable by any script on
-     the origin. Remove it; nothing reads it any more. */
+  /* A tab open across an upgrade may still hold an older build's bearer token in
+     sessionStorage, readable by any script on the origin. Remove it; nothing reads it now. */
   try { sessionStorage.removeItem(LEGACY_TOKEN_STORAGE); } catch (_e) { /* storage blocked */ }
   const notice = await adoptSessionFromFragment();
-  /* Always attempted, not only with a token in hand: after a reload the
-     session is the HttpOnly cookie, which this script cannot see, so the
-     only way to learn whether one exists is to ask /auth/me with it.
-     `startApp` refuses a session that answers there without its readable
-     half (`halfSession`), with its own banner. */
+  /* Always attempted: after a reload the session is the HttpOnly cookie, which this script
+     cannot see, so /auth/me is the only way to learn whether one exists. `startApp` refuses a
+     session without its readable half (`halfSession`), with its own banner. */
   let up = false;
   try {
     await startApp();
@@ -41408,28 +38621,16 @@ async function boot() {
 
 /* --- session: idle warning, in-place sign-in, resume ------------------
  *
- * expiry-drops-context (2026-09-22). The server ends a session after 30
- * minutes without a request and 12 hours after sign-in
- * (`security/sessions.py`). Nothing here warned, so the analyst learned
- * of it by clicking Save; `_fetch` then unmounted the app, forgot the
- * case, and the banner did not say the Save had not happened. Now:
+ * The server ends a session after 30 minutes without a request and 12 hours after sign-in
+ * (`security/sessions.py`). `noteSessionActivity` records every answered request and a
+ * one-second clock warns five minutes before either limit. At the limit, or on a 401
+ * mid-session, `sessionLapsed` puts a sign-in for the same account over the app, so the case,
+ * pane, selection and form contents stay; if the app is torn down anyway, `rememberResume`
+ * keeps the case and pane for the same analyst's next sign-in.
  *
- * - `noteSessionActivity` records every answered request, and a
- *   one-second clock shows a warning five minutes before either limit;
- * - at the limit, or on a 401 mid-session, `sessionLapsed` puts a sign-in
- *   OVER the app: case, pane, selection and form contents stay, and the
- *   sheet says whether the last action was saved;
- * - signing in there must be the same account (the email is fixed), and
- *   the app carries on where it was;
- * - if the app is torn down anyway ("Sign in as someone else", a reload),
- *   `rememberResume` keeps the case and pane for the same analyst's next
- *   sign-in, through the `#case=`/`#tab=` deep-link path that exists.
- *
- * Several tabs share one cookie session, so they share activity too, over
- * a BroadcastChannel: a tab left open behind the one being worked in must
- * not declare a session dead that the other is keeping alive. The client
- * never polls to find out; a request to ask would itself slide the idle
- * window and the timeout would never fire.
+ * Tabs share one cookie session, so they share activity over a BroadcastChannel: a tab behind
+ * the one being worked in must not declare the session dead. The client never polls, because a
+ * request to ask would itself slide the idle window.
  */
 const IDLE_WARN_MS = 5 * 60 * 1000;
 const RESUME_KEY = 'noctornal.resume';
@@ -41495,11 +38696,9 @@ function adoptStepUp(me, seconds) {
   if (Number.isFinite(s)) SESSION.stepUpUntil = Date.now() + s * 1000;
 }
 
-/** True when a step-up gated request would be refused now (with a
- *  30-second margin for the request's own trip). Asking for the sign-in
- *  first spares a doomed request, which on POST /auth/recovery-codes
- *  spends a token of its rate limit even when refused (fix round,
- *  2026-09-22). */
+/** True when a step-up gated request would be refused now (with a 30-second margin for the
+ *  request's own trip). Asking for the sign-in first spares a doomed request, which on
+ *  POST /auth/recovery-codes spends a token of its rate limit even when refused. */
 function stepUpStale() {
   return SESSION.stepUpUntil !== null && Date.now() > SESSION.stepUpUntil - 30000;
 }
@@ -41515,32 +38714,23 @@ function startSessionClock() {
   }
 }
 
-/** One-time secrets on screen that belong to the session that showed
- *  them: this analyst's new recovery codes (Account), and the password,
- *  TOTP secret and QR code an administrator was just issued for someone
- *  else (Admin). Nothing ever cleared the Admin card: a sign-out, or
- *  "Sign in as someone else" on a lapsed sheet, left it in the Admin pane
- *  for the next analyst signed in on this tab, whose rail offers Admin
- *  inside any case, and a created account's password, with the TOTP secret
- *  beside it, is live until its owner replaces it (final review C4,
- *  2026-09-23). It opens no session since c8 (2026-09-24), but whoever
- *  holds it can still choose that account's password. Shown as well as
- *  emptied, because a lapse hides the Admin card (`sessionLapsed`) and
- *  the next card an administrator is issued must be seen. First run's
- *  card is not here: it is shown before there is a session, and it has
- *  rules of its own (`forgetFirstRunSecrets`). */
+/** Clear the one-time secrets on screen that belong to the session that showed them: this
+ *  analyst's new recovery codes (Account), and the password, TOTP secret and QR code an
+ *  administrator was just issued for someone else (Admin), with which whoever holds them can
+ *  choose that account's password. The Admin card is shown as well as emptied, because a lapse
+ *  hides it (`sessionLapsed`) and the next card issued must be seen. First run's card has rules
+ *  of its own (`forgetFirstRunSecrets`). */
 function clearSessionSecrets() {
   clear($('account-codes-out'));
   clear($('adm-creds'));
   show($('adm-creds'), true);
-  /* And what was typed into Account's password form (2026-09-23): a
-     current password left in a hidden field is the next person's. */
+  /* And what was typed into Account's password form: a current password left in a hidden
+     field is the next person's. */
   $('account-pw-current').value = '';
   $('account-pw-new').value = '';
   $('account-pw-again').value = '';
   $('account-pw-code').value = '';
-  /* An ingest key issued on the Keys tab (ux12-feeds:keys-tab-read-only,
-     2026-09-23): the same one-time rule as the Admin card. */
+  /* An ingest key issued on the Keys tab: the same one-time rule as the Admin card. */
   clear($('key-secret-out'));
 }
 
@@ -41555,8 +38745,7 @@ function stopSessionClock() {
   SESSION.mode = null;
   hideIdleWarning();
   show($('reauth-scrim'), false);
-  /* The sheet is taken down here without `closeReauth`, so its fields
-     are emptied here too (2026-09-23). */
+  /* The sheet is taken down here without `closeReauth`, so its fields are emptied here too. */
   $('reauth-password').value = '';
   $('reauth-totp').value = '';
   endReauthChange();                 // and a held one-time password
@@ -41575,13 +38764,9 @@ function onSessionMessage(event) {
   if (m.t === 'activity' && m.at > SESSION.lastActivity) {
     SESSION.lastActivity = m.at;
   } else if (m.t === 'renewed') {
-    /* Another tab signed the same analyst in afresh. The cookie pair is
-       per browser, so this tab already holds the new session, lapsed or
-       not, and counts down ITS limits from now on. Until the fix round
-       of 2026-09-22 only a lapsed tab listened, and one that had not
-       lapsed kept the replaced session's 12-hour deadline: it warned, and
-       then covered itself with a sign-in, at a limit that no longer
-       applied. Any sheet open here is answered by that sign-in too. */
+    /* Another tab signed the same analyst in afresh. The cookie pair is per browser, so this
+       tab already holds the new session, lapsed or not, and counts down its limits from now
+       on. Any sheet open here is answered by that sign-in too. */
     adoptStepUp(null, m.stepUpIn);
     sessionRenewed(m.expiresIn);
     const waiters = SESSION.confirmWaiters.splice(0);
@@ -41614,12 +38799,9 @@ function tickSession() {
   show($('idle-stay'), idle);
   show($('idle-renew'), !idle);
   show(box, true);
-  /* The seconds are for the eye. The alert region beside them is rewritten
-     only when the whole minute changes, because a live region rewritten
-     every second is read out every second, for five minutes, over
-     whatever the analyst is listening to (fix round, 2026-09-22).
-     Written after the box is shown, so the region is in the tree when
-     its text arrives. */
+  /* The seconds are for the eye. The alert region beside them is rewritten only when the whole
+     minute changes, because a live region rewritten every second is read out every second.
+     Written after the box is shown, so the region is in the tree when its text arrives. */
   const mins = Math.ceil(left / 60000);   // "under", so never an overstatement
   const said = idleWarningText(idle, mins <= 1 ? 'under a minute'
     : 'under ' + mins + ' minutes');
@@ -41646,17 +38828,13 @@ function hideIdleWarning() {
   $('idle-warn-say').textContent = '';
 }
 
-/** The session is over, or this tab believes it is: put the sign-in over
- *  the app instead of tearing the app down.
+/** The session is over, or this tab believes it is: put the sign-in over the app instead of
+ *  tearing the app down.
  *
- *  `cause` is 'server' for a 401, 'idle' or 'absolute' for this tab's
- *  own clock. Unlike `endSession`, neither deletes the readable CSRF
- *  cookie. It is per browser, not per tab: another tab may already have
- *  signed back in and set a new one, which a late 401 here would delete,
- *  leaving that tab a half session (`halfSession`). A request that goes
- *  out behind the sheet on the old pair only 401s again, the sign-in in
- *  the sheet replaces the pair, and leaving the sheet goes through
- *  `endSession`, which drops it. */
+ *  `cause` is 'server' for a 401, 'idle' or 'absolute' for this tab's own clock. Unlike
+ *  `endSession`, this never deletes the readable CSRF cookie: it is per browser, and another tab
+ *  may already have signed back in and set a new one, which deleting would leave a half session
+ *  (`halfSession`). Leaving the sheet goes through `endSession`, which drops it. */
 function sessionLapsed(info) {
   if (info.unsafe) SESSION.lapseUnsafe = true;
   else if (info.cause === 'server') SESSION.lapseMissedRead = true;
@@ -41681,12 +38859,10 @@ function sessionLapsed(info) {
      the in-place sign-in (`sessionRenewed`). */
   SESSION.accountWasOpen = !$('account-scrim').hidden;
   show($('account-scrim'), false);
-  /* The Admin card of another account's one-time credentials is hidden
-     for a reason of its own: a lapse is usually an empty desk, and the
-     scrim over the app is translucent. Hidden, not cleared: the same
-     administrator signing back in here gets it back (`sessionRenewed`),
-     and anyone else never sees it (`clearSessionSecrets`). Final review
-     C4, 2026-09-23. */
+  /* The Admin card of another account's one-time credentials is hidden: a lapse is usually an
+     empty desk, and the scrim over the app is translucent. Hidden, not cleared: the same
+     administrator signing back in gets it back (`sessionRenewed`), and anyone else never sees
+     it (`clearSessionSecrets`). */
   show($('adm-creds'), false);
   hideIdleWarning();
   rememberResume();
@@ -41696,11 +38872,8 @@ function sessionLapsed(info) {
   openReauth('lapsed', info);
 }
 
-/** Why a session ended, from the server's terse reason, in words. The
- *  sign-in sheet printed "Your session has ended (the server said: no
- *  session token)." (verifier of ux19-copy developer-speak-in-copy,
- *  2026-09-23). The server's own words stay in the line's tooltip for
- *  anyone who must quote them. */
+/** Why a session ended, from the server's terse reason, in words. The server's own words stay
+ *  in the line's tooltip for anyone who must quote them. */
 function lapseReason(detail) {
   const said = String(detail || '');
   if (/no session token/i.test(said)) {
@@ -41723,9 +38896,8 @@ function describeLapse(info) {
   }[SESSION.lapseCause || info.cause] || lapseReason(info.detail);
   $('reauth-reason').textContent = reason;
   $('reauth-reason').title = info.detail ? 'The server said: ' + info.detail : '';
-  /* Said of what is actually behind the sheet. "All cases" clears the
-     case before its read, so a 401 there used to promise a case and pane
-     that were already gone (fix round, 2026-09-22). */
+  /* Said of what is actually behind the sheet: "All cases" clears the case before its read, so
+     a 401 there must not promise a case and pane. */
   const behind = state.caseId ? 'your case, pane' : 'the case list';
   let after = '';
   if (SESSION.lapseMissedRead) {
@@ -41780,14 +38952,12 @@ function openReauth(mode, info) {
 
 function closeReauth() {
   show($('reauth-scrim'), false);
-  /* The fields go with the sheet. Only opening it or a sign-in that
-     worked emptied them, so a password typed and then cancelled, or
-     left behind by "Sign in as someone else", stayed in the hidden input
-     for whoever used this tab next (2026-09-23). */
+  /* The fields go with the sheet: a password typed and then cancelled, or left behind by "Sign
+     in as someone else", would stay in the hidden input for whoever uses this tab next. */
   $('reauth-password').value = '';
   $('reauth-totp').value = '';
-  /* And a one-time password held for the new-password stage, which still
-     signs in until it is replaced (2026-09-24). */
+  /* And a one-time password held for the new-password stage, which still signs in until it is
+     replaced. */
   endReauthChange();
   /* A step-up sheet opened from Account returns to Account, which is
      modal too: the app stays inert under it. */
@@ -41807,19 +38977,12 @@ function guardUnsaved(event) {
 
 /* --- a new password, inside the sign-in sheet ---------------------------
  *
- * 2026-09-24. An administrator's reset signs out every
- * session, so a person who was working meets the lapse sheet, which says
- * that their case, pane and anything they had typed are still behind it.
- * They type the one-time password they were given, and the server answers
- * password-change-required. That answer used to end the session and hand
- * over to the sign-in page's new-password card, whose `startApp` rebuilt
- * the view from the case list, so a half-written review note went without
- * a word, on the one lapse path that broke the sheet's promise. The account
- * is the same one, so the new password is now asked for here and the
- * sign-in carries on through `sessionRenewed`, like every other. The
- * one-time password is held in this page's memory for that one request,
- * never in a field, and dropped with the sheet (`closeReauth`), when it
- * opens again, and once the change is made.
+ * An administrator's reset signs out every session, so a person who was working meets the
+ * lapse sheet, types the one-time password they were given, and the server answers
+ * password-change-required. The new password is asked for here, so the screen behind the sheet
+ * stays, and the sign-in carries on through `sessionRenewed` like every other. The one-time
+ * password is held in memory for that one request, never in a field, and dropped with the sheet
+ * (`closeReauth`), when it opens again, and once the change is made.
  */
 const REAUTH_CHANGE = { password: null };
 
@@ -41939,11 +39102,9 @@ async function submitReauth(event) {
     const waiters = SESSION.confirmWaiters.splice(0);
     for (const w of waiters) w(true);
   } catch (err) {
-    /* An administrator reset this account's password while the session
-       was open (which is what ended it): the one-time password was right,
-       and it has to be replaced. Here, in this sheet, so the screen behind
-       it stays (2026-09-24; it went through `endSession`
-       to the sign-in page's card until then). */
+    /* An administrator reset this account's password while the session was open (which is what
+       ended it): the one-time password was right and has to be replaced. Here, in this sheet,
+       so the screen behind it stays. */
     if (!changing && isPasswordChangeRequired(err)) {
       startReauthChange(json.password);
       return;
@@ -42005,7 +39166,7 @@ function sessionRenewed(expiresIn, me) {
   if (SESSION.mode !== null) closeReauth();
   clearSessionBanners();
   if (wasLapsed && state.caseId) connectLive();
-  if (wasLapsed) refreshGlassChip();  // final review C17: a lapse ate its refresh
+  if (wasLapsed) refreshGlassChip();  // a refresh refused during the lapse is not retried
   if (wasLapsed) show($('adm-creds'), true);   // hidden by `sessionLapsed`
   if (reloadList) showCaseList();
   if (wasLapsed && SESSION.accountWasOpen) {
@@ -42020,11 +39181,9 @@ function sessionRenewed(expiresIn, me) {
   }
 }
 
-/** Leave the in-place sign-in for the full one. The case and pane are
- *  kept for this analyst's next sign-in by `endSession`, in this tab's
- *  storage; the page itself is discarded, because "Sign in as someone
- *  else" is the hand-over of the desk (verifier of
- *  ux01-firstrun:logout-leaves-case-in-page, 2026-09-23). */
+/** Leave the in-place sign-in for the full one. `endSession` keeps the case and pane for this
+ *  analyst's next sign-in, in this tab's storage; the page itself is discarded, because "Sign in
+ *  as someone else" is the hand-over of the desk. */
 async function leaveReauth() {
   if (SESSION.mode !== 'lapsed') {
     const waiters = SESSION.confirmWaiters.splice(0);
@@ -42044,26 +39203,19 @@ async function leaveReauth() {
     if (SESSION.mode !== 'lapsed') return;
   }
   closeReauth();
-  /* With a title, so `endSession` remembers the case and pane for this
-     analyst's own return. Then the page goes: the previous analyst's case
-     was still in memory and in the hidden DOM under the sign-in form
-     handed to the next person. Their email is not filled in for that
-     person any more either; it was never theirs to keep. */
+  /* With a title, so `endSession` remembers the case and pane for this analyst's own return.
+     Then the page goes, so the previous analyst's case is not left in memory and in the hidden
+     DOM under the sign-in form handed to the next person. */
   endSession('Signed out', 'Your session had ended. Sign in to carry on.');
   discardPage();
 }
 
-/** "Sign in as someone else" after THIS tab's clock ended the session
- *  (2026-09-23). The server may still hold it: its idle
- *  window is slid by requests this tab does not see (the live socket's
- *  handshake among them), and the limit here is an estimate. Leaving went
- *  through `endSession` alone, which cannot delete the HttpOnly cookie,
- *  so the previous analyst's session stayed live in this browser until
- *  the server's own timeout. It is now revoked, and only if it is still
- *  the same analyst's: the cookie pair is per browser, and another tab
- *  may have signed someone else in since. Raw requests, not `api()`: a
- *  401 here is the outcome wanted, not a lapse to report. Best effort and
- *  bounded; a server that cannot be reached ends it at its idle timeout. */
+/** "Sign in as someone else" after this tab's clock ended the session: revoke it if the server
+ *  still holds it and it is still the same analyst's. The limit here is an estimate (requests
+ *  this tab does not see slide the idle window), `endSession` cannot delete the HttpOnly cookie,
+ *  and another tab may have signed someone else in since. Raw requests, not `api()`: a 401 here
+ *  is the outcome wanted. Best effort and bounded; an unreachable server ends it at its idle
+ *  timeout. */
 async function revokeIfStillOurs(userId) {
   /* The sign-out's CSRF header is taken NOW, from the pair this tab
      lapsed on. If another tab signs in while the check below is out, the
@@ -42112,13 +39264,10 @@ function forgetResume() {
   try { sessionStorage.removeItem(RESUME_KEY); } catch (_e) { /* blocked */ }
 }
 
-/** `_fetch`'s session bookkeeping, for a request that has to call fetch()
- *  itself because it wants the raw body (a file download). An answer the
- *  server accepted slides the idle clock; a mid-session 401 opens the
- *  in-place sign-in and says, in `msg`, that `what` did not happen. True
- *  when the caller must stop there. The report download bypassed both:
- *  its 401 read "invalid or expired session" in the pane, with no way
- *  back in but a sign-out (fix round, 2026-09-22). */
+/** `_fetch`'s session bookkeeping, for a request that has to call fetch() itself because it
+ *  wants the raw body (a file download). An answer the server accepted slides the idle clock; a
+ *  mid-session 401 opens the in-place sign-in and says, in `msg`, that `what` did not happen.
+ *  True when the caller must stop there. */
 async function sessionRefusedRaw(res, sentAt, msg, what) {
   if (res.status !== 401 && res.status !== 429) noteSessionActivity(sentAt);
   if (res.status !== 401 || !state.userId || state.booting) return false;
@@ -42146,14 +39295,10 @@ function applyResume(userId) {
   if (saved.tab && !state.deepLinkTab) state.deepLinkTab = saved.tab;
 }
 
-/* Banners about the session are about THIS session: a new sign-in makes
-   them false, so they are taken down instead of left over the app bar.
-   Until then they stay: "Session ended" is raised while the analyst may be
-   away, and "Signed in again" says a change was lost, so neither may pass
-   by itself like an ordinary warning. The card kept is the one banner()
-   hands back. Since banners merge, the stack's last child can be some
-   other card raised in between, which the next sign-in would then have
-   taken down (verifier, ux17-failure:banners-block-appbar, 2026-09-23). */
+/* Banners about the session are about this session: a new sign-in takes them down. Until then
+   they are sticky, because "Session ended" is raised while the analyst may be away and "Signed
+   in again" says a change was lost. The card kept is the one banner() hands back, not the
+   stack's last child, which can be another card merged in between. */
 function sessionBanner(title, detail) {
   const node = banner(title, detail, 'warn', { sticky: true });
   if (node && SESSION.banners.indexOf(node) < 0) SESSION.banners.push(node);
@@ -42165,12 +39310,8 @@ function clearSessionBanners() {
 
 /* --- account: recovery codes -------------------------------------------
  *
- * recovery-codes-unobtainable (2026-09-22). The sign-in form offered
- * recovery codes, `/auth/me` counted them and `POST /auth/recovery-codes`
- * issued them, and nothing in the console called either: the only issuer
- * was `bootstrap.py recovery-codes`, on the server. Codes are now issued
- * at the first administrator's first sign-in and from this sheet, where
- * the count is shown and a set can be replaced.
+ * Codes are issued at the first administrator's first sign-in and from this sheet, where the
+ * count (`/auth/me`) is shown and a set can be replaced (`POST /auth/recovery-codes`).
  */
 function renderAccountChip(remaining) {
   const flag = $('hdr-codes-flag');
@@ -42201,9 +39342,8 @@ function renderRecoveryCodes(box, codes, note) {
   box.appendChild(wrap);
 }
 
-/** The Account sheet says aria-modal, so the app behind it is inert, as it
- *  is behind the sign-in sheet: until the fix round of 2026-09-22 Tab
- *  walked out of the sheet into the app it covered. */
+/** The Account sheet says aria-modal, so the app behind it is inert, as it is behind the
+ *  sign-in sheet, and Tab cannot walk out into the app it covers. */
 function setAccountOpen(on) {
   if (on) closeOverSheets();
   show($('account-scrim'), on);
@@ -42253,11 +39393,9 @@ async function issueRecoveryCodes(alreadyConfirmed) {
   const msg = $('account-codes-msg');
   msg.className = 'msg';
   setMsg(msg, '');
-  /* The step-up gate: a sign-in within 15 minutes. When /auth/me has
-     said it is shut, the sign-in is asked for FIRST. Sending the request
-     to be refused cost a token of the route's rate limit (three), so
-     Generate, Cancel, Generate, confirm left the analyst locked out of
-     issuing codes for about twelve minutes (fix round, 2026-09-22). */
+  /* The step-up gate: a sign-in within 15 minutes. When /auth/me has said it is shut, the
+     sign-in is asked for first, because a refused request still spends a token of the route's
+     rate limit (three). */
   if (!alreadyConfirmed && stepUpStale()) {
     await confirmThenIssue(msg);
     return;
@@ -42289,12 +39427,10 @@ async function issueRecoveryCodes(alreadyConfirmed) {
 
 /* --- account: your own password ----------------------------------------
  *
- * gap-password-reset (2026-09-23). Nobody could change their own password.
- * `POST /auth/password` takes the current password and a code in the same
- * request, so a session somebody walked away from cannot be used to lock
- * its owner out, and a wrong current password counts toward the lockout
- * the way a wrong sign-in does. A refusal is a 403, never a 401: the
- * session is fine and stays.
+ * `POST /auth/password` takes the current password and a code in the same request, so a
+ * session somebody walked away from cannot be used to lock its owner out, and a wrong current
+ * password counts toward the lockout as a wrong sign-in does. A refusal is a 403, never a 401:
+ * the session is fine and stays.
  */
 function resetAccountPassword() {
   for (const id of ['account-pw-current', 'account-pw-new', 'account-pw-again',
@@ -42370,17 +39506,11 @@ async function confirmThenIssue(msg) {
 
 /* --- the session sheets hold the keyboard ------------------------------
  *
- * 2026-09-23, for regressions found in the
- * 2026-09-22 fixes. `inert` on the app stops focus and clicks reaching it,
- * but not the key handlers on `document`. With Account or the sign-in
- * sheet open, a stray a, r or d still accepted, rejected or deferred the
- * selected triage proposal behind it (on a live session, from Account);
- * Ctrl+K opened the palette over Account, and one Escape then closed
- * both; and Tab walked out past the sheet to the skip link and the
- * browser. A key now belongs to the sheet on top: it reaches the field or
- * button it was pressed on and stops at the sheet's edge, a key pressed
- * with the focus outside the sheet reaches nothing, Tab cycles inside the
- * sheet, and Escape answers the sheet alone.
+ * `inert` on the app stops focus and clicks reaching it, but not the key handlers on
+ * `document`, so a stray a, r or d would still dispose of the triage proposal behind a sheet.
+ * A key belongs to the sheet on top: it reaches the field or button it was pressed on and stops
+ * at the sheet's edge, a key pressed with the focus outside the sheet reaches nothing, Tab
+ * cycles inside the sheet, and Escape answers the sheet alone.
  */
 
 /** The session sheet on top, or null. The sign-in sheet (z 86) sits over
@@ -42514,11 +39644,9 @@ function initSession() {
 
 /* --- first run ---------------------------------------------------------
  *
- * While `iam.app_user` is empty the server's /setup/first-admin door is
- * open, and asking a brand-new operator to shell into the box and run
- * bootstrap.py before they can even sign in is how evaluations end. The
- * card is convenience only: the emptiness gate lives server-side, under
- * an advisory lock, so nothing here is load-bearing for safety.
+ * While `iam.app_user` is empty the server's /setup/first-admin door is open. The card is
+ * convenience only: the emptiness gate lives server-side, under an advisory lock, so nothing
+ * here is load-bearing for safety.
  */
 async function probeFirstRun() {
   let body;
@@ -42529,9 +39657,8 @@ async function probeFirstRun() {
   }
   if (!body.needs_setup) return;
   show($('login-form'), false);
-  /* A deployment that wants the operator to prove they hold its setup token
-     says so (http_ui-010 and infra-3, 2026-10-03). In production with no
-     token configured there is no web first-run, so it never reports
+  /* A deployment that wants the operator to prove they hold its setup token says so. In
+     production with no token configured there is no web first run, so it never reports
      needs_setup and this card is never reached. */
   show($('setup-token-field'), !!body.setup_token_required);
   show($('setup-form'), true);
@@ -42540,26 +39667,18 @@ async function probeFirstRun() {
 
 /* --- the one-time credential card --------------------------------------
  *
- * Used by first run and by Admin (a new analyst, a re-enrolled
- * authenticator). totp-enrolment-typein (2026-09-22): enrolment was a
- * 32-character type-in, because the otpauth:// URI was printed as text
- * nothing can scan; the copy buttons were invisible until hovered; and the
- * URI ran out of the card. The card now draws the URI as a QR code, groups
- * the secret in fours for the manual path, keeps its Copy buttons visible,
- * wraps every value, and can check a code from the app against the secret
- * on this computer, so a mistyped secret is found while it can be fixed.
+ * Used by first run and by Admin (a new analyst, a re-enrolled authenticator). The card draws
+ * the enrolment URI as a QR code, groups the secret in fours for the manual path, and can check
+ * a code from the app against the secret on this computer, so a mistyped secret is found while
+ * it can be fixed.
  */
 
-/** QR code (ISO/IEC 18004), byte mode, error correction level M, for the
- *  enrolment URI. Written here rather than fetched: the console loads no
- *  third-party script (`script-src 'self'`, no bundler), and the server's
- *  only encoder is `bootstrap.py`'s optional `qrcode` package. One
- *  function so the test can lift it out of this file and hold its output
- *  to that package's, module for module, for every mask
- *  (`test_ui_first_run_session.py`). Returns {version, size, mask,
- *  modules} with `modules` as rows of '0'/'1', or null when the text does
- *  not fit version 40. `forceMask` is for that test; the console lets the
- *  penalty rules choose. */
+/** QR code (ISO/IEC 18004), byte mode, error correction level M, for the enrolment URI.
+ *  Written here because the console loads no third-party script (`script-src 'self'`). One
+ *  function so `test_ui_first_run_session.py` can lift it out and hold its output to the
+ *  `qrcode` package's, module for module, for every mask. Returns {version, size, mask, modules}
+ *  with `modules` as rows of '0'/'1', or null when the text does not fit version 40.
+ *  `forceMask` is for that test; the console lets the penalty rules choose. */
 function qrMatrix(text, forceMask) {
   /* Error-correction codewords per block, and blocks, for level M,
      versions 1 to 40 (ISO/IEC 18004 table 9). */
@@ -42870,13 +39989,11 @@ function base32Bytes(s) {
   return new Uint8Array(out);
 }
 
-/** The RFC 6238 codes (SHA-1, 30 s, six digits, as `security/totp.py`)
- *  for the steps within `drift` of `atMs`, computed HERE so a code can be
- *  checked against a secret without sending anything anywhere. A failed
- *  sign-in counts toward the account's lockout (five in 15 minutes);
- *  a failed check here counts toward nothing. Null when this browser has
- *  no Web Crypto (it needs HTTPS or localhost), and the caller then lets
- *  the server decide. */
+/** The RFC 6238 codes (SHA-1, 30 s, six digits, as `security/totp.py`) for the steps within
+ *  `drift` of `atMs`, computed here so a code can be checked against a secret without sending
+ *  anything anywhere, and without counting toward the account's lockout as a failed sign-in
+ *  does. Null when this browser has no Web Crypto (it needs HTTPS or localhost); the caller
+ *  then lets the server decide. */
 async function totpCodes(secret, atMs, drift) {
   const key = base32Bytes(secret);
   const subtle = globalThis.crypto && globalThis.crypto.subtle;
@@ -42898,21 +40015,16 @@ async function totpCodes(secret, atMs, drift) {
   return codes;
 }
 
-/* The server accepts the current 30-second step and one either side
-   (`security/totp.py`, docs/05). The local checks used two either side
-   until the fix round of 2026-09-22, so a code from two steps away (a
-   phone about a minute out) passed here, was refused by the server, and
-   the refusal was blamed on the server's clock. */
+/* The server accepts the current 30-second step and one either side (`security/totp.py`,
+   docs/05); a wider local window would pass codes the server refuses. */
 const TOTP_SERVER_DRIFT = 1;
 const TOTP_LOOK_AROUND = 10;   // five minutes either way, to name a skew
 
-/** Where `code` falls against `secret` at `atMs`, in 30-second steps: 0
- *  is now, and anything within TOTP_SERVER_DRIFT the server also accepts.
- *  A larger number means the secret is right and a clock is off by that
- *  many steps. Null when it matches nothing in the ten minutes around
- *  now (a wrong secret or a mistyped code), undefined when this browser
- *  cannot compute codes. Should a code match twice, the nearer step is
- *  the likelier reading, so it wins. */
+/** Where `code` falls against `secret` at `atMs`, in 30-second steps: 0 is now, and anything
+ *  within TOTP_SERVER_DRIFT the server also accepts; a larger number means the secret is right
+ *  and a clock is off by that many steps. Null when it matches nothing in the ten minutes
+ *  around now (a wrong secret or a mistyped code), undefined when this browser cannot compute
+ *  codes. A code that matches twice takes the nearer step. */
 async function totpStepOffset(secret, code, atMs) {
   const codes = await totpCodes(secret, atMs, TOTP_LOOK_AROUND);
   if (!codes) return undefined;
@@ -42996,9 +40108,7 @@ function credCheckRow(secret) {
   out.hidden = true;
   btn.addEventListener('click', async () => {
     const code = input.value.replace(/\s+/g, '');
-    /* Only a whole code is judged: four digits typed so far used to be
-       answered with "the secret was probably mistyped" (fix round,
-       2026-09-22). */
+    /* Only a whole code is judged: a partial one would read as a mistyped secret. */
     if (!/^[0-9]{6}$/.test(code)) {
       out.className = 'msg warn';
       setMsg(out, 'Enter all six digits the app shows, then press Check.');
@@ -43064,10 +40174,8 @@ function renderOneTimeCreds(box, creds, opts) {
     more.appendChild(credRow('Enrolment link', creds.otpauth_uri));
     card.appendChild(more);
   }
-  /* Not a secret, and it stays on the account card, but shown here too:
-     this is the moment an administrator puts the new analyst on a case,
-     and the response always carried it (ux16 no-user-id-for-share,
-     2026-09-22). */
+  /* Not a secret, and it stays on the account card, but shown here too: this is the moment an
+     administrator puts the new analyst on a case. */
   if (creds.user_id) card.appendChild(credRow('Account id (not secret)', creds.user_id));
   if (creds.totp_secret && o.checkCode !== false) {
     card.appendChild(credCheckRow(creds.totp_secret));
@@ -43078,16 +40186,10 @@ function renderOneTimeCreds(box, creds, opts) {
 
 /* --- first run: the administrator's first sign-in -----------------------
  *
- * firstrun-oneclick-wipe (2026-09-22). The card showed a generated
- * password and a TOTP secret, and one "I saved them" click removed both
- * from the page with nothing checked. Anyone who had saved one and not
- * the other, or mistyped the secret into their phone, had an administrator
- * who could never sign in, a first-run door closed for good, and no
- * password reset: the way back was a shell on the server. Now the secrets
- * stay (in memory, and on screen unless hidden) until the account has
- * signed in with them on this card, or until the operator confirms a
- * warning that says what is lost; a reload asks first. The secrets never
- * leave this page's memory for storage of any kind.
+ * The generated password and TOTP secret stay (in memory, and on screen unless hidden) until the
+ * account has signed in with them on this card, or the operator confirms a warning that says
+ * what is lost; a reload asks first. Losing them leaves an administrator who can never sign in
+ * and a first-run door closed for good. They never leave this page's memory for storage.
  */
 const FIRST_RUN = { creds: null, hidden: false };
 

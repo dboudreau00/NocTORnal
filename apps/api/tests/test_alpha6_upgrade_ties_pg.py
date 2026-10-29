@@ -1,31 +1,24 @@
-"""The two queries an operator runs around migration 0064, on a database
-shaped the way Alpha 5.2 leaves one.
+"""The two queries an operator runs around migration 0064, on a database shaped the way Alpha 5.2
+leaves one.
 
-0064 makes a tie's confidence the highest grade among its live claims and
-backfills every tie that disagreed. The Alpha 6 pre-release check
-(2026-09-23) upgraded a populated Alpha 5.2 database and found two things
-the notes did not tell an operator: the backfill RAISES a tie an analyst
-had deliberately lowered with a correction beneath a claim that is still
-live, and it writes no audit event for any tie it changes. So the upgrade
-notes send the operator to two read-only queries under
-`release/alpha6-upgrade/`, one to keep before upgrading and one to hand to
-the analysts after. These tests run those files, as shipped, and hold them
-to what the migration does:
+0064 makes a tie's confidence the highest grade among its live claims and backfills every tie that
+disagreed. The backfill raises a tie an analyst had deliberately lowered with a correction beneath a
+claim that is still live, and it writes no audit event for any tie it changes. So the upgrade notes
+send the operator to two read-only queries under `release/alpha6-upgrade/`, one to keep before
+upgrading and one to hand to the analysts after. These tests run those files, as shipped, and hold
+them to what the migration does:
 
-- the BEFORE query lists exactly the ties the backfill changes, predicts
-  the value each one ends at, and flags the ones an analyst had lowered;
-- the AFTER query lists exactly the ties whose latest correction is lower
-  than what the tie now holds, and not a tie the analyst lowered and then
-  put back.
+- the BEFORE query lists exactly the ties the backfill changes, predicts the value each one ends at,
+  and flags the ones an analyst had lowered;
+- the AFTER query lists exactly the ties whose latest correction is lower than what the tie now holds,
+  and not a tie the analyst lowered and then put back.
 
-The Alpha 5.2 state is modelled as `test_tie_confidence_pg.py` models it
-for the backfill test: rows written in a rolled-back transaction with the
-user triggers off, because the Alpha 6 triggers refuse exactly the rows an
-Alpha 5.2 database holds.
+The Alpha 5.2 state is modelled as `test_tie_confidence_pg.py` models it for the backfill test: rows
+written in a rolled-back transaction with the user triggers off, because the Alpha 6 triggers refuse
+exactly the rows an Alpha 5.2 database holds.
 
-**The email prefix is `a6up-` and must stay unique**, for the reason
-`test_graph_mutation_api_pg.py` gives: fixtures clean up on an email
-pattern, and two files sharing one delete each other's rows.
+The email prefix is `a6up-` and must stay unique, for the reason `test_graph_mutation_api_pg.py`
+gives: fixtures clean up on an email pattern, and two files sharing one delete each other's rows.
 
 Env-gated on DATABASE_URL.
 """
@@ -113,8 +106,7 @@ def _case(client, token) -> tuple[str, str]:
 
 
 def _node(client, token, case_id, label) -> str:
-    # Graded explicitly: the API grades nothing for the caller since
-    # gap-api-grade-required (2026-09-23).
+    # Graded explicitly: the API grades nothing for the caller.
     r = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token),
                     json={"node_type": "IDENTITY", "label": label,
                           "assertion": {"basis": "DIRECT_OBSERVATION",
@@ -154,21 +146,18 @@ def _run(tx, name: str, case_code: str) -> dict[str, dict]:
 
 
 def test_the_queries_around_0064_name_the_ties_it_changes(conn, client):
-    """Six ties, each one a shape the check met on real Alpha 5.2 data:
+    """Six ties, each a shape found on real Alpha 5.2 data:
 
-    - lowered: graded MODERATE, then corrected down to LOW. The backfill
-      raises it back to MODERATE, and both queries must say so.
-    - restored: lowered to LOW and later put back to MODERATE. The
-      analyst's last word stands, so neither query lists it; a query that
-      compared every live correction with the tie, not only the latest,
-      would.
-    - drifted: graded HIGH, stored LOW, the Alpha 5.2 default nobody chose.
-      The backfill repairs it; no analyst lowered it.
-    - lowered_deleted: lowered, then soft-deleted. Still changed, and
-      flagged as deleted.
-    - raised_later: lowered to LOW, then a HIGH claim added afterwards,
-      which Alpha 5.2 never carried to the column. Listed after the
-      upgrade too, for an analyst to judge rather than redo.
+    - lowered: graded MODERATE, then corrected down to LOW. The backfill raises it back to MODERATE,
+      and both queries must say so.
+    - restored: lowered to LOW and later put back to MODERATE. The analyst's last word stands, so
+      neither query lists it; a query that compared every live correction with the tie, not only the
+      latest, would.
+    - drifted: graded HIGH, stored LOW, the Alpha 5.2 default nobody chose. The backfill repairs it;
+      no analyst lowered it.
+    - lowered_deleted: lowered, then soft-deleted. Still changed, and flagged as deleted.
+    - raised_later: lowered to LOW, then a HIGH claim added afterwards, which Alpha 5.2 never carried
+      to the column. Listed after the upgrade too, for an analyst to judge rather than redo.
     - untouched: graded LOW and stored LOW. Nothing to say.
     """
     import psycopg
@@ -189,8 +178,8 @@ def test_the_queries_around_0064_name_the_ties_it_changes(conn, client):
                        (lowered,)).fetchone()[0]
 
     def correction(tx, edge, value, minutes_ago):
-        # What an Alpha 5.2 PATCH wrote: a correction graded LOW whatever
-        # it said, the value in claim_value, and the column set directly.
+        # What an Alpha 5.2 PATCH wrote: a correction graded LOW whatever it said, the value in
+        # claim_value, and the column set directly.
         tx.execute(
             """INSERT INTO core.assertion (case_id, edge_id, basis, confidence,
                    rationale, claim_path, claim_value, created_by, recorded_at)

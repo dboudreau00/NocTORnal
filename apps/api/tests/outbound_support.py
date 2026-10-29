@@ -1,17 +1,13 @@
-"""Shared fixtures for the outbound-integration suites (2026-09-24):
-the delivery ledger (F8), Jira (F7), and lookup providers and lookups
-(F15.2 to F15.4). Importable, no test functions.
+"""Shared fixtures for the outbound-integration suites: the delivery ledger, Jira, and lookup
+providers and lookups. Importable, no test functions.
 
-Nothing here contacts a real service. Routes are FAKE EgressRoute-shaped
-objects (or a real DIRECT route built from declared rules, which is what
-route_for gives in development), and every client is a fake that records
-what it was asked.
+Nothing here contacts a real service. Routes are fake EgressRoute-shaped objects (or a real DIRECT
+route built from declared rules, which is what route_for gives in development), and every client is a
+fake that records what it was asked.
 
-Teardown removes what it may and leaves the rest, keyed on a reserved
-email prefix, as test_f19_review_pg.py describes: the outbound ledgers
-refuse DELETE by trigger on purpose, so the teardown disables the
-user triggers on those tables inside its own transaction, exactly as
-test_sample_preservation_pg.py does, and never outside it.
+Teardown removes what it may and leaves the rest, keyed on a reserved email prefix. The outbound
+ledgers refuse DELETE by trigger on purpose, so the teardown disables the user triggers on those
+tables inside its own transaction, as test_sample_preservation_pg.py does, and never outside it.
 """
 from __future__ import annotations
 
@@ -279,10 +275,6 @@ def new_id() -> UUID:
     return uuid4()
 
 
-# ---------------------------------------------------------------------------
-# Lookup providers (F15.2)
-# ---------------------------------------------------------------------------
-
 def provider_route(host="www.virustotal.com", port=443, *, network=None, proxied=False,
                    name=None):
     return FakeRoute(name or "lookup-test", frozenset({(host, port)}), proxied=proxied,
@@ -332,10 +324,6 @@ def make_provider(conn, creator, approver, *, key=None, adapter="virustotal_v3",
         reg.enable(p.id, confirm_exposure=level, actor_id=creator)
     return providers.get_provider(conn, p.id), rf
 
-
-# ---------------------------------------------------------------------------
-# Lookups (F15.3, F15.4)
-# ---------------------------------------------------------------------------
 
 def make_node(conn, case_id, owner, label, *, classification="GREEN", compartments=()):
     from noctornal_api.graph import AssertionInput, GraphWriteService

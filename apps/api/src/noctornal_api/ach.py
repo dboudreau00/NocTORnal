@@ -1,52 +1,13 @@
-"""Analysis of Competing Hypotheses (Heuer), scored.
+"""Analysis of Competing Hypotheses (Heuer), scored. Pure and database-free, like `analytics.py`,
+so the scoring can be tested against hand-computed values (docs/13).
 
-Phase 6. docs/13 puts it in tier 2 and says why:
-
-    Cybercrime attribution is where confirmation bias does the most
-    damage; a team eight months into one theory reads every new post as
-    support. Putting the competing hypothesis in the same view is a
-    structural correction.
-
-Pure and database-free, like `analytics.py` and for the same reason: the
-scoring is the part with the reasoning in it, so it should be testable
-against hand-computed values rather than against a fixture.
-
-## The inversion that makes it ACH rather than a table
-
-Heuer's central move, and the one every naive implementation gets
-backwards:
-
-    **The hypothesis that survives is the one with the LEAST evidence
-    against it, not the most evidence for it.**
-
-Counting support ranks whichever hypothesis the team has spent longest
-collecting for -- which is confirmation bias with a scoreboard. Ranking by
-inconsistency asks the only question that can actually eliminate anything:
-what does this theory fail to explain? So `inconsistency` is the primary
-sort, `support` is reported but never ranks, and `refute_first` names the
-cheapest disconfirming test rather than the next confirming one.
-
-## Diagnosticity
-
-An item of evidence consistent with EVERY hypothesis discriminates
-nothing. It feels like progress and is not: "the actor speaks Russian"
-against four Russian-speaking hypotheses moves no needle.
-
-`diagnosticity` is the spread of an item's stances across hypotheses --
-zero when identical everywhere, maximum when it separates them. It is
-reported per item and used to sort, so the evidence that would actually
-settle the question rises to the top of the matrix instead of being buried
-under forty rows of agreeable background.
-
-## Weighting by the source, not by the analyst's mood
-
-A stance is scored against the Admiralty grading of the assertion behind
-it. A "strongly inconsistent" from an F6 source (unreliable, improbable)
-must not sink a hypothesis the way one from an A1 source does, or ACH
-becomes a way to launder a hunch into a matrix cell. The weight is the
-product of two 0..1 ramps over reliability (A..F) and credibility (1..6),
-floored so that even the worst-graded source counts for something -- a
-zero would silently delete evidence rather than discount it.
+The hypothesis that survives is the one with the least evidence against it, not the most for it:
+`inconsistency` is the primary sort, `support` is reported but never ranks, and `refute_first`
+names the cheapest disconfirming test. `diagnosticity` is the spread of an item's stances across
+hypotheses, zero when identical everywhere, so evidence consistent with every hypothesis sinks
+and the evidence that would settle the question rises. Each stance is weighted by the Admiralty
+grading of its assertion, the product of two 0..1 ramps over reliability (A..F) and credibility
+(1..6), floored above zero so the worst source is discounted, never deleted.
 """
 from __future__ import annotations
 
@@ -119,12 +80,9 @@ class HypothesisScore:
     #: result and a rank.
     assessed: int
     unassessed: int
-    #: A REJECTED or SUPERSEDED hypothesis, scored for the record and never
-    #: ranked. Once the console could reject one (ux11-ach:no-hypothesis-
-    #: lifecycle-in-console, 2026-09-23), "Include rejected" fed it to the
-    #: ranking as a live competitor: a ruled-out theory with nothing against
-    #: it could be named least inconsistent, and its blank cells kept rows
-    #: "unfinished" that no live hypothesis needed scored.
+    #: A REJECTED or SUPERSEDED hypothesis, scored for the record and never ranked: as a live
+    #: competitor a ruled-out theory with nothing against it could be named least inconsistent, and
+    #: its blank cells would keep rows "unfinished" that no live hypothesis needs scored.
     retired: bool = False
 
 
@@ -138,21 +96,16 @@ class Diagnosticity:
     #: True when the item is consistent (or inconsistent) with everything
     #: equally, and therefore settles nothing.
     is_diagnostic: bool
-    #: How many of the live hypotheses this item has actually been scored
-    #: against. Below two, `is_diagnostic` is not a judgement about the
-    #: item at all -- it is a statement that the row is unfinished, and
-    #: those are different facts an analyst acts on differently. Conflating
-    #: them told an analyst that ten good items "settle nothing" when they
-    #: had simply not been entered against the second hypothesis yet.
+    #: How many of the live hypotheses this item has been scored against. Below two,
+    #: `is_diagnostic` says nothing about the item, only that the row is unfinished, which an
+    #: analyst acts on differently.
     assessed_against: int = 0
     #: How many live hypotheses the matrix was scored over, so the row can
     #: tell "agrees everywhere" from "agrees everywhere it has been looked
     #: at". 0 means unknown, and then only the two-cell floor applies.
     live_hypotheses: int = 0
-    #: The two factors of `score`, so a reader can do the arithmetic: the
-    #: spread of the stances (0..4) and the source weight it is multiplied
-    #: by. "1.96" beside a -2..+2 scale could not be reconciled with it
-    #: (ux11-ach:grading-weight-unexplained, 2026-09-23).
+    #: The two factors of `score`, so a reader can do the arithmetic: the spread of the stances
+    #: (0..4) and the source weight it is multiplied by.
     spread: int = 0
     weight: float = 0.0
 
@@ -160,15 +113,10 @@ class Diagnosticity:
     def is_incomplete(self) -> bool:
         """True when the row's diagnosticity is UNKNOWN rather than zero.
 
-        Below two cells nothing can be compared. From two cells up, a row
-        that already separates two hypotheses is diagnostic whatever its
-        blanks turn out to be; a row that agrees with itself so far is
-        unknown until the rest are scored, because the blank one could be
-        the hypothesis it separates. The fixed `< 2` let a row scored
-        against two of three hypotheses, the same way both times, count as
-        "the same thing about every hypothesis", so the pane dimmed it as
-        worthless beside its own blank cell while `refute_first` named it
-        as the next test (README screenshot review, 2026-09-23)."""
+        Below two cells nothing can be compared. From two cells up, a row that already separates
+        two hypotheses is diagnostic whatever its blanks turn out to be; a row that agrees with
+        itself so far is unknown until the rest are scored, because the blank one could be the
+        hypothesis it separates."""
         if self.assessed_against < 2:
             return True
         return (not self.is_diagnostic
@@ -195,10 +143,9 @@ class Matrix:
 
 
 def _of_items(k: int, total: int) -> str:
-    """The subject of a warning about k of the matrix's total items, as a
-    reader would say it: "1 of 3 items", "All 3 items", "Both items",
-    "The only item". The verb after it agrees with k, which the caller
-    chooses (README screenshot set review, 2026-09-23)."""
+    """The subject of a warning about k of the matrix's total items, as a reader would say it:
+    "1 of 3 items", "All 3 items", "Both items", "The only item". The caller makes the verb agree
+    with k."""
     if total == 1:
         return "The only item"
     if k == total:
@@ -210,14 +157,10 @@ def _sums(hid: UUID, statement: str, evidence: list[EvidenceItem],
           flat: set[UUID], *, retired: bool = False) -> HypothesisScore:
     """One hypothesis's weighted sums over the matrix.
 
-    `flat` holds the rows that say the same thing about every live
-    hypothesis. They count as ASSESSED (somebody did look) and add nothing
-    to either sum. The warning and the method text both said such a row is
-    "excluded from the ranking" while this loop summed every row, so a row
-    scored "-2" against each hypothesis lifted all of them by the same
-    amount and printed inconsistency no evidence discriminated
-    (ux11-ach:half-scored-row-called-undiagnostic, 2026-09-23). Heuer drops
-    non-diagnostic evidence from the tally for the same reason."""
+    `flat` holds the rows that say the same thing about every live hypothesis. They count as
+    assessed (somebody did look) and add nothing to either sum, as the warning and the method text
+    say: Heuer drops non-diagnostic evidence from the tally, because it lifts every hypothesis
+    alike."""
     inconsistency = 0.0
     support = 0.0
     assessed = 0
@@ -255,14 +198,9 @@ def score(hypotheses: list[tuple[UUID, str]],
          for hid, statement in retired),
         key=lambda h: (h.inconsistency, -h.support))
     if not hypotheses:
-        # The rows are kept (release review c18, 2026-09-24). Every
-        # hypothesis ruled out used to return an EMPTY evidence list while
-        # `ruled_out` above had counted the stances, so GET /ach sent
-        # evidence 0 beside cells 2 and "against 0.72, assessed 1" on a
-        # card, and the pane said nothing had been scored: the record of
-        # what ruled each hypothesis out vanished from the grid. With no
-        # live hypothesis every row reads unfinished at 0 and none is a
-        # next test, so the one warning below is still the whole story.
+        # The rows are kept even when every hypothesis is ruled out, so the grid still records what
+        # ruled each one out. With no live hypothesis every row reads unfinished at 0 and none is a
+        # next test, so the one warning below is the whole story.
         return Matrix([], sorted(diagnosticity, key=lambda d: -d.score), None, None,
                       ["No hypotheses. ACH needs at least two."],
                       retired=ruled_out)
@@ -278,21 +216,10 @@ def score(hypotheses: list[tuple[UUID, str]],
     # only because something has to. Never the other way round.
     ranked = sorted(scored, key=lambda h: (h.inconsistency, -h.support))
 
-    # AN UNTESTED HYPOTHESIS DOES NOT SURVIVE; IT HAS NOT COMPETED.
-    #
-    # This was the sharpest defect in the module (F20, 2026-07-26). A
-    # hypothesis assessed against NOTHING scores inconsistency 0.0, which
-    # is the lowest value the scale can produce, so it sorted first and
-    # `least_inconsistent` named it. The guard asked whether ANY hypothesis
-    # had been assessed, never whether the winner had.
-    #
-    # The failure lands precisely where the method is supposed to help. A
-    # team eight months into one theory has assessed everything against
-    # that theory and nothing against the alternative -- which is the
-    # situation docs/13 cites as the reason to build ACH at all -- and the
-    # matrix then reported the alternative as surviving, on the strength of
-    # never having been examined. Confirmation bias with a scoreboard, in
-    # the tool built to correct it.
+    # An untested hypothesis does not survive; it has not competed. Assessed against nothing it
+    # scores inconsistency 0.0, the lowest the scale gives, so only an assessed hypothesis can be
+    # `least_inconsistent`: otherwise the alternative a team never examined would be named the
+    # survivor, the confirmation bias ACH exists to correct.
     tested = [h for h in ranked if h.assessed]
     least = tested[0].hypothesis_id if tested else None
 
@@ -320,13 +247,8 @@ def score(hypotheses: list[tuple[UUID, str]],
     undiagnostic = [d for d in diagnosticity
                     if not d.is_incomplete and not d.is_diagnostic]
     incomplete = [d for d in diagnosticity if d.is_incomplete]
-    # Agreed with the count, noun, verb and pronoun: "1 of 3 items are
-    # unfinished" headed the ACH capture (README screenshot set review,
-    # 2026-09-23).
     if undiagnostic:
-        # True now that `_sums` leaves these rows out (2026-09-23): the
-        # sentence went into the report while the rows still moved every
-        # score.
+        # True because `_sums` leaves these rows out of every score.
         one = len(undiagnostic) == 1
         warnings.append(
             f"{_of_items(len(undiagnostic), len(diagnosticity))} "
@@ -349,14 +271,10 @@ def score(hypotheses: list[tuple[UUID, str]],
             "Some hypotheses have more unassessed evidence than assessed. A "
             "low inconsistency score there means untested, not surviving.")
 
-    # The cheapest next test: the most diagnostic item that some LIVE
-    # hypothesis has not yet been scored against. Deliberately NOT "the
-    # item that would most support the leader".
-    #
-    # Counted over the live hypotheses rather than over `len(item.stances)`,
-    # which includes stances against SUPERSEDED hypotheses -- `reports.py`
-    # filters the hypothesis list on status and does not filter the cells,
-    # so a row could look complete while a real gap remained.
+    # The cheapest next test: the most diagnostic item that some live hypothesis has not yet been
+    # scored against, never "the item that would most support the leader". Counted over the live
+    # hypotheses, not `len(item.stances)`: `reports.py` filters hypotheses on status but not the
+    # cells, so stances against superseded ones would hide a real gap.
     live = {hid for hid, _ in hypotheses}
     gaps = [d for d in diagnosticity
             if any(item.assertion_id == d.assertion_id
@@ -372,17 +290,12 @@ def score(hypotheses: list[tuple[UUID, str]],
 
 def _diagnosticity(item: EvidenceItem,
                    hypotheses: list[tuple[UUID, str]]) -> Diagnosticity:
-    """How much this item separates the hypotheses.
+    """How much this item separates the hypotheses: its stances' spread, weighted by the source.
 
-    The spread of its stances, weighted by the source. An item that is
-    +2 against everything scores 0 and is flagged undiagnostic -- it feels
-    like strong evidence and discriminates nothing, which is the specific
-    illusion ACH exists to break.
-
-    An item assessed against only SOME hypotheses is scored on what is
-    there: the unassessed ones are a gap to fill, not a zero to average in,
-    because averaging in a zero would make a half-finished row look
-    diagnostic.
+    An item +2 against everything scores 0 and is flagged undiagnostic: it feels like strong
+    evidence and discriminates nothing. An item assessed against only some hypotheses is scored on
+    what is there; an unassessed one is a gap to fill, not a zero to average in, which would make a
+    half-finished row look diagnostic.
     """
     stances = [item.stances[hid] for hid, _ in hypotheses if hid in item.stances]
     if len(stances) < 2:
@@ -428,13 +341,10 @@ def as_response(matrix: Matrix) -> dict:
         "refute_first": (str(matrix.refute_first)
                          if matrix.refute_first else None),
         "warnings": matrix.warnings,
-        # Rewritten in the README screenshot review, 2026-09-23: the rule
-        # is "the same stance against every hypothesis", which an item
-        # inconsistent with everything meets as well as one consistent
-        # with everything, and a row with a blank cell does not meet yet.
-        # The weighting sentence is ux11-ach:grading-weight-unexplained
-        # (2026-09-23): a single "strongly inconsistent" printed as 0.98, and
-        # nothing on the page said a C3 source counts 0.49 of an A1.
+        # The undiagnostic rule is "the same stance against every hypothesis", which an item
+        # inconsistent with everything meets as well as one consistent with everything, and a row
+        # with a blank cell does not meet yet. The weighting sentence says what a source grade
+        # counts for (a C3 source counts 0.49 of an A1).
         "method": (
             "Ranked by INCONSISTENCY, ascending. The hypothesis that survives "
             "is the one with the least evidence against it, not the most "

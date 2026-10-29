@@ -1,12 +1,9 @@
-"""Fixtures for the evidence, retention and report fixes of unit g44
-(2026-10-03): a versioned in-memory object store and the account, case and
-exhibit builders the three `test_g44_*` files share.
+"""Fixtures for the evidence, retention and report tests: a versioned in-memory object store and the
+account, case and exhibit builders the three `test_g44_*` files share.
 
-Nothing here talks to MinIO: an exhibit lodged through the service lands in
-`VersionedStore`, so no test adds an object nobody can delete to the dev
-bucket (a COMPLIANCE lock cannot be shortened by any credential).
-
-Accounts are `g44t-*@noctornal.test`, cleaned up by `rls_support.cleanup`.
+Nothing here talks to MinIO: an exhibit lodged through the service lands in `VersionedStore`, so no
+test adds an object nobody can delete to the dev bucket (a COMPLIANCE lock cannot be shortened by any
+credential). Accounts are `g44t-*@noctornal.test`, cleaned up by `rls_support.cleanup`.
 """
 from __future__ import annotations
 
@@ -122,11 +119,10 @@ def _cleanup_extra(c) -> None:
     bsub = f"(SELECT id FROM ingest.batch WHERE api_key_id IN {ksub})"
     ssub = f"(SELECT id FROM lab.sample WHERE submitted_by IN {sub})"
     statements = (
-        # A case these tests aged into expiry holds exhibits that custody
-        # rows pin for ever, and every global sweep after this file
-        # (`purge_due(case_id=None)` in the document and dead-letter suites)
-        # would pick them up and refuse for want of a store. Not expired is
-        # not due, so the leftover is left alone.
+        # A case these tests aged into expiry holds exhibits that custody rows pin for ever, and every
+        # global sweep after this file (`purge_due(case_id=None)` in the document and dead-letter
+        # suites) would pick them up and refuse for want of a store. Not expired is not due, so the
+        # leftover is left alone.
         f"""UPDATE core."case" SET retention_until = '2099-12-31',
                 review_due = '2099-12-30', legal_hold = false,
                 legal_hold_reason = NULL
@@ -221,16 +217,14 @@ def collected_document(conn, case_id, *, classification="AMBER",
                        compartments=(), source=None, external_id=None,
                        version=1, supersedes=None, cited=True,
                        purged=False) -> tuple[UUID, UUID]:
-    """One collected document at the given labels, due for retention, cited
-    by `case_id` through the case's watch (the registered citation
-    `collect.document.watch_id`) unless `cited` is false. Returns (document
-    id, source id); a second version of a post names the same `source` and
-    `external_id`.
+    """One collected document at the given labels, due for retention, cited by `case_id` through the
+    case's watch (the registered citation `collect.document.watch_id`) unless `cited` is false.
 
-    Cited through a watch and not a tag on purpose: a tag assignment per run
-    leaves `core.tag_assignment` vacuumed empty, which flips the plan
-    `test_collected_document_retention_pg` pins for its document index.
-    Rows only: the teardown removes them (`_cleanup_extra`)."""
+    Returns (document id, source id); a second version of a post names the same `source` and
+    `external_id`. Cited through a watch and not a tag on purpose: a tag assignment per run leaves
+    `core.tag_assignment` vacuumed empty, which flips the plan `test_collected_document_retention_pg`
+    pins for its document index. Rows only: the teardown removes them (`_cleanup_extra`).
+    """
     import collection_helpers as h
 
     s.register(conn, *compartments)

@@ -1,13 +1,10 @@
 """No claim is graded on anyone's behalf: the pure half.
 
-gap-api-grade-required (decided 2026-09-23). The HTTP request models used
-to default a claim's grading to DIRECT_OBSERVATION, F, 6 and LOW, and the
-create bodies defaulted the whole assertion. They now require all four
-fields, which `test_api_grade_required_pg.py` proves end to end (a 422
-naming the field, nothing written). This file pins the models themselves,
-and the one place defaults are left: `graph.AssertionInput` keeps F / 6 /
-LOW for the test suite's fixtures, so a scan fails any AssertionInput built
-in the product or the scripts without all three.
+The HTTP request models require all four grading fields (basis, reliability, credibility,
+confidence), and the create bodies require the whole assertion, which `test_api_grade_required_pg.py`
+proves end to end (a 422 naming the field, nothing written). This file pins the models themselves, and
+the one place defaults are left: `graph.AssertionInput` keeps F / 6 / LOW for the test suite's
+fixtures, so a scan fails any AssertionInput built in the product or the scripts without all three.
 """
 from __future__ import annotations
 

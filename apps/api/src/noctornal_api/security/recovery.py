@@ -1,28 +1,22 @@
 """Recovery codes: the escape hatch when TOTP cannot work (docs/05).
 
-docs/05 specifies "10, single-use, Argon2id-hashed, regenerated as a set",
-and until now they were specified and never built. That is not a
-theoretical gap: TOTP is a function of absolute Unix time, so a host whose
-clock disagrees with the authenticator by more than a step can never
-produce a matching code, and the only way back in was
-`bootstrap.py session` — a development workaround that stamps an
-MFA-bypassed login into the audit trail.
+docs/05 specifies "10, single-use, Argon2id-hashed, regenerated as a set". The need is practical: TOTP is a
+function of absolute Unix time, so a host whose clock disagrees with the authenticator by more than a step
+can never produce a matching code, and the only other way back in is `bootstrap.py session`, a development
+workaround that stamps an MFA-bypassed login into the audit trail.
 
 Three properties matter.
 
-**Single-use has to be atomic.** A code is consumed by removing its hash
-from the array in ONE conditional statement whose row count decides the
-outcome, exactly as the TOTP counter advance does. Verifying in Python and
-then deleting would let two concurrent logins both spend the same code.
+**Single-use has to be atomic.** A code is consumed by removing its hash from the array in one conditional
+statement whose row count decides the outcome, exactly as the TOTP counter advance does. Verifying in Python
+and then deleting would let two concurrent logins both spend the same code.
 
-**Regenerated as a set.** Issuing replaces all ten. Topping up a partly
-used set would let an old code stay valid indefinitely, and an analyst who
-believes they have ten fresh codes should not still be carrying one they
-printed a year ago.
+**Regenerated as a set.** Issuing replaces all ten. Topping up a partly used set would let an old code stay
+valid indefinitely, and an analyst who believes they have ten fresh codes should not still be carrying one
+they printed a year ago.
 
-**The plaintext exists exactly once.** Codes are returned by the call that
-generates them and never again — only Argon2id hashes are stored. There is
-no "show me my codes" path, because a stored plaintext is a second
+**The plaintext exists exactly once.** Codes are returned by the call that generates them and never again;
+only Argon2id hashes are stored. There is no "show me my codes" path, because a stored plaintext is a second
 password file.
 """
 from __future__ import annotations

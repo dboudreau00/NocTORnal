@@ -1,12 +1,9 @@
-"""The Telegram suite's database helpers (roadmap F5.2 and F5.3,
-2026-09-24). Importable, no test functions.
+"""The Telegram suite's database helpers. Importable, no test functions.
 
-Telegram rows are never deleted (the chat and message guards, 0082's
-platform-bound personas, the authorities), and the chat's durable id and a
-persona's account id are unique, so every id here is drawn per run from a
-uuid and `teardown` follows the collection
-foundation's no-delete pattern: what may not be deleted is purged or
-deactivated, so no later test reads it.
+Telegram rows are never deleted (the chat and message guards, 0082's platform-bound personas, the
+authorities), and the chat's durable id and a persona's account id are unique, so every id here is
+drawn per run from a uuid and `teardown` follows the collection foundation's no-delete pattern: what
+may not be deleted is purged or deactivated, so no later test reads it.
 """
 from __future__ import annotations
 

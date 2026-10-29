@@ -1,51 +1,35 @@
-"""Who may go where through the egress proxy: route loading and the persona
-context checks (the egress proxy S2, 2026-09-24; docs/20 section 8.5).
+"""Who may go where through the egress proxy: route loading and the persona context checks (docs/20 section 8.5).
 
-Every DESTINATION decision here is an egress_policy call (check_destination
-now, resolve_and_pin and admit in the proxy); this module adds only what a
-route's database rows decide: whether the route is live, and for a persona
-route whether the run, act or stop it claims is real, current and entitled
-to this destination. The run, the source, the persona and the authority are
-read from the database, never from the client.
+Every DESTINATION decision here is an egress_policy call (check_destination now, resolve_and_pin and admit in the
+proxy); this module adds only what a route's database rows decide: whether the route is live, and for a persona
+route whether the run, act or stop it claims is real, current and entitled to this destination. The run, the
+source, the persona and the authority are read from the database, never from the client.
 
-## The persona contexts
-
-- RUN (`run.<run id>`): the run is RUNNING and started within
-  RUN_CONTEXT_MAX_S. On the passive route the run carries no persona and
-  no egress profile of its own, and its source is a feed or web page read
-  by the rss adapter with neither a persona nor a profile bound
-  (passive_route_misused); the collector writes the run's
-  egress_profile_id from the source binding, which a feed never has, so
-  the passive default is matched by the run's NULL, never by its uuid
-  (2026-09-24). On any other profile the run names this profile, a persona
-  run's persona is bound here, usable and alone on the profile, and not on
-  a DIRECT exit; the run's authority is live, covers the run's source at
-  its current base_url, and was recorded and confirmed (with its target
-  added and confirmed) AFTER the profile last widened and after the
-  persona or source was last re-bound; the destination belongs to the
-  source; the source's label is within the profile's ceiling.
-- ACT (`act.<persona id>`): enrolment, resolution, joins. The persona is
-  bound, not burnt, locked or under a platform's hold, alone, on a chained
-  exit. Each TARGET is judged as a run's is: its authority is live, the
-  target covers the source's current base_url, and authority and target
-  were recorded and confirmed after the profile last widened and the
-  persona was last re-bound. The destination is the site of a source whose
-  own target passes, or an address in the profile's networks while at
-  least one target passes; one fresh authority for another source opens
-  nothing else (2026-09-25). A MACHINE lock (a credential the platform
-  refused) does not refuse an act: enrolling a new credential is how that
-  lock clears, and refusing the tunnel that enrols it would lock the
+- RUN (`run.<run id>`): the run is RUNNING and started within RUN_CONTEXT_MAX_S. On the passive route the run
+  carries no persona and no egress profile of its own, and its source is a feed or web page read by the rss
+  adapter with neither a persona nor a profile bound (passive_route_misused); the collector writes the run's
+  egress_profile_id from the source binding, which a feed never has, so the passive default is matched by the
+  run's NULL, never by its uuid. On any other profile the run names this profile, a persona run's persona is
+  bound here, usable and alone on the profile, and not on a DIRECT exit; the run's authority is live, covers the
+  run's source at its current base_url, and was recorded and confirmed (with its target added and confirmed)
+  AFTER the profile last widened and after the persona or source was last re-bound; the destination belongs to
+  the source; the source's label is within the profile's ceiling.
+- ACT (`act.<persona id>`): enrolment, resolution, joins. The persona is bound, not burnt, locked or under a
+  platform's hold, alone, on a chained exit. Each TARGET is judged as a run's is: its authority is live, the
+  target covers the source's current base_url, and authority and target were recorded and confirmed after the
+  profile last widened and the persona was last re-bound. The destination is the site of a source whose own
+  target passes, or an address in the profile's networks while at least one target passes; one fresh authority
+  for another source opens nothing else. A MACHINE lock (a credential the platform refused) does not refuse an
+  act: enrolling a new credential is how that lock clears, and refusing the tunnel that enrols it would lock the
   persona for good.
-- STOP (`stop.<persona id>`): logout and destroy. Only the binding is
-  required: stopping is always allowed, for a persona whose authority was
-  revoked or which is burnt as much as any other. Its destinations are the
-  hosts of sources bound to the persona or its venue, whatever their
-  targets' state, or an address in the profile's networks.
+- STOP (`stop.<persona id>`): logout and destroy. Only the binding is required: stopping is always allowed, for
+  a persona whose authority was revoked or which is burnt as much as any other. Its destinations are the hosts
+  of sources bound to the persona or its venue, whatever their targets' state, or an address in the profile's
+  networks.
 
-"Usable" is one predicate, USABLE_SQL: HEALTHY, or COOLDOWN past its
-cooldown_until (a NULL cooldown_until is past), no platform hold in the
-future, and (for RUN) no machine lock. Every other status refuses,
-including one this build does not know.
+"Usable" is one predicate, USABLE_SQL: HEALTHY, or COOLDOWN past its cooldown_until (a NULL cooldown_until is
+past), no platform hold in the future, and (for RUN) no machine lock. Every other status refuses, including one
+this build does not know.
 """
 from __future__ import annotations
 
@@ -167,11 +151,8 @@ def _tlp_max(*labels: str | None) -> str:
 
 
 def _above(label: str, ceiling: str) -> bool:
-    # egress-rss-floor (2026-10-03): every caller here weighs a SOURCE's
-    # label against a collection route, and invariant 8 caps that at AMBER
-    # whatever the profile's ceiling says. A profile may be labelled
-    # AMBER_STRICT or RED (its visibility), and the upgrade path used to
-    # propose the passive default at the highest feed label.
+    # Every caller here weighs a SOURCE's label against a collection route, and invariant 8 caps that at AMBER
+    # whatever the profile's ceiling says: a profile may be labelled AMBER_STRICT or RED (its visibility).
     return TLP_ORDER.index(label) > min(TLP_ORDER.index(ceiling),
                                         TLP_ORDER.index("AMBER"))
 
@@ -290,12 +271,10 @@ def _persona(conn, claim, host, port, literal, *, production, internal, now,
         resolve_locally=profile.exit_kind == "DIRECT" or profile.resolve_at_proxy,
         idle_s=profile.idle_timeout_s, session_s=profile.max_session_s,
         max_concurrent=profile.max_concurrent, route_key="persona:" + str(profile.id))
-    # Every refusal from here on carries the decision so far: the ledger row
-    # then names the run, the source the destination matched, the persona
-    # and the profile, and the reader labels it by that source's CURRENT
-    # label and compartments. Without it a refusal after the source tie
-    # (above_route_ceiling, port_not_allowed, onion_not_allowed) stored the
-    # host in clear at its insert-time label for ever (2026-09-25).
+    # Every refusal from here on carries the decision so far: the ledger row then names the run, the source the
+    # destination matched, the persona and the profile, and the reader labels it by that source's CURRENT label
+    # and compartments. Without it a refusal after the source tie (above_route_ceiling, port_not_allowed,
+    # onion_not_allowed) would store the host in clear at its insert-time label for ever.
     try:
         if claim.context_kind == "run":
             _run(conn, claim, decision, profile, literal, now=now, recheck=recheck)
@@ -342,11 +321,9 @@ def _persona_row(conn, persona_id: UUID, *, now, allow_machine_lock: bool):
 
 
 def _shared(conn, profile_id: UUID, persona_id: UUID) -> bool:
-    # collection-shared-exit (2026-10-03): a persona is alone on its exit,
-    # which a live persona-less source reading through the same profile
-    # breaks as surely as a second persona does: one address, two readings,
-    # and a site that sees both links them. Persona creation and a source's
-    # binding refuse the pairing; this refuses a pairing made before they did.
+    # A persona is alone on its exit, which a live persona-less source reading through the same profile breaks as
+    # surely as a second persona does: one address, two readings, and a site that sees both links them. Persona
+    # creation and a source's binding refuse the pairing; this also refuses a pairing that already exists.
     return conn.execute(
         """SELECT EXISTS (SELECT 1 FROM collect.collection_account
             WHERE egress_profile_id = %(profile)s AND id <> %(persona)s
@@ -483,10 +460,9 @@ def _act_targets(conn, persona_id: UUID, *, now) -> list[_Target]:
 
 
 def _persona_authority(conn, persona_id: UUID, floor, *, now) -> UUID:
-    """A live authority of the persona itself, recorded and confirmed after
-    `floor`, for an act on no source yet (2026-09-25). Its scope is
-    the attended act's own check (collection_authority.require without a
-    source); here it only has to exist and be current."""
+    """A live authority of the persona itself, recorded and confirmed after `floor`, for an act on no source
+    yet. Its scope is the attended act's own check (collection_authority.require without a source); here it only
+    has to exist and be current."""
     rows = conn.execute(
         """SELECT id, recorded_at, confirmed_at FROM collect.collection_authority
             WHERE collection_account_id = %(persona)s
@@ -542,11 +518,9 @@ def _act(conn, claim, decision, profile, literal, *, now) -> None:
     floor = _floor(profile, _latest_binding(conn, persona=persona_id, source=None))
     in_networks = literal is not None and _in_networks(decision.policy, literal)
     if not targets:
-        # No source of this persona has a target yet: enrolment, or
-        # resolving a chat before its source exists. Only the profile's
-        # own networks (Telegram's data centres) open, under a live
-        # authority of the persona itself; a name is always some source's
-        # site, so it stays closed (2026-09-25).
+        # No source of this persona has a target yet: enrolment, or resolving a chat before its source exists.
+        # Only the profile's own networks (Telegram's data centres) open, under a live authority of the persona
+        # itself; a name is always some source's site, so it stays closed.
         if not in_networks:
             raise Refused("authority_missing")
         decision.authority_id = _persona_authority(conn, persona_id, floor, now=now)

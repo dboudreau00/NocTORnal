@@ -1,20 +1,10 @@
-"""`GET /cases/{case_id}/analytics/latest`: the run an analyst expects to
-see on opening the pane.
+"""`GET /cases/{case_id}/analytics/latest`: the run an analyst expects to see on opening the pane.
 
-Until 2026-09-02 the analytics pane was empty until somebody pressed "Run
-analysis", although every completed run was already on
-`analytics.metric_run` with its full `result` payload -- the persistence
-was written for cache hits and time series and never read back as "what
-was the last answer". So an analyst opening a case saw nothing, ran the
-suite again, and was served the cached row anyway.
-
-`latest` returns the most recent COMPLETE `sna_suite` run for the case
-and projection (preset + include_inferred) in the same shape the suite
-endpoint returns, plus `computed_at`, or 404 when there is none. It is
-scoped to the caller's own visibility exactly as `history` and the cache
-lookup are: a run computed over a better-cleared analyst's graph is never
-served to a lesser one, because the score's explanation would lie in
-nodes they may not see.
+`latest` returns the most recent COMPLETE `sna_suite` run for the case and projection (preset +
+include_inferred) in the same shape the suite endpoint returns, plus `computed_at`, or 404 when there
+is none. It is scoped to the caller's own visibility exactly as `history` and the cache lookup are: a
+run computed over a better-cleared analyst's graph is never served to a lesser one, because the
+score's explanation would lie in nodes they may not see.
 
 Email prefix `al-`, unique to this file. Env-gated on DATABASE_URL.
 """
@@ -96,29 +86,20 @@ def _make_user(conn, *, clearance="RED", global_roles=("CASE_OWNER",)):
 
 
 def _session(conn, email) -> str:
-    """A signed-in caller, minted the way `scripts/bootstrap.py session`
-    mints one: the account looked up by email, then `SessionService`
-    against the same store the API validates against. Unbound -- no
-    address, no User-Agent, because nothing here has one to give -- which
-    0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING` refuses; it
-    is off in these tests.
+    """A signed-in caller, minted the way `scripts/bootstrap.py session` mints one: the account looked
+    up by email, then `SessionService` against the same store the API validates against.
 
-    Not `POST /auth/login`, which since 2026-09-10 answers 204 and leaves
-    the token only in `__Host-session`. Nothing in this file is about the
-    sign-in path, so this takes the short honest route to a session
-    rather than driving a login and unpicking a Set-Cookie header for a
-    value it would hand straight back as a Bearer. It also drops the
-    constraint the login helper carried: TOTP codes are single-use, so
-    two sign-ins for one account inside one 30-second step failed on the
-    code, not on the thing under test.
+    Unbound (no address, no User-Agent), which 0058 records and only `NOCTORNAL_SESSION_STRICT_BINDING`
+    refuses; it is off in these tests. It is not `POST /auth/login`, which answers 204 and leaves the
+    token only in `__Host-session`; nothing in this file is about the sign-in path. TOTP codes are
+    single-use, so two sign-ins for one account inside one 30-second step would fail on the code.
     """
     from noctornal_api.security.sessions import SessionService
     from noctornal_api.stores import PgSessionStore
     uid = conn.execute("SELECT id FROM iam.app_user WHERE email = %s",
                        (email,)).fetchone()[0]
-    # mfa_satisfied=True, as both real mint sites pass: a session that
-    # never satisfied MFA is refused by every step-up gated route, which
-    # would make this helper quietly narrower than the login it replaces.
+    # mfa_satisfied=True, as both real mint sites pass: a session that never satisfied MFA is refused
+    # by every step-up gated route.
     _, token = SessionService(PgSessionStore(conn)).create(
         uuid4(), uid, mfa_satisfied=True)
     return token
@@ -182,17 +163,14 @@ def test_latest_is_404_before_any_run_and_the_run_afterwards(conn, client):
     assert after.status_code == 200, after.text
     latest = after.json()
     assert latest["run_id"] == suite["run_id"]
-    # Same shape as the suite endpoint, plus when it was computed. Read
-    # from both responses so a field added to one and not the other shows
-    # up here rather than in the pane.
+    # Same shape as the suite endpoint, plus when it was computed. Read from both responses so a field
+    # added to one and not the other shows up here rather than in the pane.
     assert set(latest) == set(suite) | {"computed_at"}
     assert latest["nodes"] == suite["nodes"]
     assert latest["projection"] == suite["projection"]
-    # `cached` says only where the bytes came from -- storage, not a fresh
-    # computation, and that is true of both responses here. The currency
-    # verdict is `current`, and since 2026-09-23 `latest` establishes it by
-    # re-projecting: nothing has changed, so it is True. See
-    # test_latest_says_whether_the_graph_has_moved.
+    # `cached` says only where the bytes came from (storage, not a fresh computation), which is true of
+    # both responses here. The currency verdict is `current`, which `latest` establishes by
+    # re-projecting: nothing has changed, so it is True. See test_latest_says_whether_the_graph_has_moved.
     assert latest["cached"] is True
     assert latest["current"] is True
     datetime.fromisoformat(latest["computed_at"])   # parses, and is not a duration
@@ -288,22 +266,13 @@ def _add_a_tie(client, token, case_id) -> None:
 
 
 def test_latest_says_whether_the_graph_has_moved(conn, client):
-    """Reads BOTH sides of what `cached` and `current` mean, across the
-    file boundary they cross.
+    """Reads both sides of what `cached` and `current` mean, across the file boundary they cross.
 
-    On the suite endpoint `cached: true` can only come from
-    `AnalyticsRunService._lookup`, whose WHERE clause matches on
-    `graph_hash`. `latest` reads the newest COMPLETE run back by projection
-    name. Until 2026-09-02 both answers went onto the wire as the same
-    `cached: true`, and the only renderer of the field printed "unchanged
-    since the last run": staleness reported as freshness, this codebase's
-    signature defect.
-
-    From 2026-09-02 `latest` answered `current: null`, not checked, which
-    was honest and left the pane able to say only "not recomputed"
-    (ux10-analytics:stored-run-currency-and-timestamp). Since 2026-09-23 it
-    re-projects the caller's graph and compares hashes, so `current` is a
-    checked verdict: True on the unchanged graph, False once it has moved,
+    On the suite endpoint `cached: true` can only come from `AnalyticsRunService._lookup`, whose WHERE
+    clause matches on `graph_hash`. `latest` reads the newest COMPLETE run back by projection name, and
+    must not put the same `cached: true` on the wire as if it meant "unchanged since the last run":
+    that would report staleness as freshness. `latest` re-projects the caller's graph and compares
+    hashes, so `current` is a checked verdict: True on the unchanged graph, False once it has moved,
     and never True over a graph that moved.
     """
     _, email, secret = _make_user(conn)
@@ -375,7 +344,7 @@ def test_the_currency_verdict_is_on_every_analytics_response(conn, client):
         assert body["current"] in (True, False), (name, body["current"])
 
 
-# --- 2026-09-23: the stored key player, and asking about one run ---------
+# The stored key player, and asking about one run.
 
 def _get(client, token, case_id, suffix, **params):
     return client.get(f"/api/v1/cases/{case_id}/analytics{suffix}",
@@ -383,9 +352,8 @@ def _get(client, token, case_id, suffix, **params):
 
 
 def test_the_stored_key_player_is_read_back_by_its_size(conn, client):
-    """ux10-analytics:kpp-blank-on-stored-run. The pane opened on the
-    stored suite and left the key-player heading empty, although the run
-    was on the table. It is read back for the size asked, and checked."""
+    """The pane opened on the stored suite must not leave the key-player heading empty: it is read
+    back for the size asked, and checked."""
     _, email, secret = _make_user(conn)
     token = _session(conn, email)
     case_id = _create_case(client, token)
@@ -414,8 +382,7 @@ def test_the_stored_key_player_is_read_back_by_its_size(conn, client):
 
 
 def test_one_run_can_be_asked_whether_it_still_holds(conn, client):
-    """ux10-analytics:analysis-survives-graph-changes. After an edit the
-    pane asks about the run on screen, by id, instead of guessing."""
+    """After an edit the pane asks about the run on screen, by id, instead of guessing."""
     owner_id, email, secret = _make_user(conn)
     token = _session(conn, email)
     case_id = _create_case(client, token)
@@ -453,9 +420,8 @@ def test_one_run_can_be_asked_whether_it_still_holds(conn, client):
 
 
 def test_the_trend_says_what_each_point_measured(conn, client):
-    """ux10-analytics:trend-mixes-run-time-and-world-time. A point carries
-    the world time it measured and the projection it was measured under,
-    so the chart can plot on the one and refuse to join across the other."""
+    """A point carries the world time it measured and the projection it was measured under, so the
+    chart can plot on the one and refuse to join across the other."""
     _, email, secret = _make_user(conn)
     token = _session(conn, email)
     case_id = _create_case(client, token)
@@ -484,11 +450,9 @@ def test_a_run_stored_before_the_fix_is_served_by_the_current_rules(conn, client
     token = _session(conn, email)
     case_id = _create_case(client, token)
     _seed_small_graph(client, token, case_id)
-    # Isolates, and a fourth actor so the constraints differ: "100 minus the
-    # old percentile" is exact only without isolates, and this test used to
-    # fabricate the old rows as exactly that on a graph with none, so it
-    # could not see the trend table disagree with the actor table (found
-    # reviewing the 2026-09-23 fix).
+    # Isolates, and a fourth actor so the constraints differ: "100 minus the old percentile" is exact
+    # only without isolates, and fabricating the old rows that way on a graph with none would hide a
+    # disagreement between the trend table and the actor table.
     labels = {n["label"]: n["id"] for n in _get(client, token, case_id, "").json()["nodes"]}
     for label in ("delta", "echo", "foxtrot"):
         r = client.post(f"/api/v1/cases/{case_id}/nodes", headers=_auth(token), json={
@@ -508,9 +472,8 @@ def test_a_run_stored_before_the_fix_is_served_by_the_current_rules(conn, client
     by = {n["label"]: n for n in suite["nodes"]}
     assert by["echo"]["constraint"] is None and by["foxtrot"]["constraint"] is None
 
-    # Make it look like a run from before 2026-09-23, by the rule it was
-    # computed with then: the percentile over the raw constraint, isolates
-    # at the bottom.
+    # Make it look like a run stored before the percentile was re-ranked, by the rule it was computed
+    # with then: the percentile over the raw constraint, isolates at the bottom.
     from noctornal_api.analytics import _rank_and_percentile
     _, raw = _rank_and_percentile([n["constraint"] if n["constraint"] is not None
                                    else float("-inf") for n in suite["nodes"]])

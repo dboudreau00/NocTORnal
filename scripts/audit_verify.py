@@ -1,37 +1,29 @@
-"""Verify the audit and custody chains from a shell, and keep their tail anchor
-(evidence-chain-no-anchor, 2026-10-03). An operator runs this; nothing
-schedules it for you.
+"""Verify the audit and custody chains from a shell, and keep their tail anchor. An operator runs
+this; nothing schedules it.
 
     python scripts/audit_verify.py
     python scripts/audit_verify.py --anchor-file /secure/ledger-anchors.jsonl --record
 
-Every check on both ledgers compares a row with the rows around it, so none
-of them can see rows removed from the END, or rows edited and re-chained with
-fresh hashes (plain SHA-256). Both need the database owner's credentials. The
-defence is an anchor recorded where this system cannot write: the newest row's
-number and hash, handed back on a later run. With `--anchor-file` the last
-anchor in that file is compared first, and a row that was removed, rewritten
-or renumbered since is reported and exits 1. With `--record` a run that found
-nothing wrong appends the tails it saw, one JSON line, to the same file.
+Every check on both ledgers compares a row with the rows around it, so none of them can see rows
+removed from the end, or rows edited and re-chained with fresh hashes (plain SHA-256); both need
+the database owner's credentials. The defence is an anchor recorded where this system cannot
+write: the newest row's number and hash, handed back on a later run. With `--anchor-file` the
+last anchor in that file is compared first, and a row removed, rewritten or renumbered since is
+reported and exits 1. With `--record` a run that found nothing wrong appends the tails it saw,
+one JSON line, to the same file.
 
-The file is the operator's. Keep it on another host, on write-once storage or
-in a ticket: a file this system could rewrite protects nothing, and the
-script cannot tell. It writes the file and never reads another path.
+The file is the operator's. Keep it on another host, on write-once storage or in a ticket: a
+file this system could rewrite protects nothing, and the script cannot tell. It writes that file
+and reads no other path. A held anchor vouches for every row up to it and nothing after, so
+record regularly; `--record` refuses `--limit`, since a run that read only the newest events
+vouches for none of the older ones. A run with no anchor file is no better protected than
+`GET /audit/verify` and says so.
 
-A held anchor vouches for every row up to it and says nothing about the rows
-written after it, so record regularly. A run with no anchor file is no better
-protected than `GET /audit/verify` and says so.
-
-`--record` refuses `--limit`: an anchor vouches for every row up to it, and a
-run that read only the newest N events vouches for none of the older ones
-(g49v-record-with-limit, 2026-10-03).
-
-Exit codes: 0 when both chains verify (and the anchors, when given, are held);
-1 when a break or a failed anchor was found; 2 when it could not run or could
-not finish: bad arguments, an unreadable or unwritable anchor file, no usable
-database connection, a database that did not answer. Only 1 means tampering. A
-scheduler that reads the status can tell an outage from a break, and must
-alert on both (g49v-script-exit-codes, 2026-10-03).
+Exit codes: 0 when both chains verify (and the anchors, when given, are held); 1 when a break or
+a failed anchor was found; 2 when it could not run or finish (bad arguments, an unreadable or
+unwritable anchor file, no usable database connection, a database that did not answer). Only 1
+means tampering, so a scheduler reading the status can tell an outage from a break, and must
+alert on both.
 """
 from __future__ import annotations
 
@@ -163,10 +155,8 @@ def main(argv: list[str] | None = None, *, conn=None) -> int:
     if args.record and not args.anchor_file:
         parser.error("--record needs --anchor-file")
     if args.record and args.limit is not None:
-        # An anchor is read back as "every row up to it is unchanged"
-        # (routers/audit.py, _ANCHOR_NOTES); a run that checked only the
-        # newest N events cannot say that of the older ones
-        # (g49v-record-with-limit, 2026-10-03).
+        # An anchor is read back as "every row up to it is unchanged" (routers/audit.py,
+        # _ANCHOR_NOTES); a run that checked only the newest N events cannot say that.
         parser.error("--record cannot be used with --limit: an anchor "
                      "vouches for every row up to it, and a partial run "
                      "checked only the newest events")
@@ -187,13 +177,11 @@ def main(argv: list[str] | None = None, *, conn=None) -> int:
     )
 
     own = conn is None
-    # Everything that can go wrong before there is a verdict is exit 2, never
-    # the 1 that means a break: a scheduler reading the status must be able to
-    # tell a database that did not answer from a ledger that was altered
-    # (g49v-script-exit-codes, 2026-10-03).
+    # Everything that can go wrong before there is a verdict is exit 2, never the 1 that means a
+    # break, so a scheduler can tell a database that did not answer from an altered ledger.
     try:
-        # The system role: a verifier that sees part of a chain reports
-        # breaks that are not there (S1, 2026-09-25).
+        # The system role: a check that sees only part of a chain reports breaks that are not
+        # there.
         conn = conn or connect_system(SystemPurpose.AUDIT_VERIFY)
         try:
             audit, custody, lines, status = check(

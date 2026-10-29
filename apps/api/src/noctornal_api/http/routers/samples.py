@@ -1,72 +1,17 @@
-"""Sample handling over HTTP (Phase 8, docs/11, invariant 10).
+"""Sample handling over HTTP (docs/11, invariant 10).
 
-COUNSEL MUST REVIEW A DEPLOYMENT OF THIS. See `samples.py` and the README
-warning block; the short version is that a store of attacker-supplied
-binaries will eventually receive material whose possession alone is an
-offence, and the code being correct does not make the deployment lawful.
+COUNSEL MUST REVIEW A DEPLOYMENT OF THIS (see `samples.py` and the README): a store of
+attacker-supplied binaries will eventually receive material whose possession alone is an offence.
 
-## Metadata renders here. Bytes do not.
-
-Every endpoint in this file returns JSON about a sample -- hashes, file
-type, entropy, analysis findings, custody. That is invariant 10's first
-half, and it is why the UI can show a sample at all.
-
-The second half is that `/download` returns the encrypted archive and is
-the ONLY endpoint that touches sample bytes, and it refuses unless THIS
-PROCESS is configured as the sample origin -- `NOCTORNAL_PUBLIC_ORIGIN`
-equal to `NOCTORNAL_SAMPLE_ORIGIN`, which must itself differ from the
-application origin in `NOCTORNAL_BASE_URL` (`samples.origin_split()` is
-the one decision, and the readiness register reads the same one). The
-check is in the service so it cannot be skipped by a second caller, and
-the response headers are the belt to those braces: `application/octet-
-stream`, `Content-Disposition: attachment`, `nosniff`, and a CSP of
-`sandbox` so that even if something upstream serves this as HTML the
-browser will not execute it.
-
-Until 2026-09-09 the route derived "where the request arrived" from
-`request.url`, which is the Host header. That is a value the client
-sends, so the check granted on it; and because the console's CSP was
-`connect-src 'self'`, the only way the Lab pane could download at all was
-for the sample origin to BE the application origin, which is the
-configuration the invariant forbids. Now the console fetches the sample
-origin directly (app.py names it in `connect-src`, and the sample process
-answers the cross-origin request for the application origin alone), and
-the verdict comes from configuration.
-
-**When `NOCTORNAL_SAMPLE_ORIGIN` is unset the control is OFF.** Every
-download refuses on every process, `GET /samples/policy` reports the
-problem in `sample_origin_problem`, and `GET /admin/readiness` fails the
-`sample_origin_configured` check with the action. No document may say
-invariant 10 holds for such a deployment; the code does not back it.
-
-## The credential that crosses to the sample origin (0061)
-
-Because a `__Host-` cookie cannot reach a second origin -- the point of
-the split -- the console used to send the token the login response handed
-it, as a Bearer, to the sample process. `POST
-/samples/{id}/download-ticket` replaced that on 2026-09-10: minted HERE,
-on the application origin, under the ordinary cookie session and its CSRF
-double-submit, it authorises ONE download of ONE sample within a minute
-and is spent by the first redemption -- which re-reads the holder's
-account and their live clearance before serving, so an authority
-withdrawn inside that minute bites. The download takes it in the form
-body, and that is now the only thing the console presents there. The
-Bearer path is unchanged and still works, for callers that are not the
-console; nothing in the shipped client sends one.
-
-That body is also why the download is metered on the peer address
-(`sample.download` in the limit catalogue, applied by `_meter_download`):
-a credential in the body means this process cannot tell an authorised
-caller from a stranger until it has looked one up, and every look-up that
-fails used to append to the hash-chained audit log.
-
-## Two permissions that do not imply each other
-
-`sample.read` is case-side: an analyst may see that a sample exists and
-what the lab found. `sample.download` is lab-side and step-up gated: it is
-the one action in this system that puts working malware on somebody's
-disk. `MALWARE_ANALYST` holds the second and deliberately holds no case
-access at all.
+Every endpoint returns JSON about a sample except `/download`, which serves the encrypted archive
+as an `octet-stream` attachment with `nosniff` and a `sandbox` CSP, and only when this process is
+the sample origin by configuration, never by the Host header (`samples.origin_split()`, checked in
+the service). With `NOCTORNAL_SAMPLE_ORIGIN` unset every download refuses and readiness fails. A
+`__Host-` cookie cannot reach that origin, so the console presents a one-shot ticket minted here,
+and the redemption re-reads the account and live clearance; a Bearer token still works for other
+callers. The download is metered on the peer address, since a body credential is known only after
+a look-up. `sample.download` is lab-side and step-up, `sample.read` case-side; neither implies the
+other, and `MALWARE_ANALYST` holds no case access.
 """
 from __future__ import annotations
 
@@ -143,25 +88,19 @@ from noctornal_api.samples import (
     policy_declared,
 )
 
-# `route_class=BodyCappedRoute` is what makes the `@body_cap` marker on
-# `submit` do anything (routers/evidence.py, which opted in first,
-# explains the mechanism): the class wraps the ASGI receive that
-# FastAPI's multipart parser reads through, and only for endpoints
-# carrying the marker. Until 2026-09-09 the cap here was a private
-# `_read_capped` that read the upload in chunks AFTER the parser had
-# spooled the whole body to a temporary file: it bounded this process's
-# memory, and the bytes had all arrived.
+# `route_class=BodyCappedRoute` is what makes the `@body_cap` marker on `submit` work: for marked
+# endpoints it wraps the ASGI receive the multipart parser reads through, so an upload is cut off
+# as it arrives, not after it is spooled (routers/evidence.py explains the mechanism).
 router = APIRouter(prefix="/samples", tags=["samples"],
                    route_class=BodyCappedRoute)
 
 
 def _svc(conn: psycopg.Connection, *, preserving: bool = False
          ) -> SampleService:
-    """The service with the sample store, and the preservation store when
-    the caller is about to preserve or retrieve (F2, 2026-09-22).
+    """The service with the sample store, and the preservation store when the caller is about to
+    preserve or retrieve.
 
-    `preserving` rather than always building both: `PreservationStorage()`
-    raises when its credentials are missing, and a queue read must not fail
+    `PreservationStorage()` raises when its credentials are missing, and a queue read must not fail
     on the absence of a store it will never touch."""
     from noctornal_api.samples import PreservationStorage, SampleStorage
     return SampleService(conn, SampleStorage(),
@@ -169,38 +108,26 @@ def _svc(conn: psycopg.Connection, *, preserving: bool = False
 
 
 def _ticket_svc(conn: psycopg.Connection) -> SampleService:
-    """The service with NO storage, for the two steps that decide who may
-    have bytes without ever touching any.
+    """The service with no storage, for the two steps that decide who may have bytes without
+    touching any.
 
-    `SampleStorage()` raises when the bucket is unconfigured, so building
-    one here would make a decision about ACCESS fail on the absence of a
-    credential it would never use -- and the mint runs on the application
-    process, which is not the one that serves malware. Neither minting
-    nor redeeming reads a sample; the route that serves one builds the
-    store for itself, a line later.
+    `SampleStorage()` raises when the bucket is unconfigured, and the mint runs on the application
+    process, which does not serve malware: a decision about access must not fail on a credential
+    it never uses. The route that serves a sample builds its own store.
     """
     return SampleService(conn)
 
 
-#: The gate the download has always carried, hoisted so the ticket mint
-#: states the same one and so the download can apply it by CALL rather
-#: than by `Depends`. FastAPI resolves every declared dependency, so a
-#: route that authenticates two ways cannot express either of them as a
-#: dependency -- see `download`.
-#:
-#: The key is spelled out rather than taken from `samples.
-#: DOWNLOAD_PERMISSION`, which is the same string and is what the
-#: redemption re-reads on the other origin: `test_ui_invariants` pins this
-#: line literally, so that "the mint states the download's own gate" is
-#: checked against source text a rename cannot quietly satisfy. The two
-#: spellings are held equal by a test rather than by an import.
+#: The download's gate, shared so the ticket mint states the same one and the download can apply
+#: it by call: FastAPI resolves every declared dependency, so a route that authenticates two ways
+#: cannot declare either (see `download`). The key is spelled out, not taken from
+#: `samples.DOWNLOAD_PERMISSION`, because `test_ui_invariants` pins this line literally; a test
+#: holds the two spellings equal.
 _REQUIRE_DOWNLOAD = require_global("sample.download")
 
-#: A ticket is 43 URL-safe characters, so 2 KB of form body is room for it
-#: and nothing worth having. The download parses a body now, and a route
-#: that parses a body bounds one: without this the sample origin would
-#: buffer whatever an unauthenticated caller sent before deciding it was
-#: not a ticket.
+#: A ticket is 43 URL-safe characters, so 2 KB of form body is room for it and nothing worth
+#: having. Without a bound the sample origin would buffer whatever an unauthenticated caller sent
+#: before deciding it was not a ticket.
 _TICKET_BODY_CAP = 2 * 1024
 
 
@@ -219,13 +146,9 @@ def _ip_hash(request: Request) -> bytes | None:
 def _download_url(sample_origin: str, sample_id: UUID) -> str:
     """Where the ticket is to be redeemed.
 
-    `API_PREFIX` lives in `http/app.py`, which imports this module, so the
-    import is deferred to call time -- the same shape `_svc` uses for
-    `SampleStorage`. Built from it rather than written out, because the
-    URL handed to the console must be a path this deployment actually
-    serves: `app._DOWNLOAD_PATH`, the pattern the sample process's
-    allow-list and its CORS answer both match on, is built from the same
-    constant.
+    Built from `API_PREFIX`, as `app._DOWNLOAD_PATH` (the pattern the sample process's allow-list
+    and CORS answer match on) is, so the URL is a path this deployment serves. `http/app.py`
+    imports this module, so the import is deferred to call time.
     """
     from noctornal_api.http.app import API_PREFIX
     return f"{sample_origin}{API_PREFIX}/samples/{sample_id}/download"
@@ -251,43 +174,35 @@ class SampleOut(BaseModel):
     source_note: str | None
     assigned_to: str | None
     classification: str
-    #: Names for the two uuids above (2026-09-22). The console read
-    #: neither uuid, so who submitted a sample and who holds it were never
-    #: shown anywhere (ux13-lab:provenance-never-shown).
+    #: Names for the two uuids above: who submitted the sample and who holds it.
     submitted_by_name: str | None = None
     submitted_by_email: str | None = None
     assigned_to_name: str | None = None
     assigned_to_email: str | None = None
     compartments: list[str] = []
-    #: The labels the sample is actually handled at: its own composed with
-    #: its case's, which is what `queue()` and `visible()` gate on. The row
-    #: chip showed `classification` and `compartments` alone, so a sample
-    #: from a compartmented case read as plain AMBER to the malware
-    #: analyst, whose only marking it is (ux13-lab:label-chip-understates-
-    #: handling, 2026-09-23). `inherited_compartments` are the ones that
-    #: come from the case and not the sample; `classification_inherited`
+    #: The labels the sample is handled at: its own composed with its case's, which is what
+    #: `queue()` and `visible()` gate on, and the malware analyst's only marking of it.
+    #: `inherited_compartments` come from the case and not the sample; `classification_inherited`
     #: is true when the case raised the level above the sample's own.
     effective_classification: str | None = None
     effective_compartments: list[str] = []
     inherited_compartments: list[str] = []
     classification_inherited: bool = False
-    #: F2 (0063). `bytes_disposition` is one of `in_sample_store`,
-    #: `preserved`, `destroyed` or `kept`; the `preserved_*` fields say
-    #: where a preserved sample went. `legal_hold` is the sample's own.
+    #: `bytes_disposition` is one of `in_sample_store`, `preserved`, `destroyed` or `kept`
+    #: (migration 0063); the `preserved_*` fields say where a preserved sample went. `legal_hold`
+    #: is the sample's own.
     bytes_disposition: str = "in_sample_store"
     preserved_bucket: str | None = None
     preserved_key: str | None = None
     preserved_at: str | None = None
     legal_hold: bool = False
-    #: True when the sample's case is CLOSED, ARCHIVED or PURGED, so the
-    #: Lab work, detonation and reject routes refuse it with the case's
-    #: 409. Said on the row so the card offers none of that work: the Lab
-    #: lists samples from every case, so the open case's own state cannot
-    #: decide it (c21, 2026-09-24). The state itself is not named.
+    #: True when the sample's case is CLOSED, ARCHIVED or PURGED, so the Lab work, detonation and
+    #: reject routes refuse it with the case's 409. On the row because the Lab lists samples from
+    #: every case, so the open case's state cannot decide what the card offers. The state itself
+    #: is not named.
     case_read_only: bool = False
-    #: F11 (2026-09-24): what static triage computed, None until it ran
-    #: (`triage_gaps` says why each is absent). `tlsh` is canonical, with
-    #: no T1 prefix; the console shows and copies it with one.
+    #: What static triage computed, None until it ran (`triage_gaps` says why each is absent).
+    #: `tlsh` is canonical, with no T1 prefix; the console shows and copies it with one.
     imphash: str | None = None
     rich_header_hash: str | None = None
     ssdeep: str | None = None
@@ -300,14 +215,13 @@ class SampleOut(BaseModel):
     #: its times, why it failed, and the limits it ran under. Never its
     #: steps or any YARA rule set.
     static_triage: dict = {"status": "never"}
-    #: F13 (2026-09-24). Whether and when the sample was screened, and
-    #: against how many hash lists its newest screening record consulted.
+    #: Whether and when the sample was screened, and how many hash lists its newest screening
+    #: record consulted.
     screening_outcome: str = "NOT_SCREENED"
     screened_at: str | None = None
     screening_lists_consulted: int | None = None
-    #: Archive expansion (phase 8, 2026-10-02): the archive sample this
-    #: one was cut from, and its path inside it; the detail's `archive`
-    #: carries the tree at the reader's labels.
+    #: Archive expansion: the archive sample this one was cut from, and its path inside it; the
+    #: detail's `archive` carries the tree at the reader's labels.
     parent_sample_id: str | None = None
     archive_path: str | None = None
 
@@ -351,7 +265,7 @@ def _out(s: Sample, names: dict | None = None,
         ssdeep=s.ssdeep, tlsh=s.tlsh,
         imphash_common={"common": s.imphash in fuzzyhash.COMMON_IMPHASHES,
                         "why": fuzzyhash.COMMON_IMPHASHES.get(s.imphash or "")},
-        screening_outcome=s.screening_outcome,   # F13
+        screening_outcome=s.screening_outcome,
         screened_at=s.screened_at.isoformat() if s.screened_at else None,
         parent_sample_id=str(s.parent_sample_id) if s.parent_sample_id else None,
         archive_path=s.archive_path,
@@ -367,13 +281,11 @@ def _named(svc: SampleService, samples: list[Sample]) -> list[dict]:
                        + [s.assigned_to for s in samples])
     cases = svc.case_labels([s.case_id for s in samples])
     shut = svc.read_only_cases([s.case_id for s in samples])
-    # F11-core G and F11 K (2026-09-24): the gaps computed at read time
-    # replace any stored copy of the same step (legacy rows), and each row
-    # carries its latest static-triage run, both for the whole page in one
-    # query each.
+    # The gaps computed at read time replace any stored copy of the same step (legacy rows), and
+    # each row carries its latest static-triage run, each in one query for the whole page.
     derived = svc.derived_gaps(samples)
     runs = svc.static_triage_summaries([s.id for s in samples])
-    # F13. How many lists each row's newest screening consulted.
+    # How many lists each row's newest screening consulted.
     screened = svc.screening_summaries([s.id for s in samples])
     out = []
     for s in samples:
@@ -399,27 +311,14 @@ def _named_one(svc: SampleService, sample: Sample) -> SampleOut:
 @router.get("/policy", response_model=dict)
 def policy_status(user: CurrentUser = Depends(current_user),
                   conn: psycopg.Connection = Depends(get_conn)) -> dict:
-    """Whether an operator has declared a prohibited-content policy, and
-    whether a separate sample origin is configured -- and which one.
+    """Whether an operator has declared a prohibited-content policy, and which separate sample
+    origin is configured, so a refused submission has a discoverable cause.
 
-    Surfaced rather than buried so that "sample submission is refused" has
-    a discoverable cause. Returns the operator's own reference, which is
-    the point of asking for a reference rather than a boolean.
-
-    `sample_origin` is the origin the console must fetch a download from,
-    or null; the Lab pane builds its download URL from it, because the
-    console is served from the application origin and the bytes are not.
-    `sample_origin_configured` is true only when the split is USABLE: set,
-    an origin, and not a second name for the application's. A value that
-    is set but unusable used to read as "configured" here while every
-    download refused, and `sample_origin_problem` now carries the reason
-    instead of the console guessing at one.
-
-    For the Lab's submit form (ux13-lab:submit-form-ignores-refusal-and-
-    scope, 2026-09-23): `designated_person` is who an analyst turned away
-    here is to contact, and `your_clearance` and `your_compartments` bound
-    the labels the form offers, so it cannot offer a label `submit` would
-    refuse. They are the caller's own and nobody else's.
+    `sample_origin` is where the console fetches a download from, or null.
+    `sample_origin_configured` is true only when the split is usable (set, an origin, and not a
+    second name for the application's); `sample_origin_problem` says why not. For the submit form,
+    `designated_person` is who a refused analyst contacts, and `your_clearance` and
+    `your_compartments`, the caller's own, bound the labels it offers.
     """
     declared, detail = policy_declared()
     split = origin_split()
@@ -439,21 +338,16 @@ def policy_status(user: CurrentUser = Depends(current_user),
         "sample_origin_problem": split.split_problem,
         # The cap `submit` enforces on THIS process, for the picker.
         "max_sample_bytes": MAX_SAMPLE_BYTES,
-        # What a rejection does with the bytes (F2), so the console's
-        # confirmation can say which will happen before it happens, and
-        # the reason when the setting is one this build refuses.
+        # What a rejection does with the bytes, so the console's confirmation can say so before it
+        # happens, and the reason when the setting is one this build refuses.
         "rejected_sample_disposition": disposition,
         "rejected_sample_disposition_problem": disposition_problem,
         "max_sample_bytes_declared": cap_is_declared(SAMPLE_CAP_ENV),
         "counsel_review_required": True,
-        # F13. Counts only, never a list's name.
+        # Counts only, never a list's name.
         "screening": _screening_policy(conn),
-        # F14. Never the URL, the host or the token.
+        # Never the URL, the host or the token.
         "sandbox": _sandbox_policy(),
-        # "before it is used in any absolute sense" was garbled, and the
-        # console printed its own copy of the first sentence in front of
-        # it, so the Lab banner said it twice (ux13-lab:legal-banner-copy,
-        # 2026-09-23).
         "notice": (
             "Counsel must review this deployment before it is used. A store "
             "of attacker-supplied binaries will eventually receive material "
@@ -465,13 +359,13 @@ def policy_status(user: CurrentUser = Depends(current_user),
 
 
 def _sandbox_policy() -> dict:
-    """F14. The configured sandbox, as the console may show it."""
+    """The configured sandbox, as the console may show it."""
     from noctornal_api.sandbox import policy_block
     return policy_block()
 
 
 def _screening_policy(conn: psycopg.Connection) -> dict:
-    """F13. The policy block's screening facts (counts only)."""
+    """The policy block's screening facts (counts only)."""
     from noctornal_api.screening import policy_block
     return policy_block(conn)
 
@@ -489,44 +383,20 @@ async def submit(
     user: CurrentUser = Depends(require_global("sample.submit")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> SampleOut:
-    """Land a sample in QUARANTINE. Nothing reaches the RE queue until
-    triage has run, and nothing is accepted at all until a
-    prohibited-content policy has been declared.
+    """Land a sample in QUARANTINE. Nothing reaches the RE queue until triage has run, and nothing
+    is accepted until a prohibited-content policy has been declared.
 
-    The request body is capped at `MAX_SAMPLE_BYTES`, enforced by
-    `BodyCappedRoute` on the bytes as they arrive: a declared length over
-    the cap is refused before a byte is read, a chunked body on the chunk
-    that crosses, and the 413 names the cap. Nothing below runs for a
-    refused upload. Until 2026-09-09 the cap was a chunked read of the
-    upload in this router, which ran after FastAPI's multipart parser had
-    spooled the whole body to a temporary file.
-
-    `sample.submit` is a GLOBAL permission — `require_global` resolves the
-    verb, the active account and step-up freshness, and knows nothing about
-    a case. So a caller holding it could previously attach a sample to ANY
-    case id, including one the access gate would answer 404 for: a write
-    into a case file they cannot see, which then carries that case's labels
-    and appears in its report. `authorize_object` closes that, and it is
-    the same five-part decision every other case-scoped write makes.
-
-    `compartments` exists at all now because the form had no field for it,
-    so every sample landed with `'{}'` whatever its case required. The
-    service unions the case's in regardless; this is for the case where the
-    SAMPLE is more restricted than the case it came from, which is the
-    normal direction for a sample carrying a source's fingerprints.
+    `BodyCappedRoute` caps the body at `MAX_SAMPLE_BYTES` as it arrives, and the 413 names the cap.
+    `sample.submit` is global and knows nothing about a case, so a case id is authorised by
+    `authorize_object`, as every case-scoped write is: otherwise a holder could write into a case
+    file they cannot see. `compartments` is for a sample more restricted than its case; the service
+    unions the case's in regardless.
     """
     parsed = frozenset(c.strip() for c in compartments.split(",") if c.strip())
-    # Refuse to author what the caller could not read back. Without this a
-    # holder of `sample.submit` — CASE_OWNER, ANALYST and REVIEWER all hold
-    # it — could land a RED sample from an AMBER account: a row they
-    # created, cannot see, and cannot correct. It also closes the first
-    # step of the original critical, which began "submit at RED, then
-    # download it".
-    #
-    # Applied on BOTH paths. `authorize_object` covers the case-attached
-    # one and composes the case's labels in, but a sample with no case
-    # never reaches it, and an unattached sample is exactly where an
-    # over-labelled row would sit unnoticed.
+    # Refuse to author what the caller could not read back: otherwise a holder of `sample.submit`
+    # could land a RED sample from an AMBER account, a row they cannot see or correct. On both
+    # paths: `authorize_object` covers only the case-attached one, and an unattached sample is
+    # where an over-labelled row would sit unnoticed.
     check_writable_labels(conn, user, classification=classification,
                           compartments=parsed)
     if case_id is not None:
@@ -540,11 +410,10 @@ async def submit(
     clearance, held = user_ceiling(conn, user.user_id)
     svc = _svc(conn)
     try:
-        # The submission on a system connection (S1, 2026-09-25): its
-        # duplicate check must find a sample the submitter may not see, or
-        # the upload stores a second copy of live malware (and the unique
-        # hash turns it into a 500). What the refusal may SAY is still
-        # decided by the submitter's own labels, below.
+        # The submission on a system connection: its duplicate check must find a sample the
+        # submitter may not see, or the upload stores a second copy of live malware (and the unique
+        # hash turns it into a 500). What a refusal may say is still decided by the submitter's own
+        # labels, below.
         with system_connection(SystemPurpose.SAMPLE_INTAKE, reuse=conn) as sconn:
             submitted = _svc(sconn).submit(
                 data, submitted_by=user.user_id, case_id=case_id,
@@ -563,8 +432,8 @@ async def submit(
         # somebody looking at their upload.
         raise Problem(451, "Unavailable for legal reasons", safe_detail(exc)) from exc
     except ProhibitedContentMatch as exc:
-        # F13. Legal too. The sentence names whom to contact and never
-        # the list or its category; the console shows it and opens no card.
+        # Legal too: the sentence names whom to contact and never the list or its category; the
+        # console shows it and opens no card.
         raise Problem(451, "Unavailable for legal reasons", safe_detail(exc)) from None
     except SampleError as exc:
         raise Problem(409, "Conflict", safe_detail(exc)) from exc
@@ -577,22 +446,14 @@ def queue(
     user: CurrentUser = Depends(require_global("sample.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """The RE queue, filtered by the caller's own clearance and compartments
-    COMPOSED with each sample's case.
+    """The RE queue, filtered by the caller's own clearance and compartments composed with each
+    sample's case.
 
-    Both directions matter and the service handles both: a sample can be
-    classified above its case, so the case gate alone would leak its
-    existence; and it can sit below its case, because `lab.sample` has no
-    classification floor trigger, so the sample's own labels alone would
-    leak the case's.
-
-    `state` picks one of the six queue states, and none means the working
-    set (quarantined, triaged, assigned). `case_id` narrows to one case.
-    Neither existed until 2026-09-22: the console filtered the working set
-    client-side, so three of its six filters could never show a row, and a
-    rejected sample and its reason became unreachable the moment it was
-    rejected (ux13-lab:rejected-filter-always-empty). A state outside the
-    six is a 400 naming them, never an empty list that reads as "none".
+    Both directions matter: a sample can be classified above its case, so the case gate alone
+    would leak its existence, and below it, since `lab.sample` has no classification floor
+    trigger, so its own labels alone would leak the case's. `state` picks one of the six queue
+    states, none meaning the working set (quarantined, triaged, assigned), and any other is a 400
+    naming them rather than an empty list; `case_id` narrows to one case.
     """
     if state is not None and state.strip():
         wanted = state.strip().upper()
@@ -620,21 +481,13 @@ def preserved_for_authorisation(
     user: CurrentUser = Depends(require_global("sample.preserved.authorise")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """The Security Officer's way in to the preserved samples (2026-09-23).
+    """The Security Officer's way in to the preserved samples.
 
-    Authorising and revoking a retrieval were offered only inside the Lab's
-    sample card, which is `GET /samples/{id}` under `sample.read`, and
-    SECURITY_OFFICER holds no `sample.read` (Security Officers read no case
-    content), and no case either. So the one role allowed to authorise got
-    403 on the Lab queue and on the card, and the two-person retrieval the
-    owner decided on could not be completed from the console.
-
-    Gated on the officer's own verb instead, step-up included, like the
-    break-glass review queue beside which the console shows it. It returns
-    each preserved sample's identity, where it is held, and its
-    authorisations, and none of its content (`preserved_for_authorisation`
-    says what is left out and why). Declared ahead of `/{sample_id}`, which
-    would otherwise take "preserved" for an id.
+    Security Officers hold no `sample.read` and read no case content, so this is gated on the
+    officer's own verb, step-up included, like the break-glass review queue the console shows it
+    beside. It returns each preserved sample's identity, where it is held, and its authorisations,
+    none of its content (`preserved_for_authorisation` says what is left out and why). Declared
+    ahead of `/{sample_id}`, which would otherwise take "preserved" for an id.
     """
     clearance, compartments = user_ceiling(conn, user.user_id)
     # No storage: this reads rows, and a list about who may have bytes must
@@ -647,9 +500,8 @@ def preserved_for_authorisation(
 
 
 # ---------------------------------------------------------------------------
-# Prohibited-content screening (F13, 2026-09-24). Declared ahead of
-# `/{sample_id}`, beside `/preserved`. None of these is served on the sample
-# origin: its allow-list admits the two download paths and nothing else.
+# Prohibited-content screening. Declared ahead of `/{sample_id}`, beside `/preserved`. None of
+# these is served on the sample origin: its allow-list admits the two download paths alone.
 # ---------------------------------------------------------------------------
 
 _REVIEW_SCREENING = require_global("sample.screening.review")
@@ -671,23 +523,20 @@ def screening_overview(
     user: CurrentUser = Depends(_REVIEW_SCREENING),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """The Security Officer's screening record: the authorities, the lists,
-    and every match, newest first.
+    """The Security Officer's screening record: the authorities, the lists, and every match,
+    newest first.
 
-    The match list is LABEL-FREE by an explicit owner decision (the docs/00
-    row this build proposes): the officer must see every match whatever its
-    labels, so each row carries only a hash prefix, the time, the list
-    names, the disposition then and now, the alert state and the reviews.
-    `you_may_open` says whether the full record is within the officer's own
-    ceiling; the record itself is gated (`/screening/results/{id}`). No
-    entry of any list is ever returned by any route."""
+    The match list is label-free (docs/00 decision 126): the officer must see every match whatever
+    its labels, so each row carries only a hash prefix, the time, the list names, the disposition
+    then and now, the alert state and the reviews. `you_may_open` says whether the full record,
+    gated at `/screening/results/{id}`, is within the officer's ceiling. No route returns an entry
+    of any list."""
     from noctornal_api import screening
     clearance, held = user_ceiling(conn, user.user_id)
     svc = screening.ScreeningService(conn)
-    # The match list and the section's counts on a system connection (S1,
-    # 2026-09-25): they are label-free on purpose, and under row-level
-    # security the officer's own view would drop every match above them.
-    # `you_may_open` is still computed against the officer's labels.
+    # The match list and the section's counts on a system connection: they are label-free on
+    # purpose, and under row-level security the officer's own view would drop every match above
+    # them. `you_may_open` is still computed against the officer's labels.
     with system_connection(SystemPurpose.SCREENING, reuse=conn) as sconn:
         now = screening.state(sconn)
         matches = screening.ScreeningService(sconn).results(
@@ -753,9 +602,8 @@ async def import_screening_list(
     authority_reference: str = Form(...),
     category: str = Form(...),
     user: CurrentUser = Depends(_MANAGE_SCREENING),
-    # On a system connection (S1, 2026-09-25): the in-request pass screens
-    # EVERY held sample against the new list, not the ones the officer
-    # may read.
+    # On a system connection: the in-request pass screens every held sample against the new list,
+    # not only the ones the officer may read.
     sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.SCREENING)),
 ) -> dict:
     """Import a list under both recorded authorities (451 names the one
@@ -769,9 +617,8 @@ async def import_screening_list(
 
     from noctornal_api.screening import ScreeningError, ScreeningService
     try:
-        # Off the event loop: the parse, the COPY and the in-request pass
-        # (up to 20 s) are synchronous, and this route is async only for
-        # the upload (the lab_yara precedent, 2026-09-24).
+        # Off the event loop: the parse, the COPY and the in-request pass (up to 20 s) are
+        # synchronous, and this route is async only for the upload, as in lab_yara.
         return await run_in_threadpool(partial(
             ScreeningService(sconn).import_list,
             file.file, name=name, provider=provider,
@@ -790,8 +637,8 @@ class RetireListBody(BaseModel):
 def retire_screening_list(
     list_id: UUID, body: RetireListBody,
     user: CurrentUser = Depends(_MANAGE_SCREENING),
-    # The lists are read-only to the request role (0179, Beta 1.1), as
-    # their import is: written on the SCREENING connection.
+    # The lists are read-only to the request role (migration 0179), so this writes on the
+    # SCREENING connection, as their import does.
     sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.SCREENING)),
 ) -> dict:
     """Stop comparing against a list. Nothing is deleted here: a sample
@@ -810,7 +657,7 @@ def retire_screening_list(
 def purge_screening_list(
     list_id: UUID,
     user: CurrentUser = Depends(_MANAGE_SCREENING),
-    # As the retirement above (0179, Beta 1.1).
+    # On the SCREENING connection, as the retirement above.
     sconn: psycopg.Connection = Depends(system_conn(SystemPurpose.SCREENING)),
 ) -> dict:
     """Ask for a retired list's entries to be deleted, later than its
@@ -832,7 +679,7 @@ def start_screening_pass(
     """A screening pass, now: database work only, budgeted to 20 seconds.
     The worker finishes anything left and moves matched bytes."""
     from noctornal_api.screening import ScreeningService
-    # Every held sample, whatever the officer may read (S1, 2026-09-25).
+    # Every held sample, whatever the officer may read.
     with system_connection(SystemPurpose.SCREENING, reuse=conn) as sconn:
         return ScreeningService(sconn).rescan(trigger="RESCAN",
                                               actor_id=user.user_id,
@@ -852,16 +699,14 @@ def review_screening_result(
     user: CurrentUser = Depends(_REVIEW_SCREENING),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """Record the officer's review of a match. DISPOSED_OUTSIDE records that
-    counsel directed disposal of the held copy outside the product; it
-    changes nothing here. Not gated on the sample's labels: the officer
-    governs every match (the label-free list's owner decision), and a
-    review reveals nothing of the record."""
+    """Record the officer's review of a match. DISPOSED_OUTSIDE records that counsel directed
+    disposal of the held copy outside the product; it changes nothing here. Not gated on the
+    sample's labels: the officer governs every match on the label-free list, and a review reveals
+    nothing of the record."""
     from noctornal_api.screening import ScreeningError, ScreeningService
     try:
-        # On a system connection (S1, 2026-09-25): the officer reviews any
-        # match on the label-free list, including one whose sample is above
-        # them, and the review row hangs off a result row security would
+        # On a system connection: the officer reviews any match on the label-free list, including
+        # one whose sample is above them, and the review row hangs off a result row security would
         # otherwise hide from them.
         with system_connection(SystemPurpose.SCREENING, reuse=conn) as sconn:
             return ScreeningService(sconn).review(
@@ -872,10 +717,9 @@ def review_screening_result(
 
 
 # ---------------------------------------------------------------------------
-# The sandbox sign-off (F14, 2026-09-24). Declared ahead of
-# `/{sample_id}`. Not `require_global("sample.read")`: a lead investigator
-# assigned to the case may hold no global role; the service decides who may
-# act, and answers 404 to everyone else.
+# The sandbox sign-off. Declared ahead of `/{sample_id}`. Not `require_global("sample.read")`: a
+# lead investigator assigned to the case may hold no global role; the service decides who may act,
+# and answers 404 to everyone else.
 # ---------------------------------------------------------------------------
 
 class SignOffBody(BaseModel):
@@ -962,11 +806,9 @@ def similar_by_value(
     user: CurrentUser = Depends(require_global("sample.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """Samples you can see whose imphash, Rich header, ssdeep or TLSH is
-    the value given, or near it (F11 J, 2026-09-24). Validated before any
-    work (a 400 names the expected form); metered by its own limit,
-    tighter than search; not audited, as search is not. Declared ahead of
-    `/{sample_id}`, beside `/preserved`."""
+    """Samples you can see whose imphash, Rich header, ssdeep or TLSH is the value given, or near
+    it. Validated before any work (a 400 names the expected form); metered by its own limit,
+    tighter than search; not audited, as search is not. Declared ahead of `/{sample_id}`."""
     try:
         value = lab_similarity.canonical_value(body.by, body.value)
         clearance, held = user_ceiling(conn, user.user_id)
@@ -989,16 +831,9 @@ def detail(
 ) -> dict:
     """One sample's metadata, its findings and its custody ledger.
 
-    The label check moved INTO the service as `visible()` (F19). It used to
-    live here, comparing the sample's own classification and compartments
-    and nothing else — so a sample submitted into a RED compartmented case
-    at the router's `AMBER` default was readable by anyone with AMBER
-    clearance, because `lab.sample` has no `enforce_tlp_floor` trigger to
-    stop the row existing at AMBER in the first place.
-
-    Doing it in the service means the composition is written once and a
-    second caller cannot skip it. That is not hypothetical: `download()` is
-    the caller that skipped it.
+    The label check is the service's `visible()`, which composes the case's labels in, so a second
+    caller cannot skip it: `lab.sample` has no `enforce_tlp_floor` trigger, so a sample can sit
+    below its case's labels.
     """
     svc = _svc(conn)
     clearance, compartments = user_ceiling(conn, user.user_id)
@@ -1008,34 +843,30 @@ def detail(
                          compartments=compartments)
     if sample is None:
         raise Problem(404, "Not found", "no such sample")
-    # Recorded AFTER the label check, so a refused read writes nothing,
-    # and before the ledger is read, so the reader sees their own look.
-    # The console said "every look is a row" and no look ever was
-    # (ux13-lab:custody-ledger-hides-who-and-what, 2026-09-22).
+    # Recorded after the label check, so a refused read writes nothing, and before the ledger is
+    # read, so the reader sees their own look.
     svc.record_view(sample_id, actor_id=user.user_id)
-    # The reader's ceiling reaches the findings too (F12 G): a machine YARA
-    # row, or an assessment derived from one, is shown only to a reader who
-    # may see its rule set, and custody says no more about it than that.
+    # The reader's ceiling reaches the findings too: a machine YARA row, or an assessment derived
+    # from one, is shown only to a reader who may see its rule set, and custody says no more about
+    # it than that.
     ceiling = {"clearance": clearance.name, "compartments": compartments}
     out = {"sample": _named(svc, [sample])[0],
            "analyses": svc.analyses(sample_id, **ceiling),
            "detonations": svc.detonations(sample_id),
            "custody": svc.custody(sample_id, **ceiling),
-           # F11 K: the last five runs, the same fields as the row's summary,
-           # and whether this deployment can run YARA at all.
+           # The last five runs, the same fields as the row's summary, and whether this deployment
+           # can run YARA at all.
            "static_runs": lab_triage.static_runs(conn, sample_id),
            "yara_engine": _yara_engine(),
-           # F14. Whether this sample may be sent to the configured
-           # sandbox now, and why not: the one eligibility reader.
+           # Whether this sample may be sent to the configured sandbox now, and why not: the one
+           # eligibility reader.
            "sandbox": _sandbox_for(conn, sample_id),
-           # Phase 8 (2026-10-02). The archive this sample was cut from
-           # and the members cut from it, each at the reader's labels.
+           # The archive this sample was cut from and the members cut from it, each at the
+           # reader's labels.
            "archive": lab_archive.tree_for(conn, sample_id, **ceiling),
-           # What this reader may do here, so the card offers the lab's
-           # own work (assign, record an analysis, reject, detonate) to the
-           # people who can do it and says who can to everybody else.
-           # A hint for the console; every route below still decides for
-           # itself (ux13-lab:no-assign-or-record-analysis, 2026-09-23).
+           # What this reader may do here, so the card offers the lab's own work (assign, record
+           # an analysis, reject, detonate) to the people who can do it and says who can to
+           # everybody else. A hint for the console; every route still decides for itself.
            "you_may": _you_may(conn, user)}
     if sample.preserved_key:
         out["preservation"] = {
@@ -1068,7 +899,7 @@ def _you_may(conn: psycopg.Connection, user: CurrentUser) -> dict:
                                                     "sample.detonate"),
             "download": iam.holds_global_permission(user.user_id,
                                                     "sample.download"),
-            # F11 K: running static triage on demand is the analyst's verb.
+            # Running static triage on demand is the analyst's verb.
             "static_triage": analyse}
 
 
@@ -1087,18 +918,11 @@ def people(
 ) -> dict:
     """The people the sample card's two pickers offer, by name.
 
-    `assignees`: who the sample can be assigned to (an active account
-    holding `sample.analyse` that can see this sample). `detonation_
-    authorisers`: who can sign off a non-private detonation (a lead
-    investigator on the sample's case, cleared for it, and not the
-    caller). Both used to be a free-text uuid box that nobody had a
-    value for (ux13-lab:no-assign-or-record-analysis,
-    ux13-lab:detonation-authoriser-uuid, 2026-09-23).
-
-    Each list goes only to a caller who can use it, so holding
-    `sample.read` alone does not make this a directory of the lab and
-    of the case's leads. 404 for a sample the caller may not see, the
-    same answer `detail` gives.
+    `assignees`: active accounts holding `sample.analyse` that can see this sample.
+    `detonation_authorisers`: who can sign off a non-private detonation (a lead investigator on
+    the sample's case, cleared for it, and not the caller). Each list goes only to a caller who can
+    use it, so `sample.read` alone does not make this a directory of the lab and the case's leads.
+    404 for a sample the caller may not see, as `detail` answers.
     """
     from noctornal_ontology.definition import SELECTOR_TYPES
 
@@ -1142,55 +966,22 @@ def mint_download_ticket(
     _fresh: None = Depends(require_step_up),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> DownloadTicketOut:
-    """A one-shot, sixty-second authority to download ONE sample from the
-    sample origin.
+    """A one-shot, sixty-second authority to download one sample from the sample origin, which a
+    `__Host-` cookie cannot reach by design.
 
-    ## Why this exists
-
-    `__Host-` cookies are `Secure`, `Path=/`, no `Domain`,
-    `SameSite=strict`: they cannot reach the sample origin, and that is
-    the POINT of the split rather than a limitation of it. So the console
-    forced the token from the login response there as a Bearer -- the
-    session credential itself, held in page memory, posted to a second
-    origin, on the one path that puts working malware on a disk. This
-    endpoint is what lets that stop: the credential that crosses is good
-    for one sample, one redemption and sixty seconds, and buys the
-    archive the analyst was already downloading rather than the case file.
-
-    ## Why it is a POST, and what the CSRF header does and does not buy
-
-    It is authenticated by the ORDINARY session dependency, which means a
-    caller presenting the cookie must also send the `x-csrf-token`
-    double-submit (`deps.session_token`), and only an unsafe method
-    demands it -- a GET would be exempt, which is the first reason this
-    mint is a POST. The second is that a GET minting a credential is one
-    a prefetcher, a link scanner or a chat unfurl can trigger.
-
-    The double-submit is what a page on ANOTHER origin cannot satisfy: it
-    can make the browser send the cookie, but CORS will not let it set a
-    custom header on a request that carries one, and `SameSite=strict`
-    stops the cookie travelling in the first place. Stated precisely
-    because the tempting shorter claim is false: a script injected into
-    the console's OWN origin reads the CSRF cookie like any other script
-    and can forge the header. Nothing in a browser stops that, which is
-    exactly why what this hands back is scoped to one sample and expires
-    in a minute instead of being the session token it replaces.
-
-    ## The decision is the download's, not a second copy of it
-
-    `SampleService.issue_download_ticket` runs the same
-    `_downloadable` check `download()` runs -- clearance stated, sample
-    readable at it with its case's labels composed in, compartments held,
-    not REJECTED, data key present -- so a ticket can never be minted for
-    a sample the caller could not have downloaded directly. It also
-    refuses on this process being the sample origin, and on the split
-    being unusable at all.
+    A POST under the ordinary session, so the CSRF double-submit applies and no prefetcher, link
+    scanner or unfurl can mint one. The double-submit stops other origins, not a script injected
+    into the console's own, which is why the ticket is scoped to one sample and a minute rather
+    than being the session token. `SampleService.issue_download_ticket` runs the same
+    `_downloadable` check as `download()`, so no ticket is minted for a sample the caller could
+    not download directly; it also refuses when this process is the sample origin or the split is
+    unusable.
     """
     clearance, compartments = user_ceiling(conn, user.user_id)
     try:
-        # A ticket row binds its holder once spent, so the request role
-        # may not write one (0109, S1 2026-09-25): minted on a system
-        # connection, after the gate above, with the caller's ceiling.
+        # A ticket row binds its holder once spent, so the request role may not write one
+        # (migration 0109): minted on a system connection, after the gate above, with the caller's
+        # ceiling.
         with system_connection(SystemPurpose.TICKETS, reuse=conn) as sconn:
             ticket = _ticket_svc(sconn).issue_download_ticket(
                 sample_id, actor_id=user.user_id, clearance=clearance.name,
@@ -1215,27 +1006,14 @@ def mint_download_ticket(
 
 
 def _meter_download(request: Request, response: Response) -> None:
-    """Meter the download on the PEER ADDRESS, before anything else runs.
+    """Meter the download on the peer address, before anything else runs.
 
-    The subject is the address because it is the only one that exists at
-    this point: since 0061 the credential may be a ticket in the body, so
-    nothing is known about the caller until a ticket has been looked up,
-    and the caller cannot mint an address the way `credential_subject`
-    warns they can mint a token.
-
-    Declared as a route-level dependency rather than a handler parameter
-    so it is solved FIRST -- FastAPI inserts these at the front of the
-    dependant -- and declared with no connection of its own, which is the
-    whole reason it is written out here instead of using
-    `limits.rate_limit("sample.download")`. That factory's IP branch takes
-    `Depends(get_conn)` so it can audit a denial, and taking it would open
-    a database connection for every request to this route including the
-    tokenless ones `_credential_presented` exists to refuse without one --
-    `db.connect()` is a real connect, not a pool checkout. The trade is
-    stated rather than hidden: a denial here is logged by `enforce` and
-    never written to `audit.event`. That is the right way round on this
-    particular route, where the whole defect being closed was an
-    unauthenticated caller's ability to cause audit writes.
+    The address is the only subject that exists here: the credential may be a ticket in the body,
+    unknown until looked up, and a caller cannot mint an address as they can a token. A route-level
+    dependency, so FastAPI solves it first, and with no connection of its own, unlike
+    `limits.rate_limit`, whose IP branch opens one (a real connect) to audit a denial. So a denial
+    here is logged by `enforce` and never written to `audit.event`: an unauthenticated caller must
+    not be able to cause audit writes.
     """
     enforce(request, response, "sample.download",
             ip_subject(client_ip(request)))
@@ -1244,26 +1022,16 @@ def _meter_download(request: Request, response: Response) -> None:
 def _credential_presented(request: Request) -> None:
     """Refuse a request that presents nothing, before a connection opens.
 
-    `deps.session_token` is declared ahead of `get_conn` on purpose, and
-    says why: a tokenless request must 401 without ever opening a database
-    connection, so an unauthenticated flood costs no connections and an
-    outage still answers 401. The ticket path would have quietly ended
-    that -- a ticket travels in the BODY, so this route can no longer
-    decide from headers alone, and `get_conn` would resolve for every
-    caller including one presenting nothing at all.
-
-    So the cheap question is asked first and from the headers only: is
-    there a credential of ANY kind here? A body counts as one without
-    being read, because reading it here to look for the ticket would
-    parse it twice. A caller who sends junk in a body therefore costs a
-    connection -- exactly as one who sends junk in `Authorization`
-    always has.
+    A tokenless request must 401 without opening a database connection, as `deps.session_token`
+    ensures elsewhere, so an unauthenticated flood costs no connections and an outage still
+    answers 401. A ticket travels in the body, so this asks from the headers alone whether any
+    credential is present; a body counts without being read, since reading it here would parse it
+    twice. Junk in a body therefore costs a connection, as junk in `Authorization` does.
     """
-    # lab-5 (2026-10-03): the origin split is asked FIRST, as the exhibit
-    # route's `_production_presented` does, so a ticket posted to the
-    # application process is refused before `redeem_download_ticket` spends
-    # it and audits a redemption that served nothing. Configuration only,
-    # so this still opens no connection.
+    # The origin split is asked first, as the exhibit route's `_production_presented` does, so a
+    # ticket posted to the application process is refused before `redeem_download_ticket` spends
+    # it and audits a redemption that served nothing. Configuration only, so this opens no
+    # connection.
     split = origin_split()
     if not split.serves_here:
         raise Problem(409, "Conflict", split.refusal or "")
@@ -1280,51 +1048,28 @@ def _credential_presented(request: Request) -> None:
 def _download_actor(request: Request, conn: psycopg.Connection,
                     sample_id: UUID, ticket: str | None
                     ) -> tuple[UUID, UUID | None, str]:
-    """Who is downloading, the ticket that proved it if one did, and what
-    that ticket was minted FOR (0063): a download, or the retrieval of a
-    preserved sample. A session is always a download; a retrieval crosses
-    on a ticket or not at all.
+    """Who is downloading, the ticket that proved it if one did, and what that ticket was minted
+    for: a download, or the retrieval of a preserved sample (migration 0063). A session is always a
+    download; a retrieval crosses on a ticket or not at all.
 
-    The two authentications cannot both be `Depends`: FastAPI resolves
-    every dependency a route declares, so `Depends(_REQUIRE_DOWNLOAD)`
-    would 401 a perfectly good ticket before this function ever ran. They
-    are therefore composed by hand -- and they are composed out of the
-    SAME callables the rest of the API uses (`session_token`,
-    `current_user`, the hoisted `sample.download` gate, `require_step_up`),
-    not reimplemented, because a second spelling of "is this session
-    allowed" is how two halves of one control come to disagree.
-
-    Ticket first, and only when one is actually presented: the session
-    path is unchanged for every caller who sends a Bearer, which since
-    2026-09-10 is every caller except the console. A request carrying
-    BOTH spends the ticket, because this branch is the first one.
-
-    The two branches check the same three things, by two routes. The
-    session branch calls the gates above. The ticket branch gets the
-    account half from `redeem_download_ticket`, which re-reads the
-    holder's `is_active` and their `sample.download` through the same
-    `holds_global_permission` `require_global` is built on -- in the
-    SERVICE, so a second caller cannot skip it, exactly as the origin and
-    label checks live there -- and the label half from `download()` below,
-    which reads `user_ceiling` live. What the ticket branch does not and
-    will not re-derive is the SESSION: that is the stated residual (0061,
-    docs/17 F22), and it is a question about a credential this origin
-    cannot resolve, not about the account.
+    The two authentications cannot both be `Depends`, since FastAPI resolves every declared
+    dependency and `_REQUIRE_DOWNLOAD` would 401 a good ticket, so they are composed by hand from
+    the same callables the rest of the API uses, never reimplemented. A presented ticket wins, so a
+    request carrying both spends it. `redeem_download_ticket` re-reads the holder's `is_active` and
+    `sample.download` in the service, and `download()` reads `user_ceiling` live. The ticket path
+    does not re-derive the session, a residual docs/17 states.
     """
     if ticket:
         try:
             spent = _ticket_svc(conn).redeem_download_ticket(
                 ticket, sample_id=sample_id, ip_hash=_ip_hash(request))
         except SampleError as exc:
-            # 401 and not 403: a ticket is the credential on this path,
-            # and a spent or expired one is an expired credential. One
-            # answer for all four refusal reasons, because "already
-            # redeemed" would tell the holder of a stolen ticket that it
-            # was real and that somebody else got there first.
+            # 401, not 403: a spent or expired ticket is an expired credential. One answer for all
+            # four refusal reasons, because "already redeemed" would tell the holder of a stolen
+            # ticket that it was real.
             raise Problem(401, "Unauthenticated", safe_detail(exc)) from exc
-        # The sample origin runs no session, so under row-level
-        # security this connection is bound to the spent ticket's holder
-        # before anything is read for them (S1, 2026-09-25).
+        # The sample origin runs no session, so under row-level security this connection is bound
+        # to the spent ticket's holder before anything is read for them.
         bind_ticket(conn, ticket)
         return spent
     raw = session_token(request, request.headers.get("authorization"))
@@ -1341,67 +1086,34 @@ def _download_actor(request: Request, conn: psycopg.Connection,
 def download(
     sample_id: UUID,
     request: Request,
-    #: The one-shot ticket, in the FORM BODY. Not a query parameter: a URL
-    #: reaches the access log, the Referer and the browser history, and
-    #: this one is a credential. Not JSON either, and that is not taste --
-    #: `application/x-www-form-urlencoded` is a CORS-safelisted content
-    #: type, so a ticket redemption is a SIMPLE cross-origin request that
-    #: needs no preflight, while `application/json` would need
-    #: `content-type` in `app._preflight`'s `Access-Control-Allow-Headers`
-    #: and would fail with the console's "the request did not complete"
-    #: until somebody added it.
+    #: The one-shot ticket, in the form body. Not a query parameter: a URL reaches the access log,
+    #: the Referer and the browser history. Not JSON: form encoding is CORS-safelisted, so the
+    #: redemption is a simple cross-origin request with no preflight, while JSON would need
+    #: `content-type` in `app._preflight`'s `Access-Control-Allow-Headers`.
     ticket: str | None = Form(default=None),
     _presented: None = Depends(_credential_presented),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> Response:
-    """The encrypted archive. The ONLY endpoint that touches sample bytes.
+    """The encrypted archive: the only endpoint that touches sample bytes.
 
-    The origin check is in the service, not here, so a second caller cannot
-    skip it -- and the service reads CONFIGURATION for it, so there is
-    nothing for this route to pass. It used to pass
-    `request.url.scheme://request.url.netloc` under a comment calling that
-    "the server's own view of the URL, never a header the client
-    controls"; Starlette builds `request.url` from the Host header, so the
-    comment was false and the check granted on a client-supplied value.
-    The route no longer takes the request at all, which is the shape that
-    cannot regress. These headers are the belt to those braces: even if
-    something upstream decided to serve this as HTML, `sandbox` in the CSP
-    means the browser will not execute it, and `nosniff` means it will not
-    guess.
-
-    ## Two ways to prove who you are
-
-    A session (Bearer, or the cookie plus its CSRF header) is the original
-    path and still works, for every caller that is not the console. A
-    one-shot `ticket` in the form body is the other, minted on the
-    application origin by `download-ticket`: the split means no `__Host-`
-    cookie can reach this process, so the alternative to a ticket was the
-    console carrying its session token to a second origin -- which it did
-    until 2026-09-10 and does not do now. `_download_actor` composes both
-    out of the same callables the rest of the API uses.
-
-    Whichever proved it, the identity for the rest of this route is one
-    user: the ticket's holder is the actor the labels are checked against,
-    the audit names, and the custody row records.
+    The origin check is in the service and reads configuration, so a second caller cannot skip it
+    and the route passes nothing from the request (`request.url` is built from the Host header).
+    If anything upstream served this as HTML, `sandbox` in the CSP stops it executing and `nosniff`
+    stops the browser guessing. A session or a one-shot `ticket` from `download-ticket` proves the
+    caller (`_download_actor`); either way one user is the actor the labels are checked against,
+    the audit names and the custody row records.
     """
     actor_id, ticket_id, purpose = _download_actor(request, conn, sample_id,
                                                    ticket)
-    # The caller's ceiling, exactly as `detail()` twenty lines above already
-    # does. Its absence here was the worst defect found in this codebase:
-    # `detail()` 404'd an over-classified sample and this endpoint handed
-    # the same caller its bytes one request later.
-    #
-    # Read LIVE, and on the ticket path that matters: the ticket was
-    # minted against this ceiling up to a minute ago, and a clearance
-    # withdrawn in between must bite before the bytes move.
+    # The caller's ceiling, as `detail()` applies it: without it an over-classified sample that
+    # `detail()` hides would still be served. Read live, so a clearance withdrawn since the ticket
+    # was minted bites before the bytes move.
     clearance, compartments = user_ceiling(conn, actor_id)
     try:
         if purpose == TICKET_RETRIEVAL:
-            # A preserved sample (0063): the same archive, read from the
-            # preservation store under a live authorisation that
-            # `retrieve_preserved` checks again here, on the sample
-            # origin, because one revoked inside the ticket's minute must
-            # bite before a byte moves.
+            # A preserved sample: the same archive, from the preservation store, under a live
+            # authorisation `retrieve_preserved` checks again here, so one revoked inside the
+            # ticket's minute bites before a byte moves.
             blob, digest = _svc(conn, preserving=True).retrieve_preserved(
                 sample_id, actor_id=actor_id,
                 clearance=clearance.name, compartments=compartments,
@@ -1435,18 +1147,11 @@ def download(
 
 class RejectBody(BaseModel):
     reason: str = Field(min_length=1)
-    #: True means "dispose of the bytes the way this deployment decided"
-    #: (`NOCTORNAL_REJECTED_SAMPLE_DISPOSITION`): PRESERVED under a legal
-    #: hold by default since 2026-09-22 (F2), destroyed only where an
-    #: operator chose `destroy`. False records the rejection and disposes
-    #: of nothing. Until that date True meant destroy, on the first click
-    #: (ux13-lab:reject-one-click-destroy). Kept in the request body, where
-    #: the custody row records it. The `description` is what a script
-    #: client reads in the API document, where this comment never appears:
-    #: the Alpha 6 pre-release check (2026-09-23) found the field
-    #: undescribed and the route still documented as destroying the bytes,
-    #: so a client written against Alpha 5.2 saw no sign that the same
-    #: request now preserves them.
+    #: True disposes of the bytes as the deployment decided, by
+    #: `NOCTORNAL_REJECTED_SAMPLE_DISPOSITION`: preserved under a legal hold by default, destroyed
+    #: only where an operator chose `destroy`. False records the rejection and disposes of nothing.
+    #: Kept in the request body, where the custody row records it; the `description` is what a
+    #: script client reads in the API document.
     purge_bytes: bool = Field(
         default=True,
         description=(
@@ -1463,68 +1168,44 @@ class RejectBody(BaseModel):
 def reject(
     sample_id: UUID, body: RejectBody,
     user: CurrentUser = Depends(require_global("sample.analyse")),
-    # A fresh sign-in, whatever `sample.analyse` itself requires. A
-    # rejection moves the evidence into the preservation store, which it
-    # cannot leave without two people, or destroys it for good under
-    # `destroy`; a session somebody walked away from must not be enough to
-    # do either (gap-reject-step-up, owner decision, 2026-09-23). The
-    # console asks for the sign-in before it sends (`smpStepUp`).
+    # A fresh sign-in, whatever `sample.analyse` itself requires: a rejection moves the evidence
+    # into the preservation store, which it cannot leave without two people, or destroys it under
+    # `destroy`, and a session somebody walked away from must not be enough for either. The console
+    # asks for the sign-in before it sends (`smpStepUp`).
     _fresh: None = Depends(require_step_up),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> SampleOut:
-    """Record THAT something was rejected and why. The row stays; what
-    happens to the bytes is the deployment's decision. Needs a sign-in
-    from the last 15 minutes (step-up), like a download.
+    """Record that something was rejected and why. The row stays; what happens to the bytes is the
+    deployment's decision. Needs a sign-in from the last 15 minutes (step-up), like a download.
 
-    With `purge_bytes` true (the default) the working copy is disposed of
-    as `NOCTORNAL_REJECTED_SAMPLE_DISPOSITION` says. `preserve`, the
-    default since Alpha 6, copies the ciphertext into the preservation
-    store under a legal hold, keeps the data key, then deletes the working
-    copy; if the preservation store refuses the copy, the rejection is
-    refused and nothing changes. `destroy` deletes the object and zeroes
-    the data key, which is what `purge_bytes` true meant until Alpha 6.
-    With `purge_bytes` false the rejection is recorded and nothing is
-    disposed of. `GET /samples/policy` reports the disposition in force.
+    With `purge_bytes` true (the default) the working copy is disposed of as
+    `NOCTORNAL_REJECTED_SAMPLE_DISPOSITION` says. `preserve`, the default, copies the ciphertext
+    into the preservation store under a legal hold and keeps the data key before deleting the
+    working copy; if the store refuses the copy, nothing changes. `destroy` deletes the object and
+    zeroes the data key, which is what true meant before preservation was the default. With
+    `purge_bytes` false nothing is disposed of. `GET /samples/policy` reports the disposition in
+    force. A legal hold on the sample or its case refuses destruction (docs/08); preservation is
+    not a deletion.
 
-    Destruction of a sample under a legal hold (its own or its case's) is
-    refused, and the service says so: docs/08, a hold overrides all
-    deletion, everywhere. Preservation is not a deletion and proceeds.
-
-    ## CR11 (2026-07-26): the destructive path had no label check
-
-    `reject(purge_bytes=True)` was irreversible then, as it still is under
-    `destroy`: it deletes the object and zeroes the data key. It resolved
-    the sample through `get()`, which is
-    `WHERE id = %s` with no clearance, compartment or case predicate, and
-    the route gated only on the GLOBAL `sample.analyse` role.
-
-    `download()` composes the sample's labels with its case's before it
-    will serve a byte. `reject()`, which then destroyed those same bytes
-    for good, did not. So a MALWARE_ANALYST, who deliberately holds no
-    case access at all, could permanently destroy a sample belonging to a
-    compartmented case knowing only its UUID.
-
-    The check runs BEFORE anything is deleted, and returns the same
-    "no such sample" a nonexistent id gives: a 403 here would confirm that
-    a particular sample exists in a case the caller cannot see.
+    The label check, composing the case's labels as `download()` does, runs before anything is
+    disposed of: without it the global `sample.analyse` would let a MALWARE_ANALYST destroy a
+    compartmented case's sample by its uuid. A hidden sample gets the same "no such sample" as a
+    nonexistent id, since a 403 would confirm it exists.
     """
     clearance, comps = user_ceiling(conn, user.user_id)
     sample = _svc(conn).visible(sample_id, clearance=clearance.name,
                                 compartments=comps)
     if sample is None:
         raise Problem(404, "Not found", "no such sample")
-    # A rejection changes the sample and disposes of its working copy, so a
-    # read-only case refuses it whatever the disposition: its material
-    # leaves only through the retention purge, which takes two people (c7,
-    # 2026-09-24).
+    # A rejection changes the sample and disposes of its working copy, so a read-only case refuses
+    # it whatever the disposition: its material leaves only through the retention purge, which
+    # takes two people.
     _refuse_if_read_only(conn, user, sample, "sample.analyse")
     disposition, _problem = disposition_setting()
     try:
-        # The preservation store is built only when this rejection will
-        # use it, so a deployment that destroys, or a rejection that
-        # disposes of nothing, is not refused over credentials it never
-        # needed. A disposition this build does not know is refused by the
-        # service, naming the variable.
+        # The preservation store is built only when this rejection uses it, so a destroying
+        # deployment or a rejection that disposes of nothing is not refused over its credentials.
+        # The service refuses an unknown disposition, naming the variable.
         svc = _svc(conn, preserving=body.purge_bytes
                    and disposition == PRESERVE)
         rejected = svc.reject(sample_id, actor_id=user.user_id,
@@ -1550,18 +1231,10 @@ def assign(
 ) -> SampleOut:
     """Put a quarantined or triaged sample in one analyst's hands.
 
-    Two checks this route did not make until 2026-09-23 (ux13-lab:no-
-    assign-or-record-analysis). The sample must be one the CALLER can see,
-    the same 404 `detail` gives, because assigning by uuid was a write
-    against a sample in a case the caller cannot open, the shape CR11
-    closed on `reject`. And the assignee must be on
-    `eligible_assignees`: an active account holding `sample.analyse` that
-    can see the sample. Any uuid used to do, so a valid but wrong one
-    handed the sample to somebody who could not open it or was not in
-    the lab at all. The console offers only that list.
-
-    Refused with the case's 409 when the sample's case is read-only (c21,
-    2026-09-24).
+    The sample must be one the caller can see (the 404 `detail` gives), since assigning is a write
+    against it, and the assignee must be in `eligible_assignees`: an active account holding
+    `sample.analyse` that can see the sample. Refused with the case's 409 when the sample's case is
+    read-only.
     """
     sample = _visible_or_404(conn, user, sample_id)
     _refuse_if_read_only(conn, user, sample, "sample.analyse")
@@ -1599,9 +1272,9 @@ class AnalysisBody(BaseModel):
     narrative: str | None = None
     tool: str | None = None
     tool_version: str | None = None
-    #: The YARA rule set version this assessment was taken from, when the
-    #: card's "Use as family assessment" made it (F12 G): the row is then
-    #: read through that set's labels too, never below its source.
+    #: The YARA rule set version this assessment was taken from, when the card's "Use as family
+    #: assessment" made it: the row is then read through that set's labels too, never below its
+    #: source.
     derived_from_version_id: UUID | None = None
 
 
@@ -1611,19 +1284,14 @@ def record_analysis(
     user: CurrentUser = Depends(require_global("sample.analyse")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """Findings are machine-readable by construction. A family attribution
-    without a confidence is refused: it is an assessment, and one without a
-    confidence is a fact wearing an assessment's clothes.
+    """Record an analysis. Findings are machine-readable by construction, and a family attribution
+    without a confidence is refused: it would be a fact wearing an assessment's clothes.
 
-    Refused for a sample the caller cannot see, with the 404 `detail`
-    gives (2026-09-23): an analysis is a write against the sample, and it
-    was taken by uuid alone. Each extracted selector must name its type and
-    value, because an entry without a type can never be proposed into the
-    case (`propose_extracted_selector`).
-
-    Refused with the case's 409 when the sample's case is read-only: an
-    attribution dated after `closed_at` on a closed case's sample is the
-    post-closure material the rule keeps out (c7, 2026-09-24)."""
+    Refused with the 404 `detail` gives for a sample the caller cannot see, since an analysis is a
+    write against it, and with the case's 409 when its case is read-only: an attribution dated
+    after `closed_at` is the post-closure material the rule keeps out. Each extracted selector
+    must name its type and value, or it can never be proposed into the case
+    (`propose_extracted_selector`)."""
     sample = _visible_or_404(conn, user, sample_id)
     _refuse_if_read_only(conn, user, sample, "sample.analyse")
     if body.kind not in _ANALYSIS_KINDS:
@@ -1667,9 +1335,8 @@ def record_analysis(
 
 def _check_derived_from(conn: psycopg.Connection, user: CurrentUser,
                         sample_id: UUID, version_id: UUID) -> None:
-    """An assessment says it came from a rule set version: 404 unless the
-    caller may see that version's set, 400 unless a machine YARA row of
-    that version exists on this sample (F12 G)."""
+    """An assessment says it came from a rule set version: 404 unless the caller may see that
+    version's set, 400 unless a machine YARA row of that version exists on this sample."""
     from noctornal_api.yara_rules import RulesetService
     clearance, held = user_ceiling(conn, user.user_id)
     if RulesetService(conn).visible_version(
@@ -1702,31 +1369,23 @@ def propose_selector(
 ) -> dict:
     """Propose one extracted selector into the sample's case triage queue.
 
-    docs/11's "findings flow back as assertions", through the normal
-    proposal path: nothing reaches the graph until one of the case's
-    analysts accepts it in Triage, where the assertion is written as
-    theirs and graded as an inference (ux13-lab:no-assign-or-record-
-    analysis, 2026-09-23). The lab analyst needs no case access for this,
-    and gets none: the answer is 202 and `{"sent": true, "label"}` whether
-    a proposal was queued, one already existed or the case already holds
-    the entity, and it names no case code. Anything more let a role barred
-    from case content probe the case graph with values it typed itself
-    (the verifier's existence oracle, 2026-09-23). 202, not 201, because
-    nothing the caller may look at was created. Metered like capture,
-    because a loop here floods a queue somebody has to work.
+    docs/11's "findings flow back as assertions", through the normal proposal path: nothing
+    reaches the graph until a case analyst accepts it in Triage, as their assertion graded as an
+    inference. The lab analyst needs no case access and gets none: the answer is 202 (nothing the
+    caller may see was created) and `{"sent": true, "label"}` whether a proposal was queued, one
+    already existed or the case holds the entity, and names no case code, so a role barred from
+    case content cannot probe the graph with values it typed. Metered like capture, because a loop
+    here floods a queue.
     """
     sample = _visible_or_404(conn, user, sample_id)
-    # The gate's refusal rather than only the service's: titled so the
-    # console knows it, and audited (c7, 2026-09-24).
+    # The gate's refusal, not only the service's: titled so the console knows it, and audited.
     _refuse_if_read_only(conn, user, sample, "sample.analyse")
     clearance, held = user_ceiling(conn, user.user_id)
     try:
-        # Under the caller's ceiling (F11-core H): a finding the caller
-        # cannot see is "no such analysis", however they learned its id.
-        # The Lab proposes into a case its analyst is not on, and
-        # "already in the graph" must be judged against the whole case, so
-        # the proposal runs on a system connection; the caller's ceiling
-        # still decides which analysis they may use (S1, 2026-09-25).
+        # Under the caller's ceiling: a finding the caller cannot see is "no such analysis",
+        # however they learned its id. The Lab proposes into a case its analyst is not on, and
+        # "already in the graph" is judged against the whole case, so the proposal runs on a system
+        # connection; the caller's ceiling still decides which analysis they may use.
         with system_connection(SystemPurpose.LAB_PROPOSE, reuse=conn) as sconn:
             out = SampleService(sconn).propose_extracted_selector(
                 sample, analysis_id, body.index, actor_id=user.user_id,
@@ -1763,16 +1422,15 @@ def run_static_triage(
     user: CurrentUser = Depends(require_global("sample.analyse")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """Queue static triage of one sample now (F11 K, 2026-09-24).
+    """Queue static triage of one sample now.
 
-    The request never waits for a child: it enqueues (merging into a run
-    already queued for the sample, which then names this caller too) and
-    answers 202, and a background task starts the run after the response
-    when a slot is free (`will_run: now`), or the next cron pass takes it
-    (`next_pass`). 404 for a sample the caller may not see; the case's 409
-    for a closed case; 451 while no prohibited-content policy is declared;
-    409 for a rejected sample, one above the analysis maximum (naming the
-    setting) or one whose triage is running now. Every refusal is audited.
+    The request never waits for a child: it enqueues (merging into a run already queued for the
+    sample, which then names this caller too) and answers 202, and a background task starts the
+    run after the response when a slot is free (`will_run: now`), or the next cron pass takes it
+    (`next_pass`). 404 for a sample the caller may not see; the case's 409 for a closed case; 451
+    while no prohibited-content policy is declared; 409 for a rejected sample, one above the
+    analysis maximum (naming the setting) or one whose triage is running now. Every refusal is
+    audited.
     """
     sample = _visible_or_404(conn, user, sample_id)
     _refuse_if_read_only(conn, user, sample, "sample.analyse")
@@ -1825,13 +1483,12 @@ def similar_samples(
     user: CurrentUser = Depends(require_global("sample.read")),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """Samples you can see that are similar to this one (F11 J, F12 G).
+    """Samples you can see that are similar to this one.
 
-    The sample is checked FIRST and the hashes compared are read from the
-    row the caller may see, so a hidden sample's 404 is the same as a
-    random id's. Candidates are found
-    under the Lab's one label gate: a sample you may not see is neither
-    listed nor counted. Metered by `sample.similar`; not audited."""
+    The sample is checked first and the hashes compared are read from the row the caller may see,
+    so a hidden sample's 404 is the same as a random id's. Candidates are found under the Lab's one
+    label gate: a sample you may not see is neither listed nor counted. Metered by
+    `sample.similar`; not audited."""
     sample = _visible_or_404(conn, user, sample_id)
     clearance, held = user_ceiling(conn, user.user_id)
     try:
@@ -1849,9 +1506,8 @@ def similar_samples(
 
 
 class DetonationBody(BaseModel):
-    #: F14 (2026-09-24): "record" keeps exactly the old behaviour and
-    #: is never sent; "submit" asks the sandbox worker to send it. There is
-    #: no free-text CAPE options field.
+    #: "record" is never sent; "submit" asks the sandbox worker to send it. There is no free-text
+    #: CAPE options field.
     mode: str = Field(default="record", pattern="^(record|submit)$")
     target: str | None = Field(default=None, max_length=200)
     exposure_level: str | None = None
@@ -1872,25 +1528,19 @@ def request_detonation(
     _fresh: None = Depends(require_step_up),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> dict:
-    """Record a detonation request. **Nothing is submitted anywhere** --
-    docs/11 is emphatic that you integrate with a sandbox rather than build
-    one, and no integration exists.
+    """Record a detonation request. Nothing is sent from here: `record` is never sent, and `submit`
+    asks the sandbox worker to send it (docs/11: integrate with a sandbox rather than build one).
 
-    Anything other than a private instance needs a named authoriser and a
-    note, because submitting to a vendor or public sandbox exposes the
-    sample AND your interest in it, and operators watch public sandboxes
-    for their own samples. The authoriser is somebody `GET
-    /samples/{id}/people` lists, never the caller (the service refuses
-    anybody else), and the answer names them so the console can say who
-    signed it off (ux13-lab:detonation-authoriser-uuid, 2026-09-23).
-    Refused for a sample the caller cannot see, with the 404 `detail`
-    gives, and for one whose case is read-only, with the case's 409 (c21,
-    2026-09-24).
+    Anything other than a private instance needs a named authoriser and a note, because submitting
+    to a vendor or public sandbox exposes the sample and your interest in it, and operators watch
+    public sandboxes for their own samples. The authoriser is somebody `GET /samples/{id}/people`
+    lists, never the caller, and the answer names them. Refused with the 404 `detail` gives for a
+    sample the caller cannot see, and with the case's 409 when its case is read-only.
     """
     sample = _visible_or_404(conn, user, sample_id)
     _refuse_if_read_only(conn, user, sample, "sample.detonate")
     if body.mode == "submit":
-        # F14. Refused with 409 naming the reason; nothing is sent here.
+        # Refused with 409 naming the reason; nothing is sent here.
         from noctornal_api.sandbox import SandboxError, SandboxService
         try:
             return SandboxService(conn).request(
@@ -1921,14 +1571,12 @@ def request_detonation(
              if body.authorised_by else None)
     return {"id": str(det_id), "mode": "record",
             "submitted": False,
-            # lab-3 (2026-10-03): PENDING, and the named person has not
-            # confirmed anything in the product; they have been told.
+            # PENDING: the named person has been told, and has confirmed nothing in the product.
             "status": "PENDING",
             "authoriser_confirmed": False,
             "authorised_by_name": (named or {}).get("name"),
             "authorised_by_email": (named or {}).get("email"),
-            # F14. A record-only request is never sent, whether or not
-            # a sandbox is configured.
+            # A record-only request is never sent, whether or not a sandbox is configured.
             "notice": ("Recorded only. This request is never sent anywhere."
                        + (" The person you named has not confirmed it in the "
                           "product, and they have been told it names them."
@@ -1936,7 +1584,7 @@ def request_detonation(
 
 
 # ---------------------------------------------------------------------------
-# Preserved samples: two people to get one back out (F2, 0063, 2026-09-22)
+# Preserved samples: two people to get one back out (migration 0063)
 # ---------------------------------------------------------------------------
 
 class PreservationAuthoriseBody(BaseModel):
@@ -1964,25 +1612,17 @@ def _visible_or_404(conn: psycopg.Connection, user: CurrentUser,
 
 def _refuse_if_read_only(conn: psycopg.Connection, user: CurrentUser,
                          sample: Sample, permission_key: str) -> None:
-    """The case's read-only rule, for a Lab write on an existing sample:
-    assign, record an analysis, propose a selector, request a detonation
-    and reject (c7/c21, 2026-09-24).
+    """The case's read-only rule, for a Lab write on an existing sample: assign, record an
+    analysis, propose a selector, request a detonation and reject.
 
-    A sample attached to a case is that case's content (`cases.
-    CONTENT_READ_ONLY_STATES`), and these routes gate on global lab verbs
-    that never reach `authorize_object`, so a CLOSED or ARCHIVED case's
-    sample took new attributions and state changes after `closed_at`, and
-    under the `destroy` disposition could be destroyed by one analyst. The
-    rule is the gate's own, called by hand as ingest record triage calls
-    it: one 409 titled `CASE_READ_ONLY_TITLE`, which the console knows,
-    and one audit row.
-
-    Called AFTER the label check, so a caller who cannot see the sample
-    gets the 404 and learns nothing. A Lab analyst who can see the sample
-    but not open its case learns the case's state, never its code: the
-    least that explains why the work is refused, and what the propose
-    path already said. Preserved-retrieval authorisation and the download
-    are not routed here: they are governance and reads."""
+    A sample attached to a case is that case's content (`cases.CONTENT_READ_ONLY_STATES`), and
+    these routes gate on global lab verbs that never reach `authorize_object`; without this a
+    closed case's sample would take new attributions after `closed_at`, and under `destroy` one
+    analyst could destroy it. The rule is the gate's own, called by hand: one 409 titled
+    `CASE_READ_ONLY_TITLE` and one audit row. Called after the label check, so a caller who cannot
+    see the sample gets the 404; one who can see it but not its case learns the case's state, never
+    its code. Preserved-retrieval authorisation and the download are governance and reads, so they
+    are not routed here."""
     if sample.case_id is not None:
         refuse_if_case_read_only(conn, user, sample.case_id, permission_key)
 
@@ -2057,27 +1697,19 @@ def mint_retrieval_ticket(
     _fresh: None = Depends(require_step_up),
     conn: psycopg.Connection = Depends(get_conn),
 ) -> DownloadTicketOut:
-    """A one-shot ticket to retrieve ONE preserved sample, spent at the
-    sample origin's download path exactly as a download ticket is.
+    """A one-shot ticket to retrieve one preserved sample, spent at the sample origin's download
+    path as a download ticket is.
 
-    Why a ticket and not a route of its own: a preserved sample's bytes are
-    sample bytes, invariant 10 puts them on the separate origin, and the
-    process there serves the download path and nothing else
-    (`app._allowed_on_sample_origin`). A second byte-serving route would be
-    a second door on the one process the split keeps narrow. (The one other
-    path it answers, since 2026-09-24, produces an EXHIBIT of attacker
-    markup: case-scoped bytes from the evidence store under
-    `evidence.export`, which no sample route could have carried.) The ticket
-    carries its purpose, so the redemption re-reads
-    `sample.preserved.retrieve` rather than `sample.download`, reads the
-    preservation store, and checks the live authorisation again.
-
-    451 when the caller holds no live authorisation for this sample: the
-    two-person control working, audited as a refusal.
+    Not a route of its own: the bytes are sample bytes (invariant 10), and the sample origin
+    serves only its download path and exhibit production (`app._allowed_on_sample_origin`), so a
+    second byte-serving route would be a second door. The ticket carries its purpose, so the
+    redemption re-reads `sample.preserved.retrieve` rather than `sample.download`, reads the
+    preservation store and checks the live authorisation again. 451 when the caller holds no live
+    authorisation: the two-person control working, audited as a refusal.
     """
     clearance, compartments = user_ceiling(conn, user.user_id)
     try:
-        # Minted on a system connection, as the download ticket is (S1).
+        # Minted on a system connection, as the download ticket is.
         with system_connection(SystemPurpose.TICKETS, reuse=conn) as sconn:
             ticket = _ticket_svc(sconn).issue_retrieval_ticket(
                 sample_id, actor_id=user.user_id, clearance=clearance.name,

@@ -1,15 +1,10 @@
-"""A case's lookups (F15.3 and F15.4, 2026-09-24).
+"""A case's lookups, under /cases/{case_id}/lookups (static paths before /{lookup_id}).
 
-Prefix /cases/{case_id}/lookups. Static paths are declared before
-/{lookup_id}. No selector value ever travels in a query string: a request,
-a plan and a batch send it in the body. Every read uses the CURRENT labels
-of the lookup's node, sample and case, and one serialiser that withholds
-an answer's outcome from a reader who does not dominate it.
-
-The verbs a route sends under are named in the service (lookups.py), never
-as literals here: test_closed_case_read_only.py reads the literals of a
-route body, and a read that named a content verb would be refused on a
-closed case.
+No selector value travels in a query string: a request, a plan and a batch send it in the body.
+Every read uses the current labels of the lookup's node, sample and case, and one serialiser
+withholds an answer's outcome from a reader who does not dominate it. The verbs a route sends
+under are named in the service (lookups.py), never as literals here: test_closed_case_read_only.py
+reads a route body's literals, and a read naming a content verb would be refused on a closed case.
 """
 from __future__ import annotations
 
@@ -42,8 +37,7 @@ def _refused(exc: lookups.LookupRefused) -> JSONResponse:
     status = exc.status
     title = {400: "Invalid request", 403: "Forbidden", 409: "Conflict"}.get(status,
                                                                           "Conflict")
-    # A problem with two extension members, so the problem media type too
-    # (2026-10-07: it was served as application/json).
+    # A problem with two extension members, so the problem media type too.
     return JSONResponse(status_code=status, media_type="application/problem+json", content={
         "type": "about:blank", "title": title, "status": status,
         "detail": safe_detail(exc), "code": exc.code,
@@ -121,9 +115,8 @@ def _answer(svc: lookups.LookupService, case_id: UUID, user_id: UUID, outcome: d
                          else outcome[key])
     status = outcome.get("status", 200)
     if item["withheld"]:
-        # The status would say whether a withheld answer could be read
-        # (2026-09-25): the reader is told only that there
-        # is an answer above their clearance.
+        # The status would say whether a withheld answer could be read: the reader is told only
+        # that there is an answer above their clearance.
         status = 200
     if status >= 500:
         body["detail"] = item.get("error_detail")

@@ -1,13 +1,11 @@
 """Postgres-backed implementations of the auth/session store protocols.
 
-These are the production stores behind AuthService and SessionService.
-Every query is parameterised (docs/05: no string-built SQL). The TOTP
-secret is decrypted only when totp.verify actually needs it, in the API
+These are the production stores behind AuthService and SessionService. Every query is parameterised
+(docs/05: no string-built SQL). The TOTP secret is decrypted only when totp.verify needs it, in the API
 process, and never returned to a client or logged.
 
-Connections are expected to be autocommit (see db.connect): the two
-security-critical mutations — the TOTP counter advance and the lockout
-increment — are single-statement compare-and-set UPDATEs, so their
+Connections are expected to be autocommit (see db.connect): the two security-critical mutations, the TOTP
+counter advance and the lockout increment, are single-statement compare-and-set UPDATEs, so their
 atomicity comes from the statement itself, not a surrounding transaction.
 """
 from __future__ import annotations
@@ -121,12 +119,11 @@ class PgUserStore(UserStore):
         return len(self.get_recovery_hashes(user_id))
 
     def recovery_codes_remaining(self, user_id: UUID) -> int | None:
-        """The count alone, through the definer 0143 adds (rls-6,
-        2026-10-03): the request role cannot read the hashes, and the
-        function answers only for the account the connection is bound to.
-        None when it will not answer: no such account, or not the bound
-        one (a session revoked while the request ran). `count_recovery_codes`
-        stays for the owner's shell tools."""
+        """The count alone, through the definer 0143 adds: the request role cannot read the hashes, and
+        the function answers only for the account the connection is bound to.
+
+        None when it will not answer: no such account, or not the bound one (a session revoked while the
+        request ran). `count_recovery_codes` stays for the owner's shell tools."""
         row = self._c.execute(
             "SELECT iam.recovery_codes_remaining(%s)", (user_id,)).fetchone()
         return int(row[0]) if row and row[0] is not None else None
@@ -162,15 +159,13 @@ class PgUserStore(UserStore):
     def record_failed_login(
         self, user_id: UUID, threshold: int, lock_until: datetime
     ) -> None:
-        """Increment and lock in one statement, deciding lockout from the
-        POST-increment value so parallel failures cannot each read a stale
-        count and skip the lock, and never shortening an existing lock.
+        """Increment and lock in one statement, deciding lockout from the post-increment value so parallel
+        failures cannot each read a stale count and skip the lock, and never shortening an existing lock.
 
-        The counter DECAYS: once a previous lock has elapsed the window
-        restarts at 1. Without that reset the count stayed at the threshold
-        forever, so a single bad login every 15 minutes re-locked the account
-        indefinitely — a one-request-per-quarter-hour denial of service
-        against any analyst whose email address is known.
+        The counter decays: once a previous lock has elapsed the window restarts at 1. Without that reset
+        the count would stay at the threshold forever, and a single bad login every 15 minutes would
+        re-lock the account indefinitely, a one-request-per-quarter-hour denial of service against any
+        analyst whose email address is known.
         """
         self._c.execute(
             """UPDATE iam.app_user
@@ -191,13 +186,12 @@ class PgUserStore(UserStore):
         )
 
     def clear_failed_logins(self, user_id: UUID, at: datetime) -> None:
-        """Both factors were right: the failures before this no longer
-        count. `at` is when they were proved, and it is NOT the sign-in
-        time any more. This also stamped `last_login_at` until 2026-09-24
-        (final review u22), so the must-change refusal and an Account
-        password change, which open no session, read on the Admin card as
-        the "last password sign-in". That stamp is `record_sign_in`'s,
-        called where a session is minted."""
+        """Both factors were right: the failures before this no longer count.
+
+        `at` is when they were proved, not the sign-in time. The `last_login_at` stamp is
+        `record_sign_in`'s, called where a session is minted, so the must-change refusal and an Account
+        password change, which open no session, do not read on the Admin card as the "last password
+        sign-in"."""
         del at
         self._c.execute(
             """UPDATE iam.app_user
@@ -236,18 +230,13 @@ class PgAccessResolver:
         mfa_satisfied_at: datetime | None,
         count_use: bool = True,
     ) -> AccessContext:
-        """`count_use=False` is for a gate asked as a QUESTION rather than
-        a request being let through: `search._allowed_on_case` (what a
-        response may name, for a request whose own gate has already run),
-        `ingest._case_allows` (which rows a queue listing may show) and
-        `live._recheck` (whether to keep streaming to a socket whose
-        opening was already counted). Counting them told the reviewing
-        officer each inspector open was two uses of the grant, and each
-        queue load or live event one more (final review U19 and its fix
-        round, 2026-09-23). The default stays True
-        on purpose: a new caller that forgets the flag over-counts, which
-        an officer can see through, rather than under-counts, which they
-        cannot."""
+        """`count_use=False` is for a gate asked as a question rather than a request being let through:
+        `search._allowed_on_case` (what a response may name, for a request whose own gate has already
+        run), `ingest._case_allows` (which rows a queue listing may show) and `live._recheck` (whether to
+        keep streaming to a socket whose opening was already counted). Counting them would tell the
+        reviewing officer each inspector open was two uses of the grant, and each queue load or live event
+        one more. The default stays True on purpose: a new caller that forgets the flag over-counts, which
+        an officer can see through, rather than under-counts, which they cannot."""
         # Every lookup fails CLOSED: an unknown permission/user or an
         # out-of-range TLP value raises AccessResolutionError (→ 403), never
         # a 500 that could mask a bad caller.
@@ -259,23 +248,13 @@ class PgAccessResolver:
             raise AccessResolutionError(f"unknown permission: {permission_key!r}")
         requires_step_up = bool(perm_row[0])
 
-        # `is_active` belongs HERE, not only on the global path (CR2,
-        # 2026-07-26).
+        # `is_active` is checked here, not only on the global path. `SessionService.validate` resolves a
+        # token against `iam.session` alone and never joins `app_user`, so without this a deactivated
+        # analyst holding a live `__Host-session` cookie would keep full read and write on every assigned
+        # case (every graph, evidence and comms mutation) for the rest of the session's absolute lifetime.
         #
-        # `SessionService.validate` resolves a token against `iam.session`
-        # alone and never joins `app_user`, and `revoke_all_for_user` has
-        # zero production callers — so deactivating an account severed
-        # nothing. A deactivated analyst holding a live `__Host-session`
-        # cookie kept full read AND write on every case they were assigned
-        # to, for the remaining twelve hours of the session's absolute
-        # lifetime. Login already refuses them (`auth.py`) and
-        # `require_global` already checks it; the case-scoped path — which
-        # is every graph, evidence and comms mutation in the product — did
-        # not.
-        #
-        # An inactive account resolves to "unknown user" deliberately: the
-        # caller learns their session is no good, not whether a particular
-        # account exists or what state it is in.
+        # An inactive account resolves to "unknown user" deliberately: the caller learns their session is
+        # no good, not whether a particular account exists or what state it is in.
         user = self._c.execute(
             "SELECT tlp_clearance, compartments FROM iam.app_user "
             "WHERE id = %s AND is_active",
@@ -286,33 +265,25 @@ class PgAccessResolver:
         user_clearance = tlp_from_name(user[0])
         user_compartments = frozenset(user[1] or [])
 
-        # Break-glass (docs/05, break_glass.py). A live, unrevoked grant for
-        # this user that names a classification raises the caller's
-        # effective clearance to that level -- for THIS case, or for every
-        # case if the grant was global (case_id NULL). Compartments are
-        # deliberately not widened: need-to-know is a read-in with a name
-        # on it, not an eight-hour bypass.
+        # Break-glass (docs/05, break_glass.py). A live, unrevoked grant for this user that names a
+        # classification raises the caller's effective clearance to that level, for this case or for every
+        # case if the grant was global (case_id NULL). Compartments are deliberately not widened:
+        # need-to-know is a read-in with a name on it, not an eight-hour bypass.
         #
-        # A use is recorded only when the grant is what makes the access
-        # possible (base < object <= granted). An analyst reading a CLEAR
-        # node under an AMBER grant has not USED the grant, and counting it
-        # would tell the reviewing officer the emergency was busier than it
-        # was. And only once the gate has ALLOWED the request: see the end
-        # of this method. The connection is autocommit, so the count
-        # survives whatever the request does next.
+        # A use is recorded only when the grant is what makes the access possible (base < object <=
+        # granted): an analyst reading a CLEAR node under an AMBER grant has not used the grant, and
+        # counting it would tell the reviewing officer the emergency was busier than it was. And only once
+        # the gate has allowed the request (see the end of this method). The connection is autocommit, so
+        # the count survives whatever the request does next.
         #
-        # A grant whose classification does not parse is ignored, not
-        # fatal: failing closed here means "no raise", not "every request
-        # from this user 403s until an officer revokes the row".
+        # A grant whose classification does not parse is ignored, not fatal: failing closed here means "no
+        # raise", not "every request from this user 403s until an officer revokes the row".
         #
-        # The HIGHEST live level decides, not the grant that ends last.
-        # Ordered by expiry alone, an analyst holding an 8-hour AMBER grant
-        # who invoked RED for one hour was told "raised to RED" while this
-        # kept reading the AMBER row, because it ends later (ux15
-        # breakglass-grant-raises-nothing follow-up, 2026-09-23). Each live
-        # grant was justified and is reviewed on its own, so the one that
-        # raises most is the one in force, and its use is what is counted.
-        # `core.tlp` is an enum declared CLEAR..RED, so DESC is highest.
+        # The highest live level decides, not the grant that ends last. Ordered by expiry alone, an analyst
+        # holding an 8-hour AMBER grant who invoked RED for one hour would be told "raised to RED" while
+        # this kept reading the AMBER row. Each live grant was justified and is reviewed on its own, so the
+        # one that raises most is the one in force, and its use is what is counted. `core.tlp` is an enum
+        # declared CLEAR..RED, so DESC is highest.
         grant = self._c.execute(
             """SELECT id, granted_classification
                  FROM iam.break_glass
@@ -364,14 +335,11 @@ class PgAccessResolver:
             object_compartments=object_compartments,
             mfa_satisfied_at=mfa_satisfied_at,
         )
-        # Counted AFTER the decision, and only when it allows. The use used
-        # to be recorded above, while the context was still being built, so
-        # a request the gate then refused (no such permission on the case
-        # role, a compartment the caller is not read into, no assignment at
-        # all under a global grant) still added to `action_count` and wrote
-        # a BREAK_GLASS_ACTION row for access that never happened (2026-09-23). `evaluate()`
-        # is pure, so asking it here
-        # is the same decision every caller then makes.
+        # Counted after the decision, and only when it allows. Recording the use while the context was
+        # still being built would add to `action_count` and write a BREAK_GLASS_ACTION row for a request
+        # the gate then refused (no such permission on the case role, a compartment the caller is not read
+        # into, no assignment under a global grant). `evaluate()` is pure, so asking it here is the same
+        # decision every caller then makes.
         if use_of is not None and count_use and evaluate(ctx).allowed:
             from noctornal_api.break_glass import BreakGlassService
             BreakGlassService(self._c).record_use(
@@ -387,20 +355,15 @@ class PgAccessResolver:
         object_compartments: frozenset[str],
         mfa_satisfied_at: datetime | None,
     ) -> AccessContext:
-        """The five-part context for a verb held through a GLOBAL role
-        (`iam.user_role`), against an object that belongs to no case.
+        """The five-part context for a verb held through a global role (`iam.user_role`), against an
+        object that belongs to no case.
 
-        `require_global` checks three of the five facts in its own SQL --
-        the verb through a global role, the account active, step-up
-        freshness -- and until 2026-09-11 the one route that lists objects
-        with no case (an unattached dead letter) applied the lattice and
-        need-to-know predicates in its query. This resolves the same facts
-        for `evaluate()`, so a global decision is the same evaluator's
-        decision, with the relationship check satisfied by construction:
-        there is no case to be assigned to, and the verb IS the
-        relationship. Break-glass is not consulted: a grant raises the
-        clearance for case reads, and an object with no case has no case
-        the grant could name.
+        `require_global` checks three of the five facts in its own SQL (the verb through a global role,
+        the account active, step-up freshness). This resolves the same facts for `evaluate()`, so a global
+        decision is the same evaluator's decision, with the relationship check satisfied by construction:
+        there is no case to be assigned to, and the verb is the relationship. Break-glass is not
+        consulted: a grant raises the clearance for case reads, and an object with no case has no case the
+        grant could name.
         """
         perm_row = self._c.execute(
             "SELECT requires_step_up FROM iam.permission WHERE key = %s",
@@ -440,17 +403,14 @@ class PgSessionStore(SessionStore):
         self._c = conn
 
     def insert(self, record: SessionRecord) -> None:
-        # `ip` is an `inet` column (0058). It is handed to psycopg as an
-        # ipaddress object rather than as text so the driver dumps it with
-        # the inet OID and a string that is not an address (Starlette's
-        # "testclient", a Unix-socket peer) becomes NULL here instead of a
-        # 22P02 at login. `normalise_ip` is what makes that decision, so
-        # the row and the validator's comparison agree on what counts.
+        # `ip` is an `inet` column (0058). It is handed to psycopg as an ipaddress object rather than as
+        # text so the driver dumps it with the inet OID, and a string that is not an address (Starlette's
+        # "testclient", a Unix-socket peer) becomes NULL here instead of a 22P02 at login. `normalise_ip`
+        # makes that decision, so the row and the validator's comparison agree on what counts.
         ip = normalise_ip(record.ip)
-        # `rls_binding_hash` (S1, 2026-09-25, migration 0110) is what
-        # binds a request's connection to this session under row-level
-        # security. The request role cannot INSERT here (0109): a session
-        # is minted on a system connection, so a forged row cannot exist.
+        # `rls_binding_hash` (migration 0110) binds a request's connection to this session under row-level
+        # security. The request role cannot INSERT here (0109): a session is minted on a system
+        # connection, so a forged row cannot exist.
         self._c.execute(
             """INSERT INTO iam.session
                    (id, user_id, token_hash, issued_at, expires_at,
@@ -490,23 +450,15 @@ class PgSessionStore(SessionStore):
 
     def slide(self, session_id: UUID, at: datetime,
               idle_floor: datetime) -> datetime | None:
-        """Slide the idle window of a session that is still live, as one
-        statement (authz-session-revoke-bypass, 2026-10-03).
+        """Slide the idle window of a session that is still live, as one statement.
 
-        It replaces a whole-row `update` that wrote last_seen_at,
-        mfa_satisfied_at, revoked_at and revoke_reason from a record read
-        before the write, with `WHERE id` alone: a revocation committed by
-        another connection in between was written back to NULL. This names
-        `last_seen_at` only, so it cannot carry a stale revocation, and its
-        WHERE matches only an unrevoked, unexpired session inside its idle
-        window, so a dead session is never touched back to life; the caller
-        reads no row as "no longer live". GREATEST keeps two concurrent
-        requests from moving the window backwards (0144's guard refuses a
-        backwards move from the request role), and LEAST holds what is
-        written to the database's own clock plus a minute: 0144's guard
-        refuses a slide more than five minutes ahead of it, so an API host
-        whose clock runs fast would otherwise turn every request into a
-        refusal (rls-7, 2026-10-03)."""
+        It names `last_seen_at` only, so it cannot carry a stale revocation back to NULL, and its WHERE
+        matches only an unrevoked, unexpired session inside its idle window, so a dead session is never
+        touched back to life; the caller reads no row as "no longer live". GREATEST keeps two concurrent
+        requests from moving the window backwards (0144's guard refuses a backwards move from the request
+        role), and LEAST holds what is written to the database's own clock plus a minute: 0144's guard
+        refuses a slide more than five minutes ahead of it, so an API host whose clock runs fast would
+        otherwise turn every request into a refusal."""
         row = self._c.execute(
             """UPDATE iam.session
                   SET last_seen_at = GREATEST(last_seen_at,

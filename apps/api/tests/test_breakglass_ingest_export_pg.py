@@ -1,28 +1,23 @@
-"""Break-glass uses on the exhibit export and the ingest routes, and the
-dead-letter replay that could move a fragment between cases (2026-09-24: c4, c5, c6, c19
-and the category correction).
+"""Break-glass uses on the exhibit export and the ingest routes, and the dead-letter replay that must
+not move a fragment between cases.
 
-`test_breakglass_count_once_pg.py` holds the rule: one request under a
-grant is one use on the officer's card, never two and never none, and a
-gate asked as a question counts nothing. These routes broke it:
+`test_breakglass_count_once_pg.py` holds the rule: one request under a grant is one use on the
+officer's card, never two and never none, and a gate asked as a question counts nothing. These routes
+must keep it:
 
-- c4: `POST /cases/{id}/evidence/{ev}/export` gated twice with counting
-  on, so an export on a case above the caller's clearance counted two;
-- `POST /ingest/records/{id}/category` gated `ingest.read` and then
-  `ingest.replay` at the same labels, both counting: two;
-- c6: `POST /ingest/records/rescore` let a case in through an uncounted
-  question and wrote the whole queue's priorities: none;
-- c5: `POST /ingest/dead-letters/{id}/replay` gated the dead letter's own
-  labels only as a question, so a RED fragment replayed under a grant
-  counted none, and a grant on one case let a RED record into another;
-- c19: the same replay put a fragment into a case its batch never fed,
-  which then opened the batch's other dead letters to that case's readers.
+- `POST /cases/{id}/evidence/{ev}/export` gates twice, so an export on a case above the caller's
+  clearance must not count two;
+- `POST /ingest/records/{id}/category` gates `ingest.read` and then `ingest.replay` at the same
+  labels, and must count one;
+- `POST /ingest/records/rescore` must not let a case in through an uncounted question and write the
+  whole queue's priorities with none counted;
+- `POST /ingest/dead-letters/{id}/replay` gates the dead letter's own labels, so a RED fragment
+  replayed under a grant is counted, and a grant on one case does not let a RED record into another;
+- the same replay must not put a fragment into a case its batch never fed, which would open the
+  batch's other dead letters to that case's readers.
 
-Every assertion on those five fails on the base commit (d0faa34).
-
-**The email prefix is `bix-` and must stay unique**: the fixture cleans up
-by deleting on it, and two files sharing a prefix delete each other's
-rows mid-run.
+The email prefix is `bix-` and must stay unique: the fixture cleans up by deleting on it, and two
+files sharing a prefix delete each other's rows mid-run.
 
 Env-gated on DATABASE_URL.
 """
@@ -233,11 +228,10 @@ def _record(conn, batch_id) -> str:
 # ---------------------------------------------------------------------------
 
 def test_an_export_on_a_case_above_clearance_is_one_use(conn, client):
-    """A GREEN account assigned Lead investigator (the one case role that
-    holds `evidence.export`) on an AMBER case, under an AMBER grant. The
-    export passes the case's gate through the grant and then the
-    exhibit's; it added two before this fix, and the ledger read
-    `evidence.export` twice for one attempted export."""
+    """A GREEN account assigned Lead investigator (the one case role that holds `evidence.export`) on
+    an AMBER case, under an AMBER grant. The export passes the case's gate through the grant and then
+    the exhibit's, and must add one, not two: the ledger reads `evidence.export` once for one
+    attempted export."""
     officer = _officer(conn)
     owner, owner_auth = _owner(conn)
     case_id = _case(client, owner_auth, "AMBER")
@@ -281,10 +275,9 @@ def test_an_export_within_clearance_counts_only_an_exhibit_above_it(
 
 def test_a_category_correction_on_a_case_above_clearance_is_one_use(
         conn, client):
-    """Two gates at the same labels, `ingest.read` then `ingest.replay`,
-    and each counted: the ledger read ['ingest.read', 'ingest.replay']
-    for one correction. The second gate still refuses a caller without
-    the repair verb (the REVIEWER below), counted once, at the first."""
+    """Two gates at the same labels, `ingest.read` then `ingest.replay`, must count once, not twice.
+    The second gate still refuses a caller without the repair verb (the REVIEWER below), counted once,
+    at the first."""
     officer = _officer(conn)
     owner, owner_auth = _owner(conn)
     case_id = _case(client, owner_auth, "AMBER")
@@ -304,8 +297,8 @@ def test_a_category_correction_on_a_case_above_clearance_is_one_use(
                  auth, 200) == 1
     assert _card_figure(client, officer, gid) == 2
 
-    # The repair verb is still asked: a REVIEWER under the same kind of
-    # grant is refused 403, and the one use is the read gate's.
+    # The repair verb is still asked: a REVIEWER under the same kind of grant is refused 403, and the
+    # one use is the read gate's.
     rid, reviewer = _user(conn, clearance="GREEN", roles=("CASE_OWNER",))
     _assign(conn, case_id, rid, "REVIEWER", owner)
     rgid = _grant(client, reviewer, case_id, "RED")

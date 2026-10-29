@@ -1,16 +1,14 @@
 """A refusal is stored as one (docs/17, "refusals are recorded as SUCCESS").
 
-`deps.audit_auth_event` wrote AUTHZ_DENIED, AUTH_SESSION_REJECTED,
-RLS_BINDING_FAILED, SESSION_BINDING_REFUSED and CASE_SHARE_REFUSED with the
-column's default outcome, SUCCESS, while the sign-in, rate-limit and
-row-security refusals were stored DENIED. A reader that filtered the log on
-outcome found some of the refusals and missed these. They are DENIED now,
-whichever gate refused, and the two readers of the column keep working: the
-officer's listing returns the stored value and the chain verifier recomputes
-each row from it.
+`deps.audit_auth_event` writes AUTHZ_DENIED, AUTH_SESSION_REJECTED, RLS_BINDING_FAILED,
+SESSION_BINDING_REFUSED and CASE_SHARE_REFUSED with outcome DENIED, like the sign-in, rate-limit and
+row-security refusals, whichever gate refused. A reader that filtered the log on outcome would
+otherwise miss the ones stored with the column's default, SUCCESS. The two readers of the column keep
+working: the officer's listing returns the stored value and the chain verifier recomputes each row
+from it.
 
-Rows written before then keep SUCCESS (the log is append-only), so an
-officer looks for those by action.
+Rows written before this keep SUCCESS (the log is append-only), so an officer looks for those by
+action.
 """
 from __future__ import annotations
 

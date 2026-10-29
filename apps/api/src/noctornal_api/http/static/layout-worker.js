@@ -1,30 +1,11 @@
-/* ForceAtlas2 with Barnes-Hut, in a worker (docs/02, enhancement U1).
+/* ForceAtlas2 with Barnes-Hut, in a worker (docs/02), so the layout never blocks the page.
  *
- * The main-thread simulation this replaces is O(n^2) in repulsion with a
- * grid approximation bolted on, and it runs inside the render loop -- so on
- * a case of any size the whole interface stops responding while the graph
- * settles. Phase 3 made that worse by giving analysts a reason to load
- * bigger graphs.
- *
- * docs/02 specifies "ForceAtlas2 with Barnes-Hut in a worker", and this is
- * that, written by hand rather than pulled from graphology. The reason is
- * the CSP: the UI ships under `script-src 'self'` with no bundler and no
- * inline script, so a npm dependency would mean adopting a build step --
- * a real decision (docs/14 U1) that should be taken deliberately, not
- * smuggled in as a side effect of wanting a layout. A worker is a
- * same-origin script file, so it needs neither.
- *
- * Barnes-Hut is the part that matters: approximating a distant cluster of
- * nodes by its centre of mass turns repulsion from O(n^2) into O(n log n).
- * At 2,000 nodes that is the difference between four million force
- * calculations per tick and about twenty thousand.
- *
- * ForceAtlas2 specifics, following Jacomy et al. (2014):
- *   - a node's MASS is its degree + 1, so hubs repel more strongly and
- *     stop being buried inside their own neighbourhoods;
- *   - attraction is linear in distance, repulsion is inverse-linear;
- *   - a global swing/traction ratio adapts the step size, which is what
- *     stops the layout oscillating instead of converging.
+ * Written by hand rather than taken from graphology: the UI ships under `script-src 'self'`
+ * with no bundler, and a worker is a same-origin script file (docs/14 U1). Barnes-Hut
+ * approximates a distant cluster by its centre of mass, turning repulsion from O(n^2) into
+ * O(n log n). Following Jacomy et al. (2014): a node's mass is its degree + 1, so hubs repel
+ * more strongly; attraction is linear in distance, repulsion inverse-linear; and a global
+ * swing/traction ratio adapts the step size so the layout converges instead of oscillating.
  */
 
 var THETA = 1.2;          // Barnes-Hut opening angle. Higher = faster, cruder.
@@ -184,11 +165,8 @@ function tick() {
     n.pfy = n.fy;
   }
 
-  // Convergence has to be measured RELATIVE to the layout's own size. An
-  // absolute "nodes moved less than N pixels" test never fires, because
-  // ForceAtlas2 keeps expanding until repulsion and attraction balance --
-  // a graph twice as wide moves twice as far per iteration while being no
-  // less converged. What matters is movement as a fraction of the spread.
+  // Convergence is measured relative to the layout's own size: ForceAtlas2 keeps expanding
+  // until repulsion and attraction balance, so an absolute pixel threshold never fires.
   var radius = 0;
   for (i = 0; i < nodes.length; i += 1) {
     n = nodes[i];
@@ -213,18 +191,9 @@ function post(done, settled) {
   }, [out.buffer]);
 }
 
-/* Progress posts are RATE-LIMITED rather than sent every batch.
- *
- * Posting after each batch floods the main thread: 800 iterations in
- * batches of 12 is ~67 messages inside a second, and servicing that many
- * message events starves everything else. The interface then stalls just
- * as badly as it did when the maths ran in the page -- the work moved, but
- * the blocking followed it. Measured on a 400-node case, that was ~990ms
- * of main-thread lag for a layout the worker finished in 1s.
- *
- * The intermediate frames are only a settling animation, not something
- * anyone reads, so a post every ~100ms looks identical and costs a tenth
- * of the traffic. */
+/* Progress posts are rate-limited rather than sent every batch: a post per batch (about 67 a
+ * second) floods the main thread with message events and stalls the interface. The frames are
+ * only a settling animation, so a post every ~100ms looks the same at a tenth of the traffic. */
 var POST_INTERVAL_MS = 100;
 var lastPost = 0;
 

@@ -1,38 +1,21 @@
-"""Send the queued outbound lookups once. This is the cron entry
-(F15.4, 2026-09-24).
+"""Send the queued outbound lookups once: the cron entry.
 
-Unattended egress, so it re-checks every rule at send time and never sends
-a lookup that is not NONE: a lookup that sends case material to a vendor
-or the public is sent at its sign-off or not at all (docs/00 decision 75), and
-the database refuses to queue one. Queued NONE lookups (an interactive one
-that met a full window, or a batch) are paced by the provider's windows,
-keeping a reserve for interactive work.
+Unattended egress, so it re-checks every rule at send time and never sends a lookup that is not
+NONE: one that sends case material to a vendor or the public is sent at its sign-off or not at all
+(docs/00 decision 75), and the database refuses to queue one. Queued NONE lookups are paced by the
+provider's windows, keeping a reserve for interactive work.
 
     python scripts/lookup_drain.py [--limit N] [--max-seconds S] [--dry-run]
 
-It runs in the cron loop with no sleep of its own, so every job in the loop
-keeps its five-minute cadence (infra/production/compose.yml). The
-collection poll it followed moved to the collector service on 2026-10-02.
-The cadence is a resolution, not a rate: pacing comes from the provider
-windows.
+It runs in the cron loop with no sleep of its own, so every job there keeps its five-minute
+cadence; the cadence is a resolution, not a rate. It prints the host switch as read
+(NOCTORNAL_OUTBOUND_LOOKUPS=...), so an API and a cron that disagree show in the cron log, then the
+housekeeping counts, then one line per provider. Housekeeping (lapsed sign-offs, abandoned sends,
+lapsed exposure changes) sends nothing and runs whatever the switch says.
 
-Prints, first, the host switch as read (NOCTORNAL_OUTBOUND_LOOKUPS=...), so
-an api and a cron that disagree are visible in the cron log; then the
-housekeeping counts; then one line per provider. Housekeeping (lapsed
-sign-offs, abandoned sends, lapsed exposure changes) runs whatever the
-switch says: it sends nothing.
-
-Exit codes: 0 when nothing failed; 1 when a lookup FAILED in this pass or a
-provider had no route out (information, like notify_drain.py: every other
-row was still attempted); 2 when, under NOCTORNAL_ENV=production, a
-credential in the environment carries a published value, the schema
-owner's password or DSN is in it (docs/17 F52 and infra-12, 2026-10-02 and
-2026-10-03), or the persona key only the collector may hold is (A collector
-process, 2026-10-02), before any connection and with one line per variable on stderr,
-`lookup_drain: refusing to run: <NAME> ...`, naming it and never its value.
-It is the one helper every job calls first
-(`config.refuse_unsafe_job_environment`) and the one code every job gives it
-(`config.JOB_REFUSAL_EXIT`).
+Exit 0 when nothing failed; 1 when a lookup failed in this pass or a provider had no route out
+(every other row was still attempted); 2 (`config.JOB_REFUSAL_EXIT`) when
+`config.refuse_unsafe_job_environment` refuses the production environment, before any connection.
 """
 from __future__ import annotations
 
@@ -55,11 +38,9 @@ SWITCH_ENV = "NOCTORNAL_OUTBOUND_LOOKUPS"
 def main(argv: list[str] | None = None, *, conn=None, service=None) -> int:
     from noctornal_api.config import JOB_REFUSAL_EXIT, refuse_unsafe_job_environment
 
-    # First, before the switch is echoed or anything is connected to (docs/17
-    # F52 and infra-12, 2026-10-02 and 2026-10-03): the published-value check
-    # this script once made on its own, the schema owner's credential beside
-    # it, and the persona key (the cron loop holds none: A collector process,
-    # 2026-10-02), through the one helper every job calls (config.py).
+    # First, before the switch is echoed or anything is connected to: published credentials, the
+    # schema owner's and the persona key (the cron loop holds none), through the helper every job
+    # calls.
     refusals = refuse_unsafe_job_environment("lookup_drain")
     if refusals:
         print("\n".join(refusals), file=sys.stderr)

@@ -1,42 +1,19 @@
-"""The assumptions register (docs/08 Phase 6, migration 0056).
+"""The assumptions register (docs/08, migration 0056).
 
-docs/08 defines it in one paragraph: per case, list the load-bearing
-assumptions explicitly, with a review flag, so that "the same PGP key
-means the same operator" is written down where it can be challenged.
-Nothing existed for it until 2026-09-02, and the report stated its
-conclusions without stating what they rested on.
+Per case, the load-bearing assumptions are listed explicitly with a review flag, so that "the same
+PGP key means the same operator" is written down where it can be challenged.
 
-## A register, not a to-do list
+A register's flags cannot be flipped without a trace: every change writes an audit row
+(ASSUMPTION_MADE, _REVIEWED, _WITHDRAWN) and stamps who and when on the row. Two transitions are
+guarded further. Leaving REFUTED requires a review note saying why the refutation does not stand,
+because reopening a finding without one makes the assumption load-bearing again unnoticed. WITHDRAWN
+is terminal: it means the row was entered in error, and a revivable withdrawn row would be a way to
+park an inconvenient premise out of the default listing and bring it back later.
 
-The difference is that a register's flags cannot be flipped without a
-trace. Every change writes an audit row (ASSUMPTION_MADE, _REVIEWED,
-_WITHDRAWN) and stamps who and when on the row itself, and two transitions
-are guarded on top of that:
-
-- REFUTED is a FINDING -- somebody established that a premise was false.
-  Re-opening or confirming it without a note would erase the finding
-  while leaving the assumption load-bearing again, which is the exact
-  move the register exists to make visible. So that transition demands a
-  review note saying why the refutation no longer stands.
-- WITHDRAWN is terminal. It means the row was entered in error; it is not
-  a judgement about the assumption, and a withdrawn row that could be
-  revived would be a way to park an inconvenient premise out of the
-  default listing and bring it back later.
-
-## Who may write
-
-Access is the router's job: listing is `case.read`, every write is
-`case.update`, both through the five-part gate. This service does not
-re-decide that. What it DOES enforce is that every write is keyed on
-(case_id, id), so an id from another case is "no such assumption" rather
-than a cross-case edit -- the gate decided the caller may update THIS
-case, and a guessed id must not extend that to another.
-
-## What the report includes
-
-`REPORTABLE_STATUSES` is ONE constant read by `reports.py`, so the
-document cannot quietly disagree with the register about what "still
-assumed" means.
+Access is the router's job (`case.read` to list, `case.update` to write, through the five-part
+gate). Every write here is keyed on (case_id, id), so an id from another case is "no such
+assumption" rather than a cross-case edit. `REPORTABLE_STATUSES` is the one constant `reports.py`
+reads, so the report cannot disagree with the register about what "still assumed" means.
 """
 from __future__ import annotations
 
@@ -55,11 +32,10 @@ STATUSES = ("OPEN", "CONFIRMED", "REFUTED", "WITHDRAWN")
 #: statement that the row should never have been made.
 REVIEW_STATUSES = ("OPEN", "CONFIRMED", "REFUTED")
 
-#: What the report states: the assumptions the case still rests on.
-#: REFUTED is excluded because a report that lists a premise it has
-#: already found false is presenting a premise it knows to be false;
-#: WITHDRAWN because it was never a premise. Read by `reports.py` and
-#: pinned by the tests from both sides.
+#: What the report states: the assumptions the case still rests on. REFUTED is excluded because a
+#: report that lists a premise already found false presents a premise it knows to be false;
+#: WITHDRAWN because it is not a premise. Read by `reports.py` and pinned by the tests from both
+#: sides.
 REPORTABLE_STATUSES = ("OPEN", "CONFIRMED")
 
 
@@ -76,9 +52,8 @@ class AssumptionRow:
     status: str
     made_by: UUID
     made_at: datetime
-    #: Whoever last changed the status -- a reviewer, or the person who
-    #: withdrew the row -- and when. One fact; the schema forbids one
-    #: half without the other.
+    #: Whoever last changed the status (a reviewer, or the person who withdrew the row) and when.
+    #: One fact: the schema forbids one half without the other.
     reviewed_by: UUID | None
     reviewed_at: datetime | None
     review_note: str | None

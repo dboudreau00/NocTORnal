@@ -2,137 +2,48 @@
 
     .venv\\Scripts\\python scripts\\seed_readme_showcase.py --case OP-SHOWCASE-26 --owner-email you@example.org
 
-Run it AFTER `bootstrap.py demo-network` and the other seeders
-(seed_deception_demo, seed_lab_demo, seed_feeds_demo, seed_ach_demo), on
-the case the README's screenshots are taken from.
+Run it after `bootstrap.py demo-network` and the other seeders (seed_deception_demo, seed_lab_demo,
+seed_feeds_demo, seed_ach_demo), on the case the README's screenshots are taken from.
 
-## Why this exists
+Everything goes through the services the console uses: graph elements through `GraphWriteService`
+with their assertions, exhibits through `EvidenceService`, selectors through `SelectorStore`,
+comms through the comms services, proposals through `CaptureService` and `ProposalReview`,
+notifications through the platform's own producers, runs through `AnalyticsRunService`. A seeder
+that INSERTs graph rows creates the unfounded graph the model exists to prevent. The only SQL
+writes left are the account rows `bootstrap.py create-user` makes and the two audit rows the
+console's routes write beside their service calls (DOCUMENT_CAPTURED, EDGE_UPDATED). Each element
+is dated by its claim: the assertion's `observed_at` is its `valid_from`, and First seen is
+derived from the live claims (`projections.seen_sql`), so `core.node.first_seen` needs no UPDATE.
 
-README screenshot review, 2026-09-23. Round 1 shot every pane of
-OP-SHOWCASE-26 and found the estate too thin for the paragraphs under the
-images: the hero sociogram printed "0 of 37 elements rest on an exhibit" in
-red directly under the tagline "every line of it traces back to an
-exhibit"; no tie was inferred, so nothing was drawn dashed; every entity was
-a persona; no selector existed, so search could not show a hit reached
-through one; nothing sat above CLEAR, so the report's redaction was never
-seen working; triage, the inbox and the comms pane were empty; the
-analytics trend was a single dot; and the custody log held one ACQUIRED
-row under a paragraph about recording every read. This writes the missing
-material, each piece through the service the console itself would use.
+The README's analytics paragraph rests on demo-network's shape, and the sociogram and the Analysis
+pane share one projection, so nothing here moves it. The new GROUP, WALLET and INFRA entities hang
+off structural edge types (`is_social_tie = false`), which the "All ties" projection leaves out.
+The one inferred tie sits inside the bitwright crew, parallel to the bit_forge / bit_lathe vouch,
+and is corrected to weight 0: `analytics.materialise` sums parallel ties into one dyad, so the
+igraph graph is unchanged (at weight 1, an accepted proposal's weight, it inverts the eigenvector
+ranking). What still moves, held exactly by `apps/api/tests/test_seed_readme_showcase_pg.py`:
+bit_forge's positive out-degree and bit_lathe's positive in-degree rise by one, because every
+social edge type carries a sign; and the five new entities are isolates, so whole-population
+figures move (percentiles, harmonic closeness scaled by 14/19 with no rank change, density,
+community and component counts, key-player fragmentation, the mode warning). No rank, raw
+structural value, key-player or top-3 set, cut vertex, bridge, balance count or community of the
+fifteen changes.
 
-## Everything goes through the services
+Not seeded: an exhibit past its retention deadline (`RetentionService.due()` dates exhibits by the
+case's `retention_until`, so one would mean expiring the whole case); a reviewed break-glass grant
+(the officer's review queue shows only unreviewed grants, so this one is left for the officer to
+review on camera); a PROPOSED tie (every demo-network tie is a person's claim, born ACCEPTED, and
+the showcase has no machine to make one).
 
-Graph elements through `GraphWriteService` (each with its assertion in the
-same transaction), exhibits through `EvidenceService` into the dev MinIO,
-selectors through `SelectorStore` and its normalisers, bindings and the
-contact block through the comms services, proposals through
-`CaptureService` / `ProposalStore` / `ProposalReview`, notifications through
-the platform's own producers (`notify_events`, `ApprovalService`,
-`BreakGlassService`), runs through `AnalyticsRunService`. A seeder that
-INSERTs graph rows directly creates exactly the unfounded graph the model
-exists to prevent, and it is the first thing a reader copies. The SQL
-writes that remain are the ones `bootstrap.py create-user` makes for an
-account (clearance and global roles have no service) and the two audit
-rows the console's routes write beside their service calls: the capture
-route's DOCUMENT_CAPTURED and the edge correction route's EDGE_UPDATED.
+Everything is TLP:CLEAR except one unlinked GREEN exhibit, `fraud-desk-liaison-note.txt`, so a
+report prepared at CLEAR withholds exactly one exhibit and says so; the officer's break-glass
+alert is GREEN by `BreakGlassService`'s own rule. Every step looks for what it would write first,
+so a second run doubles nothing, and a step that writes things belonging together runs in one
+transaction, so a run that dies half way leaves each step done or not started.
 
-Each entity and tie is dated by its claim: the assertion's `observed_at`
-is the element's `valid_from`. That is also what fills the entity list's
-First seen column, which the read paths derive from the observed times of
-an entity's live claims (`projections.seen_sql`, gap-first-seen,
-2026-09-23), so `core.node.first_seen` needs no UPDATE around the service.
-
-## The analytics story is not moved
-
-The README's analytics paragraph rests on demo-network's shape: oriel is the
-sole bridge to the bitwright crew, and dvina and kolar redundantly bridge
-halcyon and meridian. The console draws the sociogram and computes the
-Analysis pane over ONE projection (`state.proj` in app.js: All ties,
-inferred IN, LOW), so anything drawn there is also counted there. So:
-
-- The new GROUP, WALLET and INFRA entities hang off STRUCTURAL edge types
-  (CONTROLS, USED), which the ontology marks `is_social_tie = false`. The
-  "All ties" projection keeps those edges out, so no path between two
-  identities changes.
-- The one inferred tie sits INSIDE the bitwright crew, parallel to the
-  bit_forge / bit_lathe vouch, so no dyad is added, and the analyst then
-  corrects its weight to 0 (the correction route's own path, with its
-  reason). `analytics.materialise` collapses parallel ties into one dyad
-  whose strength is the SUM of their weights, so a zero-weight parallel
-  leaves the igraph graph, and every number computed from it, exactly as
-  it was. At weight 1 (what an accepted proposal is given) it did not.
-  Measured beside each of the sixteen ties inside a crew: on the thirteen
-  whose dyad carries a positive tie it moved eigenvector values for 13 or
-  14 of the fifteen, on the three purely hostile dyads it made the dyad
-  contested and moved the balance count, and at this pair it inverted the
-  eigenvector ranking (bit_forge went from 12th to 1st, hal_vector from
-  1st to 7th) and moved constraint, effective size, hierarchy and harmonic
-  closeness (README screenshot review, 2026-09-23, verifier round; the
-  first version of this docstring called that "shift slightly", which it
-  was not). The canvas draws width by weight over the projection's own
-  range, so the inferred tie draws at the thinnest width, dashed, beside
-  the vouch: suggested, and weighed at nothing until its content is seen.
-
-What still moves, stated rather than discovered, and held exactly by
-`apps/api/tests/test_seed_readme_showcase_pg.py`:
-
-- With inferred ties counted, bit_forge's positive out-degree and
-  bit_lathe's positive in-degree (the Analysis table's given and received
-  columns) rise by one, and so does both endpoints' positive degree in the
-  inspector. Every social edge type carries a sign (the ontology has no
-  social type at sign 0), and those columns count ties, not strength, so an
-  inferred tie the default projection draws cannot avoid them.
-- The five new entities are isolates in the social projection, so the
-  figures computed over the whole population move: every percentile,
-  harmonic closeness (normalised by n - 1, so every value scales by 14/19
-  and no rank changes), density, the community and component counts, the
-  key-player fragmentation figures, and the Analysis pane's mode warning,
-  which names the non-actor isolates and says exactly this. No rank, no
-  raw structural value, no key-player or top-3 set, no cut vertex, bridge,
-  balance count or community of the fifteen changes.
-
-## What is NOT here, and why
-
-- No exhibit is past its retention deadline. `RetentionService.due()` dates
-  an exhibit by its CASE's `retention_until`, and ingest and document clocks
-  are stamped now plus a positive rule, so the only way to put one exhibit
-  on the due list is to expire the whole case, which puts every exhibit on
-  it. The legal hold is applied; the due list stays empty.
-- The break-glass grant is ended but NOT reviewed. The officer's review
-  queue (`BreakGlassService.unreviewed`, the only list of grants the
-  console has) shows only unreviewed grants, so a reviewed grant leaves the
-  one place that shows it. A second grant made only to be reviewed would put
-  a second URGENT notice in the owner's inbox for a second emergency the
-  case has no reason for (it holds one GREEN item). It is left for the
-  officer account to review on camera.
-- Edge review state: every demo-network tie is a person's own claim, so it
-  is born ACCEPTED (`GraphWriteService.create_edge`, gap-tie-review,
-  2026-09-23) and no node carries the unreviewed ring. Leaving one PROPOSED
-  for the camera would need a tie founded on AUTOMATED_INFERENCE, which is
-  a machine's claim the showcase has no machine to make.
-
-## Labels
-
-Everything is TLP:CLEAR except ONE exhibit, `fraud-desk-liaison-note.txt`
-at GREEN, left unlinked, so a report prepared at CLEAR withholds exactly
-one exhibit and says so. The break-glass alert the officer receives is
-GREEN by `BreakGlassService`'s own rule (it carries nothing about the case);
-it is a notification, not case material.
-
-## Safe to run twice
-
-Every step first looks for what it would write and skips it if it is there,
-so a second run doubles nothing and says which items were already present.
-A step that writes several things that belong together (the inferred tie
-and its correction; the capture, its audit row and the owner's notice; the
-approval request; the break-glass grant, its read and its end) runs in one
-transaction, so a run that dies half way leaves each step either done or
-not started, and the next run finishes it.
-
-**Every name, handle, wallet, host and person below is fiction.** Hosts are
-reserved `.example` names; the wallet is a well formed bech32 address whose
-program is a SHA-256 of a fixed sentence, so nobody holds its key; the Tox
-key is the one the round 1 recipes already use; the Telegram id is the
+**Every name, handle, wallet, host and person below is fiction.** Hosts are reserved `.example`
+names; the wallet is a well formed bech32 address whose program is a SHA-256 of a fixed sentence,
+so nobody holds its key; the Tox key is one the existing recipes use; the Telegram id is the
 placeholder the repository's own tests use.
 """
 from __future__ import annotations
@@ -167,10 +78,9 @@ EML_TITLE = "remittance-change.eml"
 #: of a fixed string, and the checksum is valid.
 TOX_ADVERT = ("A350523A7935F37AF6DBD28F1FD984AD4D01E1FE2C45D36DC8FCFF4F1259FD11"
               "5E1C0A7D1B48")
-#: The same public key under a ROTATED nospam (9C4E2B71, checksum F816). It
-#: is what is stored as the binding, so correlating on the advert's ID
-#: answers with a different tail and one identity: the nospam sentence of
-#: the README, visible (08-comms designer, README screenshot review).
+#: The same public key under a rotated nospam (9C4E2B71, checksum F816). It is what is stored as
+#: the binding, so correlating on the advert's ID answers with a different tail and one identity,
+#: as the README's nospam sentence says.
 TOX_ROTATED = ("A350523A7935F37AF6DBD28F1FD984AD4D01E1FE2C45D36DC8FCFF4F1259FD11"
                "9C4E2B71F816")
 #: The repository's own placeholder user id, already in its tests and docs,
@@ -259,14 +169,9 @@ def _png(width: int = 96, height: int = 96, rgb=(58, 32, 64)) -> bytes:
             + chunk(b"IEND", b""))
 
 
-# Each post that backs a tie is written by the tie's SOURCE and names its
-# target in the tie's own sense, and the link quotes it: the first version
-# had "mer_kite: escrow through mer_ash" backing mer_kite ESCROW_FOR
-# mer_ash, which says the opposite (ash holding the escrow), and "ash has
-# held escrow for me" backing a VOUCH (README screenshot review,
-# 2026-09-23, verifier round). The dates sit near demo-network's own dates
-# for the same ties (it dates them months back from the build), so the
-# timeline and the exhibit tell one story.
+# Each post that backs a tie is written by the tie's source and names its target in the tie's own
+# sense, and the link quotes it. The dates sit near demo-network's own dates for the same ties, so
+# the timeline and the exhibit tell one story.
 ESCROW_THREAD = f"""nightmarket.example / escrow board / thread 8790 (pinned)
 [2024-11-18 21:14] mer_ledger: vouching for mer_kite, three clean deals with him
 [2025-05-09 17:30] dvina: I vouch for mer_ledger, did the halcyon run with him
@@ -303,22 +208,16 @@ received two further transfers from other victims in July.
 Not for onward release above GREEN.
 """
 
-#: When the escrow wallet was first posted: the 2025-10-21 21:40 line of
-#: thread 8790. The wallet's own dates and its CONTROLS ties take it, so the
-#: entity is not dated before the post that shows it.
+#: When the escrow wallet was first posted, in thread 8790. The wallet's own dates and its CONTROLS
+#: ties take it, so the entity is not dated before the post that shows it.
 WALLET_SEEN = datetime(2025, 10, 21, 21, 40, tzinfo=timezone.utc)
 
-#: (title, media type, bytes, acquisition, TLP, days before now, source url,
-#:  description, entity labels it backs, ties it backs, relevance for the
-#:  entity links). Each tie is (src, type, dst, quote): the quote is the
-#:  passage that supports it, verbatim from the exhibit's text (or, for the
-#:  image, its description), written by the source and naming the target
-#:  in the tie's own sense. The link carries it as its relevance and the
-#:  line it is on as its page reference, so the inspector says which line
-#:  backs which tie. The four CLEAR exhibits back 12 of the 20 entities and
-#:  11 of the 23 social ties: coverage lands near half, so the sociogram
-#:  shows solid nodes beside hollow ones and beaded ties beside plain ones,
-#:  which is the point of drawing the difference at all.
+#: (title, media type, bytes, acquisition, TLP, days before now, source url, description, entity
+#:  labels it backs, ties it backs, relevance for the entity links). Each tie is (src, type, dst,
+#:  quote): the quote is the supporting passage, verbatim from the exhibit (or the image's
+#:  description); the link carries it as its relevance and its line as the page reference. The
+#:  four CLEAR exhibits back 12 of the 20 entities and 11 of the 23 social ties, so the sociogram
+#:  shows solid nodes beside hollow ones and beaded ties beside plain ones.
 EXHIBITS = [
     ("meridian-escrow-thread-8790.txt", "text/plain", ESCROW_THREAD, "COLLECTOR",
      "CLEAR", 20, "http://nightmarket.example/t/8790",
@@ -368,10 +267,8 @@ EXHIBITS = [
        "bit_forge is the contact handle on the reseller account that "
        "registered secure-billing.example")],
      "Named by the registrar's response"),
-    # The ONE element above CLEAR, and unlinked: a report prepared at CLEAR
-    # then shows "exhibits withheld 1" and the withheld statement, and
-    # nothing on the graph changes colour because of it (README screenshot
-    # review, 11-report).
+    # The one element above CLEAR, and unlinked: a report prepared at CLEAR shows "exhibits withheld
+    # 1" and the withheld statement, and nothing on the graph changes colour because of it.
     ("fraud-desk-liaison-note.txt", "text/plain", LIAISON, "MANUAL_UPLOAD",
      "GREEN", 5, None,
      "Liaison note from the partner bank's fraud desk.",
@@ -432,11 +329,9 @@ STRUCTURAL = [
                     "reference job; not corroborated")),
 ]
 
-#: (selector type, raw value as observed, owner label, when: months back or
-#: a date). Five
-#: personas and the wallet. The two Jabber ids share the crew's private
-#: server, so a search for "meridian" reaches dvina, whose name and
-#: attributes do not contain it, THROUGH a selector, and says which.
+#: (selector type, raw value as observed, owner label, when: months back or a date), for five
+#: personas and the wallet. The two Jabber ids share the crew's private server, so a search for
+#: "meridian" reaches dvina, whose name and attributes do not contain it, through a selector.
 SELECTORS = [
     ("JABBER", "ledger@xmpp.meridian.example", "mer_ledger", 7),
     ("JABBER", "dvina@xmpp.meridian.example/desk", "dvina", 6),
@@ -463,14 +358,10 @@ HOLD_REASON = (
     "DEMO/2026/LH-01 (fiction): keep the message and everything derived "
     "from it until the civil claim is resolved.")
 
-#: How far back the two earlier analytics runs look, in months. Earliest
-#: first, so each run's start time rises with its as-of and the trend reads
-#: left to right the way the network grew. Neither is a month demo-network
-#: dates a tie at, so a day either way cannot move a tie across the line.
-#: At 17 months mer_florin has no tie yet (betweenness 0); at 9.5 it is the
-#: one path from the rest to oriel (9); now oriel reaches the bitwright crew
-#: through it too (45). A trend that rises, which is the promotion docs/03
-#: says a series exists to show.
+#: How far back the two earlier analytics runs look, in months, earliest first so the trend reads
+#: left to right. Neither is a month demo-network dates a tie at, so a day either way cannot move a
+#: tie across the line. mer_florin's betweenness rises 0, 9, 45: the promotion docs/03 says a series
+#: exists to show.
 TREND_MONTHS = (17, 9.5)
 
 def ago(months: float) -> datetime:
@@ -620,12 +511,9 @@ def seed_entities(conn, case_id, owner, tally: Tally) -> dict:
 def seed_exhibits(conn, case_id, owner, storage, tally: Tally) -> dict:
     """The exhibits, and their links to what they support.
 
-    The object lock and the retention date are the service's default, as
-    they are for every other seeder's exhibits: a shorter lock of this
-    seeder's own made these four read "retain until" a month out beside the
-    .eml's year in the same register (README screenshot review, 2026-09-23,
-    verifier round). tests/conftest.py still cuts the default to a day
-    through EVIDENCE_RETENTION_DAYS."""
+    The object lock and the retention date are the service's default, as for every other seeder's
+    exhibits, so the register shows them all under one retention. tests/conftest.py cuts the
+    default to a day through EVIDENCE_RETENTION_DAYS."""
     from noctornal_api.evidence import EvidenceService
 
     svc = EvidenceService(conn, storage)
@@ -692,16 +580,10 @@ def _linked(conn, evidence_id, *, node_id=None, edge_id=None) -> bool:
         (evidence_id, node_id, edge_id)).fetchone() is not None
 
 
-#: How long the database's clock must read past a stamp, without a break,
-#: before this seeder writes the next row the server stamps. Measured on
-#: this dev stack on 2026-09-23: the database runs in WSL, whose clock
-#: steps between the host's time and about 12.6 seconds behind it, and has
-#: held the host's time for at most about a second at a stretch (1,705
-#: readings over 20 seconds). Rows stamped by the server's clock (a custody
-#: row's `occurred_at`, a run's `started_at`) then land out of causal
-#: order, and the console sorts by them: in one test run the .eml's log
-#: read VIEWED, HASH_VERIFIED, ACQUIRED (README screenshot review,
-#: 2026-09-23, verifier round).
+#: Seconds the database's clock must read past a stamp, without a break, before this seeder writes
+#: the next row the server stamps. A database in WSL can step about 12.6 seconds behind the host
+#: and back, so server-stamped rows (a custody row's `occurred_at`, a run's `started_at`) would
+#: land out of causal order, and the console sorts by them.
 CLOCK_WINDOW = 1.5
 
 
@@ -887,17 +769,14 @@ def seed_comms(conn, case_id, owner, colleague, tally: Tally) -> None:
 # ------------------------------------------------------- inferred tie, triage
 
 def seed_inferred(conn, case_id, owner, tally: Tally) -> None:
-    """One inferred tie INSIDE the bitwright crew, through the only path an
-    inferred edge has into the graph: a machine's proposal, accepted by a
-    person, who then weighs it at 0 through the console's edge correction
-    (`GraphWriteService.update_edge` with its assertion, and the
-    EDGE_UPDATED audit row the route writes beside it). Parallel to the
-    bit_forge / bit_lathe vouch, and at weight 0, so the analytics graph is
-    the one demo-network made: the module docstring has the measurements.
+    """One inferred tie inside the bitwright crew, through the only path an inferred edge has into
+    the graph: a machine's proposal, accepted by a person, who then weighs it at 0 through the
+    console's edge correction (`GraphWriteService.update_edge` and the EDGE_UPDATED audit row).
+    Parallel to the bit_forge / bit_lathe vouch at weight 0, so the analytics graph is the one
+    demo-network made.
 
-    One transaction, so a run that dies between the acceptance and the
-    correction leaves neither; an estate that has the tie at another weight
-    (the first version of this seeder left it at 1) gets the correction."""
+    One transaction, so a run that dies between the acceptance and the correction leaves neither;
+    an estate that has the tie at another weight gets the correction."""
     from psycopg.types.json import Json
 
     from noctornal_api.graph import AssertionInput, GraphWriteService
@@ -953,16 +832,13 @@ def seed_inferred(conn, case_id, owner, tally: Tally) -> None:
 
 
 def seed_triage(conn, case_id, owner, colleague, tally: Tally) -> None:
-    """The colleague pastes the advert thread; extraction raises proposals
-    and the case owner is told, as the capture route does, and has read
-    that notice, so the inbox shows both states. The owner parks the forum
-    escrow as DISPUTED.
+    """The colleague pastes the advert thread; extraction raises proposals and the case owner is
+    told, as the capture route does, and has read that notice, so the inbox shows both states. The
+    owner parks the forum escrow as DISPUTED.
 
-    The capture, its audit row, the notice and its reading are one
-    transaction. Apart, a run that died after the capture left proposals
-    with no audit row and no notice, and the next run found the proposals,
-    raised nothing, and so never wrote either (README screenshot review,
-    2026-09-23, verifier round)."""
+    The capture, its audit row, the notice and its reading are one transaction: apart, a run that
+    died after the capture would leave proposals that no later run writes the audit row or notice
+    for."""
     from psycopg.types.json import Json
 
     from noctornal_api import notify_events
@@ -971,9 +847,8 @@ def seed_triage(conn, case_id, owner, colleague, tally: Tally) -> None:
     from noctornal_api.proposals import ProposalReview
 
     with conn.transaction():
-        # Through the service and not the HTTP route: the route is rate
-        # limited, and this is the call it makes (README screenshot review,
-        # 04-triage).
+        # Through the service and not the HTTP route: the route is rate limited, and this is the
+        # call it makes.
         result = CaptureService(conn).capture(
             case_id=case_id, text=TRIAGE_THREAD, title=TRIAGE_TITLE,
             external_url=TRIAGE_URL, author_handle="mer_kite",
@@ -1052,15 +927,13 @@ def seed_approval(conn, case_id, colleague, tally: Tally) -> None:
 
 def seed_break_glass(conn, case_id, owner, colleague, storage, green_id,
                      tally: Tally) -> None:
-    """The colleague, cleared for CLEAR, breaks glass to GREEN to read the
-    one GREEN note, reads it, and ends the grant. The owner gets the URGENT
-    notice and the officer the case-free alert, both from the service's own
-    `_alert`. Left for the officer to review: see the module docstring.
+    """The colleague, cleared for CLEAR, breaks glass to GREEN to read the one GREEN note, reads it,
+    and ends the grant. The owner gets the URGENT notice and the officer the case-free alert, both
+    from the service's own `_alert`. Left for the officer to review: see the module docstring.
 
-    One transaction. The check below skips the step once any grant exists,
-    so apart, a run that died after the invoke left a live, unused grant
-    raising the colleague to GREEN that no later run would end (README
-    screenshot review, 2026-09-23, verifier round)."""
+    One transaction: the check below skips the step once any grant exists, so apart, a run that
+    died after the invoke would leave a live grant raising the colleague to GREEN that no later run
+    ends."""
     from noctornal_api.break_glass import BreakGlassService
     from noctornal_api.evidence import EvidenceService
 
@@ -1120,12 +993,9 @@ def seed_runs(conn, case_id, owner, tally: Tally) -> None:
     # inferred in, LOW) and the router's default parameters, so the run
     # stored for "now" is the one the Analysis pane loads.
     params = AnalyticsParams()
-    # Anchored to the case, not to this run's clock. as_of is part of the
-    # projection's fingerprint, so a date taken from now() is a new
-    # projection on every run and a second run stored two more runs (found
-    # by running it twice). Midnight of the case's creation day, minus the
-    # months, is the same on every run; demo-network dates its ties from
-    # that same moment, and TREND_MONTHS avoids the months it uses.
+    # Anchored to the case, not to this run's clock: as_of is part of the projection's fingerprint,
+    # so a date from now() would store two more runs on every run. Midnight of the case's creation
+    # day, minus the months, is the moment demo-network dates its ties from.
     created = conn.execute('SELECT created_at FROM core."case" WHERE id = %s',
                            (case_id,)).fetchone()[0].astimezone(timezone.utc)
     anchor = created.replace(hour=0, minute=0, second=0, microsecond=0)

@@ -1,57 +1,30 @@
 """Regenerate `db/schema.sql` from a live database, or check that it is current.
 
-## Why this exists
+`db/schema.sql` is the generated mirror of the Alembic chain (docs/00 decision 17). This script
+produces it from the database itself, and CI regenerates and diffs it on every push (the "Schema
+mirror matches the migrations" step in `.github/workflows/ci.yml`), so it cannot fall behind.
 
-`db/schema.sql` has called itself a "mirror" of the Alembic chain since
-2026-07-24 (docs/00 decision 17), and it was maintained by hand. By
-2026-09-09 the migrations created ten schemas and the file named five --
-`comms`, `deception`, `ingest`, `lab` and `notify` were simply absent, along
-with everything revisions 0040-0058 added. Nothing checked it, so the one
-file a reader is sent to for "the whole schema, end to end" described a
-database that had not existed for six weeks. That is this codebase's
-signature defect: a document claiming something the code does not do.
-
-The fix is to stop writing the mirror by hand. This script produces it from
-the database itself and CI regenerates and diffs it on every push (the
-"Schema mirror matches the migrations" step in `.github/workflows/ci.yml`,
-the same shape as the ontology drift gate), so the file can no longer
-silently fall behind.
-
-## pg_dump, and only pg_dump
-
-The dump is `pg_dump --schema-only --no-owner --no-privileges`. There is
-deliberately NO fallback that re-implements the dump over `psycopg` and the
-catalogs. A second emitter can never produce byte-identical output, so the
-first time CI (which has `pg_dump`) regenerated a file that a developer
-(who did not) had produced with the fallback, the diff would report
-"schema drift" for what is really a difference between two emitters -- a
-failure reported as the wrong thing, which is the other half of the defect
-this pass exists to remove. If `pg_dump` is not on PATH, point
-`NOCTORNAL_PG_DUMP` at one. The development host this was written on has
-no client tools installed and runs Postgres in a container under WSL, so it
-uses the server image's own binary:
+The dump is `pg_dump --schema-only --no-owner --no-privileges`, with deliberately no fallback
+over `psycopg` and the catalogs: a second emitter can never produce byte-identical output, and
+the diff would report a difference between emitters as schema drift. If `pg_dump` is not on
+PATH, point `NOCTORNAL_PG_DUMP` at one, for example the server image's own binary:
 
     NOCTORNAL_PG_DUMP="wsl -d Ubuntu-24.04 -- docker exec noctornal-postgres-1 pg_dump"
 
-CI does the same against its service container (`docker exec <id> pg_dump`),
-which means both sides dump with the binary shipped in `pgvector/pgvector:pg16`
-rather than whatever client version happens to be installed on the host.
+CI does the same against its service container, so both sides dump with the binary shipped in
+`pgvector/pgvector:pg16`.
 
-## What is normalised, and why each line is volatile
+Normalised, because each varies with the client and carries no schema:
 
-- `SET ...;` and `SELECT pg_catalog.set_config(...)` -- session settings
-  that differ by client version (17 adds `transaction_timeout`) and carry
-  no schema.
-- `-- Dumped from database version ...` / `-- Dumped by pg_dump version ...`
-  -- change on every minor upgrade of either side.
-- `\\restrict <token>` / `\\unrestrict <token>` -- added by pg_dump 16.10 /
-  17.6 for CVE-2025-8714, with a RANDOM token per run.
-- The `alembic_version` ROW is not in a schema-only dump at all; the
-  revision it holds is read separately and written into the header so the
-  file says which revision it mirrors, and `test_schema_mirror.py` holds
-  that header to the chain's head.
-- Runs of blank lines are collapsed to one, because removing the lines
-  above leaves gaps that would otherwise change with client version too.
+- `SET ...;` and `SELECT pg_catalog.set_config(...)`: session settings that differ by client
+  version (17 adds `transaction_timeout`).
+- `-- Dumped from database version ...` and `-- Dumped by pg_dump version ...`.
+- `\\restrict <token>` and `\\unrestrict <token>`, added by pg_dump 16.10 and 17.6 for
+  CVE-2025-8714 with a random token per run.
+- Runs of blank lines, collapsed to one.
+
+The `alembic_version` row is not in a schema-only dump, so the revision is read separately and
+written into the header; `test_schema_mirror.py` holds that header to the chain's head.
 
 Usage:
 
@@ -59,8 +32,8 @@ Usage:
     python scripts/dump_schema.py --check    # exit 1 with a diff if stale
     python scripts/dump_schema.py --out X    # write somewhere else
 
-Reads DATABASE_URL (SQLAlchemy form `postgresql+psycopg://...` accepted; the
-`+psycopg` is stripped for libpq) and NOCTORNAL_PG_DUMP as above.
+Reads DATABASE_URL (the SQLAlchemy form `postgresql+psycopg://...` is accepted; `+psycopg` is
+stripped for libpq) and NOCTORNAL_PG_DUMP as above.
 """
 from __future__ import annotations
 
@@ -100,11 +73,10 @@ def without_password(url: str) -> tuple[str, dict[str, str]]:
     """`url` with its password taken out, and the environment that carries it
     instead: `PGPASSWORD`, which libpq reads. A password in `--dbname` is an
     argument of the pg_dump process, which any local user reads from the
-    process list for as long as it runs (infra-10, 2026-10-03). A pg_dump
-    wrapped in `docker exec` does not pass the environment on unless the
-    wrapper names the variable (`docker exec -e PGPASSWORD ...`); the stock
-    Postgres image trusts its own loopback, so the development stack's needs
-    none."""
+    process list for as long as it runs. A pg_dump wrapped in `docker exec`
+    does not pass the environment on unless the wrapper names the variable
+    (`docker exec -e PGPASSWORD ...`); the stock Postgres image trusts its own
+    loopback, so the development stack's needs none."""
     parts = urlsplit(url)
     if parts.password is None:
         return url, {}

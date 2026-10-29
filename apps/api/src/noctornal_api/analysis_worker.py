@@ -1,172 +1,82 @@
-"""The isolated analysis worker: a container with no secrets and no
-network that runs the bounded analysis children for the application
-(docs/17 F42, 2026-10-02).
+"""The isolated analysis worker: a container with no secrets and no network that runs the bounded
+analysis children for the application.
 
     python -m noctornal_api.analysis_worker               serve
     python -m noctornal_api.analysis_worker --check       the compose healthcheck
     python -m noctornal_api.analysis_worker --shared-uid  serve, development only
 
-## What it is, and what it is not
+Not a task worker (decision 30; CONVENTIONS' "no worker container" means a queue's worker): there
+is no queue, nothing is scheduled here, and no state outlives a request. A caller connects, hands
+over one request and waits for its answer; the worker starts the child with
+`analysis_runner.run_local`, the function the callers would otherwise use, so the parsers run the
+same code under the same limits either way.
 
-Not a task worker: there is no queue, nothing is scheduled here, and no
-state outlives a request: a child can create no file, shared memory,
-semaphore or message queue that a later request could find ("State a child
-could leave behind" below; decision 30 stands; the owner decided this
-sandbox on 2026-10-02, and CONVENTIONS' "no worker container" means a
-queue's worker). A caller in the API, the cron loop or the lab-triage
-loop connects, hands over one request, and waits for its answer; the
-worker starts the child with `analysis_runner.run_local`, the very
-function those callers would otherwise use, so the parsers run the same
-code under the same limits either way.
+It starts with an environment it can name and nothing else (`analysis_runner.WORKER_ALLOWED_ENV`)
+and refuses to start holding any other variable. compose.yml gives it no env_file, no network, a
+read-only root with a tmpfs only root can write, no IPC objects a child could use,
+no-new-privileges, pids and memory limits, and only the kill, setgid and setuid capabilities. Its
+one channel is a Unix socket on a tmpfs volume only the application containers mount, read-only.
+A parser exploit in a child can read an environment that holds nothing and reach nothing beyond
+its own pipes.
 
-## Why it can be trusted with hostile bytes
-
-It is started with an environment it can name and nothing else
-(`analysis_runner.WORKER_ALLOWED_ENV`) and refuses to start holding any
-other variable. compose.yml gives it no env_file, no network
-(network_mode none), a read-only root with a tmpfs only root can write,
-no private IPC objects a child could use (below), no-new-privileges, pids
-and memory limits, and of the capabilities only the three it needs to
-keep its children apart (below). Its one channel is
-a Unix socket on a tmpfs volume that only the application containers
-mount, read-only. A parser exploit in a child can therefore read an
-environment that holds nothing, and reach nothing beyond its own pipes.
-
-## Each child is a user of its own (F42 review, 2026-10-02)
-
-The review showed, in a container with these settings, that a child
-running as the worker's own user could unlink the worker's socket and
-bind its own at the same name; that a process it detached with setsid
-outlived the request's kill and then answered every later request in the
-worker's place; and that a child could spend the container's pids until
-the worker could not start a thread for anybody.
-
-So the worker is a supervisor. It starts as root holding only the kill,
-setgid and setuid capabilities, behind no-new-privileges (so no setuid
-program hands a capability back to a child), and refuses to start
-otherwise. Slot N's child runs as uid CHILD_UID_BASE + N, gid the same,
-with no supplementary group:
+Each child is a user of its own: a child sharing the worker's uid could unlink and rebind its
+socket, outlive its request with setsid and answer later requests, or spend the container's pids.
+So the worker is a supervisor, root with those three capabilities behind no-new-privileges, and
+refuses to start otherwise. Slot N's child runs as uid and gid CHILD_UID_BASE + N with no
+supplementary group:
 
 * the socket's directory is root's and closed to that user, so the child
   cannot unlink, bind or even connect there;
 * it cannot signal or trace the worker or another slot's child, whatever
   kernel.yama.ptrace_scope says, because none of them is its user;
-* RLIMIT_NPROC, set before its program starts
-  (`analysis_runner.launch_argv`), holds it and everything it starts to
-  CHILD_MAX_TASKS processes and threads, and the service's pids limit
-  must leave the worker room beside every slot at that limit
-  (`start_problems` checks);
-* before the request is answered, every process of the slot's uid is
-  killed (`purge_user`), so nothing a child started outlives its request.
-  The purge runs inside `run_local`, once the child has gone and BEFORE
-  anything waits on the child's pipes: a process the child left holding
-  its stdout or stderr open (with or without setsid) used to wedge the
-  request, and its slot for good, until the helper died on its own, because
-  the purge ran only after `run_local` returned (F42 verify 1,
-  2026-10-03). A slot whose uid cannot be emptied, or whose purge fails,
-  is not used again; with none left the worker exits so Docker restarts it
-  clean. init: true reaps them.
+* RLIMIT_NPROC, set before its program starts (`analysis_runner.launch_argv`), holds it and
+  everything it starts to CHILD_MAX_TASKS, and the service's pids limit must leave the worker room
+  beside every slot at that limit (`pids_problem`);
+* every process of the slot's uid is killed (`purge_user`) inside `run_local`, once the child has
+  gone and before anything waits on its pipes, so nothing a child started outlives its request. A
+  slot whose uid cannot be emptied is not used again; with none left the worker exits so Docker
+  restarts it clean. init: true reaps them.
 
-Why this and not the other ways: a pid namespace per request needs
-CAP_SYS_ADMIN or a user namespace, which Docker's default seccomp profile
-refuses; killing every process of one shared child uid after a request
-would kill another request's child; and a root-owned socket directory
-alone still leaves a child of the worker's uid able to kill or trace the
-worker. The cost is a root process, with three capabilities, in a
-container with no network, no secret and a read-only root, which parses
-nothing hostile itself: it moves bytes, bounded, between the socket and a
-child's pipes.
+A pid namespace per request would need CAP_SYS_ADMIN or a user namespace, which Docker's default
+seccomp profile refuses, and one shared child uid would let a purge kill another request's child.
+`--shared-uid` runs every child as this process's own (non-root) user, for development and the
+tests; the hello says so, and readiness reports such a worker as not isolated.
 
-`--shared-uid` keeps the old shape for development and the tests: every
-child runs as this process's own user, which must then not be root. The
-hello says so, and readiness reports such a worker as not isolated.
+Killing a uid's processes does not remove what they made in the kernel or on a writable
+filesystem, and the worker can remove none of it, so it is closed at the source and the worker
+refuses to start (and readiness fails) unless it sees that it is: `ipc: none` (no /dev/shm);
+kernel.shmmax 0, kernel.msgmni 0, kernel.sem "0 0 0 0" and fs.mqueue.queues_max 0 in the
+container's IPC namespace; and /tmp a tmpfs of root's with mode 0755. `state_left_open` reads each
+from the running process, and the hello names any that is open.
 
-## State a child could leave behind (F42 verify 2, 2026-10-03)
+Bounds: a request's frame is read under `FRAME_HEADER_CAP` and an idle limit; its payloads must fit
+`NOCTORNAL_ANALYSIS_WORKER_MAX_BYTES` before a byte is read, and are read only once a slot is free,
+so at most `NOCTORNAL_ANALYSIS_WORKER_CONCURRENCY` requests are in memory; a request waiting longer
+than QUEUE_WAIT_S is answered busy. The answer is sent while the slot is held. Connections beyond
+`MAX_CONNECTIONS`, or with no thread to serve them, are closed at once. The child's wall clock and
+output cap are the request's, clamped to MAX_WALL_S and MAX_OUTPUT_BYTES. A broken request is
+answered `worker_refused` and logged by its request id, never by its content.
 
-Killing a uid's processes does not remove what they made in the kernel or
-on a writable filesystem. The review showed SysV shared memory a child
-creates survives every process of the uid, is charged to the container's
-memory limit until the worker itself is killed for it, and is readable by
-a child of another slot; POSIX shared memory (/dev/shm, Docker's default
-64 MiB tmpfs), POSIX message queues and files in /tmp did the same. The
-worker, holding no capability that overrides ownership, can remove none of
-it. So it is closed at the source instead, and the worker refuses to start
-(and readiness fails) unless it can see for itself that it is:
+`Worker.status` (the hello) reports what this process is, not what a file says it should be: its
+uid, effective capabilities, no-new-privileges, a read-only root, network interfaces, pids limit,
+the state a child could leave behind, the names of its environment (never a value), how children
+are kept apart, the slots retired and the parser versions. Readiness judges that.
 
-* `ipc: none` gives the container no /dev/shm at all;
-* sysctls kernel.shmmax 0, kernel.msgmni 0, kernel.sem "0 0 0 0" and
-  fs.mqueue.queues_max 0 leave a child unable to create a SysV segment,
-  queue or semaphore set or a POSIX queue (shmget answers EINVAL, msgget and
-  mq_open ENOSPC, semget EINVAL: measured on 2026-10-03). They are the
-  container's own, in its IPC namespace;
-* /tmp is a tmpfs of root's with mode 0755, so no child's uid can write in
-  it, and nothing a child runs needs to (the code is on the read-only
-  root).
+What remains:
 
-`state_left_open` reads each of those from the running process, and the
-hello carries the names of any that is open.
-
-## Bounds
-
-A request's frame is read under `FRAME_HEADER_CAP` and an idle limit;
-its declared payloads must fit `NOCTORNAL_ANALYSIS_WORKER_MAX_BYTES`
-before a byte of them is read, and are read only once a slot is free, so
-at most `NOCTORNAL_ANALYSIS_WORKER_CONCURRENCY` requests are held in
-memory; a request that waits longer than QUEUE_WAIT_S for a slot is
-answered busy. The answer is sent while the slot is still held, so a
-slot's memory is its payload, its child and its output, and nothing is
-held beside the slots. Connections beyond `MAX_CONNECTIONS` are closed at
-once, and so is one no thread can be started for. The child's wall clock
-is the request's, clamped to MAX_WALL_S, and its output cap the
-request's, clamped to MAX_OUTPUT_BYTES. A broken request is answered
-`worker_refused` and logged by its request id, never by its content.
-
-## What the hello reports
-
-`Worker.status` is what readiness judges, and it reports what this
-process IS rather than what a file says it should be: its uid, its
-effective capabilities, no-new-privileges, whether its root is read-only,
-its network interfaces, its pids limit, the state a child could leave
-behind (`state_left_open`), the NAMES of its environment (never a value),
-how its children are kept apart, how many slots it has retired, and its
-parser versions. Until the F42 review (2026-10-02) it did not report its
-capabilities, no-new-privileges or a read-only root, and the compose
-file's cap_drop, security_opt and read_only were held by text tests alone;
-until the verify round (2026-10-03) the docstring named the pids limit and
-the hello did not carry it, so an absent or enormous limit started
-silently (`pids_problem` is now the one reader, for the start and for
-readiness).
-
-## What remains (F42 review, 2026-10-02)
-
-* The state a child could leave behind is closed by the container's
-  settings, which the worker checks from inside; what it cannot see is a
-  runtime that ignores them. A kernel object of another kind that a plain
-  uid can create (a kernel keyring, which Docker's default seccomp profile
-  refuses; a container started with no seccomp profile is outside this
-  claim) is not covered.
-* A slot's uid is reused by later requests, after the purge. Nothing of
-  one request is in the next one's memory, processes, files or IPC.
-* The local runner (development, and NOCTORNAL_ANALYSIS_LOCAL=1) has no
-  uid to purge: a helper that left the child's session keeps the child's
-  pipes and survives the run. The run no longer waits for it (it is
-  answered after PIPE_GRACE_S at most) and what it writes later is never
-  added to the answer, but the process lives until it exits or is killed.
-* RLIMIT_NPROC counts a uid's tasks over the whole host, not per
-  container: uids CHILD_UID_BASE to CHILD_UID_BASE + 15 must own nothing
-  else on the host, a second analysis worker included
-  (infra/production/README.md, Analysis worker).
-* kernel.yama.ptrace_scope does not matter here: a child holds no
-  capability and shares no uid with the worker or with a child of another
-  slot, so it cannot trace or read them at any setting. It matters under
-  --shared-uid (development), where every child shares the worker's uid
-  and at scope 0 could read a concurrent request's payload; readiness
-  reports such a worker as not isolated.
-* Memory: infra/production/README.md has the sizing and what was measured.
-  A child ranks first for the kernel's OOM killer, so a container limit
-  that is too small costs a crashed step, never the worker.
-* A kernel or container-runtime escape from the worker's container is not
-  addressed (docs/17 F42); a compromised child can still return false
+* A runtime that ignores the container's settings, and a kernel object of another kind (a kernel
+  keyring, which Docker's default seccomp profile refuses), are not covered.
+* A slot's uid is reused after the purge; nothing of one request is in the next one's memory,
+  processes, files or IPC.
+* The local runner has no uid to purge: a helper that left the child's session survives the run,
+  though the run waits for it at most PIPE_GRACE_S and never adds what it writes later.
+* RLIMIT_NPROC counts a uid's tasks host-wide, so uids CHILD_UID_BASE to CHILD_UID_BASE + 15 must
+  own nothing else on the host, a second analysis worker included (infra/production/README.md).
+* Under --shared-uid every child shares the worker's uid and, at ptrace_scope 0, could read a
+  concurrent request's payload.
+* A child ranks first for the OOM killer, so too small a memory limit costs a crashed step, never
+  the worker (sizing in infra/production/README.md).
+* A kernel or container-runtime escape is not addressed; a compromised child can still return false
   findings, which the parent validates by shape only.
 """
 from __future__ import annotations
@@ -198,9 +108,8 @@ MAX_CONNECTIONS = 32
 #: own nothing on the host either (infra/production/README.md, Analysis
 #: worker): RLIMIT_NPROC counts a uid's processes host-wide.
 CHILD_UID_BASE = 10100
-#: Processes and threads one child may hold, itself included. A YARA scan
-#: needs two (yara-x keeps a timer thread; measured 2026-10-02, and a
-#: compile of 3000 rules started none); the rest is room.
+#: Processes and threads one child may hold, itself included. A YARA scan needs two (yara-x keeps
+#: a timer thread); the rest is room.
 CHILD_MAX_TASKS = 16
 #: What the worker needs beside its children: a thread per connection,
 #: init, itself and a healthcheck, with room.
@@ -220,9 +129,8 @@ _SIGKILL = getattr(signal, "SIGKILL", 9)
 KIND_ARGV: dict[str, list[str]] = {
     "lab_static": [sys.executable, "-m", "noctornal_api.lab_static"],
     "forum_parse": [sys.executable, "-m", "noctornal_api.forum_parse"],
-    # Archive expansion's child (phase 8, merged 2026-10-03): it writes no
-    # path, so the worker's tmpfs of one MiB and its read-only root are all
-    # it needs.
+    # Archive expansion's child writes no path, so the worker's one-MiB tmpfs and read-only root are
+    # all it needs.
     "lab_archive_child": [sys.executable, "-m", "noctornal_api.lab_archive_child"],
     # A watch's regular expressions (watch_regex): text in, one boolean per
     # text out, no path, no network.
@@ -258,11 +166,9 @@ def capability_names(mask: int) -> list[str]:
     return sorted(out)
 
 
-#: The container's pids limit may not be more than this many times what its
-#: slots need (F42 verify 3, 2026-10-03). The limit is the second wall: the
-#: first is each child's task limit, and the second is what is left when a
-#: task limit does not hold. A limit of 100000 holds nothing, and so does
-#: none at all, which the kernel reports as "max".
+#: The container's pids limit may not be more than this many times what its slots need. It is the
+#: second wall, after each child's task limit: a limit of 100000 holds nothing, and so does none at
+#: all, which the kernel reports as "max".
 PIDS_CEILING_FACTOR = 4
 
 
@@ -280,8 +186,7 @@ def pids_problem(pids_max, concurrency: int) -> str | None:
     number from what the slots need up to the ceiling. The one reader: the
     worker refuses to start on it and readiness fails on it, so the
     compose file's pids_limit is judged on the running process and not on
-    its text (F42 verify 3, 2026-10-03: the hello did not report it, and an
-    absent or enormous limit started silently)."""
+    its text."""
     need = pids_needed(concurrency)
     if isinstance(pids_max, bool) or not isinstance(pids_max, int):
         return ("The analysis worker's container has no pids limit it can "
@@ -337,15 +242,11 @@ def read_pids_max(*, root: str = "/sys/fs/cgroup",
     return None
 
 
-#: What a child's uid can create that outlives its processes, and the
-#: setting that closes each (F42 verify 2, 2026-10-03). Each is read from
-#: the running process, in the container's own IPC namespace, by
-#: `state_left_open`. SysV shared memory, a message queue or a semaphore
-#: set, and a POSIX message queue, stay until the container is removed, are
-#: charged to its memory limit, and cannot be removed by a worker holding
-#: no capability that overrides ownership; /dev/shm is the same for POSIX
-#: shared memory, and a file in /tmp is the same for any child that can
-#: write one.
+#: What a child's uid can create that outlives its processes, and the setting that closes each,
+#: read from the running process in the container's own IPC namespace by `state_left_open`. SysV
+#: shared memory, message queues and semaphore sets and POSIX message queues stay until the
+#: container is removed, are charged to its memory limit, and cannot be removed by a worker holding
+#: no capability that overrides ownership; /dev/shm and a file in /tmp are the same.
 IPC_SYSCTLS = ("kernel.shmmax", "kernel.msgmni", "fs.mqueue.queues_max")
 #: The directories a child's uid could write to if their mode and mount let
 #: it: left there, a file is read by the next request's child.
@@ -514,13 +415,11 @@ def start_problems(env: Mapping[str, str], *, shared: bool = False,
             "The analysis worker must not be PID 1: set init: true on the "
             "service, so the processes killed after each request are reaped.")
     concurrency = settings["concurrency"] if settings else DEFAULT_CONCURRENCY
-    # F42 verify 3 (2026-10-03): a limit that is absent, unreadable or
-    # enormous used to start silently; only one that was too small refused.
+    # A pids limit that is absent, unreadable or enormous refuses the start, as one too small does.
     pids = pids_problem(facts.get("pids_max"), concurrency)
     if pids:
         problems.append(pids)
-    # F42 verify 2 (2026-10-03): state a child leaves behind outlives its
-    # request, which the purge of its uid cannot reach.
+    # State a child leaves behind outlives its request, and the purge of its uid cannot reach it.
     left = facts.get("state_left_open")
     if not isinstance(left, list):
         problems.append(
@@ -577,7 +476,7 @@ def bind_unix(path: str):
 
 
 # ---------------------------------------------------------------------------
-# Emptying a slot's uid (F42 review, 2026-10-02)
+# Emptying a slot's uid
 # ---------------------------------------------------------------------------
 
 def tasks_of(uid: int, *, proc: str = "/proc") -> list[int]:
@@ -676,9 +575,7 @@ class Worker:
         the effective capabilities, no-new-privileges, a read-only root, the
         network interfaces, its pids limit and the state a child could leave
         behind, so readiness can see for itself what this process is rather
-        than read the compose file (F42 review, 2026-10-02; the pids limit
-        and the state, which the docstring named and the hello did not
-        carry, F42 verify 2 and 3, 2026-10-03)."""
+        than read the compose file."""
         from noctornal_api import lab_static
         facts = process_facts()
         own = self.child_uids is not None
@@ -712,9 +609,8 @@ class Worker:
             try:
                 self._accept_one()
             except Exception:  # noqa: BLE001 - nothing one request does ends the loop
-                # F42 review (2026-10-02): an error here used to end the
-                # loop every other request needs. The pause stops a hot
-                # loop when the error repeats.
+                # An error here must not end the loop every other request needs. The pause stops a
+                # hot loop when the error repeats.
                 log.warning("the analysis worker's accept loop met an error "
                             "and carries on", exc_info=True)
                 time.sleep(0.1)
@@ -737,10 +633,9 @@ class Worker:
             threading.Thread(target=self._serve_one, args=(conn,),
                              daemon=True).start()
         except Exception:  # noqa: BLE001 - RuntimeError when no thread can start
-            # No thread to be had (the container's tasks are spent, which a
-            # child at its task limit can no longer cause): this caller is
-            # told at once by a closed connection, and the loop goes on
-            # (F42 review, 2026-10-02).
+            # No thread to be had (the container's tasks are spent, which a child held to its task
+            # limit cannot cause): this caller is told at once by a closed connection, and the loop
+            # goes on.
             self._connections.release()
             conn.close()
             log.warning("an analysis request was turned away: no thread could "
@@ -857,18 +752,14 @@ class Worker:
             self._refuse(conn, rid, "no slot came free", failure="worker_busy")
             return
         uid = self.child_uids[slot] if self.child_uids is not None else None
-        # True until a child may have run; from then on only an emptied uid
-        # makes it True again (F42 verify 1, 2026-10-03: it used to stay True
-        # when the purge itself failed, which freed a slot nobody had
-        # emptied).
+        # True until a child may have run; from then on only an emptied uid makes it True again, so
+        # a failed purge never frees a slot nobody emptied.
         clean = True
         purged: list[bool] = []
 
         def reap() -> None:
-            # Called by run_local after the child is gone and BEFORE it waits
-            # on the child's pipes: a process the child left holding them is
-            # stopped here, where it used to wedge run_local until it died
-            # on its own (F42 verify 1, 2026-10-03).
+            # Called by run_local after the child is gone and before it waits on the child's pipes,
+            # so a process the child left holding them is stopped rather than wedging run_local.
             purged.append(purge_user(uid))
 
         try:
@@ -893,9 +784,8 @@ class Worker:
             finally:
                 payloads = ()
                 if uid is not None:
-                    # Before the answer: nothing the child started outlives
-                    # its request (F42 review, 2026-10-02). The purge that
-                    # ran inside run_local is not repeated when it answered.
+                    # Before the answer: nothing the child started outlives its request. The purge
+                    # that ran inside run_local is not repeated when it answered.
                     try:
                         clean = purged[-1] if purged else purge_user(uid)
                     except Exception:  # noqa: BLE001 - not emptied is not clean

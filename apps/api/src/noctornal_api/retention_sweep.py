@@ -1,58 +1,40 @@
-"""The deployment-wide sweep of what no case governs (docs/17 F30, 2026-10-02;
-F55, 2026-10-08).
+"""The deployment-wide sweep of what no case governs (docs/17 F30, F55).
 
-A Telegram group's messages and a forum's posts are collected documents. They
-carry a retention clock (CHAT_EXPORT and the other rules), the purge honours
-every legal hold on a document and on every case that cites it, and until now
-nothing ran that purge over them: the governance purge route is case-scoped
-and a collected document belongs to no case, and no script called
-`RetentionService.purge_due(case_id=None)`. So a group chat's third-party
-messages outlived their clock for as long as nobody decided how a sweep is
-run, by whom and under which authority (docs/16 L4).
-
-F55 (owner, 2026-10-08): dead letters and the ingest records attached to no
-case are in the same position, and join this sweep under the same rules. A
-dead letter has no case, and so no case hold, and carries a 90-day clock and
-third-party victim data; a record attached to no case has a clock and no case
-to govern it. Neither can be held, so every one past its clock is one a sweep
-destroys.
+A Telegram group's messages and a forum's posts are collected documents. They carry a retention clock
+(CHAT_EXPORT and the other rules), and the purge honours every legal hold on a document and on every case that
+cites it. The governance purge route is case-scoped and a collected document belongs to no case, so this sweep
+is what runs that purge over them (docs/16 L4). Dead letters and the ingest records attached to no case join it
+under the same rules: a dead letter has no case, and so no case hold, and carries a 90-day clock and
+third-party victim data; a record attached to no case has a clock and no case to govern it. Neither can be
+held, so every one past its clock is one a sweep destroys.
 
 ## What this module decides (docs/00 decisions 171 to 173)
 
-**It is run by an operator, never by the cron loop.** `scripts/
-retention_sweep.py` is dry by default, and a real run needs an explicit flag
-AND an authority reference declared in the environment. That is the L1
-pattern (`samples.policy_declared`): recorded, refused when missing or a
-placeholder, never verified, because the software cannot check that the
-document the reference names exists or says what the operator believes. The
-retention module's own rule stands: "a purge job that runs itself on a timer
-nobody watches is how data disappears on a Sunday". The operator documentation
-(infra/production/README.md) says how to schedule it, and a test holds the
-production cron loop to not containing it.
+**It is run by an operator, never by the cron loop.** `scripts/retention_sweep.py` is dry by default, and a
+real run needs an explicit flag AND an authority reference declared in the environment. That is the L1 pattern
+(`samples.policy_declared`): recorded, refused when missing or a placeholder, never verified, because the
+software cannot check that the document the reference names exists or says what the operator believes. The
+retention module's own rule stands: a purge job that runs itself on a timer nobody watches is how data
+disappears on a Sunday. The operator documentation (infra/production/README.md) says how to schedule it, and a
+test holds the production cron loop to not containing it.
 
-**It sweeps what no case governs, and nothing else.** `purge_due(case_id=None)`
-also reaches every case's exhibits, ingest records, lookups and dead letters,
-and writes their tombstones under no case: the cross-case destruction
-`test_a_purge_cannot_be_run_without_naming_a_case` was written against.
-Exhibits are behind a COMPLIANCE object lock and the case-scoped route's
-preview digest and step-up; a document is the one family with no other way in.
-The family set is `SWEPT_KINDS`, one line, so widening it is a decision with a
-diff. Since F55 it holds the documents, the dead letters and the ingest
-records, and the run asks `purge_due` for `unattached_only`, so a record
-attached to a case stays that case's, with its clock and its hold, and is
+**It sweeps what no case governs, and nothing else.** `purge_due(case_id=None)` also reaches every case's
+exhibits, ingest records, lookups and dead letters, and writes their tombstones under no case: the cross-case
+destruction `test_a_purge_cannot_be_run_without_naming_a_case` was written against. Exhibits are behind a
+COMPLIANCE object lock and the case-scoped route's preview digest and step-up; a document is the one family
+with no other way in. The family set is `SWEPT_KINDS`, one line, so widening it is a decision with a diff. It
+holds the documents, the dead letters and the ingest records, and the run asks `purge_due` for
+`unattached_only`, so a record attached to a case stays that case's, with its clock and its hold, and is
 reached only by the case-scoped route.
 
-**It does not fork the purge.** The act is `RetentionService.purge_due`, with
-its hold predicate, its locks, its markup deletion and its tombstone, called
-with `kinds=SWEPT_KINDS`. This module adds the declaration, the named actor,
-the loop over a backlog bigger than one pass, and one audit row of counts.
+**It does not fork the purge.** The act is `RetentionService.purge_due`, with its hold predicate, its locks,
+its markup deletion and its tombstone, called with `kinds=SWEPT_KINDS`. This module adds the declaration, the
+named actor, the loop over a backlog bigger than one pass, and one audit row of counts.
 
-**A named account answers for it.** `core.purge_tombstone.purged_by` is a
-real user, so the run names an active account that holds `retention.purge`.
-That is a declaration too, not an authentication: the script runs on the
-server with the system role, where a signed-in session has no meaning, and
-step-up (a property of a session) is replaced by the three things a script
-can enforce: the flag, the declared authority and a named account, all
+**A named account answers for it.** `core.purge_tombstone.purged_by` is a real user, so the run names an active
+account that holds `retention.purge`. That is a declaration too, not an authentication: the script runs on the
+server with the system role, where a signed-in session has no meaning, and step-up (a property of a session) is
+replaced by the three things a script can enforce: the flag, the declared authority and a named account, all
 recorded in the tombstones and in the one `RETENTION_SWEEP` event.
 """
 from __future__ import annotations
@@ -82,10 +64,9 @@ ACTOR_ENV = "NOCTORNAL_RETENTION_SWEEP_ACTOR"
 EVENT = "RETENTION_SWEEP"
 PERMISSION = "retention.purge"
 
-#: The `DueItem.object_type` values this sweep may destroy: collected
-#: documents (F30), and since F55 dead letters and ingest records, the
-#: latter only when attached to no case (`purge_due(unattached_only=True)`).
-#: See the module docstring for why that is the decision.
+#: The `DueItem.object_type` values this sweep may destroy: collected documents, dead letters, and ingest
+#: records attached to no case (`purge_due(unattached_only=True)`). See the module docstring for why that is the
+#: decision.
 SWEPT_KINDS = frozenset({"document", "dead_letter", "ingest_record"})
 
 #: One pass destroys at most what `RetentionService.due` lists (500) of each
@@ -189,9 +170,8 @@ class SweepReport:
     #: of those no hold kept: what a dry run would destroy.
     past_clock: int = 0
     sweepable: int = 0
-    #: Dead letters, and ingest records attached to no case, past their clock
-    #: when the run began (F55). Neither can be held, so each is one a sweep
-    #: destroys.
+    #: Dead letters, and ingest records attached to no case, past their clock when the run began. Neither can be
+    #: held, so each is one a sweep destroys.
     dead_letters: int = 0
     unattached_records: int = 0
     passes: int = 0
@@ -361,8 +341,7 @@ def _age_words(age: timedelta) -> str:
 
 
 def _unswept(documents: int, dead_letters: int, records: int) -> str:
-    """The unswept things in words, only the kinds there are: a count of
-    collected documents alone reads exactly as it did before F55."""
+    """The unswept things in words, only the kinds there are."""
     parts = []
     if documents:
         parts.append(_documents(documents))
@@ -377,18 +356,14 @@ def _unswept(documents: int, dead_letters: int, records: int) -> str:
 
 def readiness_verdict(conn: psycopg.Connection, *,
                       now: datetime | None = None) -> tuple[bool, str, str]:
-    """(ok, evidence, action) for the `retention_sweep_current` row: how many
-    collected documents, dead letters and ingest records attached to no case
-    are past their clock and unswept. Counts and an age, never a document, a
-    source or a case.
+    """(ok, evidence, action) for the `retention_sweep_current` row: how many collected documents, dead letters
+    and ingest records attached to no case are past their clock and unswept. Counts and an age, never a
+    document, a source or a case.
 
-    Passes with nothing past its clock, with only held documents past it (a
-    hold is the purge refusing correctly, and the evidence says how many),
-    and with unheld ones inside `OVERDUE_AFTER`. Fails once something no hold
-    keeps has waited longer than that: somebody's third-party content is
-    being held past its clock, which is the gap F30 recorded and F55 widened
-    to dead letters and unattached records. Not blocking: it names a duty
-    that is late, not a decision that cannot wait."""
+    Passes with nothing past its clock, with only held documents past it (a hold is the purge refusing
+    correctly, and the evidence says how many), and with unheld ones inside `OVERDUE_AFTER`. Fails once
+    something no hold keeps has waited longer than that: somebody's third-party content is being held past its
+    clock. Not blocking: it names a duty that is late, not a decision that cannot wait."""
     now = now or datetime.now(timezone.utc)
     service = RetentionService(conn)
     past, sweepable, oldest = service.document_backlog(now)

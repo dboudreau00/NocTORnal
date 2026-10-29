@@ -1,52 +1,35 @@
 """Server-side opaque sessions with absolute and idle expiry.
 
-docs/05: absolute expiry 12 h, idle expiry 30 min, both enforced
-server-side; only the token hash is stored; global revocation; step-up
-freshness clock (mfa_satisfied_at). The store is a protocol so the policy
-here is testable in-memory and backed by iam.session in production.
+docs/05: absolute expiry 12 h, idle expiry 30 min, both enforced server-side; only the token hash is
+stored; global revocation; step-up freshness clock (mfa_satisfied_at). The store is a protocol so the
+policy here is testable in-memory and backed by iam.session in production.
 
 ## Binding (0058)
 
-A token is a bearer credential, so until 2026-09-02 a stolen one was
-perfectly portable: nothing on record said where a session was minted,
-and validation had nothing to compare a replay against. `create` now
-takes the address and User-Agent it was minted with and records them, and
-`binding_mismatch` says whether a presentation matches them. Whether a
-mismatch is REFUSED is `NOCTORNAL_SESSION_STRICT_BINDING`, off by default:
-a browser update changes the User-Agent mid-session and a laptop moving
-between networks changes the address, so refusing is a deliberate posture
-for a deployment that would rather re-authenticate than risk it. The
-values are recorded either way, for the audit trail.
+A token is a bearer credential, so `create` takes the address and User-Agent it was minted with and
+records them, and `binding_mismatch` says whether a presentation matches them. Whether a mismatch is
+refused is `NOCTORNAL_SESSION_STRICT_BINDING`, off by default: a browser update changes the User-Agent
+mid-session and a laptop moving between networks changes the address, so refusing is a deliberate posture
+for a deployment that would rather re-authenticate than risk a replay. The values are recorded either way,
+for the audit trail.
 
-WHICH sessions actually carry them is a shorter list than "a session
-now carries" suggested, and saying it that way was a claim this module
-could not keep. The product mints a session in exactly two places:
+The product mints a session in exactly two places:
 
-- `http/routers/auth.py` (the login handler) passes both, so every
-  session a person signs in for is bound;
-- `scripts/bootstrap.py session` passes NEITHER, and cannot: it mints
-  from a shell for a browser it has never met, and a guessed address
-  would be a fact on record that nobody established. Under strict
-  binding that session is refused on first use -- deliberately, since
-  "cannot verify" is not "verified" -- and the command says so before it
-  prints the URL.
+- `http/routers/auth.py` (the login handler) passes both, so every session a person signs in for is bound;
+- `scripts/bootstrap.py session` passes neither, and cannot: it mints from a shell for a browser it has
+  never met, and a guessed address would be a fact on record that nobody established. Under strict binding
+  that session is refused on first use, since "cannot verify" is not "verified", and the command says so
+  before it prints the URL.
 
-The suite is not a third kind: many tests build a `SessionService` and
-call `create` to get a token without going through login, and not one of
-them passes an address or a User-Agent, so every session they mint sits
-with bootstrap's. That is why a strict-mode test sets the flag and then
-asserts the REFUSAL -- an unbound session is what the suite produces by
-default, not the exception it has to arrange.
+Tests that build a `SessionService` and call `create` without going through login pass neither either, so
+a strict-mode test sets the flag and asserts the refusal. A session minted before 0058 is in the same
+position and is refused for the same reason. `deps.refuse_unbound_session` records `unbound` in the audit
+row so the security officer can tell that case from a replay.
 
-A session minted before 0058 is in the same position and is refused for
-the same reason. `deps.refuse_unbound_session` records `unbound` in the
-audit row so the security officer can tell that case from a replay.
-
-Both validation call sites -- `deps.current_user` for HTTP and the
-websocket handshake in `http/routers/live.py` -- run the check in the
-same order: validate with `touch=False`, refuse, and only then slide the
-idle window. `live.py` did not until 2026-09-02, which made the socket a
-way to both use and keep alive a session HTTP had already refused.
+Both validation call sites, `deps.current_user` for HTTP and the websocket handshake in
+`http/routers/live.py`, run the check in the same order: validate with `touch=False`, refuse, and only then
+slide the idle window. Otherwise the socket would both use and keep alive a session HTTP had already
+refused.
 """
 from __future__ import annotations
 
@@ -108,9 +91,8 @@ class SessionRecord:
     #: a None here is a fact strict mode compares, not a wildcard.
     ip: str | None = None
     user_agent: str | None = None
-    # The sha256 of the row-security binding proof (S1, 2026-09-25;
-    # security.tokens.rls_proof, migration 0110). Written at mint and never
-    # read back by the application: iam.rls_actor() reads it in SQL.
+    # The sha256 of the row-security binding proof (`security.tokens.rls_proof`, migration 0110). Written
+    # at mint and never read back by the application: iam.rls_actor() reads it in SQL.
     rls_binding_hash: bytes | None = None
 
 
@@ -134,11 +116,9 @@ def binding_mismatch(record: SessionRecord, *, ip: str | None,
 class SessionStore(Protocol):
     def insert(self, record: SessionRecord) -> None: ...
     def get_by_token_hash(self, token_hash: bytes) -> SessionRecord | None: ...
-    # The idle window's slide, and nothing else (authz-session-revoke-bypass,
-    # 2026-10-03). The answer is the stored last_seen_at, or None when the
-    # session was no longer live at the moment of the write. There is no
-    # whole-row `update` any more: rewriting every mutable column from a
-    # record read earlier wrote a concurrent revocation back to NULL.
+    # The idle window's slide, and nothing else. The answer is the stored last_seen_at, or None when the
+    # session was no longer live at the moment of the write. There is no whole-row `update`: rewriting
+    # every mutable column from a record read earlier would write a concurrent revocation back to NULL.
     def slide(self, session_id: UUID, at: datetime,
               idle_floor: datetime) -> datetime | None: ...
     def revoke(self, session_id: UUID, reason: str, at: datetime) -> bool: ...
@@ -149,10 +129,8 @@ class SessionStore(Protocol):
 class ValidationResult:
     session: SessionRecord | None
     reason: str | None = None  # 'revoked' | 'absolute_expired' | 'idle_expired' | 'not_found'
-    #: The refused session's id when the token named a real one (revoked
-    #: or expired), None for a token that matches nothing. Never returned
-    #: to a client: it keys the audit window for a refused presentation
-    #: (http_ui-004, 2026-10-03).
+    #: The refused session's id when the token named a real one (revoked or expired), None for a token that
+    #: matches nothing. Never returned to a client: it keys the audit window for a refused presentation.
     session_id: UUID | None = None
 
     @property
@@ -174,11 +152,11 @@ class SessionService:
         ip: str | None = None,
         user_agent: str | None = None,
     ) -> tuple[SessionRecord, str]:
-        """Create a session and return (record, raw_token). The raw token
-        is shown to the client once; only its hash is persisted. `ip` and
-        `user_agent` are where it was minted (0058); the address is
-        canonicalised here so the record and the row agree with what
-        `binding_mismatch` will later compare."""
+        """Create a session and return (record, raw_token).
+
+        The raw token is shown to the client once; only its hash is persisted. `ip` and `user_agent` are
+        where it was minted (0058); the address is canonicalised here so the record and the row agree with
+        what `binding_mismatch` will later compare."""
         now = self._now()
         token = new_session_token()
         record = SessionRecord(
@@ -191,7 +169,7 @@ class SessionService:
             mfa_satisfied_at=now if mfa_satisfied else None,
             ip=normalise_ip(ip),
             user_agent=(user_agent or None),
-            rls_binding_hash=token.rls_binding_hash,  # S1
+            rls_binding_hash=token.rls_binding_hash,
         )
         self._store.insert(record)
         return record, token.raw
@@ -220,25 +198,18 @@ class SessionService:
         return ValidationResult(record)
 
     def touch(self, record: SessionRecord) -> SessionRecord | None:
-        """Slide the idle window. Separate from `validate` so a caller can
-        validate first, apply its own refusal (`deps.refuse_unbound_session`,
-        from `deps.current_user` over HTTP and from the websocket handshake
-        in `routers/live.py`), and count the request as activity only if it
-        passed -- a refused replay must not keep the session alive. Any new
-        validation call site owes the same order; `live.py` used the
-        touching default until 2026-09-02 and every refused reconnect kept
-        the victim's session from ever timing out.
+        """Slide the idle window.
 
-        None when the session stopped being live between the caller's
-        read and this write, and the caller must then refuse exactly as
-        for a bad token (authz-session-revoke-bypass, 2026-10-03). Until
-        then this rewrote the whole row from the record the caller read,
-        `revoked_at` included, so a logout, a password change, a
-        deactivation or a re-enrolment landing in that gap was written back
-        to NULL and the token kept working. The store's `slide` is one
-        guarded statement that names `last_seen_at` alone and matches only
-        a session that is still unrevoked, unexpired and inside its idle
-        window, so no revocation can be undone from here in any posture."""
+        Separate from `validate` so a caller can validate first, apply its own refusal
+        (`deps.refuse_unbound_session`, from `deps.current_user` over HTTP and from the websocket handshake
+        in `routers/live.py`), and count the request as activity only if it passed: a refused replay must
+        not keep the session alive. Any new validation call site owes the same order.
+
+        None when the session stopped being live between the caller's read and this write, and the caller
+        must then refuse exactly as for a bad token. The store's `slide` is one guarded statement that names
+        `last_seen_at` alone and matches only a session that is still unrevoked, unexpired and inside its
+        idle window, so a logout, a password change, a deactivation or a re-enrolment landing in that gap
+        can never be undone from here."""
         now = self._now()
         seen = self._store.slide(record.id, now, now - IDLE_TIMEOUT)
         if seen is None:
@@ -252,10 +223,8 @@ class SessionService:
             return False
         return self._now() - record.mfa_satisfied_at < STEP_UP_FRESHNESS
 
-    # `mark_mfa_satisfied` is gone (rls-7, 2026-10-03). It had no caller:
-    # a step-up is a fresh sign-in minted on the AUTH connection with
-    # `mfa_satisfied=True`, and the request role no longer holds the
-    # column grant it would have needed (migration 0144).
+    # There is no `mark_mfa_satisfied`: a step-up is a fresh sign-in minted on the AUTH connection with
+    # `mfa_satisfied=True`, and the request role has no column grant to set it (migration 0144).
 
     def revoke(self, session_id: UUID, reason: str) -> bool:
         """Revoke ONE session — an ordinary logout. Killing every session

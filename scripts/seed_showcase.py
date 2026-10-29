@@ -3,17 +3,14 @@
     .venv\\Scripts\\python scripts\\seed_showcase.py --owner-email you@example.com
 
 The other seeders each demonstrate one subsystem with a handful of rows.
-This one exists for the different question "what does it look like with a
-real case load in it": six cases at different classifications and
-lifecycle states, and a flagship network big enough that the sociogram and
-the analytics have something to say.
+This one answers "what does it look like with a real case load in it": six
+cases at different classifications and lifecycle states, and a flagship
+network big enough that the sociogram and the analytics have something to
+say.
 
-## The network is STRUCTURED, not random
-
-A uniformly random graph is the wrong demo. It renders as a hairball, every
-centrality comes out flat, community detection finds nothing, and the
-key-player set is indistinguishable from the top-n by degree, which is
-precisely the claim docs/03 says this tool beats. So the generator builds:
+The network is structured, not random, because a random graph renders as a
+hairball with flat centralities, no communities and a key-player set no
+different from the top-n by degree (the claim docs/03 says this tool beats):
 
 - **six crews** of unequal size, densely tied inside (`VOUCHED_FOR`,
   `MEMBER_OF`) and sparsely between;
@@ -24,33 +21,21 @@ precisely the claim docs/03 says this tool beats. So the generator builds:
 - **negative ties** (`ACCUSED_SCAM`, `RIVAL_OF`, `DISPUTED_WITH`) placed to
   produce genuinely unbalanced triads and contested dyads;
 - **dates spread over thirty months**, so trust decay visibly changes the
-  numbers instead of being a parameter with no effect.
+  numbers.
 
-## Everything goes through the services
-
-`GraphWriteService` writes every node and edge, so each one carries its
-assertion in the same transaction (invariant 1). Nothing here INSERTs into
-`core.node` or `core.edge` directly. A seeder that did would be creating
-exactly the unfounded graph the model exists to prevent, and it would be
-the first thing a reader copied.
-
-Deterministic: `random.Random(SEED)` rather than `secrets`, because a demo
-estate you cannot regenerate identically is one you cannot screenshot
-twice. Re-running against a case that already exists is refused rather
-than doubled.
-
-## `--regrade`: an estate seeded before migration 0064
+`GraphWriteService` writes every node and edge with its assertion in the
+same transaction (invariant 1); nothing here INSERTs into `core.node` or
+`core.edge`. Deterministic (`random.Random(SEED)`), so the estate can be
+regenerated identically; re-running against an existing case is refused
+rather than doubled.
 
     .venv\\Scripts\\python scripts\\seed_showcase.py --owner-email you@example.com --regrade
 
-Until 2026-09-22 this script gave each tie a confidence of its own and
-graded the claim under it MODERATE, and 0064's backfill (a tie's confidence
-is its claims') turned every seeded NIGHTJAR and CORVID tie MODERATE. A
-fresh seed is right. `--regrade` repairs an existing estate in place,
-without dropping it: it replays the seed from the RNG, writing nothing, and
-supersedes each seed claim whose grade differs with one carrying the grade
-this script seeds today. See `regrade` for how and why that way. It is
-idempotent, and it touches no other row.
+`--regrade` repairs an estate seeded before migration 0064, where every
+seeded NIGHTJAR and CORVID tie came out MODERATE: it replays the seed from
+the RNG, writing nothing, and supersedes each seed claim whose grade differs
+with one carrying the seeded grade. It is idempotent and touches no other
+row; see `regrade`.
 
 **Every name, wallet, host and victim below is fiction.**
 """
@@ -151,25 +136,13 @@ def main() -> int:
     g = GraphWriteService(conn)
     sel = SelectorStore(conn)
 
-    # A compartmented case needs TWO things that a fresh install does not
-    # have, and it needs them in this order. Getting either wrong killed the
-    # seeder half-way, after the first two cases had already been committed
-    # on an autocommit connection — a partial estate that the "already
-    # seeded" guard below then refused to finish. That happened twice: once
-    # for the read-in, and again on 2026-09-02 for the registry.
-    #
-    # FIRST, the key must be in the REGISTRY. 0057 made `iam.compartment` a
-    # closed vocabulary and `CaseService.create` refuses a key that is not in
-    # it. The registry block below survived review only because a developer
-    # machine's 0057 backfill had already found STEALER-2026 sitting in an
-    # array; on a fresh install — which is every install, and every CI run —
-    # there was nothing to find.
-    #
-    # Guarded with a lookup rather than caught, because `register_compartment`
-    # REFUSES a duplicate by design (a re-registration would silently relabel
-    # what every case in the compartment is filed under) and this script is
-    # re-runnable. Said out loud, because widening the vocabulary the access
-    # gate compares against is not something a seed script should do quietly.
+    # A compartmented case needs two things a fresh install lacks, in this order, before any case
+    # is committed: a failure half-way leaves a partial estate the "already seeded" guard below
+    # will not finish. First, the key in the registry: `iam.compartment` is a closed vocabulary
+    # (0057) and `CaseService.create` refuses a key outside it. Looked up rather than caught,
+    # because `register_compartment` refuses a duplicate by design (a re-registration would
+    # relabel every case filed under it) and this script is re-runnable. Said out loud, because
+    # widening the vocabulary the access gate compares against is never quiet.
     from noctornal_api.iam_admin import IamAdminService
     admin = IamAdminService(conn)
     known = {r["key"] for r in admin.list_compartments()}
@@ -183,12 +156,9 @@ def main() -> int:
               f"widens the vocabulary every case and read-in is checked "
               f"against, and is audited as COMPARTMENT_REGISTERED.")
 
-    # SECOND, the OWNER must be read into it — `CaseService.create` refuses
-    # outright otherwise, and it is right to: a case whose own owner cannot
-    # see it is a case nobody can work. Granted rather than skipped, because
-    # the compartment is one of the things worth SEEING in a demo, and said
-    # out loud, because widening an account's access is not something a seed
-    # script should do quietly.
+    # Second, the owner read into it: `CaseService.create` refuses a case its own owner cannot see.
+    # Granted rather than skipped, because the compartment is worth seeing in a demo, and said out
+    # loud, because widening an account's access is never quiet.
     have = conn.execute(
         "SELECT compartments FROM iam.app_user WHERE id = %s",
         (owner,)).fetchone()[0] or []
@@ -203,10 +173,8 @@ def main() -> int:
 
     # ---------------------------------------------------------------- cases
     #
-    # Varied on purpose. A case list where every row is AMBER/ACTIVE tells a
-    # viewer nothing about how the labels and the lifecycle actually read;
-    # this one exercises four classifications, five states, a compartment
-    # and a legal hold.
+    # Varied on purpose: four classifications, five states, a compartment and a legal hold, so the
+    # case list shows how the labels and the lifecycle read.
     catalogue = [
         (args.code, "Operation Nightjar",
          "Ransomware affiliate ecosystem: access brokers, laundering and the "
@@ -278,17 +246,13 @@ def build_network(g, sel, *, case_id, ids: dict, owner, make_assertion,
                   log: Callable[[str], None] = print) -> None:
     """The flagship network and the two secondary cases' smaller ones.
 
-    Separate from `main` so `--regrade` can run it against `_Replay`, which
-    records what it would write instead of writing it. Every RNG draw is
-    made HERE, never inside `g` or `sel`, which is what makes a replay draw
-    the same handles, pairs, dates and grades as the run that seeded the
-    estate. Keep it that way: a draw moved into a service call, or one
-    skipped on a condition only the database can answer, would make every
-    later draw differ and the regrade would match nothing.
+    Separate from `main` so `--regrade` can run it against `_Replay`, which records what it would
+    write instead of writing it. Every RNG draw is made here, never inside `g` or `sel`, and none is
+    skipped on a condition only the database can answer: otherwise a replay draws different
+    handles, pairs, dates and grades from the seeding run and the regrade matches nothing.
 
-    `populated(case_id)` says whether a secondary case already holds a
-    network and should be left alone; the replay answers False, as the
-    original run did for a fresh estate.
+    `populated(case_id)` says whether a secondary case already holds a network and should be left
+    alone; the replay answers False, as a fresh estate's run did.
     """
     RNG.seed(SEED)
 
@@ -346,13 +310,9 @@ def build_network(g, sel, *, case_id, ids: dict, owner, make_assertion,
             for b in RNG.sample(members, min(len(members), RNG.randint(3, 6))):
                 if a is b:
                     continue
-                # Drawn in the order the call used to draw them (weight,
-                # grade, then the dates), so the seeded estate is the same
-                # one every screenshot and review of it describes. The
-                # grade is the ASSERTION's now: a tie's confidence is its
-                # assertion's (migration 0064), and the separate edge value
-                # this used to pass is how the demo came to hold 259 ties
-                # that disagreed with their own claims.
+                # Drawn in a fixed order (weight, grade, then the dates), so the seeded estate is
+                # the one every screenshot describes. The grade is the assertion's: a tie's
+                # confidence is its assertion's (migration 0064).
                 weight = round(RNG.uniform(0.4, 1.0), 2)
                 conf = RNG.choice(["LOW", "MODERATE", "MODERATE", "HIGH"])
                 g.create_edge(
@@ -547,37 +507,17 @@ def replay(*, case_id, ids: dict, owner) -> list[SeededTie]:
 def regrade(conn, owner, ties: list[SeededTie]) -> Counter:
     """Bring each seeded tie's founding claim to the grade in `ties`.
 
-    ## Why this exists
+    For an estate seeded before migration 0064, whose backfill left every seeded tie MODERATE. By
+    supersession, invariant 5's own mechanism: a new assertion carrying the seed's grade and every
+    other field of the one it replaces, recorded through the service, with the old row stamped
+    `superseded_at` / `superseded_by` and kept; the 0064 trigger re-derives the tie from what is
+    live. Never an UPDATE of the old claim's grade, which is the overwrite the invariant forbids.
 
-    Until 2026-09-22 this script passed each tie a confidence of its own
-    and graded the claim under it MODERATE regardless. Migration 0064 made
-    a tie's confidence its claims' (ux06 edge-confidence-not-stored), and
-    its backfill, rightly, sided with the claims: every seeded tie in
-    NIGHTJAR and CORVID came out MODERATE. A HIGH floor then showed
-    nothing, and the canvas drew every tie at one opacity, which hid the
-    one encoding (confidence as opacity) the demo exists to show. Found by
-    the fix-round verifier. A fresh seed is already right; this repairs an
-    estate seeded before the fix without dropping it.
-
-    ## How, and why that way
-
-    Through SUPERSESSION, invariant 5's own mechanism ("superseded, never
-    overwritten"): a new assertion carrying the seed's grade and every
-    other field of the one it replaces, recorded through the service, and
-    the old row stamped `superseded_at` / `superseded_by`, kept, never
-    edited otherwise. The 0064 trigger re-derives the tie from what is
-    live. Not an UPDATE of the old claim's grade: that is the overwrite the
-    invariant forbids, and this file is the first thing a reader copies.
-
-    Only the seed's own claims are touched: the founding assertion by the
-    seeding owner, with the seed's rationale and no claim path. A claim an
-    analyst added to a demo tie is left alone, and still counts. The key
-    is the edge's type, endpoint labels and `valid_from`, which is what
-    the unique index on live edges is built on, so it finds one tie.
-
-    Idempotent: a regraded tie's live seed claim already carries its
-    grade, so a second run changes nothing. One transaction, so a failure
-    leaves the estate as it was.
+    Only the seed's own claims are touched (the founding assertion by the seeding owner, with the
+    seed's rationale and no claim path); an analyst's claim on a demo tie is left alone. The key is
+    the edge's type, endpoint labels and `valid_from`, the columns of the unique index on live
+    edges, so it finds one tie. Idempotent, and one transaction, so a failure leaves the estate as
+    it was.
     """
     from noctornal_api.graph import AssertionInput, GraphWriteService
 

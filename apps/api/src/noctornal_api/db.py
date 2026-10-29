@@ -23,20 +23,14 @@ from noctornal_api.config import is_production
 def dsn() -> str:
     url = os.environ.get("DATABASE_URL")
     if not url:
-        # SET-BUT-EMPTY is a different problem from ABSENT, and reporting
-        # "is not set" for it sends people to look in the wrong place --
-        # typically at .env.local, where the value is sitting perfectly
-        # correctly the whole time.
-        #
-        # The variable ends up defined-and-empty more easily than it looks:
-        # `docker run -e DATABASE_URL` with no `=value` forwards it as
-        # empty when the host has no such variable, a CI matrix can supply
-        # a blank default, and PowerShell's
-        # `[Environment]::SetEnvironmentVariable(name, $null, 'Process')`
-        # leaves the name defined with an empty value rather than removing
-        # it. In every one of those cases scripts/_env.py deliberately
-        # declines to override an already-defined variable, so the file
-        # value never arrives.
+        # SET-BUT-EMPTY is a different problem from ABSENT, and reporting "is not set" for it sends
+        # people to look in the wrong place, typically at .env.local, where the value is sitting
+        # correctly. The variable ends up defined-and-empty more easily than it looks: `docker run
+        # -e DATABASE_URL` with no `=value` forwards it as empty when the host has none, a CI matrix
+        # can supply a blank default, and PowerShell's `[Environment]::SetEnvironmentVariable(name,
+        # $null, 'Process')` leaves the name defined and empty. In every case scripts/_env.py
+        # deliberately declines to override an already-defined variable, so the file value never
+        # arrives.
         if "DATABASE_URL" in os.environ:
             raise RuntimeError(
                 "DATABASE_URL is set but empty. An empty value still counts "
@@ -47,59 +41,45 @@ def dsn() -> str:
 
 
 def connect(*, for_request: bool = False) -> psycopg.Connection:
-    # autocommit=True: the stores are single-statement and atomic (the TOTP
-    # counter advance and the lockout increment are compare-and-set UPDATEs),
-    # so no multi-statement transaction is needed and read paths never leave
-    # a connection "idle in transaction" pinning the vacuum horizon.
+    # autocommit=True: the stores are single-statement and atomic (the TOTP counter advance and the
+    # lockout increment are compare-and-set UPDATEs), so no multi-statement transaction is needed
+    # and read paths never leave a connection "idle in transaction" pinning the vacuum horizon.
     #
-    # connect_timeout: libpq's default is effectively "wait for ever" on a
-    # host that does not answer. A database that is down therefore did not
-    # FAIL -- every request, every test and every script sat in TCP connect
-    # until something external killed it (a 300s CI timeout, a person).
-    # Found 2026-09-01 when the dev stack was down and a read-only audit
-    # hung for five minutes with no message. A connect that cannot complete
-    # in ten seconds is not going to; say so.
+    # connect_timeout: libpq's default is effectively "wait for ever" on a host that does not
+    # answer, so a database that is down would hang every request, test and script until something
+    # external killed it. A connect that cannot complete in ten seconds is not going to.
     #
-    # for_request: only `connect_request` asks for it, and it adds the
-    # statement timeout (see REQUEST_STATEMENT_TIMEOUT_ENV); every other
-    # connection is opened as it always was.
+    # for_request: only `connect_request` asks for it, and it adds the statement timeout (see
+    # REQUEST_STATEMENT_TIMEOUT_ENV); every other connection is opened without it.
     url = dsn()
     return psycopg.connect(url, autocommit=True,
                            connect_timeout=connect_timeout_seconds(),
                            options=session_options(url, for_request=for_request))
 
 
-#: Server settings every application connection is opened with (2026-10-07). JIT compiles a query's expressions once the planner's
-#: cost estimate passes `jit_above_cost`, and row security's policies inflate
-#: that estimate on every case read: on a 1,000,000-claim database the search,
-#: the triage queue and the graph view each spent 1.5 to 2.4 s compiling for
-#: 0.1 to 0.5 s of work. JIT never changes an answer, only how it is
-#: computed, and nothing this process asks Postgres is an analytical scan
+#: Server settings every application connection is opened with. JIT compiles a query's expressions
+#: once the planner's cost estimate passes `jit_above_cost`, and row security's policies inflate
+#: that estimate on every case read: on a 1,000,000-claim database the search, the triage queue and
+#: the graph view each spent 1.5 to 2.4 s compiling for 0.1 to 0.5 s of work. JIT never changes an
+#: answer, only how it is computed, and nothing this process asks Postgres is an analytical scan
 #: that would repay it (the graph maths runs in igraph).
 SESSION_OPTIONS = "-c jit=off"
 
 
-#: The most one statement on a REQUEST connection may run before the
-#: database cancels it, in seconds (docs/17, Load and performance).
-#: `NOCTORNAL_REQUEST_STATEMENT_TIMEOUT` sets it; a value that is not a whole
-#: number from 5 to 3600 is ignored and the default holds, so a typo bounds
-#: requests rather than freeing them, and nothing switches it off.
+#: The most one statement on a REQUEST connection may run before the database cancels it, in seconds
+#: (docs/17, Load and performance). `NOCTORNAL_REQUEST_STATEMENT_TIMEOUT` sets it; a value that is
+#: not a whole number from 5 to 3600 is ignored and the default holds, so a typo bounds requests
+#: rather than freeing them, and nothing switches it off.
 #:
-#: Nothing bounded a request's statements, so an abandoned request ran on:
-#: ten register queries were seen stacked, the oldest ten minutes old. The
-#: default is 120 seconds, measured with the whole load plan against a case of
-#: 101,000 entities, 300,000 ties and 1,000,000 claims (59 smaller cases, a
-#: 215,000-row audit log): the slowest single statement a request made, as
-#: the request role, was 1.4 s with one user (the projection's read of the
-#: entities) and 20.8 s with fifty at once, so the limit ends a statement that
-#: is not going to finish without touching one that is. The whole-chain audit
-#: verify, 2.2 s on that log, is a system connection's in production.
+#: The default is 120 seconds, measured with the whole load plan against a case of 101,000 entities,
+#: 300,000 ties and 1,000,000 claims: the slowest single statement a request made, as the request
+#: role, was 1.4 s with one user and 20.8 s with fifty at once, so the limit ends a statement that
+#: is not going to finish without touching one that is.
 #:
-#: Request connections only. System connections, the jobs and the migrations
-#: run the whole-chain audit verify, the purge, the merge and the schema
-#: changes, whose statements take as long as the data is big, and they are not
-#: bounded here. (In development and the suite a system connection IS the
-#: request's own, so it is bounded there.)
+#: Request connections only. System connections, the jobs and the migrations run the whole-chain
+#: audit verify, the purge, the merge and the schema changes, whose statements take as long as the
+#: data is big, and they are not bounded here. (In development and the suite a system connection IS
+#: the request's own, so it is bounded there.)
 REQUEST_STATEMENT_TIMEOUT_ENV = "NOCTORNAL_REQUEST_STATEMENT_TIMEOUT"
 REQUEST_STATEMENT_TIMEOUT_DEFAULT = 120
 REQUEST_STATEMENT_TIMEOUT_MIN = 5
@@ -152,18 +132,14 @@ def connect_timeout_seconds() -> int:
         return 10
 
 
-# ---------------------------------------------------------------------------
-# Row-level security (S1, 2026-09-25). Everything below is how a
-# connection comes to be subject to the policies (the request role, bound to
-# a user) or exempt from them (the system role, for work that must see every
+# Row-level security. Everything below is how a connection comes to be subject to the policies (the
+# request role, bound to a user) or exempt from them (the system role, for work that must see every
 # row).
 #
-# Development and the test suite connect as the schema OWNER, which row
-# security never filters. On such a connection nothing below changes
-# behaviour: `system_connection(..., reuse=conn)` hands back `conn` itself,
-# so the transaction a caller opened is still the one its work runs in, and
-# binding only sets a setting nothing reads.
-# ---------------------------------------------------------------------------
+# Development and the test suite connect as the schema OWNER, which row security never filters. On
+# such a connection nothing below changes behaviour: `system_connection(..., reuse=conn)` hands back
+# `conn` itself, so the transaction a caller opened is still the one its work runs in, and binding
+# only sets a setting nothing reads.
 
 #: The request role (db/init/10-app-role.sh, 0060).
 APP_ROLE = "noctornal_app"
@@ -196,67 +172,57 @@ class SystemPurpose(StrEnum):
     EVIDENCE_LOCKS = "evidence_locks"    # every exhibit's lock follows the case
     COMPARTMENTS = "compartments"        # rename, retire, where carried
     MERGE = "merge"                      # merge and unmerge with their approval
-    # Every probe of the readiness register but the two about the request
-    # connection itself: each counts across the deployment (S1, 2026-09-25).
+    # Every probe of the readiness register but the two about the request connection itself: each
+    # counts across the deployment.
     READINESS = "readiness"
     AUDIT_VERIFY = "audit_verify"        # the audit and custody chain walks
     LAB_PROPOSE = "lab_propose"          # the Lab proposes into a case it is not on
     NOTIFY = "notify"                    # the outbox drain, cron or Drain now
-    # The delivery ledger, its requeue and the Jira destination's
-    # administration: an administrator's view across every recipient and
-    # case, which names no content (F51, 2026-10-02).
+    # The delivery ledger, its requeue and the Jira destination's administration: an administrator's
+    # view across every recipient and case, which names no content.
     NOTIFY_ADMIN = "notify_admin"
-    # The poll, a manual run and a pasted capture: each dedupes against every
-    # stored document and matches every watch (S1, 2026-09-25).
+    # The poll, a manual run and a pasted capture: each dedupes against every stored document and
+    # matches every watch.
     COLLECTION = "collection"
-    # The lookup drain, and an interactive send, a sign-off and the
-    # provider test from the gates on: each stores an answer at the
-    # provider's label and counts every attempt on the provider; a
-    # provider's withdrawal and a batch's cancel, which reach every case's
-    # rows (F51, 2026-10-02).
+    # The lookup drain, and an interactive send, a sign-off and the provider test from the gates on:
+    # each stores an answer at the provider's label and counts every attempt on the provider; a
+    # provider's withdrawal and a batch's cancel, which reach every case's rows.
     LOOKUPS = "lookups"
     LAB_TRIAGE = "lab_triage"            # static triage and YARA
-    # Prohibited-content screening: the worker, and the Security Officer's
-    # label-free match list, its counts, a review and a console pass, which
-    # govern every match whatever its labels (S1, 2026-09-25).
+    # Prohibited-content screening: the worker, and the Security Officer's label-free match list,
+    # its counts, a review and a console pass, which govern every match whatever its labels.
     SCREENING = "screening"
-    # A sample submission's duplicate check, which must refuse a duplicate
-    # the submitter may not see, and say nothing about it (S1, 2026-09-25).
+    # A sample submission's duplicate check, which must refuse a duplicate the submitter may not
+    # see, and say nothing about it.
     SAMPLE_INTAKE = "sample_intake"
-    # An exhibit upload's duplicate check, which must see an exhibit above
-    # the uploader so their bytes never land on it, and say nothing about it
-    # (rls-4, evidence-ingest-dedup-oracle, 2026-10-03).
+    # An exhibit upload's duplicate check, which must see an exhibit above the uploader so their
+    # bytes never land on it, and say nothing about it.
     EVIDENCE_INTAKE = "evidence_intake"
-    # A Telegram chat's duplicate check, which must refuse a chat already
-    # added under a source the adder may not see, and say nothing about it
-    # (F51, 2026-10-02).
+    # A Telegram chat's duplicate check, which must refuse a chat already added under a source the
+    # adder may not see, and say nothing about it.
     TELEGRAM_INTAKE = "telegram_intake"
-    # The persona act queue (A collector process, 2026-10-02): the
-    # collector's claims, its sweeps and every outcome, and the inline
+    # The persona act queue: the collector's claims, its sweeps and every outcome, and the inline
     # runner's; the request role may only enqueue and read its own acts.
     PERSONA_ACTS = "persona_acts"
-    # Comms minimisation (docs/16 L4) and the incidental-party flag it
-    # relies on: an obligation done in full, never to the minimiser's
-    # labels (S1, 2026-09-25).
+    # Comms minimisation (docs/16 L4) and the incidental-party flag it relies on: an obligation done
+    # in full, never to the minimiser's labels.
     MINIMISATION = "minimisation"
-    # Ingest scoring's watch list: a quarantined record scores against every
-    # watch in the deployment (S1, 2026-09-25).
-    # And, since ingest.record is policied (0154), a batch's parse, a dead
-    # letter's replay, every scoring pass and the fingerprint correlation:
-    # each dedupes or answers across every record and writes rows at the
-    # feed key's label, which may sit above its caller (F51, 2026-10-02).
+    # Ingest scoring's watch list: a quarantined record scores against every watch in the
+    # deployment. And, since ingest.record is policied (0154), a batch's parse, a dead letter's
+    # replay, every scoring pass and the fingerprint correlation: each dedupes or answers across
+    # every record and writes rows at the feed key's label, which may sit above its caller.
     INGEST = "ingest"
     SANDBOX = "sandbox"                  # detonation dispatch and polling
-    # The embedding pass, and an index's registration, activation, recheck
-    # and retirement, which queue and sweep every item (S1, 2026-09-25).
+    # The embedding pass, and an index's registration, activation, recheck and retirement, which
+    # queue and sweep every item.
     EMBEDDINGS = "embeddings"
     # Deployment configuration the request role may only read (0179, Beta
     # 1.1): the administration of egress profiles, routes and destinations,
     # collection sources, personas and authorities, lookup providers and
     # ingest keys, after the route's own gate, step-up and audit.
     CONFIGURATION = "configuration"
-    # A person's own delivery settings, which the request role may only read
-    # (0182, Beta 1.1): written for the caller the route authenticated.
+    # A person's own delivery settings, which the request role may only read (0182): written for the
+    # caller the route authenticated.
     NOTIFY_PREFERENCE = "notify_preference"
     SCRIPT = "script"                    # seeders, bootstrap, maintenance
 
@@ -268,13 +234,11 @@ class SystemContextUnavailable(RuntimeError):
 
 
 class SystemContextMisconfigured(SystemContextUnavailable):
-    """The deployment NAMED a system connection and it is the wrong one: not
-    exempt from row security, or in production a superuser or the schema
-    owner. Apart from `SystemContextUnavailable` for "none is configured" (the
-    sample origin holds none, on purpose) so a writer that falls back to a
-    weaker write can say so: a misconfigured deployment must be loud, not
-    quietly lose actor attribution (g49v-system-fallback-silent,
-    2026-10-03). Still a `SystemContextUnavailable`, so every handler that
+    """The deployment NAMED a system connection and it is the wrong one: not exempt from row
+    security, or in production a superuser or the schema owner. Distinct from
+    `SystemContextUnavailable` ("none is configured": the sample origin holds none, on purpose) so a
+    writer that falls back to a weaker write can say so: a misconfigured deployment must be loud,
+    not quietly lose actor attribution. Still a `SystemContextUnavailable`, so every handler that
     answers 503 for the one answers for both."""
 
 
@@ -340,19 +304,16 @@ SELECT r.rolsuper, r.rolbypassrls,
 
 
 def refuse_privileged_request_role(conn: psycopg.Connection) -> None:
-    """In production, refuse a request connection whose role is a
-    superuser, bypasses row security or is the schema owner (infra-4,
-    2026-10-03).
+    """In production, refuse a request connection whose role is a superuser, bypasses row security
+    or is the schema owner.
 
-    Row-level security does not bind such a role and it may ALTER TABLE ...
-    DISABLE TRIGGER on the audit and custody chains, so every analyst
-    request would run with the protection switched off while the register
-    showed a running deployment. `config.verify_environment` refuses the
-    names it can see in the DSN at boot; this reads the catalog, once per
-    process and DSN, for a role under another name or one that merely holds
-    the owner's membership. `connect_system` makes the same refusal for the
-    system role. Development and the suite connect as the owner on purpose
-    and are not asked."""
+    Row-level security does not bind such a role and it may ALTER TABLE ... DISABLE TRIGGER on the
+    audit and custody chains, so every analyst request would run with the protection switched off
+    while the register showed a running deployment. `config.verify_environment` refuses the names it
+    can see in the DSN at boot; this reads the catalog, once per process and DSN, for a role under
+    another name or one that merely holds the owner's membership. `connect_system` makes the same
+    refusal for the system role. Development and the suite connect as the owner on purpose and are
+    not asked."""
     if not _production():
         return
     key = hashlib.sha256(dsn().encode()).hexdigest()
@@ -473,19 +434,15 @@ def bind_ticket(conn: psycopg.Connection, raw_ticket: str) -> RlsBinding:
 
 
 def connect_like(conn) -> psycopg.Connection:
-    """A NEW connection of the same kind as `conn` (0150,
-    evidence-ledger-actor-time-forgeable, 2026-10-03): a request connection
-    for a caller that row security filters, a system connection for one it
-    does not.
+    """A NEW connection of the same kind as `conn` (0150): a request connection for a caller that
+    row security filters, a system connection for one it does not.
 
-    A refusal that a rollback must not take is written on a second
-    connection. The request role cannot attribute a row to a user it is not
-    bound to, so a caller that is itself the system role (a merge, a purge, an
-    administrator's two-person change) needs a second system connection to
-    keep naming the person. Its purpose is the caller's own, read back from the
-    application name `connect_system` sets; with none (development, the suite)
-    it is the administration of accounts and policy, which is where most of
-    these refusals come from."""
+    A refusal that a rollback must not take is written on a second connection. The request role
+    cannot attribute a row to a user it is not bound to, so a caller that is itself the system role
+    (a merge, a purge, an administrator's two-person change) needs a second system connection to
+    keep naming the person. Its purpose is the caller's own, read back from the application name
+    `connect_system` sets; with none (development, the suite) it is the administration of accounts
+    and policy, which is where most of these refusals come from."""
     if not is_exempt(conn):
         return connect_request()
     purpose = SystemPurpose.IAM_ADMIN
@@ -501,15 +458,13 @@ def connect_like(conn) -> psycopg.Connection:
 
 
 def bind_like(target: psycopg.Connection, source: psycopg.Connection) -> None:
-    """Bind `target` to whoever `source` is bound to, if anyone (0150,
-    evidence-ledger-actor-time-forgeable, 2026-10-03).
+    """Bind `target` to whoever `source` is bound to, if anyone (0150).
 
-    A side connection that writes a row for the person the request belongs to
-    (a refusal that a rollback must not take) is otherwise bound to nobody,
-    and the audit trigger demotes an actor the database cannot verify.
-    Binding it to the same session or ticket lets the database verify the
-    actor, so the row keeps its name. It copies the caller's own binding and
-    nothing else: a `source` bound to nobody leaves `target` bound to nobody.
+    A side connection that writes a row for the person the request belongs to (a refusal that a
+    rollback must not take) is otherwise bound to nobody, and the audit trigger demotes an actor the
+    database cannot verify. Binding it to the same session or ticket lets the database verify the
+    actor, so the row keeps its name. It copies the caller's own binding and nothing else: a
+    `source` bound to nobody leaves `target` bound to nobody.
     """
     if not isinstance(source, psycopg.Connection):
         return

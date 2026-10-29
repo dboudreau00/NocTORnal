@@ -1,33 +1,23 @@
-"""Outbound lookup provider adapters: pure, network-free protocol classes
-(F15.1, 2026-09-24).
+"""Outbound lookup provider adapters: pure, network-free protocol classes.
 
-An adapter knows one vendor's API: how to build a request for one selector
-(`prepare`), how to read the answer (`interpret`) and what findings the
-answer suggests (`findings`). It never opens a socket, never reads a key
-from anywhere but the mapping it is handed, and never touches the database:
-lookups.LookupService sends through the one outbound client (pinned_http)
-on the provider's integration route (docs/00 decision 68), and turns
-findings into proposals, never graph writes.
+An adapter knows one vendor's API: how to build a request for one selector (`prepare`), how to read the
+answer (`interpret`) and what findings the answer suggests (`findings`). It never opens a socket, never
+reads a key from anywhere but the mapping it is handed, and never touches the database:
+lookups.LookupService sends through the one outbound client (pinned_http) on the provider's integration
+route (docs/00 decision 68), and turns findings into proposals, never graph writes.
 
-Three adapters, one per exposure level an operator is likely to set:
-VirusTotal v3 report lookups (VENDOR), Shodan host (VENDOR), MISP
-restSearch against the operator's own instance (NONE). There is
-deliberately no scan or submission operation anywhere: a scan makes the
-vendor fetch attacker infrastructure on the investigation's behalf (docs/16
-L5). vt-py and the shodan package were rejected because both open their
-own sockets around the pinned connect, the deadline and the address
-policy.
+Three adapters, one per exposure level an operator is likely to set: VirusTotal v3 report lookups
+(VENDOR), Shodan host (VENDOR), MISP restSearch against the operator's own instance (NONE). There is
+deliberately no scan or submission operation anywhere: a scan makes the vendor fetch attacker
+infrastructure on the investigation's behalf (docs/16 L5). vt-py and the shodan package are not used
+because both open their own sockets around the pinned connect, the deadline and the address policy.
 
-## Hostile bodies
-
-A vendor body is attacker-influenced (a Shodan banner is whatever a
-scanned server said). `parse_json` refuses deep nesting BEFORE parsing,
-with a scan that skips string contents and escapes (a banner holding
-"[[[[" is not nesting), so a hostile body cannot reach json's recursion;
-every decode or parse error is
-AdapterError. `sanitise` removes U+0000 and replaces lone surrogates with
-U+FFFD in every key and string, because Postgres refuses both in jsonb
-and text, and a refused insert would strand a spent answer.
+Hostile bodies: a vendor body is attacker-influenced (a Shodan banner is whatever a scanned server said).
+`parse_json` refuses deep nesting before parsing, with a scan that skips string contents and escapes (a
+banner holding "[[[[" is not nesting), so a hostile body cannot reach json's recursion; every decode or
+parse error is AdapterError. `sanitise` removes U+0000 and replaces lone surrogates with U+FFFD in every
+key and string, because Postgres refuses both in jsonb and text, and a refused insert would strand a
+spent answer.
 
 `live_verified` is reported with each adapter by the Providers API.
 """
@@ -111,9 +101,8 @@ class Finding:
 # ---------------------------------------------------------------------------
 
 def json_depth(raw: bytes) -> int:
-    """The bracket nesting of a JSON text, skipping string contents and
-    their escapes. Linear, and never recursive. Public because the Jira
-    client reads hostile answers too (2026-09-25)."""
+    """The bracket nesting of a JSON text, skipping string contents and their escapes. Linear, and never
+    recursive. Public because the Jira client reads hostile answers too."""
     depth = deepest = 0
     in_string = escaped = False
     for byte in raw:

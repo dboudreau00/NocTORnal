@@ -1,42 +1,27 @@
-"""Watch regexes, run under a bound the collector enforces (finding
-collection-watch-regex-redos, review of 2026-10-03).
+"""Watch regexes, run under a bound the collector enforces.
 
-A watch carries regular expressions an investigator wrote, and the text they
-run over is written by the people under investigation. Python's `re` is a
-backtracking engine with no timeout, and it holds the interpreter lock while
-it matches, so a thread cannot interrupt it: a pattern with a nested
-repeat (`(a+)+$`) over a crafted post does not raise, it spins. The match ran
-inside the persist transaction, with the source's poll lock held, so one
-such pattern wedged a source's poll, its database transaction and its lock
-with nothing to end it.
+A watch carries regular expressions an investigator wrote, and the text they run over is written by
+the people under investigation. Python's `re` is a backtracking engine with no timeout that holds
+the interpreter lock while it matches, so a thread cannot interrupt it: a pattern with a nested
+repeat (`(a+)+$`) over a crafted post spins instead of raising, and inside the persist transaction
+it would wedge a source's poll, its transaction and its lock.
 
-## What bounds it
+The only bound that holds is a process the parent can kill. Each pattern is matched in a child
+(`python -m noctornal_api.watch_regex`, started through lab_triage's bounded runner, as the forum
+parser is) that limits its own CPU and memory before it reads a byte, under a wall clock the
+collector enforces by killing it. A pattern that does not finish is abandoned for the run and
+REPORTED (a WATCH_PATTERN warning, so the run reads PARTIAL), never silently skipped: a dead watch
+that reads like a quiet one is worse than a noisy one.
 
-The only bound that holds is a process the parent can kill. Each pattern is
-matched in a child (`python -m noctornal_api.watch_regex`, started through
-lab_triage's bounded runner, as the forum parser is) that limits its own CPU
-and memory before it reads a byte, under a wall clock the collector enforces
-by killing it. A pattern that does not finish is abandoned for the run and
-REPORTED (a WATCH_PATTERN warning, so the run reads PARTIAL), never silently
-skipped: a watch is a standing tasking, and a dead one that reads like a
-quiet one is worse than a noisy one.
+The collector asks for every verdict before it opens the persist transaction
+(`CollectionService._regex_verdicts`), so the database holds no transaction or row lock while a
+hostile pattern is being stopped. The poll's advisory lock is held for at most the budget below.
 
-The collector asks for every verdict BEFORE it opens the persist
-transaction (`CollectionService._regex_verdicts`), so the database holds no
-transaction and no row lock while a hostile pattern is being stopped. The
-poll's advisory lock is held for the run either way; it is now held for at
-most the budget below.
-
-## The residual
-
-A memory-safety defect in the interpreter's own matcher, and the cost of a
-pattern that is slow but finishes inside its limit, are not closed here.
-Since F53 (2026-10-08) a collection manager writes patterns through the
-console (`POST /cases/{case_id}/collection/watches`, behind `watch.manage`
-and the case), so a pattern's author is a person holding that role and not
-only an operator. The route bounds a pattern's length and their number and
-only PARSES one, so that a typo is refused at once; it never matches one.
-This child is still the only place a pattern meets text.
+Not closed here: a memory-safety defect in the interpreter's own matcher, and the cost of a pattern
+that is slow but finishes inside its limit. A collection manager writes patterns through the console
+(`POST /cases/{case_id}/collection/watches`, behind `watch.manage` and the case). That route bounds
+a pattern's length and their number and only parses one; it never matches one, so this child is the
+only place a pattern meets text.
 """
 from __future__ import annotations
 
@@ -47,10 +32,8 @@ from dataclasses import dataclass, field
 
 #: One pattern, all of the texts of one batch: how long the child may match.
 PATTERN_WALL_S = 5.0
-#: Added to that for starting the child's interpreter, which the runner's wall
-#: clock also counts (2026-10-07: on a loaded host a
-#: benign pattern was reported `limit` before it had begun). Small on purpose:
-#: a stopped pattern costs this much more, and the run's budget caps the sum.
+#: Added to that for starting the child's interpreter, which the runner's wall clock also counts.
+#: Small on purpose: a stopped pattern costs this much more, and the run's budget caps the sum.
 STARTUP_S = 3.0
 #: Every pattern of one run together. A run with many slow patterns stops
 #: matching rather than holding its poll lock for ever.
@@ -164,9 +147,8 @@ def run(jobs: dict[str, list[str]], *, argv: list[str] | None = None,
                 stdout_cap=STDOUT_CAP, argv=argv or CHILD_ARGV,
                 kind=CHILD_KIND)
             if not result.ok:
-                # The sandbox's own state (no worker, a busy one, an answer
-                # that is not one) says nothing about the pattern, and is
-                # never told as a crashed matcher (2026-10-07).
+                # The sandbox's own state (no worker, a busy one, an answer that is not one) says
+                # nothing about the pattern, and is never reported as a crashed matcher.
                 sentence = (f"{lab_triage.CHILD_FAILURES[result.failure]}, so it "
                             f"was not matched on this run"
                             if result.failure in lab_triage.CHILD_FAILURES

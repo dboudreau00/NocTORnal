@@ -1,30 +1,12 @@
-"""What a refused session token leaves in the audit log (http_ui-004, 2026-10-03).
+"""What a refused session token leaves in the audit log.
 
-Until this module, `deps.current_user` appended an AUTH_SESSION_REJECTED
-row for EVERY token that failed validation, with no source address. A
-caller needed no account: any `Authorization: Bearer <random>` on any
-authenticated route made one permanent row in the hash-chained log, each
-serialised through the chain's advisory lock, at up to the blanket
-ceiling of about 3,000 a minute per address. That is the denial of service
-`ratelimit.py` decision 43(d) and the sample-download path already refuse
-to offer: unauthenticated appends to the append-only chain.
-
-So the record now depends on what the token was:
-
-- A token that matches no session is not an event about anybody. It
-  writes no row; it is counted into one sampled log line per
-  `UNKNOWN_LOG_SECONDS`, the way `samples._SampledWarning` counts
-  unknown download tickets, so an operator still sees the size of a
-  campaign and the peer does not choose how fast anything grows.
-- A token that names a real session that is revoked or expired is worth
-  a row, because someone holds a credential that worked once. It is
-  written with the source address hash, at most once per session per
-  `REJECTION_WINDOW_SECONDS`, so a held token cannot be replayed into an
-  unbounded stream either. The number of rows is then bounded by the
-  number of real sessions, which nobody outside can mint.
-
-The window lives in this process; a deployment of one API process (the
-supported shape) holds the bound exactly, and N processes hold N times it.
+An unauthenticated caller must not be able to append to the hash-chained log (`ratelimit.py`
+decision 43(d)). A token that matches no session writes no row, only a count in one sampled log
+line per `UNKNOWN_LOG_SECONDS`. A token naming a real session that is revoked or expired writes a
+row, since someone holds a credential that worked once, with the source address hash and at most
+once per session per `REJECTION_WINDOW_SECONDS`, so the rows are bounded by real sessions, which
+nobody outside can mint. The window lives in this process: one API process holds the bound
+exactly, N processes N times it.
 """
 from __future__ import annotations
 

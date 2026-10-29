@@ -6,18 +6,11 @@ is what the router's checks and `ach.py`'s scoring actually do.
     .venv\\Scripts\\python scripts\\seed_ach_demo.py --case OP-NIGHTJAR-26
     .venv\\Scripts\\python scripts\\seed_ach_demo.py --case OP-NIGHTJAR-26 --clean
 
-The matrix is built to demonstrate the method rather than to look tidy,
-because a demo where the obvious hypothesis wins teaches the wrong lesson:
-
-  * Three hypotheses, one of which is the one an analyst would reach for
-    first. It is NOT the one that survives, because ACH ranks on
-    evidence AGAINST rather than evidence for.
-  * One piece of evidence consistent with every hypothesis, so the
-    "not diagnostic" row is populated. That row is the point: it is the
-    evidence a team spends weeks collecting and which discriminates
-    nothing.
-  * At least one unassessed cell, because a real matrix always has them
-    and an unassessed cell is not a neutral one.
+The matrix demonstrates the method: the hypothesis an analyst would reach for
+first does not survive, because ACH ranks on evidence against; one piece of
+evidence is consistent with every hypothesis, so the "not diagnostic" row is
+populated; and at least one cell is unassessed, which is not the same as
+neutral.
 """
 from __future__ import annotations
 
@@ -36,11 +29,8 @@ load_env_local()
 
 
 def connect():
-    """Every script connects as the system role (S1, 2026-09-25). A
-    script serves no request and binds no user, so on the request role it
-    would see nothing under row-level security; `db.connect_system` refuses
-    rather than hand it a connection that silently sees part of the data.
-    Named `connect` so the tests that replace it still find it."""
+    """Connect as the system role: a script binds no user, so under row-level security the request
+    role would see nothing. Named `connect` because the tests replace it by that name."""
     return connect_system(SystemPurpose.SCRIPT)
 
 #: (statement, {evidence-index: stance})
@@ -54,11 +44,8 @@ HYPOTHESES = [
      {0: -1, 1: 2}),          # index 2 deliberately left unassessed
 ]
 
-#: `core.hypothesis` has no free-text marker column, so demo rows are
-#: identified by their exact statement. That is deterministic and, unlike a
-#: `[demo]` prefix, does not put scaffolding into the thing an analyst
-#: reads. `hypothesis_evidence` cascades on delete, so removing the
-#: hypothesis takes its cells with it.
+#: Demo rows are identified by their exact statement (`core.hypothesis` has no marker column, and a
+#: `[demo]` prefix would show to an analyst). `hypothesis_evidence` cascades on delete.
 STATEMENTS = [statement for statement, _ in HYPOTHESES]
 
 
@@ -86,8 +73,6 @@ def live_assertions(conn, case_id, want):
               AND a.superseded_at IS NULL
             ORDER BY a.recorded_at LIMIT %s""", (case_id, want)).fetchall()
     if len(rows) < want:
-        # No em dash and no bracketed plural: a reader runs this from
-        # the README (README screenshot set review, 2026-09-23).
         raise SystemExit(
             f"this case has {len(rows)} live "
             f"{'assertion' if len(rows) == 1 else 'assertions'} and the demo "

@@ -6,8 +6,8 @@ only: nothing here writes, and there is no --apply.
 
 Sections (noctornal_api/legacy_records.py says why each exists):
 
-  undated          claims accepted from Triage before Alpha 6 with no
-                   observation date, and the date their document gives
+  undated          Triage claims accepted with no observation date, and the
+                   date their document gives
   underlabelled    ATTRIBUTE claims readable below what they were found in,
                    or attached to an entity in another case
   captures         captured documents a compartmented case cites that no
@@ -182,8 +182,7 @@ def url_fragments(conn) -> int:
     rep = url_identity_changes(conn)
     print(f"URLs whose identity changed: "
           f"{plural(rep.total, 'record', 'records')}")
-    # Every stored form is printed without its password or token
-    # (graph-url-selector-keeps-credentials, 2026-10-03).
+    # Every stored form is printed without its password or token.
     for s in rep.selectors:
         shared = ("one observation: record it again and it gets its own row"
                   if s.observations <= 1 else

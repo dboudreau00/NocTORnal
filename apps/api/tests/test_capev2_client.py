@@ -1,13 +1,11 @@
-"""The CAPEv2 client against a local stub (F14, 2026-09-24).
+"""The CAPEv2 client against a local stub.
 
-Every call goes through egress.route_for and the one outbound client; the
-network route is always sent; what leaves is the encrypted archive named
-for its hash; the token and the user agent are sent; nothing is resent,
-and what was or was not sent is decided by what left: a refused connection
-is NOT_SENT, a drop after the first byte is UNCONFIRMED however much of the
-body went; a redirect is never followed; a 4xx is REJECTED_BY_TARGET; the
-report falls back to the IOC summary only when it is too large; the probe
-names an instance whose API or web interface answers without a token.
+Every call goes through egress.route_for and the one outbound client; the network route is always
+sent; what leaves is the encrypted archive named for its hash; the token and the user agent are sent;
+nothing is resent, and what was or was not sent is decided by what left: a refused connection is
+NOT_SENT, a drop after the first byte is UNCONFIRMED however much of the body went; a redirect is
+never followed; a 4xx is REJECTED_BY_TARGET; the report falls back to the IOC summary only when it is
+too large; the probe names an instance whose API or web interface answers without a token.
 """
 from __future__ import annotations
 
@@ -24,9 +22,8 @@ from noctornal_api.samples import archive
 
 
 class _Conn:
-    """A connection with no egress route rows (2026-09-25): the route
-    provider asks for an administrator's row first and, in development,
-    falls back to the declared rules alone."""
+    """A connection with no egress route rows: the route provider asks for an administrator's row
+    first and, in development, falls back to the declared rules alone."""
 
     def execute(self, *_args, **_kwargs):
         return self

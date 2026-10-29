@@ -1,31 +1,20 @@
-"""Break-glass after the final adversarial review (2026-09-23, group g02).
+"""Break-glass: sole-officer invoke, scoped ceilings, live grants and what counts as a use.
 
-Each test here fails on the merged head 1667cc1 and passes with the fix
-it names:
+- The sole Security Officer cannot invoke break-glass: the grant could never be reviewed (`review()`
+  refuses your own) nor would anybody be alerted (notifications never tell you what you just did).
+- A grant scoped to one case does not raise the ceiling on the collected documents and sources an
+  assertion names, which belong to no case.
+- A verdict on a live grant does not take it out of the only queue and away from the only revoke
+  control while the raise runs on.
+- `action_count` does not count requests the gate then refused, nor the question-form probe behind
+  every inspector open as a second use.
+- A deception capture or message opened by id above the analyst's clearance under a grant is counted,
+  and once: a capture or message opened on a case above the analyst's clearance is not counted twice,
+  the invoke notice does not say entity reads are counted when they are not, and the live re-check and
+  the ingest probe are not uses.
 
-- C6: the sole Security Officer could invoke break-glass, and the grant
-  could never be reviewed (`review()` refuses your own) nor was anybody
-  alerted (notifications never tell you what you just did);
-- C11: a grant scoped to one case raised the
-  ceiling on the collected documents and sources an assertion names, which
-  belong to no case;
-- a verdict on a LIVE grant took it out of the only queue and away
-  from the only revoke control while the raise ran on;
-- `action_count` counted requests the gate then refused, and counted
-  the question-form probe behind every inspector open as a second use;
-- a deception capture or message opened by id above the analyst's
-  clearance under a grant was never counted.
-
-The last three came from the verifier of the first pass, and each fails
-on that pass: a capture or message opened on a case above the analyst's
-clearance counted twice, the invoke notice said entity reads were counted
-when they are not, and the live re-check and the ingest probe still
-counted as uses. The first of them passes on 1667cc1, which never asked
-the second gate at all (the U23 test pins what that missed).
-
-**The email prefix is `bfr-` and must stay unique**: the fixture cleans
-up by deleting on it, and two files sharing a prefix delete each other's
-rows mid-run.
+The email prefix is `bfr-` and must stay unique: the fixture cleans up by deleting on it, and two
+files sharing a prefix delete each other's rows mid-run.
 
 Env-gated on DATABASE_URL.
 """
@@ -135,8 +124,7 @@ def _case(client, auth, classification="AMBER") -> str:
 
 
 def _officer(conn):
-    """Break-glass refuses outright when nobody but the invoker could
-    review it."""
+    """Break-glass refuses outright when nobody but the invoker could review it."""
     return _user(conn, name="BFR Officer", clearance="RED",
                  roles=("SECURITY_OFFICER",))
 
@@ -178,22 +166,18 @@ def _count(conn, grant_id) -> int:
                         (grant_id,)).fetchone()[0]
 
 
-# ---------------------------------------------------------------------------
-# C6: the invoker is not a reviewer
-# ---------------------------------------------------------------------------
+# The invoker is not a reviewer.
 
 def test_the_sole_officer_cannot_invoke_what_nobody_else_could_review(
         conn, client):
-    """A fresh install's operator holds SYS_ADMIN, SECURITY_OFFICER and
-    CASE_OWNER. Counted as their own reviewer, they were granted emergency
-    access that `review()` then refused to let anybody review, and whose
-    page to "every security officer" reached nobody."""
+    """A fresh install's operator holds SYS_ADMIN, SECURITY_OFFICER and CASE_OWNER. Counted as their
+    own reviewer, they would be granted emergency access that `review()` refuses to let anybody review,
+    and whose page to "every security officer" reaches nobody."""
     uid, email = _user(conn, name="Solo Operator", clearance="AMBER",
                        roles=("SECURITY_OFFICER", "CASE_OWNER"))
     auth = _session(conn, email)
-    # Global state: every OTHER active officer is stood down for the test
-    # and restored by id in the finally, so no later test loses its
-    # reviewer (test_governance_http_e2e learned this the hard way).
+    # Global state: every other active officer is stood down for the test and restored by id in the
+    # finally, so no later test loses its reviewer.
     others = [r[0] for r in conn.execute(
         """SELECT u.id FROM iam.app_user u
              JOIN iam.user_role ur ON ur.user_id = u.id
@@ -225,9 +209,7 @@ def test_the_sole_officer_cannot_invoke_what_nobody_else_could_review(
                          " WHERE id = ANY(%s)", (others,))
 
 
-# ---------------------------------------------------------------------------
-# C11: a case grant does not raise deployment-wide collection names
-# ---------------------------------------------------------------------------
+# A case grant does not raise deployment-wide collection names.
 
 def _source(conn, level):
     return conn.execute(
@@ -321,9 +303,8 @@ def test_a_live_grant_cannot_be_reviewed_until_it_ends(conn, client):
 
 def test_the_database_clock_decides_whether_a_grant_has_ended(
         conn, monkeypatch):
-    """The readable refusal uses this process's clock; the write itself is
-    guarded by the database's, so an app server running ahead cannot
-    review a grant that is still raising clearance."""
+    """The readable refusal uses this process's clock; the write itself is guarded by the database's,
+    so an app server running ahead cannot review a grant that is still raising clearance."""
     from noctornal_api.break_glass import BreakGlassError, BreakGlassService, Grant
     officer, _ = _officer(conn)
     analyst, _ = _user(conn, roles=("CASE_OWNER",))
@@ -459,10 +440,6 @@ def test_a_red_capture_or_message_opened_under_a_grant_is_counted(
     assert r.json()["body_text"] == "wire it today"
     assert _count(conn, gid) == 2
 
-
-# ---------------------------------------------------------------------------
-# Fix round (2026-09-23): what the verifier found in the first pass
-# ---------------------------------------------------------------------------
 
 def test_on_a_case_above_clearance_a_capture_or_message_counts_once(
         conn, client):

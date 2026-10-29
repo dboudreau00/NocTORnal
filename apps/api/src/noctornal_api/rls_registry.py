@@ -1,39 +1,30 @@
-"""Which tables row-level security covers, and why each other one is not.
+"""Which tables row-level security covers, and why each other one is not (docs/00 decision 76).
 
-S1, 2026-09-25 (docs/00 decision 76). Every table in the ten product
-schemas is in exactly one of three maps:
+Every table in the ten product schemas is in exactly one of three maps:
 
-- `POLICY`: under row-level security in this build, with the template its
-  policy follows (migrations 0114, 0116 and 0118 onwards hold the SQL,
-  each as frozen text). Every reader of the table
-  has been converted: gate inputs read facts (`iam.case_facts`,
-  `iam.element_facts`, `iam.lookup_result_facts`), work that must see
-  every row runs on a system connection (`db.SystemPurpose`).
-- `EXEMPT`: never under a policy, with the reason. The IAM plane is the
-  policies' own input and is read-only to the request role instead (0109);
-  the collection plane is read by the egress proxy's role, which is subject
-  to row security and must not be given a bypass; the rest is reference
-  vocabulary or deployment configuration with no case and no label.
-- `DEFERRED`: will carry a policy, and does not yet, because its readers
-  have not all been converted. The reason names the reader work still
-  owed. A table is either fully enforced or not enforced at all: never
+- `POLICY`: under row-level security, with the template its policy follows (migrations 0114, 0116 and 0118
+  onwards hold the SQL, each as frozen text). Every reader of the table has been converted: gate inputs read
+  facts (`iam.case_facts`, `iam.element_facts`, `iam.lookup_result_facts`), work that must see every row runs
+  on a system connection (`db.SystemPurpose`).
+- `EXEMPT`: never under a policy, with the reason. The IAM plane is the policies' own input and is read-only to
+  the request role instead (0109); the collection plane is read by the egress proxy's role, which is subject to
+  row security and must not be given a bypass; the rest is reference vocabulary or deployment configuration
+  with no case and no label.
+- `DEFERRED`: will carry a policy, and does not yet, because its readers have not all been converted. The
+  reason names the reader work still owed. A table is either fully enforced or not enforced at all: never
   half.
 
-`test_rls_registry_pg.py` holds the database to this module: a table that
-carries case_id, classification, compartments, read_compartments,
-visibility_clearance or visibility_compartments, or a foreign key to a
-policied table, and is in none of the three maps fails by name; the set of
-tables with relrowsecurity equals `POLICY` exactly. The readiness row
-`row_level_security_enforced` reads `POLICY` and `POLICY_FLOOR`.
+`test_rls_registry_pg.py` holds the database to this module: a table that carries case_id, classification,
+compartments, read_compartments, visibility_clearance or visibility_compartments, or a foreign key to a
+policied table, and is in none of the three maps fails by name; the set of tables with relrowsecurity equals
+`POLICY` exactly. The readiness row `row_level_security_enforced` reads `POLICY` and `POLICY_FLOOR`.
 
 ## Adding a table
 
-A migration that creates a case-scoped table either puts it under a
-policy (ENABLE ROW LEVEL SECURITY and one of the templates below, as 0114
-does) and adds it to `POLICY`, or adds it to `DEFERRED` or `EXEMPT` here
-with a reason. The templates, with CASES = `(SELECT iam.rls_cases())::uuid[]`,
-CLR = `(SELECT iam.rls_clearance())`, CEIL = `(SELECT iam.rls_ceilings())`,
-HELD = `(SELECT iam.rls_compartments())`:
+A migration that creates a case-scoped table either puts it under a policy (ENABLE ROW LEVEL SECURITY and one
+of the templates below, as 0114 does) and adds it to `POLICY`, or adds it to `DEFERRED` or `EXEMPT` here with a
+reason. The templates, with CASES = `(SELECT iam.rls_cases())::uuid[]`, CLR = `(SELECT iam.rls_clearance())`,
+CEIL = `(SELECT iam.rls_ceilings())`, HELD = `(SELECT iam.rls_compartments())`:
 
 - ELEMENT (case_id, classification, compartments):
   `case_id = ANY (CASES) AND (classification <= CLR OR classification <=
@@ -67,9 +58,9 @@ HELD = `(SELECT iam.rls_compartments())`:
   who may list, sign or apply them.
 - CUSTOM_WATCH (0124): a case's watches in a readable case; a case-less
   one to every bound user.
-- CUSTOM_MERGE (0132, 2026-10-03): the CASE term AND an EXISTS over
-  `core.node` for the merge's source and for its target, so a merge is
-  visible only where both of its entities are.
+- CUSTOM_MERGE (0132): the CASE term AND an EXISTS over `core.node` for the
+  merge's source and for its target, so a merge is visible only where both of
+  its entities are.
 - CUSTOM_NOTICE (a notification, 0126): the recipient's own
   (`recipient_id = (SELECT iam.rls_actor())`), its classification within
   CLR, its compartments held, and when it names a case, that case
@@ -104,11 +95,11 @@ HELD = `(SELECT iam.rls_compartments())`:
   readable case, dated at the moment it is made; counted only by its
   grantee, on a live, unrevoked row. The grant is the GLOBAL half of the
   route's gate: the case half (the permission read off the grantor's one
-  role on that case) is not asked at the database (docs/17, 2026-10-03).
-- CUSTOM_ACT (a persona act, 0156, 2026-10-02): the requester's own
+  role on that case) is not asked at the database (docs/17).
+- CUSTOM_ACT (a persona act, 0156): the requester's own
   (`requested_by = (SELECT iam.rls_actor())`) and its label within CLR, a
   SELECT policy and an INSERT policy that admits only a fresh PENDING row
-  (attempts zero, no claimant, no claim time, no result; 2026-10-03). No
+  (attempts zero, no claimant, no claim time, no result). No
   UPDATE or DELETE policy: the collector and the inline runner claim and
   finish an act as the PERSONA_ACTS system purpose.
 - CUSTOM_AUDIT (the audit log, 0168): a SELECT policy, `case_id = ANY
@@ -132,28 +123,21 @@ HELD = `(SELECT iam.rls_compartments())`:
   iam.rls_actor())` to the child test, so a custody row names the user who
   wrote it. The column is NOT NULL, so there is no unattributed row to allow.
 
-A table the request role writes only by UPDATE carries its template as a
-SELECT and an UPDATE policy and nothing else, so no INSERT of the request
-role reaches its keys and no DELETE reaches a row: `ingest.record` and
-`ingest.victim_credential` (0154), whose rows are made and destroyed on
-system connections (F51, 2026-10-02).
+A table the request role writes only by UPDATE carries its template as a SELECT and an UPDATE policy and
+nothing else, so no INSERT of the request role reaches its keys and no DELETE reaches a row: `ingest.record`
+and `ingest.victim_credential` (0154), whose rows are made and destroyed on system connections.
 
-A policy says which rows, never which columns or values. On
-`ingest.record`, `ingest.victim_credential` and `ingest.pii_authorisation`
-the request role holds UPDATE only on the columns a request writes, and a
-guard trigger holds what those columns may become, as 0109 and 0112 do for
-the session (0155, F51, 2026-10-02).
+A policy says which rows, never which columns or values. On `ingest.record`, `ingest.victim_credential` and
+`ingest.pii_authorisation` the request role holds UPDATE only on the columns a request writes, and a guard
+trigger holds what those columns may become, as 0109 and 0112 do for the session (0155).
 
-A table the request role never writes carries its template as a SELECT
-policy alone (`rls_read`), so no INSERT of the request role reaches its
-unique keys and no UPDATE or DELETE reaches a row: `notify.delivery`,
-`notify.jira_link` and `notify.jira_event` (0126), which only
-`notify.enqueue` and the NOTIFY and NOTIFY_ADMIN system purposes write
-(F51, 2026-10-02).
+A table the request role never writes carries its template as a SELECT policy alone (`rls_read`), so no INSERT
+of the request role reaches its unique keys and no UPDATE or DELETE reaches a row: `notify.delivery`,
+`notify.jira_link` and `notify.jira_event` (0126), which only `notify.enqueue` and the NOTIFY and NOTIFY_ADMIN
+system purposes write.
 
-A trigger function that reads a policied table must be SECURITY DEFINER
-with `SET search_path = pg_catalog, <its schemas>, pg_temp` (0113), or it
-reads only the writer's view and an invariant fails open.
+A trigger function that reads a policied table must be SECURITY DEFINER with `SET search_path = pg_catalog,
+<its schemas>, pg_temp` (0113), or it reads only the writer's view and an invariant fails open.
 """
 from __future__ import annotations
 
@@ -170,15 +154,13 @@ POLICY: dict[str, str] = {
     "core.hypothesis": "CASE",
     "core.assumption": "CASE",
     "core.node_set": "CASE",
-    # 0132 (2026-10-03): and both of its entities visible.
+    # 0132: and both of its entities visible.
     "core.node_merge": "CUSTOM_MERGE",
     "core.hypothesis_evidence": "CHILD",
     "core.node_set_member": "CHILD",
-    # 0118 (S1, 2026-09-25): collected documents and what hangs off them,
-    # and Triage's proposals. A document is case-less, so its policy is the
-    # case-less ceiling (CUSTOM_DOCUMENT); a proposal's label is derived and
-    # read by the application through fact functions, so its policy is the
-    # case term alone.
+    # 0118: collected documents and what hangs off them, and Triage's proposals. A document is case-less, so its
+    # policy is the case-less ceiling (CUSTOM_DOCUMENT); a proposal's label is derived and read by the
+    # application through fact functions, so its policy is the case term alone.
     "collect.document": "CUSTOM_DOCUMENT",
     "collect.extraction": "CHILD",
     "collect.forum_post": "CHILD",
@@ -249,45 +231,37 @@ POLICY: dict[str, str] = {
     # every watch as system purposes (COLLECTION, INGEST).
     "collect.watch": "CUSTOM_WATCH",
     "collect.watch_hit": "CHILD",
-    # 0126 (F51, 2026-10-02): notifications and what they reached. Every
-    # notice is raised through notify.enqueue (0125); the drain runs as
-    # NOTIFY, and the delivery ledger and Jira's administration as
-    # NOTIFY_ADMIN.
+    # 0126: notifications and what they reached. Every notice is raised through notify.enqueue (0125); the drain
+    # runs as NOTIFY, and the delivery ledger and Jira's administration as NOTIFY_ADMIN.
     "notify.notification": "CUSTOM_NOTICE",
     "notify.delivery": "CHILD",
     "notify.case_route_block": "CASE",
     "notify.jira_link": "CASE_LABELLED",
     "notify.jira_event": "CHILD",
-    # 0128 (F51, 2026-10-02): the lookup ledger. An interactive send, a
-    # sign-off and the provider test run from the gates on as LOOKUPS, as
-    # the drain does, and what the requester is shown is read back at their
-    # labels; the answer's label is read through iam.lookup_result_facts
-    # (0127). A provider test's canary has no case, so no request role sees
-    # it. The attempts are append-only, so their CHILD test is a ledger's.
+    # 0128: the lookup ledger. An interactive send, a sign-off and the provider test run from the gates on as
+    # LOOKUPS, as the drain does, and what the requester is shown is read back at their labels; the answer's
+    # label is read through iam.lookup_result_facts (0127). A provider test's canary has no case, so no request
+    # role sees it. The attempts are append-only, so their CHILD test is a ledger's.
     "ingest.lookup": "CASE_LABELLED",
     "ingest.lookup_result": "CASE_LABELLED",
     "ingest.lookup_attempt": "LEDGER_CHILD",
     "ingest.lookup_batch": "CASE",
-    # 0129 (F51, 2026-10-02): which Telegram chat a source is. A new chat's
-    # duplicate check runs as a system purpose (TELEGRAM_INTAKE), and the
-    # attended acts refuse a write that changed no chat. 0164 (F43) restates
-    # the policy with the source's compartments held.
+    # 0129: which Telegram chat a source is. A new chat's duplicate check runs as a system purpose
+    # (TELEGRAM_INTAKE), and the attended acts refuse a write that changed no chat. 0164 restates the policy with
+    # the source's compartments held.
     "collect.telegram_chat": "CUSTOM_SOURCE_CHILD",
-    # 0154 (F51, 2026-10-02): the ingest records and what hangs off them. A
-    # parse, a replay, every scoring pass and the fingerprint correlation
-    # run as INGEST; the routes read a record's labels and a batch's cases
-    # as facts (0153), and the queue's copy total is a WITHHELD count.
+    # 0154: the ingest records and what hangs off them. A parse, a replay, every scoring pass and the fingerprint
+    # correlation run as INGEST; the routes read a record's labels and a batch's cases as facts (0153), and the
+    # queue's copy total is a WITHHELD count.
     "ingest.record": "CUSTOM_RECORD",
     "ingest.victim_credential": "CHILD",
     "ingest.dead_letter": "CUSTOM_DEAD_LETTER",
     "ingest.pii_authorisation": "CUSTOM_PII_AUTHORISATION",
-    # 0156 (A collector process, 2026-10-02): the persona act queue. The
-    # API enqueues on the request connection; claims and outcomes are
-    # written as PERSONA_ACTS.
+    # 0156: the persona act queue. The API enqueues on the request connection; claims and outcomes are written as
+    # PERSONA_ACTS.
     "collect.persona_act": "CUSTOM_ACT",
-    # 0168 (F51, 2026-10-02): the audit log. The countersign rule reads it as
-    # the definer (0166), the Lab's last screening pass is a fact (0167), and
-    # every other reader is classified by function in test_rls_audit_paths.py.
+    # 0168: the audit log. The countersign rule reads it as the definer (0166), the Lab's last screening pass is
+    # a fact (0167), and every other reader is classified by function in test_rls_audit_paths.py.
     "audit.event": "CUSTOM_AUDIT",
 }
 
@@ -307,17 +281,15 @@ _EGRESS = ("the collection plane the egress proxy reads as noctornal_egress, whi
            "configuration and ceilings, no case content")
 _VOCAB = "reference vocabulary: no case, no label, the same for every reader"
 _CONFIG = "deployment configuration with no case and no label"
-#: 0179 (Beta 1.1): the administration routes write these on a system
-#: connection (SystemPurpose.CONFIGURATION and its neighbours) after their
-#: own gate, step-up and audit.
+#: 0179: the administration routes write these on a system connection (SystemPurpose.CONFIGURATION and its
+#: neighbours) after their own gate, step-up and audit.
 _READ_ONLY = "; read-only to the request role, written by its routes as the system role (0179)"
-#: 0180 (Beta 1.1): sealed columns the request role is not granted at all.
+#: 0180: sealed columns the request role is not granted at all.
 _SEALED = "; its sealed columns are not granted to the request role (0180)"
 
 EXEMPT: dict[str, str] = {
-    # By named column since 0143 (rls-6, 2026-10-03): the password hash, the
-    # sealed TOTP secret and its key id, the recovery hashes and the replay
-    # counter are not granted to the request role at all.
+    # By named column since 0143: the password hash, the sealed TOTP secret and its key id, the recovery hashes
+    # and the replay counter are not granted to the request role at all.
     "iam.app_user": _IAM + "; the request role reads it by named column, and "
                            "never the credential columns (0143)",
     "iam.session": _IAM + "; the request role keeps UPDATE of three columns on "
@@ -371,9 +343,8 @@ EXEMPT: dict[str, str] = {
     "lab.screening_list": _CONFIG + " (the officer's label-free view, F13)" + _READ_ONLY,
     "lab.screening_hash": _CONFIG + " (read only by the screening worker)" + _READ_ONLY,
     "lab.yara_compile_job": _CONFIG + " (a queue the triage worker drains)",
-    # 0157 (2026-10-03): when each collector was last seen and
-    # whether its persona key ring opened what it sampled; key ids and
-    # counts, never key material, a person or a source.
+    # 0157: when each collector was last seen and whether its persona key ring opened what it sampled; key ids
+    # and counts, never key material, a person or a source.
     "collect.collector_heartbeat": _CONFIG + " (the collector's heartbeat, "
                                              "read by the readiness register)",
     "collect.source": _EGRESS + _READ_ONLY,
@@ -388,10 +359,9 @@ EXEMPT: dict[str, str] = {
     "collect.egress_connection": _EGRESS,
 }
 
-#: Will carry a policy; not yet. Each reason names what is owed first. Empty
-#: since 0168 put the audit log under its policy, the last table that was
-#: waiting on its readers (F51, 2026-10-03): a new entry is a table that is
-#: not enforced, and a reason that says what is owed before it can be.
+#: Will carry a policy; not yet. Each reason names what is owed first. Empty since 0168 put the audit log under
+#: its policy, the last table waiting on its readers: a new entry is a table that is not enforced, with a reason
+#: that says what is owed before it can be.
 DEFERRED: dict[str, str] = {}
 
 #: Trigger functions that read a policied table and stay SECURITY INVOKER,
@@ -400,8 +370,7 @@ INVOKER_TRIGGER_FUNCTIONS: dict[str, str] = {
     "iam.refuse_compartment_removal": (
         "fires on iam.compartment writes, which only a system connection "
         "makes (0109); iam.compartment_in_use then sees every row"),
-    # S1, 2026-09-25: two guards that name their own table only in the
-    # sentence they raise, and read no row of anything.
+    # Two guards that name their own table only in the sentence they raise, and read no row of anything.
     "lab.block_access_mutation": (
         "refuses every change to the custody ledger; reads nothing"),
     "lab.guard_preservation_authorisation": (
@@ -411,7 +380,7 @@ INVOKER_TRIGGER_FUNCTIONS: dict[str, str] = {
     "iam.check_dual_control_change": (
         "fires on iam.dual_control_policy_change writes, which only a system "
         "connection makes (0109), so it reads every approval as it is"),
-    # F51, 2026-10-02: names the audit log only in the sentence it raises.
+    # Names the audit log only in the sentence it raises.
     "audit.block_mutation": (
         "refuses every change to the audit log; reads nothing"),
 }

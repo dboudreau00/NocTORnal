@@ -1,10 +1,8 @@
-"""Shared fixtures for the static-triage and YARA suites (F11, F12,
-2026-09-24). Not a test module: the suites import it by name.
+"""Shared fixtures for the static-triage and YARA suites. Not a test module.
 
-Nothing here is malware. The PE images are built byte by byte from the
-format's own structures, carry one import and a Rich header the builder
-chose, and do nothing if run: enough for pefile to parse and hash, which
-is all static triage asks of them. No binary is checked in.
+Nothing here is malware. The PE images are built byte by byte from the format's own structures, carry
+one import and a Rich header the builder chose, and do nothing if run: enough for pefile to parse and
+hash, which is all static triage asks of them. No binary is checked in.
 """
 from __future__ import annotations
 

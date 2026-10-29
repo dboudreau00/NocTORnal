@@ -1,21 +1,19 @@
-"""Projections and graph queries (Phase 2, docs/03 + docs/09).
+"""Projections and graph queries (docs/03, docs/09).
 
-A metric computed against "the graph" is meaningless, because every filter
-changes every number. So analysis always runs against a **projection**: a
-named, reproducible view pinning which edge types count, whether inferred
-edges are included, the minimum confidence, and the time window. docs/03
-ships four presets, and the point of them is that the leadership picture
-differs between them — that difference is itself a finding.
+A metric computed against "the graph" is meaningless, because every filter changes every number. So
+analysis always runs against a **projection**: a named, reproducible view pinning which edge types
+count, whether inferred edges are included, the minimum confidence, and the time window. docs/03
+ships four presets, and the leadership picture differs between them; that difference is itself a
+finding.
 
-Every query here filters by the CALLER's clearance and compartments, and an
-edge is only returned when BOTH endpoints are visible: otherwise an edge
-would betray the existence of a node the analyst may not see.
+Every query here filters by the CALLER's clearance and compartments, and an edge is only returned
+when BOTH endpoints are visible: otherwise an edge would betray the existence of a node the analyst
+may not see.
 
-Local metrics (degree, weighted degree, clustering, k-core) are computed in
-Python over the projected subgraph. They are the ones cheap enough to be
-live per docs/03's "under 5k nodes: exact, synchronous" band; betweenness,
-Burt's constraint, Leiden and key-player analysis are Phase 3 and belong in
-the analytics worker with igraph.
+Local metrics (degree, weighted degree, clustering, k-core) are computed in Python over the
+projected subgraph: they are cheap enough to be live per docs/03's "under 5k nodes: exact,
+synchronous" band. Betweenness, Burt's constraint, Leiden and key-player analysis belong in the
+analytics worker with igraph.
 """
 from __future__ import annotations
 
@@ -61,10 +59,8 @@ PRESETS: dict[str, dict] = {
                        "TX_INPUT", "TX_OUTPUT"],
     },
     "all": {
-        # "All social ties", was "All ties" (ux19-copy
-        # one-concept-many-names, 2026-09-23): the case holds identity
-        # links this preset leaves out, so "all" beside a count lower than
-        # the case's read as relationships lost.
+        # "All social ties", not "All ties": the case holds identity links this preset leaves
+        # out, so "all" beside a count lower than the case's read as relationships lost.
         "label": "All social ties",
         "description": "Every edge type marked as a social tie in the "
                        "ontology. Identity plumbing (SAME_AS, ALIAS_OF) stays "
@@ -77,35 +73,22 @@ PRESETS: dict[str, dict] = {
 _CONFIDENCE_ORDER = {"LOW": 0, "MODERATE": 1, "HIGH": 2}
 
 
-# --- what "evidenced" means, in ONE place -------------------------------
+# What "evidenced" means, in ONE place. An exhibit reaches an element by two routes: a live
+# assertion that carries it (`assertion.evidence_id`) and a direct attachment
+# (`core.evidence_link`). Both count.
 #
-# ux07 two-evidence-paths-disagree and ux05 linked-evidence-vs-evidenced
-# (2026-09-22). An exhibit reaches an element by two routes: a live
-# assertion that carries it (`assertion.evidence_id`, the E1 add-form path)
-# and a direct attachment (`core.evidence_link`, the inspector's linker).
-# Until this date the canvas mark, the coverage figure and the report's
-# "Evidenced" column counted only the first, while the inspector listed
-# only the second. So an analyst who linked an exhibit saw the element stay
-# hollow and the report say "NO", and an element evidenced at creation said
-# "No exhibits linked." in its own inspector. Both readings were wrong.
+# An element is EVIDENCED when an exhibit is attached to it by a live (unretracted) assertion OR by
+# an evidence_link row, and that exhibit is in the element's case, not purged, and visible at the
+# reader's clearance and compartments. The projection (`has_evidence`, and through it the coverage
+# figure and the report) and the inspector's evidence list (`routers/read.py`) both build on
+# `evidence_backing_sql`.
 #
-# The rule now, used by the projection (`has_evidence`, and through it the
-# coverage figure and the report) and by the inspector's evidence list
-# (`routers/read.py`), which both build on `evidence_backing_sql`:
-#
-#   an element is EVIDENCED when an exhibit is attached to it by a live
-#   (unretracted) assertion OR by an evidence_link row, and that exhibit is
-#   in the element's case, not purged, and visible at the reader's
-#   clearance and compartments.
-#
-# The visibility leg is deliberate. `withheld()` below explains why a mark
-# that localises withheld material is the disclosure that matters, and a
-# "yes" resting on an exhibit the reader cannot see would be exactly that.
-# It is also what keeps the report honest: the report projects at the
-# TARGET's clearance and its exhibit register filters the same way, so
-# "Evidenced: yes" means an exhibit in that document's own register backs it.
-# A purged exhibit is shown by the inspector (flagged) but backs nothing,
-# because an element cannot rest on bytes the record says are gone.
+# The visibility leg is deliberate: `withheld()` below explains why a mark that localises withheld
+# material is the disclosure that matters, and a "yes" resting on an exhibit the reader cannot see
+# would be exactly that. It also keeps the report honest: the report projects at the TARGET's
+# clearance and its exhibit register filters the same way, so "Evidenced: yes" means an exhibit in
+# that document's own register backs it. A purged exhibit is shown by the inspector (flagged) but
+# backs nothing, because an element cannot rest on bytes the record says are gone.
 
 _ELEMENT_COLUMNS = ("node_id", "edge_id")
 
@@ -156,45 +139,31 @@ def evidenced_sql(column: str, alias: str) -> str:
 
 
 def seen_sql() -> str:
-    """`first_seen, last_seen` for the node aliased `n`, derived from the
-    entity's live observations. Two select-list items. Takes FOUR bind
-    parameters, the reader's clearance and compartments twice over, in the
-    order `seen_params` returns them.
+    """`first_seen, last_seen` for the node aliased `n`, derived from the entity's live
+    observations. Two select-list items. Takes FOUR bind parameters, the reader's clearance and
+    compartments twice over, in the order `seen_params` returns them.
 
-    gap-first-seen (decided 2026-09-23). Nothing writes
-    `core.node.first_seen` or `last_seen`: `create_node` never set them and
-    no importer does, so the entity list's First seen column and the
-    inspector's "first seen / last seen" were blank on every estate while
-    the claims under them said when the entity was observed. The dates are
-    derived instead, without a migration: the earliest and latest
-    `observed_at` among the entity's LIVE claims (not retracted, not
-    superseded, the projection's own rule), combined with the stored column
-    so a value an importer does write one day still counts. LEAST and
-    GREATEST skip a NULL, so either side alone is enough and neither
-    alone blanks the other. Only the entity's claims count, not claims
-    about its ties: a tie's claim is about the relationship. A withdrawn
-    sighting stops moving the dates the moment it is withdrawn.
+    Nothing writes `core.node.first_seen` or `last_seen`, so the dates are derived without a
+    migration: the earliest and latest `observed_at` among the entity's LIVE claims (not retracted,
+    not superseded, the projection's own rule), combined with the stored column so a value an
+    importer writes one day still counts. LEAST and GREATEST skip a NULL, so either side alone is
+    enough. Only the entity's claims count, not claims about its ties: a tie's claim is about the
+    relationship. A withdrawn sighting stops moving the dates at once.
 
-    "The entity's claims" include those of every record merged into it
-    (release review c10, 2026-09-24). A merge asserts the two records were
-    always the same thing, and it leaves the absorbed record's claims on
-    that record (merges.py), which every list and the canvas then hide: so
-    merging a 2024 persona into its 2025 one dropped the 2024 sighting from
-    the First seen column and the timeline, with no sign anything was left
-    out. The walk is recursive because a record that has absorbed others
-    can itself be merged onward, and a reversed merge clears the redirect,
-    so it stops counting at once. Every hop is held to the READER's
-    ceiling, as `curation._merge_chain` holds its chain: an assertion has
-    no marking of its own, so an absorbed RED or compartmented persona's
-    observation dates would otherwise reach a reader who may see only the
-    survivor. A hidden hop ends the walk there. UNION rather than UNION ALL
-    so a malformed cycle ends the walk instead of the query.
+    "The entity's claims" include those of every record merged into it. A merge leaves the absorbed
+    record's claims on that record (merges.py), which every list and the canvas hide, so without the
+    walk a merged persona's earlier sighting would drop out of the First seen column and the
+    timeline with no sign anything was left out. The walk is recursive because a record that has
+    absorbed others can itself be merged onward, and a reversed merge clears the redirect, so it
+    stops counting at once. Every hop is held to the READER's ceiling, as `curation._merge_chain`
+    holds its chain: an assertion has no marking of its own, so an absorbed RED or compartmented
+    persona's observation dates would otherwise reach a reader who may see only the survivor. A
+    hidden hop ends the walk there. UNION rather than UNION ALL so a malformed cycle ends the walk
+    instead of the query.
 
-    The walk runs only for an entity something has been merged into (one
-    probe of the partial index on `merged_into_id`); every other entity
-    reads its own claims as before. Walking for all of them cost about a
-    third more on NIGHTJAR's 146-entity projection, and most never absorb
-    anything.
+    The walk runs only for an entity something has been merged into (one probe of the partial index
+    on `merged_into_id`); every other entity reads its own claims. Walking for all of them cost
+    about a third more on a 146-entity projection, and most never absorb anything.
     """
     live = " AND sa.retracted_at IS NULL AND sa.superseded_at IS NULL"
     own = ("(SELECT {agg}(sa.observed_at) FROM core.assertion sa"
@@ -222,26 +191,21 @@ class ProjectionError(Exception):
 
 
 class ProjectionTooLarge(ProjectionError):
-    """The view is within every filter but too large to transform (F2's
-    derived-tie limit, 2026-09-24). A ProjectionError, so no route can
-    answer it with a 500; the analysis routes map it to 422 before the 400
-    every other ProjectionError gets."""
+    """The view is within every filter but too large to transform (the derived-tie limit of the
+    one-mode projection). A ProjectionError, so no route can answer it with a 500; the analysis
+    routes map it to 422 before the 400 every other ProjectionError gets."""
 
 
 class PathSearchLimit(ProjectionError):
-    """A path search gathered `NEIGHBOURHOOD_MAX_NODES` entities without
-    joining its two ends and without running out of entities to look at, so
-    it cannot say whether they are connected. Never `connected: false`: the
-    route answers 422 (Beta 1.1)."""
+    """A path search gathered `NEIGHBOURHOOD_MAX_NODES` entities without joining its two ends and
+    without running out of entities to look at, so it cannot say whether they are connected. Never
+    `connected: false`: the route answers 422."""
 
 
-#: The most entities an ego network or a path search gathers (docs/03: the
-#: live views are built for about 5,000 entities). Until Beta 1.1 both
-#: searched the FIRST 5,000 entities of the case by creation time and
-#: answered "not in this projection" for an entity outside them: 88 of 100
-#: ego requests on a case of 101,000 entities. They are built outward from the
-#: entity asked about now, nearer entities before farther ones, and stop here
-#: saying so.
+#: The most entities an ego network or a path search gathers (docs/03: the live views are built for
+#: about 5,000 entities). Both are built outward from the entity asked about, nearer entities before
+#: farther ones, and stop here saying so, so an entity is never reported "not in this projection"
+#: merely because it fell outside an arbitrary first 5,000.
 NEIGHBOURHOOD_MAX_NODES = 5000
 
 #: How many ties one step of a search reads, as a multiple of the bound above.
@@ -250,9 +214,8 @@ NEIGHBOURHOOD_MAX_NODES = 5000
 _STEP_ROWS_PER_NODE = 20
 
 
-# L3 (2026-09-24): which ties a projection computes over by review state.
-# "all" is today's behaviour; "accepted" keeps only the ties a reviewer has
-# accepted and counts every tie it left out, by state.
+# Which ties a projection computes over by review state: "all" keeps everything; "accepted" keeps
+# only the ties a reviewer has accepted and counts every tie it left out, by state.
 REVIEW_SCOPE_ALL = "all"
 REVIEW_SCOPE_ACCEPTED = "accepted"
 REVIEW_SCOPES = (REVIEW_SCOPE_ALL, REVIEW_SCOPE_ACCEPTED)
@@ -279,9 +242,9 @@ class Projection:
     #: projection name and cache digest computed before it existed is
     #: unchanged (both are test-pinned).
     review_scope: str = REVIEW_SCOPE_ALL
-    #: F2: the venue families projected to entities. Described only when a
-    #: family is listed, for the same reason. Only the analytics router
-    #: sets it: the sociogram keeps drawing what was recorded.
+    #: The venue families projected to entities. Described only when a family is listed, for the
+    #: same reason. Only the analytics router sets it: the sociogram keeps drawing what was
+    #: recorded.
     one_mode: affiliation.OneModeParams = field(default_factory=affiliation.OneModeParams)
 
     def resolved_edge_types(self) -> list[str] | None:
@@ -306,11 +269,10 @@ class Projection:
 
 
 def validate_projection(p: Projection) -> None:
-    """Refuse a projection no query can honour, in one place, before
-    anything is fetched or looked up. The analytics routes call it through
-    their shared dependency, so `/latest` answers 400 to an unknown
-    confidence floor instead of 404 from a name lookup that could never
-    match (L3, 2026-09-24); `project()` calls it too."""
+    """Refuse a projection no query can honour, in one place, before anything is fetched or looked
+    up. The analytics routes call it through their shared dependency, so `/latest` answers 400 to an
+    unknown confidence floor instead of 404 from a name lookup that could never match; `project()`
+    calls it too."""
     if p.preset not in PRESETS:
         raise ProjectionError(f"unknown preset {p.preset!r}; one of "
                               f"{', '.join(sorted(PRESETS))}")
@@ -329,9 +291,8 @@ def validate_projection(p: Projection) -> None:
 def _review_split(rows: list[dict]) -> tuple[list[dict], dict]:
     """The rows a reviewer has accepted, and a count by state of the rest.
 
-    Every non-ACCEPTED row is counted under its lower-cased state, or under
-    "other" for a value outside the enum, so the counts always add up to
-    what was left out (L3, 2026-09-24)."""
+    Every non-ACCEPTED row is counted under its lower-cased state, or under "other" for a value
+    outside the enum, so the counts always add up to what was left out."""
     kept: list[dict] = []
     left = dict.fromkeys(LEFT_OUT_KEYS, 0)
     for row in rows:
@@ -394,15 +355,13 @@ def _edge_row(r) -> dict:
 
 def one_mode_subgraph(p: Projection, node_out: list[dict],
                       rows: list[tuple[dict, bool]], truncated: bool = False) -> Subgraph:
-    """F2's path through `project()` (2026-09-24), from the fetched rows,
-    each paired with whether the preset holds it. Pure, so the unit tests
-    drive the same code the database path does.
+    """The one-mode path through `project()`, from the fetched rows, each paired with whether the
+    preset holds it. Pure, so the unit tests drive the same code the database path does.
 
-    Venue SIZES are taken from every visible live consumable row, before
-    the confidence floor and the review scope, and only the rows that pass
-    them DRAW ties (filtering first let the accepted scope switch the
-    venue caps off). The inferred filter stays in SQL: it
-    is the analyst's choice of what exists."""
+    Venue SIZES are taken from every visible live consumable row, before the confidence floor and
+    the review scope, and only the rows that pass them DRAW ties (filtering first would let the
+    accepted scope switch the venue caps off). The inferred filter stays in SQL: it is the analyst's
+    choice of what exists."""
     min_rank = _CONFIDENCE_ORDER[p.min_confidence]
     keep = {c for c in ("LOW", "MODERATE", "HIGH") if _CONFIDENCE_ORDER[c] >= min_rank}
     in_preset = [e for e, member in rows if member]
@@ -441,17 +400,14 @@ class Subgraph:
     #: "affiliations" when venues were projected; None otherwise. Data only,
     #: folded into the cache key when present.
     review_left_out: dict | None = None
-    #: F2: the one-mode coverage (what was projected, what was excluded and
-    #: why); None when no family was projected. Data only, folded into the
-    #: cache key when present, because venue names and sizes never reach
-    #: `nodes`.
+    #: The one-mode coverage (what was projected, what was excluded and why); None when no family
+    #: was projected. Data only, folded into the cache key when present, because venue names and
+    #: sizes never reach `nodes`.
     one_mode: dict | None = None
-    #: The union of the compartments of every node and edge in this
-    #: projection, which the caller is read into (the projection filters on
-    #: it). 2026-10-07: a report built from this
-    #: carried the header's and the exhibits' compartments but not these, so
-    #: a compartmented entity went out through the egress gate unmarked. It
-    #: is not a key on any row, and a Subgraph built from another one's
+    #: The union of the compartments of every node and edge in this projection, which the caller is
+    #: read into (the projection filters on it). A report marks its output with these as well as the
+    #: header's and the exhibits' compartments, so a compartmented entity cannot go out through the
+    #: egress gate unmarked. It is not a key on any row, and a Subgraph built from another one's
     #: rows (`ego`) carries the whole's, which is the safe direction.
     compartments: frozenset[str] = field(default_factory=frozenset)
 
@@ -459,11 +415,10 @@ class Subgraph:
         return {n["id"] for n in self.nodes}
 
 
-#: What a case is willing to say about material the reader cannot see.
-#: Migration 0030 has the reasoning; the short version is that an analyst
-#: who cannot tell a sparse network from a censored one draws confident
-#: conclusions from an incomplete picture, and that is a worse failure than
-#: the one bit of disclosure this costs.
+#: What a case is willing to say about material the reader cannot see. Migration 0030 has the
+#: reasoning: an analyst who cannot tell a sparse network from a censored one draws confident
+#: conclusions from an incomplete picture, a worse failure than the one bit of disclosure this
+#: costs.
 DISCLOSURE_NONE = "NONE"
 DISCLOSURE_PRESENCE = "PRESENCE"
 DISCLOSURE_COUNT = "COUNT"
@@ -488,8 +443,7 @@ class Withheld:
 
     def as_response(self) -> dict:
         if self.mode == DISCLOSURE_NONE:
-            # Not "withheld: false" -- that would itself be an answer. The
-            # key is absent, exactly as it was before this existed.
+            # Not "withheld: false": that would itself be an answer. The key is absent.
             return {}
         if not self.any_withheld:
             return {"incomplete": False, "mode": self.mode}
@@ -510,18 +464,16 @@ class GraphService:
     # -- projection --------------------------------------------------------
     def project(self, p: Projection, *, limit: int = 2000,
                 within: Sequence[UUID] | None = None) -> Subgraph:
-        """The projected subgraph: visible nodes, and edges whose endpoints
-        are BOTH visible and which pass the projection's filters.
+        """The projected subgraph: visible nodes, and edges whose endpoints are BOTH visible and
+        which pass the projection's filters.
 
-        With the accepted scope (L3) only accepted ties are kept and every
-        other one is counted by state; with venue families listed (F2) the
-        venues are replaced by derived ties between entities. Neither ever
-        filters a node, and neither adds a key to a stored edge's row, so
+        With the accepted scope only accepted ties are kept and every other one is counted by
+        state; with venue families listed the venues are replaced by derived ties between
+        entities. Neither ever filters a node, and neither adds a key to a stored edge's row, so
         `/graph`, which serialises the rows as they are, is untouched.
 
-        `within` limits the entities to those ids (an ego network's, a
-        path's): the filters are the same, so it is the projection cut to
-        them and no other answer."""
+        `within` limits the entities to those ids (an ego network's, a path's): the filters are
+        the same, so it is the projection cut to them and no other answer."""
         validate_projection(p)
 
         nodes = self._c.execute(
@@ -587,9 +539,9 @@ class GraphService:
         types = p.resolved_edge_types()
         min_rank = _CONFIDENCE_ORDER[p.min_confidence]
         keep = {c for c in ("LOW", "MODERATE", "HIGH") if _CONFIDENCE_ORDER[c] >= min_rank}
-        # F2: the affiliation types and identity links the listed families
-        # need beyond the preset. Empty when none is listed, which matches
-        # nothing, so the rows fetched are exactly today's.
+        # The affiliation types and identity links the listed families need beyond the
+        # preset. Empty when none is listed, which matches nothing, so only the preset's
+        # rows are fetched.
         material = affiliation.material_edge_types(p.one_mode.families)
         rows: list = []
         if ids:
@@ -656,33 +608,28 @@ class GraphService:
 
     # -- what the caller is not being shown (docs/14 U2) -------------------
     def withheld(self, p: Projection) -> Withheld:
-        """Count the elements this projection WOULD contain for a fully
-        cleared reader and does not contain for this one.
+        """Count the elements this projection WOULD contain for a fully cleared reader and does
+        not contain for this one.
 
-        Deliberately a separate call rather than part of `project()`. The
-        graph endpoint wants it once per page; `ego`, `path` and `metrics`
-        all call `project()` internally and would otherwise pay for two
-        extra aggregates each time, to answer a question nobody asked.
+        Deliberately a separate call rather than part of `project()`. The graph endpoint wants
+        it once per page; `ego`, `path` and `metrics` all call `project()` internally and would
+        otherwise pay for two extra aggregates each time, to answer a question nobody asked.
 
-        The counts apply every OTHER filter the projection applies -- preset,
-        inferred, confidence, as-of, live provenance, soft deletion, and the
-        review scope (L3, 2026-09-24; no route passes it here yet, but the
-        promise holds). Without that they would be meaningless: "1,990
-        elements withheld" when 1,988 of them were excluded by the preset is
-        not information, it is alarm.
+        The counts apply every OTHER filter the projection applies: preset, inferred, confidence,
+        as-of, live provenance, soft deletion, and the review scope (no route passes it here yet,
+        but the promise holds). Without that they would be meaningless: "1,990 elements
+        withheld" when 1,988 of them were excluded by the preset is not information, it is alarm.
 
-        The one-mode transform (F2) is ignored: derived ties are not stored
-        elements, so none of them can be withheld.
+        The one-mode transform is ignored: derived ties are not stored elements, so none of them
+        can be withheld.
         """
         mode = self._disclosure_mode(p.case_id)
         if mode == DISCLOSURE_NONE:
             return Withheld(mode)
-        # These counts exist to tell a reader what they CANNOT see
-        # (docs/14 U2), which under row-level security is exactly what the
-        # request connection cannot count: every count would be zero and the
-        # notice would say nothing was withheld. So they run on a system
-        # connection, with this reader's ceiling as before, and only the two
-        # numbers come back (S1, 2026-09-25).
+        # These counts exist to tell a reader what they CANNOT see (docs/14), which under
+        # row-level security is exactly what the request connection cannot count: every count
+        # would be zero and the notice would say nothing was withheld. So they run on a system
+        # connection, with this reader's ceiling as before, and only the two numbers come back.
         with system_connection(SystemPurpose.WITHHELD, reuse=self._c) as counter:
             return self._hidden_counts(p, mode, counter)
 
@@ -750,7 +697,7 @@ class GraphService:
                         nodes=hidden_nodes, edges=hidden_edges)
 
     def _disclosure_mode(self, case_id: UUID) -> str:
-        # A case setting, read as a lock fact (`iam.case_facts`, S1).
+        # A case setting, read as a lock fact (`iam.case_facts`).
         row = self._c.execute(
             "SELECT withheld_disclosure FROM iam.case_facts(%s)",
             (case_id,)).fetchone()
@@ -802,15 +749,13 @@ class GraphService:
         return rows[:rows_max], len(rows) > rows_max
 
     def ego(self, p: Projection, centre: UUID, depth: int = 1) -> Subgraph:
-        """The ego network around one node to `depth` hops, what a
-        double-click gives you (docs/06), under the projection's filters.
+        """The ego network around one node to `depth` hops, what a double-click gives you (docs/06),
+        under the projection's filters.
 
-        Built OUTWARD from the centre, a step at a time, so an entity
-        anywhere in the case has one; it used to be cut from the first 5,000
-        entities of the case, and answered "not in this projection" for the
-        rest. It holds at most `NEIGHBOURHOOD_MAX_NODES` entities, the nearer
-        before the farther (the older before the newer among the same
-        distance), and `truncated` says when it was cut."""
+        Built OUTWARD from the centre, a step at a time, so an entity anywhere in the case has
+        one. It holds at most `NEIGHBOURHOOD_MAX_NODES` entities, the nearer before the
+        farther (the older before the newer among the same distance), and `truncated` says
+        when it was cut."""
         validate_projection(p)
         if p.one_mode.enabled():
             return self._ego_of_whole(p, centre, depth)
@@ -847,17 +792,15 @@ class GraphService:
         )
 
     def shortest_path(self, p: Projection, src: UUID, dst: UUID) -> list[UUID]:
-        """Unweighted shortest path (BFS), the shift-click interaction. The
-        path is treated as undirected: an analyst asking "how are these two
-        connected" does not care about edge direction.
+        """Unweighted shortest path (BFS), the shift-click interaction. The path is treated as
+        undirected: an analyst asking "how are these two connected" does not care about edge
+        direction.
 
-        Grown from BOTH ends a step at a time, the smaller side first, until
-        they meet, so two entities anywhere in the case are asked about; it
-        used to search the first 5,000 entities of the case. `[]` means the
-        two are not connected under the projection, and is said only when a
-        side ran out of entities to look at. A search that reached
-        `NEIGHBOURHOOD_MAX_NODES` entities first raises `PathSearchLimit`:
-        it cannot say."""
+        Grown from BOTH ends a step at a time, the smaller side first, until they meet, so two
+        entities anywhere in the case are asked about. `[]` means the two are not connected under
+        the projection, and is said only when a side ran out of entities to look at. A search
+        that reached `NEIGHBOURHOOD_MAX_NODES` entities first raises `PathSearchLimit`: it cannot
+        say."""
         validate_projection(p)
         if p.one_mode.enabled():
             return self._path_of_whole(p, src, dst)
@@ -898,9 +841,8 @@ class GraphService:
         return []
 
     def _ego_of_whole(self, p: Projection, centre: UUID, depth: int) -> Subgraph:
-        """`ego` over a projection with venue families (F2), whose derived
-        ties exist only after `project()` has made them: searched in the
-        first `NEIGHBOURHOOD_MAX_NODES` entities, as every ego network was."""
+        """`ego` over a projection with venue families, whose derived ties exist only after
+        `project()` has made them: searched in the first `NEIGHBOURHOOD_MAX_NODES` entities."""
         full = self.project(p, limit=NEIGHBOURHOOD_MAX_NODES)
         if centre not in full.node_ids():
             raise ProjectionError("centre node is not in this projection")
@@ -953,21 +895,18 @@ class GraphService:
 
     # -- local metrics -----------------------------------------------------
     def metrics(self, p: Projection) -> dict:
-        """Degree, weighted degree, signed degree, clustering and k-core over
-        the projection. Cheap enough to be synchronous at this scale; the
-        expensive centralities are Phase 3.
+        """Degree, weighted degree, signed degree, clustering and k-core over the projection.
+        Cheap enough to be synchronous at this scale; the expensive centralities belong in the
+        analytics worker.
 
-        Signed degree is separated deliberately: an actor with many negative
-        ties is not the same as a well-connected one, and a single degree
-        number hides that.
+        Signed degree is separated deliberately: an actor with many negative ties is not the
+        same as a well-connected one, and a single degree number hides that.
         """
         sub = self.project(p, limit=5000)
         ids = [n["id"] for n in sub.nodes]
         labels = {n["id"]: n["label"] for n in sub.nodes}
-        # A metric over a node set that was CUT OFF is not a metric over the
-        # case, and until now the flag was computed and then dropped on the
-        # floor. Degree degrades gracefully under truncation; betweenness and
-        # community structure do not.
+        # A metric over a node set that was CUT OFF is not a metric over the case. Degree degrades
+        # gracefully under truncation; betweenness and community structure do not.
         neighbours: dict[UUID, set[UUID]] = {i: set() for i in ids}
         weighted: dict[UUID, float] = dict.fromkeys(ids, 0.0)
         pos: dict[UUID, int] = dict.fromkeys(ids, 0)
@@ -1001,11 +940,10 @@ class GraphService:
 
         core = _k_core(neighbours)
         n = len(ids)
-        # Metrics treat the graph as SIMPLE: two actors joined by both a vouch
-        # and an accusation are one dyad, not two, because degree and
-        # clustering are defined over neighbour sets. That makes dyad_count
-        # legitimately smaller than the projection's edge count, so both are
-        # reported — a silent discrepancy would read as a bug.
+        # Metrics treat the graph as SIMPLE: two actors joined by both a vouch and an accusation
+        # are one dyad, not two, because degree and clustering are defined over neighbour sets.
+        # So dyad_count can be smaller than the projection's edge count, and both are reported:
+        # a silent discrepancy would read as a bug.
         dyads = sum(len(v) for v in neighbours.values()) // 2
         # E2: how much of what is on screen rests on an exhibit. A case is
         # defensible in proportion to how much of it is evidenced, so this
@@ -1025,8 +963,8 @@ class GraphService:
                 "elements": total_elements,
                 "ratio": round((evidenced_nodes + evidenced_edges) / total_elements, 4)
                 if total_elements else None,
-                # Worded from `evidenced_sql`, the one definition the
-                # canvas, the inspector and the report share (2026-09-22).
+                # Worded from `evidenced_sql`, the one definition the canvas, the inspector and the
+                # report share.
                 "note": "share of visible elements backed by an exhibit you "
                         "can see, either carried by a live assertion or "
                         "linked to the element directly",

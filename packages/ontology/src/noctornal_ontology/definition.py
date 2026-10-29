@@ -1,17 +1,11 @@
-"""THE single source of truth for the NocTORnal graph vocabulary.
+"""The single source of truth for the NocTORnal graph vocabulary.
 
-Every node type, edge type and selector type lives here and nowhere else.
-The SQL seed (db/migrations 0017 + db/seed_ontology.sql) and the
-TypeScript types are generated from this file; if you change a row here,
-regenerate (python -m noctornal_ontology.generate) and ship the change as
-a new data migration.
-
-Field semantics mirror the DB columns exactly — see db/schema.sql
-section 1 for the reasoning behind each flag (is_social_tie keeps
-identity plumbing out of centrality; is_strong raises a MERGE LEAD --
-`StrongSelectorConflict` for an analyst, never an automatic merge, which
-was designed and never built -- and a false merge is worse than a missed
-one).
+Every node, edge and selector type is declared here, and the SQL seed and the TypeScript types in
+packages/ontology/generated/ are produced from it: after changing a row, regenerate
+(python -m noctornal_ontology.generate) and ship the change as a new data migration. Fields
+mirror the database columns (db/schema.sql, section 1): is_social_tie keeps identity plumbing
+out of centrality, and is_strong raises a merge lead (`StrongSelectorConflict`) for an analyst,
+never an automatic merge, because a false merge is worse than a missed one.
 """
 from dataclasses import dataclass
 
@@ -70,13 +64,9 @@ NODE_TYPES: tuple[NodeType, ...] = (
     NodeType("CREDENTIAL_SET", "Credential set", "ARTEFACT", "artefact.data", 110),
     NodeType("DATASET", "Leaked dataset", "ARTEFACT", "artefact.data", 115),
     NodeType("TOOL", "Tool / kit", "ARTEFACT", "artefact.malware", 120),
-    # CONTEXT layer
-    # The pretext itself (docs/19): the fake O365 login, the invoice-
-    # redirect story, the "IT support" script. Distinct from TOOL, which
-    # is the kit that GENERATES it, and from CAMPAIGN, which is time-
-    # bounded and actor-scoped. Lures outlive both and recur across
-    # actors — "the same pretext hit six victims via three senders" is
-    # the question this platform exists to answer.
+    # LURE is the pretext itself (docs/19): the fake O365 login, the invoice-redirect story, the
+    # "IT support" script. TOOL is the kit that generates it and CAMPAIGN is time-bounded and
+    # actor-scoped; a lure outlives both and recurs across actors.
     NodeType("LURE", "Lure / pretext", "ARTEFACT", "artefact.lure", 125),
 
     NodeType("EVENT", "Event", "CONTEXT", "context.event", 130),
@@ -176,15 +166,9 @@ EDGE_TYPES: tuple[EdgeType, ...] = (
     EdgeType("TARGETED", "targeted", "was targeted by", True, 0,
              ("IDENTITY", "GROUP", "CAMPAIGN", "LURE", "INFRA"),
              ("VICTIM", "ORGANISATION", "PERSON"), False),
-    # A FALSE identity claim — the opposite of ALIAS_OF/SAME_AS, which
-    # both assert the subjects ARE the same. Nothing existing could carry
-    # "this page claims to be Microsoft".
-    #
-    # is_social_tie=False and default_sign=0 are load-bearing, not
-    # defaults. If impersonation counted as affiliation, the impersonated
-    # brand would become the most central node in every phishing case in
-    # the system and every centrality ranking would be garbage. Invariant
-    # 4's concern arriving via a new edge.
+    # A false identity claim ("this page claims to be Microsoft"), the opposite of ALIAS_OF and
+    # SAME_AS. is_social_tie=False and default_sign=0 are deliberate: counted as affiliation, the
+    # impersonated brand would be the most central node of every phishing case.
     EdgeType("IMPERSONATES", "impersonates", "is impersonated by", True, 0,
              ("IDENTITY", "LURE", "COMMS_ACCOUNT"),
              ("ORGANISATION", "PERSON", "SERVICE"), False),
@@ -296,12 +280,9 @@ SELECTOR_TYPES: tuple[SelectorType, ...] = (
     # would be the cert fingerprint, which this selector is not.
     SelectorType("CODESIGN_CN", "Code-signing subject", False, False, "trim"),
     SelectorType("USER_AGENT", "User agent string", False, False, "trim"),
-    # Social-engineering evidence (docs/19). The theme is invariant 9:
-    # index what the infrastructure proves, not what the victim was shown.
-    #
-    # The certificate public-key hash survives domain rotation, which is
-    # exactly what phishing infrastructure does — so it is the durable
-    # web identifier in the way the domain is not.
+    # Social-engineering evidence (docs/19): index what the infrastructure proves, not what the
+    # victim was shown (invariant 9). The certificate's public-key hash survives the domain
+    # rotation that phishing infrastructure relies on, so it is the durable web identifier.
     SelectorType("TLS_SPKI", "TLS public-key hash", True, False, "lower_hex"),
     SelectorType("SIP_URI", "SIP URI", True, True, "sip_norm"),
     # Attacker-generated for attacker-sent mail, so it identifies the KIT,

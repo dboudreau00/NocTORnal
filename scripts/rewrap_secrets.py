@@ -9,15 +9,15 @@ not already under the active key, and leaves the rest exactly as found.
     python scripts/rewrap_secrets.py --apply            # re-seal
     python scripts/rewrap_secrets.py --apply --legacy-key-file /root/old.kek
 
-`--legacy-key-file` is for the pre-ring world: before 2026-09-11 every
-blob was recorded under `env:v1` whatever key sealed it, so a deployment
-that ever changed its KEK holds rows under two keys and one id, which no
-ring can express. Given the old key (base64, in a file and never on
-the command line, which is in `ps` and the shell history), rows the ring
-cannot open are tried under it and, when it opens them, re-sealed under
-the active key. Rows nothing opens are counted and left; the readiness
-check `kek_ring_opens_stored_secrets` keeps naming them, and an account
-in that state re-enrols.
+`--legacy-key-file` is for blobs sealed before the key ring existed: each is
+recorded under `env:v1` whatever key sealed it, so a deployment that ever
+changed its KEK holds rows under two keys and one id, which no ring can
+express. Given the old key (base64, in a file and never on the command line,
+which is in `ps` and the shell history), rows the ring cannot open are tried
+under it and re-sealed under the active key when it opens them. Rows nothing
+opens are counted and left; the readiness check
+`kek_ring_opens_stored_secrets` keeps naming them, and an account in that
+state re-enrols.
 
 Each row is a compare-and-set on its own ciphertext
 (`security/sealed.rewrap_table`), so a row re-enrolled while this runs is
@@ -26,23 +26,19 @@ left alone rather than overwritten. One audit event records the pass.
 Exit 0 when every row is under the active key (or would be), 1 when rows
 remain that nothing opens, 2 when the environment itself is not usable.
 
-## Persona credentials, `--persona` (A collector process, 2026-10-02)
-
-A persona credential seals under its own ring, NOCTORNAL_PERSONA_KEK, which
-in production only the collector holds; the TOTP pass above no longer
-touches `collect.collection_account`. `--persona` reports every persona
-credential by key id, and with `--apply` moves each one sealed before the
-split (under a TOTP ring id) onto the persona ring and re-seals each one
-under a retired persona key under the active one. It needs BOTH rings, so
-it runs in the collector:
+Persona credentials seal under their own ring, NOCTORNAL_PERSONA_KEK, which
+in production only the collector holds, so the pass above does not touch
+`collect.collection_account`. `--persona` reports every persona credential by
+key id, and with `--apply` moves each one still under a TOTP ring id onto the
+persona ring and re-seals each one under a retired persona key under the
+active one. It needs both rings, so it runs in the collector:
 
     sudo docker compose -f infra/production/compose.yml run --rm collector \\
         python scripts/rewrap_secrets.py --persona --apply
 
-The upgrade note: until it has run, the vault refuses every persona
-credential sealed before the split by name, polls of those personas are
-BLOCKED with that sentence, and the readiness row `collector_split` counts
-them.
+Until it has run, the vault refuses every persona credential still under a
+TOTP ring id, by name, polls of those personas are BLOCKED with that
+sentence, and the readiness row `collector_split` counts them.
 """
 from __future__ import annotations
 
@@ -105,8 +101,7 @@ def main() -> int:
     from noctornal_api.security.persona_sealed import sealed_before_split
     stranded = sealed_before_split(conn)
     if stranded:
-        # A collector process (2026-10-02): this pass no longer moves
-        # persona credentials, and a TOTP key dropped from the ring takes
+        # This pass does not move persona credentials, and a TOTP key dropped from the ring takes
         # the ones still sealed under it with it.
         from noctornal_api.wording import count_of
         print(f"{count_of(stranded, 'persona credential is', 'persona credentials are')} "
@@ -179,10 +174,9 @@ def _persona(args) -> int:
     print(f"persona ring: active {active}"
           + (f", retired {', '.join(ids[1:])}" if ids[1:] else ", no retired keys"))
     conn = connect_system(SystemPurpose.SCRIPT)
-    # BEFORE the inventory opens anything (2026-10-03): a row
-    # still sealed under the TOTP ring is opened with that ring, so a
-    # process without the TOTP key must be refused by name here, with exit
-    # 2, and not crash in the inventory with a traceback and exit 1.
+    # Before the inventory opens anything: a row still sealed under the TOTP ring is opened with
+    # that ring, so a process without the TOTP key is refused here by name with exit 2, not by a
+    # traceback in the inventory.
     stranded = sealed_before_split(conn)
     if stranded:
         try:
