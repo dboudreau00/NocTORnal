@@ -756,8 +756,11 @@ noctornal/
 
 **Beta. Unaudited. Not certified for evidential use. Not lawful to operate against real material until the five blocking items above are settled.** It is fit for other people to try on synthetic or published, non-personal data.
 
-This is Beta 1.4, release 0.9.4, tag `v0.9.4-beta`: Beta 1.3 with a quiet console
-and a manual you can read, and no migration. Every explanatory paragraph that
+This is Beta 1.5, release 0.9.5, tag `v0.9.5-beta`: Beta 1.4 with the 18 findings
+of a code review of the whole tree closed, each with a test, and one migration,
+0183, which stops the request role from lowering the label of an entity or a tie.
+Beta 1.4 was Beta 1.3 with a quiet console and a manual you can read, and no
+migration. Every explanatory paragraph that
 used to open a pane is off the screen, and what it said is in the manual, now a
 book of five parts and thirteen appendices with a PDF beside it. A warning that
 protects somebody is still on screen, in a sentence. Beta 1.3 was Beta 1.2 with
@@ -789,7 +792,7 @@ reads, selectors, search and the audit log hold at 100,000 entities and
 about 5,000 entities a case, and the ego network and the path search stop at
 5,000. That load was measured from a Windows host with Postgres in WSL2.
 
-Beyond what the tour shows, Beta 1.4 has entity merge under the two-person
+Beyond what the tour shows, Beta 1.5 has entity merge under the two-person
 policy; PGP verification and vendor keys; collection from feeds, forums and
 Telegram under a two-person authority (the operator's end-to-end Telegram
 check is `docs/17` F31); ingest; similarity search; Jira, the delivery

@@ -1,12 +1,12 @@
 # What is left
 
-**State (2026-10-12):** branch `main`, Alembic head `0183`,
+**State (2026-10-29):** branch `main`, Alembic head `0183`,
 8420 tests counted as `def test_` functions across the two pytest roots,
-version 0.9.4 single-sourced from `pyproject.toml`. Those four counters are
+version 0.9.5 single-sourced from `pyproject.toml`. Those four counters are
 generated: `scripts/refresh_counters.py` writes them and `test_doc_invariants`
 holds them to the tree with no tolerance. Per-release totals of COLLECTED
 items, which parametrisation makes larger, are in `release/CHANGELOG.md`.
-Beta 1.3 (2026-10-12) is released. **Every roadmap item is built.** The
+Beta 1.5 (2026-10-29) is released. **Every roadmap item is built.** The
 end-to-end check of the Telegram adapter is `scripts/telegram_live_check.py`,
 which an operator runs with the deployment's own Telegram account (docs/17
 F31). What stands between the product and a deployment is not software: it is

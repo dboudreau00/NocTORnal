@@ -87,7 +87,7 @@ x-logging: &logging
 # The root filesystem stays writable because the CA bundle and the Lab's child processes write
 # /tmp (infra/production/README.md, Hardening).
 x-noctornal-app: &noctornal-app
-  image: noctornal-api:0.9.4
+  image: noctornal-api:0.9.5
   pull_policy: never
   env_file: [secrets.env]
   networks: [noctornal]
@@ -911,7 +911,7 @@ services:
   # small a limit costs a crashed step, never the worker. Raise mem_limit with
   # NOCTORNAL_ANALYSIS_WORKER_MAX_BYTES, the sample cap or the concurrency.
   analysis-worker:
-    image: noctornal-api:0.9.4
+    image: noctornal-api:0.9.5
     pull_policy: never
     restart: unless-stopped
     logging: *logging

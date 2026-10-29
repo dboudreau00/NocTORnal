@@ -1,5 +1,74 @@
 # Changelog
 
+## Beta 1.5: 2026-10-29
+
+The fifth revision of the beta, version 0.9.5. It closes the 18 findings of a code
+review of the whole tree, each with a test that fails without the fix, and it
+cleans the codebase: dated markers and session narration are gone from the source,
+the console and the tests, the test files are named for what they prove, and seven
+functions nothing called are removed. There is one migration, 0183, and no setting
+changes. It has not been audited, and it is still not lawful to operate against
+real material until docs/16 L1 to L5 are settled outside this codebase. Legal
+review is required before any active case load.
+
+- **A TOTP secret the key ring cannot open is a failed sign-in.** It used to answer
+  503, which a person could not tell from an outage and which the lockout never
+  counted. It now writes the audit reason `totp_secret_unopenable`, counts toward
+  the lockout, and answers 401 at sign-in and 403 at a password change.
+- **The request role cannot lower the label of an entity or a tie** (0183). A
+  trigger on `core.node` and `core.edge` refuses a lower classification for any
+  caller row security does not exempt; raising a label stays open, and the owner
+  and the system role can still correct one filed too high. Before this, one
+  statement as a teammate cleared to RED could rewrite a RED entity on an AMBER
+  case down to AMBER, and every teammate cleared only to AMBER would then read it.
+- **Records.** A report names the case's classification only when its header is
+  included. A document purge writes one tombstone per outcome, and the answer to an
+  out-of-schedule purge no longer names an exhibit above the person asking.
+- **Collection.** A third party's label with lookalike letters or invisible marks
+  in it is no longer taken for the publisher's own, and a long identifier that is
+  only the start of a longer token no longer confirms a key.
+- **The Lab.** The Received chain records the peer that connected and not the
+  address a sender claimed in HELO. A zip entry that is a symbolic link but
+  carries bytes is expanded for screening, and the header bodies of a tar entry
+  (long names, extended attributes) count against the archive's expansion ratio.
+- **Merges and corrections.** A merge notice counts only the ties its owner may
+  read, and retracting a correction does not put a real name back.
+- **The console.** The bearer token is dropped from the page once the session
+  cookie pair has landed, a malformed sign-in fragment is erased before it is
+  decoded and refused, the sign-in question is kept to one line, and the egress
+  preview shows a bidirectional override as an escape and not as reordered text.
+- **A role repair keeps the vocabulary read-only.** `scripts/runtime_roles.py
+  ensure` replays 0172's grants after its blanket grant, so a repair no longer
+  hands the request role write access to the vocabulary tables.
+
+Known and not fixed: the notice sent when a merge is reversed counts ties the same
+way the merge notice used to; compartments may be stripped by the request role the
+way a classification could; a member holding `retention.purge` can still destroy an
+exhibit above their own clearance with an approver who is cleared for it; a
+contact block's guarantor word without a colon, an accented label and a fullwidth
+colon are not read; the sparse-header loop of a tar entry is not counted; and two
+lines of the egress preview (the computed-over line and a hypothesis's warnings)
+do not yet go through the visible-text escape.
+
+8420 tests (`def test_` functions). The whole suite, run on a database built from nothing with every migration and with both runtime database roles present, passed 12854 and skipped 0.
+
+### Upgrading from Beta 1.4
+
+One revision, 0183, which adds two triggers and a function and writes no row. Stop
+the API and, on a production stack, the jobs that run the application image, take
+the usual backup, then:
+
+```
+git pull
+```
+
+A development install applies the revision the next time it starts through
+`scripts/launch.*` or the installer, or by hand with `alembic upgrade head`. On the
+production stack `sudo docker compose -p noctornal-prod -f infra/production/compose.yml up -d --build`
+rebuilds the image (tag `noctornal-api:0.9.5`) and runs the migration job. The
+downgrade drops the triggers and the function. Where the roles were created later
+than the migrations, `python scripts/runtime_roles.py ensure` replays the grants.
+
 ## Beta 1.4: 2026-10-21
 
 The fourth revision of the beta, version 0.9.4. It makes the console quiet and the

@@ -909,7 +909,7 @@ what Beta 1.1 closed, in the order of the areas under Known residuals.
 | **F19** | The hostile pass over Phases 5 and 8 found nine criticals, including a notification centre that never checked case assignment | 2026-07-26 |
 | **F20** | The ACH matrix ranked an untested hypothesis top, and the warning that would have caught it could not fire | 2026-07-26 |
 | **Approvals UI** | Phase 6 dual control had no analyst surface, so Merge was unreachable from a browser whenever it was on | 2026-08-10, Triage, Dual control |
-| **Key ring** | A mismatched `NOCTORNAL_TOTP_KEK` made login answer 500, and the readiness check could not see it, because it verified the key decoded and not that it decrypted anything | 2026-09-11: `key_id` selects the key, the register opens stored secrets and counts, and login refuses with a named 503 |
+| **Key ring** | A mismatched `NOCTORNAL_TOTP_KEK` made login answer 500, and the readiness check could not see it, because it verified the key decoded and not that it decrypted anything | 2026-09-11: `key_id` selects the key, the register opens stored secrets and counts, and a secret the ring cannot open is a failed sign-in (audit reason `totp_secret_unopenable`, the lockout counts it, 401 at login and 403 at a password change) |
 | **The 2026-10-03 review** | 82 findings, 16 high, 25 medium and 41 low | 2026-10-07: 77 fixed, one fixed for credentials and stated for the rest (rls-6), four stated and not fixed. 2026-10-08: 78 fixed, rls-6 fixed apart from case membership, three stated and not fixed. Each finding's status is below, and what the fixes left is in Known residuals at Beta 1.1 |
 
 ### The 2026-10-03 review: its 82 findings at Beta 1.1
